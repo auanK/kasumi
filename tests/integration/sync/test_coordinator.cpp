@@ -1380,6 +1380,172 @@ bool has_path(const std::vector<std::string>& paths, std::string_view path) {
     return std::ranges::find(paths, path) != paths.end();
 }
 
+namespace coord = kasumi::application::sync::coordinator;
+namespace sync_journal = kasumi::application::sync::journal;
+namespace app_obs = kasumi::application::observation;
+using CoordErrorCode = coord::ErrorCode;
+using coord::RecoveryResult;
+
+kasumi::NodeRow dir_row(std::string path, kasumi::TimestampNs mtime = 0) {
+    return kasumi::NodeRow{
+        .path = std::move(path), .mtime = mtime, .is_directory = true};
+}
+
+kasumi::NodeRow file_row(std::string path,
+                         const kasumi::Hash& hash,
+                         std::uint64_t size,
+                         kasumi::TimestampNs mtime = 0) {
+    return kasumi::NodeRow{.path = std::move(path),
+                           .hash = hash,
+                           .size = size,
+                           .mtime = mtime,
+                           .is_directory = false};
+}
+
+kasumi::Snapshot
+make_snapshot(std::initializer_list<kasumi::NodeRow> rows = {}) {
+    kasumi::Snapshot snapshot;
+    if (rows.size() == 0 || !rows.begin()->path.empty()) {
+        snapshot.rows.push_back(
+            kasumi::NodeRow{.path = "", .is_directory = true});
+    }
+    snapshot.rows.insert(snapshot.rows.end(), rows.begin(), rows.end());
+    kasumi::finalize_snapshot(snapshot);
+    return snapshot;
+}
+
+[[nodiscard]] ::testing::AssertionResult
+recover_expect(const kasumi::runtime::RuntimeData& runtime,
+               kasumi::transport::Transport& storage,
+               std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key,
+               RecoveryResult expected) {
+    const auto recovered = coord::recover_if_needed(runtime, storage, key);
+    if (!recovered.has_value()) {
+        return ::testing::AssertionFailure() << recovered.error().detail;
+    }
+    if (*recovered != expected) {
+        return ::testing::AssertionFailure() << "unexpected recovery result";
+    }
+    return ::testing::AssertionSuccess();
+}
+
+[[nodiscard]] ::testing::AssertionResult recover_unavailable_expect(
+    const kasumi::runtime::RuntimeData& runtime,
+    std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key,
+    RecoveryResult expected) {
+    kasumi::transport::Transport unavailable{};
+    return recover_expect(runtime, unavailable, key, expected);
+}
+
+[[nodiscard]] ::testing::AssertionResult recover_error_expect(
+    const kasumi::runtime::RuntimeData& runtime,
+    kasumi::transport::Transport& storage,
+    std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key,
+    CoordErrorCode expected) {
+    const auto recovered = coord::recover_if_needed(runtime, storage, key);
+    if (recovered.has_value()) {
+        return ::testing::AssertionFailure()
+               << "expected recovery error, succeeded instead";
+    }
+    if (recovered.error().code != expected) {
+        return ::testing::AssertionFailure()
+               << "unexpected error detail: " << recovered.error().detail;
+    }
+    return ::testing::AssertionSuccess();
+}
+
+[[nodiscard]] ::testing::AssertionResult recover_unavailable_error_expect(
+    const kasumi::runtime::RuntimeData& runtime,
+    std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key,
+    CoordErrorCode expected) {
+    kasumi::transport::Transport unavailable{};
+    return recover_error_expect(runtime, unavailable, key, expected);
+}
+
+[[nodiscard]] ::testing::AssertionResult
+init_and_save_state(const std::filesystem::path& db_path,
+                    const kasumi::state_storage::StoredState& state) {
+    if (!kasumi::state_storage::initialize(db_path)) {
+        return ::testing::AssertionFailure() << "failed to initialize state db";
+    }
+    if (!kasumi::state_storage::save_state(db_path, state)) {
+        return ::testing::AssertionFailure() << "failed to save initial state";
+    }
+    return ::testing::AssertionSuccess();
+}
+
+[[nodiscard]] ::testing::AssertionResult
+collect_local_input(const std::filesystem::path& local,
+                    kasumi::reconciliation::Input& input) {
+    const auto local_tree = app_obs::collect_local_tree(local);
+    if (!local_tree.has_value()) {
+        return ::testing::AssertionFailure() << local_tree.error();
+    }
+    input = empty_publication_input();
+    input.local_tree = *local_tree;
+    return ::testing::AssertionSuccess();
+}
+
+kasumi::NodeRow text_row(std::string path,
+                         std::string_view contents,
+                         kasumi::TimestampNs mtime = 0) {
+    return file_row(std::move(path),
+                    kasumi::hasher::hash_string(contents),
+                    contents.size(),
+                    mtime);
+}
+
+kasumi::reconciliation::Input make_base_input(const kasumi::Snapshot& base) {
+    auto input = empty_publication_input();
+    set_persisted_base(input, base);
+    return input;
+}
+
+kasumi::transport::Transport
+make_initialized_ambiguous_storage(AmbiguousPublicationState*& state) {
+    auto storage = make_ambiguous_transport(state);
+    if (!kasumi::transport::initialize(storage)) {
+        ADD_FAILURE() << "failed to initialize ambiguous transport";
+    }
+    return storage;
+}
+
+auto execute_at(const std::filesystem::path& profile,
+                const std::filesystem::path& local,
+                const std::filesystem::path& storage_path,
+                kasumi::transport::Transport& storage,
+                std::span<const std::uint8_t, kasumi::crypto::KEY_SIZE> key,
+                const kasumi::reconciliation::Input& input,
+                const kasumi::reconciliation::Result& result) {
+    return coord::execute(make_runtime(profile, local, storage_path),
+                          storage,
+                          key,
+                          input,
+                          result);
+}
+
+auto execute_fixture(PruningFixture& fixture) {
+    return coord::execute(fixture.runtime,
+                          fixture.storage,
+                          fixture.key,
+                          fixture.input,
+                          fixture.result);
+}
+
+[[nodiscard]] ::testing::AssertionResult
+execute_fixture_error_expect(PruningFixture& fixture, CoordErrorCode expected) {
+    const auto executed = execute_fixture(fixture);
+    if (executed.has_value()) {
+        return ::testing::AssertionFailure()
+               << "expected execute error, succeeded instead";
+    }
+    if (executed.error().code != expected) {
+        return ::testing::AssertionFailure()
+               << "unexpected error detail: " << executed.error().detail;
+    }
+    return ::testing::AssertionSuccess();
+}
+
 TEST(SyncCoordinatorTest, DeleteLocalMetadataRestoreSet) {
     const auto record = metadata_record(
         metadata_operation(kasumi::Action::DeleteLocal, "docs/alpha.txt"));
@@ -1637,10 +1803,9 @@ TEST(ScanEvidenceTest,
     ASSERT_TRUE(create_link(local / "ignored-link"));
     ASSERT_TRUE(create_link(local / "unexpected-link"));
 
-    const auto scanned =
-        kasumi::application::observation::scanner::scan_result(local);
+    const auto scanned = app_obs::scanner::scan_result(local);
     ASSERT_TRUE(scanned.has_value())
-        << kasumi::application::observation::scanner::describe(scanned.error());
+        << app_obs::scanner::describe(scanned.error());
     EXPECT_EQ(kasumi::find_row(scanned->snapshot, "ignored-link"), nullptr);
     EXPECT_EQ(kasumi::find_row(scanned->snapshot, "unexpected-link"), nullptr);
     EXPECT_EQ(kasumi::find_row(scanned->snapshot, "ignored-link/secret.txt"),
@@ -1984,8 +2149,7 @@ TEST(SyncCoordinatorTest,
 }
 
 TEST(SyncCoordinatorTest, PrepareCommitTimestampSurvivesCanonicalRoundTrip) {
-    kasumi::Snapshot tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+    kasumi::Snapshot tree{.rows = {dir_row("")}};
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
 
     const auto prepared =
@@ -2039,8 +2203,8 @@ TEST(SyncCoordinatorTest,
     runtime_data.min_history_age_hours = 9;
     const auto before = kasumi::platform::clock::unix_seconds();
     ASSERT_TRUE(before.has_value()) << before.error();
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        runtime_data, *storage, key, input, *result);
+    const auto executed =
+        coord::execute(runtime_data, *storage, key, input, *result);
     ASSERT_TRUE(executed.has_value()) << executed.error().detail;
     const auto after = kasumi::platform::clock::unix_seconds();
     ASSERT_TRUE(after.has_value()) << after.error();
@@ -2158,8 +2322,8 @@ TEST(SyncCoordinatorTest, PruningEpochPersistsMatchingEpochSequence) {
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     ASSERT_TRUE(result->requires_publication);
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        runtime_data, *storage, key, input, *result);
+    const auto executed =
+        coord::execute(runtime_data, *storage, key, input, *result);
     ASSERT_TRUE(executed) << executed.error().detail;
 
     const auto state =
@@ -2183,12 +2347,7 @@ TEST(
     ASSERT_TRUE(fixture.ready);
     const auto epoch_puts = fixture.state->epoch_put_count;
 
-    const auto executed =
-        kasumi::application::sync::coordinator::execute(fixture.runtime,
-                                                        fixture.storage,
-                                                        fixture.key,
-                                                        fixture.input,
-                                                        fixture.result);
+    const auto executed = execute_fixture(fixture);
     ASSERT_TRUE(executed.has_value()) << executed.error().detail;
     EXPECT_EQ(fixture.state->epoch_put_count, epoch_puts);
 
@@ -2216,12 +2375,7 @@ TEST(
     ASSERT_TRUE(fixture.ready);
     const auto epoch_puts = fixture.state->epoch_put_count;
 
-    const auto executed =
-        kasumi::application::sync::coordinator::execute(fixture.runtime,
-                                                        fixture.storage,
-                                                        fixture.key,
-                                                        fixture.input,
-                                                        fixture.result);
+    const auto executed = execute_fixture(fixture);
     ASSERT_TRUE(executed.has_value()) << executed.error().detail;
     EXPECT_EQ(fixture.state->epoch_put_count, epoch_puts + 1);
 
@@ -2285,12 +2439,7 @@ TEST(SyncCoordinatorTest, UnchangedFrontierDoesNotPublishRedundantEpoch) {
     }
     const auto epoch_puts = fixture.state->epoch_put_count;
 
-    const auto executed =
-        kasumi::application::sync::coordinator::execute(fixture.runtime,
-                                                        fixture.storage,
-                                                        fixture.key,
-                                                        fixture.input,
-                                                        fixture.result);
+    const auto executed = execute_fixture(fixture);
     ASSERT_TRUE(executed.has_value()) << executed.error().detail;
     EXPECT_EQ(fixture.state->epoch_put_count, epoch_puts);
 
@@ -2314,19 +2463,17 @@ TEST(SyncCoordinatorTest, MaximumEpochSequenceFailsBeforePublication) {
         .anchors = {{.commit_id = std::string(64, 'a'), .height = 0}}};
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
 
-    const auto prepared =
-        kasumi::application::sync::coordinator::detail::prepare_pruning_epoch(
-            record,
-            {},
-            plan,
-            std::string(64, 'b'),
-            std::numeric_limits<std::uint64_t>::max(),
-            std::string(64, 'c'),
-            key);
+    const auto prepared = coord::detail::prepare_pruning_epoch(
+        record,
+        {},
+        plan,
+        std::string(64, 'b'),
+        std::numeric_limits<std::uint64_t>::max(),
+        std::string(64, 'c'),
+        key);
 
     ASSERT_FALSE(prepared.has_value());
-    EXPECT_EQ(prepared.error().code,
-              kasumi::application::sync::coordinator::ErrorCode::InvalidInput);
+    EXPECT_EQ(prepared.error().code, CoordErrorCode::InvalidInput);
     EXPECT_TRUE(record.epoch_id.empty());
 }
 
@@ -2370,12 +2517,7 @@ TEST(SyncCoordinatorTest,
     fixture.result = *result;
 
     const auto epoch_puts = fixture.state->epoch_put_count;
-    const auto executed =
-        kasumi::application::sync::coordinator::execute(fixture.runtime,
-                                                        fixture.storage,
-                                                        fixture.key,
-                                                        fixture.input,
-                                                        fixture.result);
+    const auto executed = execute_fixture(fixture);
     ASSERT_TRUE(executed.has_value()) << executed.error().detail;
     EXPECT_EQ(fixture.state->epoch_put_count, epoch_puts);
 
@@ -2410,15 +2552,8 @@ TEST(SyncCoordinatorTest, MissingLogicalHeadFailsBeforeRemotePublication) {
     const auto remote_puts = fixture.state->put_count;
     const auto epoch_puts = fixture.state->epoch_put_count;
 
-    const auto executed =
-        kasumi::application::sync::coordinator::execute(fixture.runtime,
-                                                        fixture.storage,
-                                                        fixture.key,
-                                                        fixture.input,
-                                                        fixture.result);
-    ASSERT_FALSE(executed.has_value());
-    EXPECT_EQ(executed.error().code,
-              kasumi::application::sync::coordinator::ErrorCode::InvalidInput);
+    ASSERT_TRUE(
+        execute_fixture_error_expect(fixture, CoordErrorCode::InvalidInput));
     EXPECT_EQ(fixture.state->put_count, remote_puts);
     EXPECT_EQ(fixture.state->epoch_put_count, epoch_puts);
     EXPECT_FALSE(std::filesystem::exists(fixture.runtime.database_path));
@@ -2430,15 +2565,8 @@ TEST(SyncCoordinatorTest, MissingObservedEpochPolicyFailsClosed) {
     const auto epoch_puts = fixture.state->epoch_put_count;
     fixture.input.storage.epoch_policy.reset();
 
-    const auto executed =
-        kasumi::application::sync::coordinator::execute(fixture.runtime,
-                                                        fixture.storage,
-                                                        fixture.key,
-                                                        fixture.input,
-                                                        fixture.result);
-    ASSERT_FALSE(executed.has_value());
-    EXPECT_EQ(executed.error().code,
-              kasumi::application::sync::coordinator::ErrorCode::InvalidInput);
+    ASSERT_TRUE(
+        execute_fixture_error_expect(fixture, CoordErrorCode::InvalidInput));
     EXPECT_EQ(fixture.state->epoch_put_count, epoch_puts);
     EXPECT_FALSE(std::filesystem::exists(fixture.runtime.database_path));
 }
@@ -2451,15 +2579,8 @@ TEST(SyncCoordinatorTest, MalformedObservedEpochPolicyFailsClosed) {
         kasumi::reconciliation::EpochRetentionPolicy{
             .min_history_depth = 0, .min_history_age_hours = 1};
 
-    const auto executed =
-        kasumi::application::sync::coordinator::execute(fixture.runtime,
-                                                        fixture.storage,
-                                                        fixture.key,
-                                                        fixture.input,
-                                                        fixture.result);
-    ASSERT_FALSE(executed.has_value());
-    EXPECT_EQ(executed.error().code,
-              kasumi::application::sync::coordinator::ErrorCode::InvalidInput);
+    ASSERT_TRUE(
+        execute_fixture_error_expect(fixture, CoordErrorCode::InvalidInput));
     EXPECT_EQ(fixture.state->epoch_put_count, epoch_puts);
     EXPECT_FALSE(std::filesystem::exists(fixture.runtime.database_path));
 }
@@ -2497,16 +2618,9 @@ TEST(SyncCoordinatorTest, RejectsEveryPartialObservedEpochStateBeforeJournal) {
         ASSERT_TRUE(fixture.ready);
         invalid(fixture.input.storage, case_number);
         const auto epoch_puts = fixture.state->epoch_put_count;
-        const auto executed =
-            kasumi::application::sync::coordinator::execute(fixture.runtime,
-                                                            fixture.storage,
-                                                            fixture.key,
-                                                            fixture.input,
-                                                            fixture.result);
+        const auto executed = execute_fixture(fixture);
         ASSERT_FALSE(executed.has_value()) << case_number;
-        EXPECT_EQ(
-            executed.error().code,
-            kasumi::application::sync::coordinator::ErrorCode::InvalidInput)
+        EXPECT_EQ(executed.error().code, CoordErrorCode::InvalidInput)
             << case_number;
         EXPECT_EQ(fixture.state->epoch_put_count, epoch_puts) << case_number;
         EXPECT_FALSE(std::filesystem::exists(fixture.runtime.database_path))
@@ -2519,9 +2633,8 @@ TEST(SyncCoordinatorTest,
     auto fixture = make_pruning_fixture();
     ASSERT_TRUE(fixture.ready);
 
-    const auto storage_state =
-        kasumi::application::observation::collect_storage_state(
-            fixture.storage, fixture.key, fixture.profile, true);
+    const auto storage_state = app_obs::collect_storage_state(
+        fixture.storage, fixture.key, fixture.profile, true);
     ASSERT_TRUE(storage_state.has_value()) << storage_state.error();
     ASSERT_TRUE(storage_state->epoch_policy.has_value());
     EXPECT_EQ(storage_state->epoch_policy->min_history_depth, 1U);
@@ -2539,9 +2652,8 @@ TEST(SyncCoordinatorTest,
          .epoch_id = fixture.previous_epoch.reference.epoch_id,
          .epoch_sequence = fixture.previous_epoch.reference.sequence}));
 
-    const auto observed =
-        kasumi::application::observation::collect_reconciliation_input(
-            fixture.runtime, fixture.storage, fixture.key, true);
+    const auto observed = app_obs::collect_reconciliation_input(
+        fixture.runtime, fixture.storage, fixture.key, true);
     ASSERT_TRUE(observed.has_value()) << observed.error().detail;
     ASSERT_TRUE(observed->storage.epoch_policy.has_value());
     EXPECT_EQ(observed->storage.epoch_policy->min_history_depth, 1U);
@@ -2573,16 +2685,8 @@ TEST(SyncCoordinatorTest,
     fixture.result = *recomputed;
 
     fixture.state->fail_epoch_put = true;
-    const auto executed =
-        kasumi::application::sync::coordinator::execute(fixture.runtime,
-                                                        fixture.storage,
-                                                        fixture.key,
-                                                        fixture.input,
-                                                        fixture.result);
-    ASSERT_FALSE(executed.has_value());
-    EXPECT_EQ(
-        executed.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::PublicationFailure);
+    ASSERT_TRUE(execute_fixture_error_expect(
+        fixture, CoordErrorCode::PublicationFailure));
 
     const auto state =
         kasumi::state_storage::load_state(fixture.runtime.database_path);
@@ -2590,23 +2694,18 @@ TEST(SyncCoordinatorTest,
     EXPECT_EQ((*state)->epoch_id, fixture.previous_epoch.reference.epoch_id);
     EXPECT_EQ((*state)->epoch_sequence,
               fixture.previous_epoch.reference.sequence);
-    const auto paths =
-        kasumi::application::sync::journal::make_paths(fixture.profile);
+    const auto paths = sync_journal::make_paths(fixture.profile);
     ASSERT_TRUE(paths.has_value());
-    const auto pending =
-        kasumi::application::sync::journal::load(*paths, fixture.key);
+    const auto pending = sync_journal::load(*paths, fixture.key);
     ASSERT_TRUE(pending.has_value() && *pending);
     EXPECT_EQ((*pending)->phase, kasumi::transaction::Phase::HeadVerified);
     EXPECT_TRUE((*pending)->epoch_id.empty());
 
     fixture.state->fail_epoch_put = false;
     const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            fixture.runtime, fixture.storage, fixture.key);
+        coord::recover_if_needed(fixture.runtime, fixture.storage, fixture.key);
     ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    EXPECT_EQ(*recovered, RecoveryResult::RolledForward);
     const auto after_recovery =
         kasumi::state_storage::load_state(fixture.runtime.database_path);
     ASSERT_TRUE(after_recovery.has_value() && *after_recovery);
@@ -2624,12 +2723,7 @@ TEST(SyncCoordinatorTest,
     fixture.state->fail_epoch_put = true;
     fixture.state->persist_epoch_on_put_failure = true;
 
-    const auto executed =
-        kasumi::application::sync::coordinator::execute(fixture.runtime,
-                                                        fixture.storage,
-                                                        fixture.key,
-                                                        fixture.input,
-                                                        fixture.result);
+    const auto executed = execute_fixture(fixture);
     ASSERT_TRUE(executed.has_value()) << executed.error().detail;
     EXPECT_EQ(fixture.state->epoch_put_count, epoch_puts_before + 1);
     const auto state =
@@ -2645,29 +2739,18 @@ TEST(SyncCoordinatorTest,
     ASSERT_TRUE(fixture.ready);
     fixture.state->fail_epoch_get = true;
 
-    const auto executed =
-        kasumi::application::sync::coordinator::execute(fixture.runtime,
-                                                        fixture.storage,
-                                                        fixture.key,
-                                                        fixture.input,
-                                                        fixture.result);
-    ASSERT_FALSE(executed.has_value());
-    EXPECT_EQ(
-        executed.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::PublicationFailure);
+    ASSERT_TRUE(execute_fixture_error_expect(
+        fixture, CoordErrorCode::PublicationFailure));
     EXPECT_FALSE(std::filesystem::exists(fixture.runtime.database_path));
-    const auto paths =
-        kasumi::application::sync::journal::make_paths(fixture.profile);
+    const auto paths = sync_journal::make_paths(fixture.profile);
     ASSERT_TRUE(paths.has_value());
-    const auto pending =
-        kasumi::application::sync::journal::load(*paths, fixture.key);
+    const auto pending = sync_journal::load(*paths, fixture.key);
     ASSERT_TRUE(pending.has_value() && *pending);
     EXPECT_EQ((*pending)->phase, kasumi::transaction::Phase::EpochUploaded);
 
     fixture.state->fail_epoch_get = false;
     const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            fixture.runtime, fixture.storage, fixture.key);
+        coord::recover_if_needed(fixture.runtime, fixture.storage, fixture.key);
     ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
     const auto state =
         kasumi::state_storage::load_state(fixture.runtime.database_path);
@@ -2686,8 +2769,7 @@ TEST(SyncCoordinatorTest,
             layout, fixture.recovery_head);
     fixture.input.storage.marked_head_identifiers = {old_marker};
 
-    const auto paths =
-        kasumi::application::sync::journal::make_paths(fixture.profile);
+    const auto paths = sync_journal::make_paths(fixture.profile);
     ASSERT_TRUE(paths.has_value());
     fixture.state->on_epoch_verified = [temporary = paths->temporary_path] {
         std::error_code error;
@@ -2695,20 +2777,11 @@ TEST(SyncCoordinatorTest,
         EXPECT_FALSE(error);
     };
 
-    const auto executed =
-        kasumi::application::sync::coordinator::execute(fixture.runtime,
-                                                        fixture.storage,
-                                                        fixture.key,
-                                                        fixture.input,
-                                                        fixture.result);
-    ASSERT_FALSE(executed.has_value());
-    EXPECT_EQ(
-        executed.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::JournalFailure);
+    ASSERT_TRUE(
+        execute_fixture_error_expect(fixture, CoordErrorCode::JournalFailure));
     EXPECT_FALSE(std::filesystem::exists(fixture.runtime.database_path));
 
-    const auto pending =
-        kasumi::application::sync::journal::load(*paths, fixture.key);
+    const auto pending = sync_journal::load(*paths, fixture.key);
     ASSERT_TRUE(pending.has_value() && *pending);
     EXPECT_EQ((*pending)->phase, kasumi::transaction::Phase::EpochUploaded);
     std::lock_guard lock(fixture.state->mutex);
@@ -2755,16 +2828,8 @@ TEST(SyncCoordinatorTest, DatabaseFailurePreservesAcceptedPublicationMarkers) {
     sqlite3_free(sqlite_error);
     ASSERT_EQ(sqlite3_close(database), SQLITE_OK);
 
-    const auto executed =
-        kasumi::application::sync::coordinator::execute(fixture.runtime,
-                                                        fixture.storage,
-                                                        fixture.key,
-                                                        fixture.input,
-                                                        fixture.result);
-    ASSERT_FALSE(executed.has_value());
-    EXPECT_EQ(
-        executed.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::DatabaseFailure);
+    ASSERT_TRUE(
+        execute_fixture_error_expect(fixture, CoordErrorCode::DatabaseFailure));
 
     const auto state =
         kasumi::state_storage::load_state(fixture.runtime.database_path);
@@ -2773,11 +2838,9 @@ TEST(SyncCoordinatorTest, DatabaseFailurePreservesAcceptedPublicationMarkers) {
     EXPECT_EQ((*state)->epoch_sequence,
               fixture.previous_epoch.reference.sequence);
 
-    const auto paths =
-        kasumi::application::sync::journal::make_paths(fixture.profile);
+    const auto paths = sync_journal::make_paths(fixture.profile);
     ASSERT_TRUE(paths.has_value());
-    const auto pending =
-        kasumi::application::sync::journal::load(*paths, fixture.key);
+    const auto pending = sync_journal::load(*paths, fixture.key);
     ASSERT_TRUE(pending.has_value() && *pending);
     EXPECT_EQ((*pending)->phase, kasumi::transaction::Phase::EpochVerified);
     std::lock_guard lock(fixture.state->mutex);
@@ -2842,8 +2905,7 @@ TEST(SyncCoordinatorTest,
     ASSERT_FALSE(id.empty());
 
     const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            fixture.runtime, fixture.storage, fixture.key);
+        coord::recover_if_needed(fixture.runtime, fixture.storage, fixture.key);
     ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
     const auto state =
         kasumi::state_storage::load_state(fixture.runtime.database_path);
@@ -2874,8 +2936,7 @@ TEST(SyncCoordinatorTest,
             .empty());
 
     const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            fixture.runtime, fixture.storage, fixture.key);
+        coord::recover_if_needed(fixture.runtime, fixture.storage, fixture.key);
     ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
     const auto state =
         kasumi::state_storage::load_state(fixture.runtime.database_path);
@@ -2955,22 +3016,17 @@ TEST(SyncCoordinatorTest,
             .empty());
 
     const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            fixture.runtime, fixture.storage, fixture.key);
+        coord::recover_if_needed(fixture.runtime, fixture.storage, fixture.key);
     ASSERT_FALSE(recovered.has_value());
-    EXPECT_EQ(
-        recovered.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict)
+    EXPECT_EQ(recovered.error().code, CoordErrorCode::RecoveryConflict)
         << recovered.error().detail;
     EXPECT_FALSE(std::filesystem::exists(fixture.runtime.database_path));
     EXPECT_TRUE(
         std::filesystem::exists(fixture.profile / "transaction.bin.enc"));
     EXPECT_EQ(fixture.state->epoch_put_count, epoch_puts);
-    const auto paths =
-        kasumi::application::sync::journal::make_paths(fixture.profile);
+    const auto paths = sync_journal::make_paths(fixture.profile);
     ASSERT_TRUE(paths.has_value());
-    const auto journal =
-        kasumi::application::sync::journal::load(*paths, fixture.key);
+    const auto journal = sync_journal::load(*paths, fixture.key);
     ASSERT_TRUE(journal.has_value() && *journal);
     EXPECT_EQ((*journal)->phase, kasumi::transaction::Phase::EpochUploaded);
 }
@@ -2993,8 +3049,7 @@ TEST(SyncCoordinatorTest,
     ASSERT_FALSE(id.empty());
 
     const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            fixture.runtime, fixture.storage, fixture.key);
+        coord::recover_if_needed(fixture.runtime, fixture.storage, fixture.key);
     ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
     const auto state =
         kasumi::state_storage::load_state(fixture.runtime.database_path);
@@ -3019,12 +3074,9 @@ TEST(SyncCoordinatorTest,
     ASSERT_FALSE(id.empty());
 
     const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            fixture.runtime, fixture.storage, fixture.key);
+        coord::recover_if_needed(fixture.runtime, fixture.storage, fixture.key);
     ASSERT_FALSE(recovered.has_value());
-    EXPECT_EQ(
-        recovered.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    EXPECT_EQ(recovered.error().code, CoordErrorCode::RecoveryConflict);
     EXPECT_FALSE(std::filesystem::exists(fixture.runtime.database_path));
     EXPECT_TRUE(
         std::filesystem::exists(fixture.profile / "transaction.bin.enc"));
@@ -3058,12 +3110,9 @@ TEST(SyncCoordinatorTest,
             .empty());
 
     const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            fixture.runtime, fixture.storage, fixture.key);
+        coord::recover_if_needed(fixture.runtime, fixture.storage, fixture.key);
     ASSERT_FALSE(recovered.has_value());
-    EXPECT_EQ(
-        recovered.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    EXPECT_EQ(recovered.error().code, CoordErrorCode::RecoveryConflict);
     EXPECT_FALSE(std::filesystem::exists(fixture.runtime.database_path));
     EXPECT_TRUE(
         std::filesystem::exists(fixture.profile / "transaction.bin.enc"));
@@ -3099,12 +3148,9 @@ TEST(SyncCoordinatorTest,
     ASSERT_FALSE(id.empty());
 
     const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            fixture.runtime, fixture.storage, fixture.key);
+        coord::recover_if_needed(fixture.runtime, fixture.storage, fixture.key);
     ASSERT_FALSE(recovered.has_value());
-    EXPECT_EQ(
-        recovered.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    EXPECT_EQ(recovered.error().code, CoordErrorCode::RecoveryConflict);
     EXPECT_FALSE(std::filesystem::exists(fixture.runtime.database_path));
 }
 
@@ -3163,14 +3209,11 @@ TEST(SyncCoordinatorTest,
                                        fixture.recovery_parents);
         ASSERT_FALSE(transaction_id.empty()) << static_cast<int>(phase);
 
-        const auto recovered =
-            kasumi::application::sync::coordinator::recover_if_needed(
-                fixture.runtime, fixture.storage, fixture.key);
+        const auto recovered = coord::recover_if_needed(
+            fixture.runtime, fixture.storage, fixture.key);
         ASSERT_TRUE(recovered.has_value())
             << static_cast<int>(phase) << ": " << recovered.error().detail;
-        EXPECT_EQ(*recovered,
-                  kasumi::application::sync::coordinator::RecoveryResult::
-                      RolledForward)
+        EXPECT_EQ(*recovered, RecoveryResult::RolledForward)
             << static_cast<int>(phase);
         EXPECT_EQ(fixture.state->epoch_put_count, epoch_puts)
             << static_cast<int>(phase);
@@ -3219,8 +3262,8 @@ TEST(SyncCoordinatorTest, SyncWithoutNewEpochPreservesAcceptedEpochReference) {
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     ASSERT_TRUE(result->requires_publication);
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        runtime_data, *storage, key, input, *result);
+    const auto executed =
+        coord::execute(runtime_data, *storage, key, input, *result);
     ASSERT_TRUE(executed) << executed.error().detail;
 
     const auto state =
@@ -3236,11 +3279,8 @@ TEST(SyncCoordinatorTest,
         make_coordinator_env("transaction-overlapped-commit-upload");
     kasumi::test::write_text(local / "file.txt", "contents");
 
-    const auto local_tree =
-        kasumi::application::observation::collect_local_tree(local);
-    ASSERT_TRUE(local_tree.has_value()) << local_tree.error();
-    auto input = empty_publication_input();
-    input.local_tree = *local_tree;
+    kasumi::reconciliation::Input input;
+    ASSERT_TRUE(collect_local_input(local, input));
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     ASSERT_TRUE(result->requires_publication);
@@ -3253,12 +3293,8 @@ TEST(SyncCoordinatorTest,
     state.require_commit_overlap = true;
     auto storage = make_reobserve_transport(state);
 
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        make_runtime(profile, local, storage_path),
-        storage,
-        key,
-        input,
-        *result);
+    const auto executed =
+        execute_at(profile, local, storage_path, storage, key, input, *result);
     ASSERT_TRUE(executed.has_value()) << executed.error().detail;
     EXPECT_FALSE(state.commit_overlap_timed_out);
 
@@ -3282,11 +3318,8 @@ TEST(SyncCoordinatorTest, CommitVerificationFailurePreventsHeadPublication) {
         make_coordinator_env("commit-verification-failure-no-head");
     kasumi::test::write_text(local / "file.txt", "contents");
 
-    const auto local_tree =
-        kasumi::application::observation::collect_local_tree(local);
-    ASSERT_TRUE(local_tree.has_value()) << local_tree.error();
-    auto input = empty_publication_input();
-    input.local_tree = *local_tree;
+    kasumi::reconciliation::Input input;
+    ASSERT_TRUE(collect_local_input(local, input));
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     ASSERT_TRUE(result->requires_publication);
@@ -3299,16 +3332,10 @@ TEST(SyncCoordinatorTest, CommitVerificationFailurePreventsHeadPublication) {
     state.fail_commit_verification = true;
     auto storage = make_reobserve_transport(state);
 
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        make_runtime(profile, local, storage_path),
-        storage,
-        key,
-        input,
-        *result);
+    const auto executed =
+        execute_at(profile, local, storage_path, storage, key, input, *result);
     ASSERT_FALSE(executed.has_value());
-    EXPECT_EQ(
-        executed.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::PublicationFailure);
+    EXPECT_EQ(executed.error().code, CoordErrorCode::PublicationFailure);
 
     // HEAD PUT was never attempted.
     EXPECT_TRUE(std::ranges::find(state.events, "head PUT") ==
@@ -3338,11 +3365,8 @@ TEST(SyncCoordinatorTest,
         make_coordinator_env("journal-failure-before-head-put");
     kasumi::test::write_text(local / "file.txt", "contents");
 
-    const auto local_tree =
-        kasumi::application::observation::collect_local_tree(local);
-    ASSERT_TRUE(local_tree.has_value()) << local_tree.error();
-    auto input = empty_publication_input();
-    input.local_tree = *local_tree;
+    kasumi::reconciliation::Input input;
+    ASSERT_TRUE(collect_local_input(local, input));
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     ASSERT_TRUE(result->requires_publication);
@@ -3360,12 +3384,8 @@ TEST(SyncCoordinatorTest,
     };
     auto storage = make_reobserve_transport(state);
 
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        make_runtime(profile, local, storage_path),
-        storage,
-        key,
-        input,
-        *result);
+    const auto executed =
+        execute_at(profile, local, storage_path, storage, key, input, *result);
     ASSERT_FALSE(executed.has_value());
 
     // HEAD PUT was never attempted.
@@ -3389,11 +3409,8 @@ TEST(SyncCoordinatorTest, AmbiguousCommitUploadAbsentPreventsHeadPublication) {
         make_coordinator_env("ambiguous-commit-absent-no-head");
     kasumi::test::write_text(local / "file.txt", "contents");
 
-    const auto local_tree =
-        kasumi::application::observation::collect_local_tree(local);
-    ASSERT_TRUE(local_tree.has_value()) << local_tree.error();
-    auto input = empty_publication_input();
-    input.local_tree = *local_tree;
+    kasumi::reconciliation::Input input;
+    ASSERT_TRUE(collect_local_input(local, input));
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     ASSERT_TRUE(result->requires_publication);
@@ -3406,16 +3423,10 @@ TEST(SyncCoordinatorTest, AmbiguousCommitUploadAbsentPreventsHeadPublication) {
     state.fail_commit_put_ambiguous_absent = true;
     auto storage = make_reobserve_transport(state);
 
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        make_runtime(profile, local, storage_path),
-        storage,
-        key,
-        input,
-        *result);
+    const auto executed =
+        execute_at(profile, local, storage_path, storage, key, input, *result);
     ASSERT_FALSE(executed.has_value());
-    EXPECT_EQ(
-        executed.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::PublicationFailure);
+    EXPECT_EQ(executed.error().code, CoordErrorCode::PublicationFailure);
 
     // HEAD PUT was never attempted.
     EXPECT_TRUE(std::ranges::find(state.events, "head PUT") ==
@@ -3439,11 +3450,8 @@ TEST(SyncCoordinatorTest, HeadVerificationFailurePreventsDatabaseAdvance) {
         make_coordinator_env("head-verification-failure-no-db");
     kasumi::test::write_text(local / "file.txt", "contents");
 
-    const auto local_tree =
-        kasumi::application::observation::collect_local_tree(local);
-    ASSERT_TRUE(local_tree.has_value()) << local_tree.error();
-    auto input = empty_publication_input();
-    input.local_tree = *local_tree;
+    kasumi::reconciliation::Input input;
+    ASSERT_TRUE(collect_local_input(local, input));
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     ASSERT_TRUE(result->requires_publication);
@@ -3456,16 +3464,10 @@ TEST(SyncCoordinatorTest, HeadVerificationFailurePreventsDatabaseAdvance) {
     state.fail_head_verification = true;
     auto storage = make_reobserve_transport(state);
 
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        make_runtime(profile, local, storage_path),
-        storage,
-        key,
-        input,
-        *result);
+    const auto executed =
+        execute_at(profile, local, storage_path, storage, key, input, *result);
     ASSERT_FALSE(executed.has_value());
-    EXPECT_EQ(
-        executed.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::PublicationFailure);
+    EXPECT_EQ(executed.error().code, CoordErrorCode::PublicationFailure);
 
     // HEAD PUT was attempted.
     EXPECT_TRUE(std::ranges::find(state.events, "head PUT") !=
@@ -3481,11 +3483,8 @@ TEST(SyncCoordinatorTest,
         make_coordinator_env("head-verification-unknown");
     kasumi::test::write_text(local / "file.txt", "contents");
 
-    const auto local_tree =
-        kasumi::application::observation::collect_local_tree(local);
-    ASSERT_TRUE(local_tree.has_value()) << local_tree.error();
-    auto input = empty_publication_input();
-    input.local_tree = *local_tree;
+    kasumi::reconciliation::Input input;
+    ASSERT_TRUE(collect_local_input(local, input));
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     ASSERT_TRUE(result->requires_publication);
@@ -3499,17 +3498,14 @@ TEST(SyncCoordinatorTest,
     auto storage = make_reobserve_transport(state);
     const auto runtime = make_runtime(profile, local, storage_path);
 
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        runtime, storage, key, input, *result);
+    const auto executed = coord::execute(runtime, storage, key, input, *result);
     ASSERT_FALSE(executed.has_value());
-    EXPECT_EQ(executed.error().code,
-              kasumi::application::sync::coordinator::ErrorCode::
-                  RecoveryIndeterminate);
+    EXPECT_EQ(executed.error().code, CoordErrorCode::RecoveryIndeterminate);
     EXPECT_FALSE(std::filesystem::exists(runtime.database_path));
 
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    const auto pending = kasumi::application::sync::journal::load(*paths, key);
+    const auto pending = sync_journal::load(*paths, key);
     ASSERT_TRUE(pending.has_value() && *pending);
     EXPECT_EQ((*pending)->phase, kasumi::transaction::Phase::HeadPublished);
     EXPECT_TRUE(std::filesystem::exists(profile / ".transactions" /
@@ -3529,24 +3525,16 @@ TEST(SyncCoordinatorTest,
     const auto head_puts_before = std::ranges::count(
         state.request_events, "PUT " + (*pending)->marker_id);
 
-    const auto still_unknown =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime, storage, key);
+    const auto still_unknown = coord::recover_if_needed(runtime, storage, key);
     ASSERT_FALSE(still_unknown.has_value());
     EXPECT_EQ(still_unknown.error().code,
-              kasumi::application::sync::coordinator::ErrorCode::
-                  RecoveryIndeterminate);
+              CoordErrorCode::RecoveryIndeterminate);
     EXPECT_TRUE(std::filesystem::exists(paths->final_path));
     EXPECT_FALSE(std::filesystem::exists(runtime.database_path));
 
     state.fail_head_verification_unknown = false;
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime, storage, key);
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(
+        recover_expect(runtime, storage, key, RecoveryResult::RolledForward));
     const auto stored =
         kasumi::state_storage::load_state(runtime.database_path);
     ASSERT_TRUE(stored.has_value() && *stored);
@@ -3562,21 +3550,15 @@ TEST(SyncCoordinatorTest,
     EXPECT_EQ(*visible_after_recovery, kasumi::transport::Presence::Present);
     EXPECT_FALSE(std::filesystem::exists(paths->final_path));
 
-    const auto repeated =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime, storage, key);
-    ASSERT_TRUE(repeated.has_value());
-    EXPECT_EQ(
-        *repeated,
-        kasumi::application::sync::coordinator::RecoveryResult::NoJournal);
+    ASSERT_TRUE(
+        recover_expect(runtime, storage, key, RecoveryResult::NoJournal));
 }
 
 TEST(SyncCoordinatorTest, MismatchedHeadMarkerRejectedDuringRecovery) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("mismatched-head-marker-recovery");
 
-    const kasumi::Snapshot tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+    const kasumi::Snapshot tree{.rows = {dir_row("")}};
     auto prepared = kasumi::application::sync::publication::prepare_commit(
         tree, false, 0, {}, 100, key);
     ASSERT_TRUE(prepared.has_value());
@@ -3610,13 +3592,8 @@ TEST(SyncCoordinatorTest, MismatchedHeadMarkerRejectedDuringRecovery) {
                              object->head.ciphertext_id);
     ASSERT_FALSE(id.empty());
 
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, *opened, key);
-    ASSERT_FALSE(recovered.has_value());
-    EXPECT_EQ(
-        recovered.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    ASSERT_TRUE(recover_error_expect(
+        runtime_data, *opened, key, CoordErrorCode::RecoveryConflict));
 
     // State database must NOT be advanced.
     EXPECT_FALSE(std::filesystem::exists(runtime_data.database_path));
@@ -3628,8 +3605,7 @@ TEST(SyncCoordinatorTest, RenameReusesContentReferencedByRemoteHistory) {
     const auto source = local / "renamed.txt";
     kasumi::test::write_text(source, "same-content");
 
-    const auto local_tree =
-        kasumi::application::observation::collect_local_tree(local);
+    const auto local_tree = app_obs::collect_local_tree(local);
     ASSERT_TRUE(local_tree.has_value()) << local_tree.error();
     auto input = empty_publication_input();
     input.local_tree = *local_tree;
@@ -3658,12 +3634,8 @@ TEST(SyncCoordinatorTest, RenameReusesContentReferencedByRemoteHistory) {
                                  kasumi::Action::Upload,
                                  &kasumi::Operation::action),
               1);
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        make_runtime(profile, local, storage_path),
-        storage,
-        key,
-        input,
-        *result);
+    const auto executed =
+        execute_at(profile, local, storage_path, storage, key, input, *result);
     ASSERT_TRUE(executed.has_value()) << executed.error().detail;
     EXPECT_EQ(std::ranges::count(state.events, "content PUT"), 0);
     EXPECT_EQ(state.put_count, 2U);
@@ -3679,8 +3651,7 @@ TEST(SyncCoordinatorTest, DuplicateRepairUploadsTransferContentOnce) {
     kasumi::test::write_text(local / "alpha.txt", "duplicate");
     kasumi::test::write_text(local / "beta.txt", "duplicate");
 
-    const auto local_tree =
-        kasumi::application::observation::collect_local_tree(local);
+    const auto local_tree = app_obs::collect_local_tree(local);
     ASSERT_TRUE(local_tree.has_value()) << local_tree.error();
     auto input = empty_publication_input();
     input.local_tree = *local_tree;
@@ -3702,12 +3673,8 @@ TEST(SyncCoordinatorTest, DuplicateRepairUploadsTransferContentOnce) {
                                  &kasumi::Operation::action),
               2);
 
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        make_runtime(profile, local, storage_path),
-        storage,
-        key,
-        input,
-        *result);
+    const auto executed =
+        execute_at(profile, local, storage_path, storage, key, input, *result);
     ASSERT_TRUE(executed.has_value()) << executed.error().detail;
     EXPECT_EQ(std::ranges::count(state.events, "content PUT"), 1);
     EXPECT_EQ(state.put_count, 1U);
@@ -3722,8 +3689,7 @@ TEST(SyncCoordinatorTest, DuplicateDownloadsFetchContentOnce) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("duplicate-downloads-fetch-once");
 
-    const auto local_tree =
-        kasumi::application::observation::collect_local_tree(local);
+    const auto local_tree = app_obs::collect_local_tree(local);
     ASSERT_TRUE(local_tree.has_value()) << local_tree.error();
     const auto content_hash = kasumi::hasher::hash_string("duplicate");
     const auto source = kasumi::test::workspace_path(workspace, "source.txt");
@@ -3765,12 +3731,8 @@ TEST(SyncCoordinatorTest, DuplicateDownloadsFetchContentOnce) {
                                  kasumi::Action::Download,
                                  &kasumi::Operation::action),
               2);
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        make_runtime(profile, local, storage_path),
-        storage,
-        key,
-        input,
-        *result);
+    const auto executed =
+        execute_at(profile, local, storage_path, storage, key, input, *result);
     ASSERT_TRUE(executed.has_value()) << executed.error().detail;
     EXPECT_EQ(state.get_count, 1U);
     EXPECT_EQ(kasumi::test::read_text(local / "alpha.txt"), "duplicate");
@@ -3922,9 +3884,7 @@ TEST(SyncCoordinatorTest, ConcurrentUntouchedFileMtimeChangeIsNotMasked) {
     auto input = empty_publication_input();
     input.local_tree = kasumi::Snapshot{
         .rows = {
-            kasumi::NodeRow{.path = "",
-                            .mtime = canonical_mtime(root_mtime),
-                            .is_directory = true},
+            dir_row("", canonical_mtime(root_mtime)),
             kasumi::NodeRow{.path = "tracked.txt",
                             .hash = old_hash,
                             .size = 3,
@@ -3939,9 +3899,7 @@ TEST(SyncCoordinatorTest, ConcurrentUntouchedFileMtimeChangeIsNotMasked) {
     input.base_tree = input.local_tree;
     input.storage.tree = kasumi::Snapshot{
         .rows = {
-            kasumi::NodeRow{.path = "",
-                            .mtime = canonical_mtime(root_mtime),
-                            .is_directory = true},
+            dir_row("", canonical_mtime(root_mtime)),
             kasumi::NodeRow{.path = "tracked.txt",
                             .hash = new_hash,
                             .size = 3,
@@ -3977,16 +3935,10 @@ TEST(SyncCoordinatorTest, ConcurrentUntouchedFileMtimeChangeIsNotMasked) {
     const auto concurrent_mtime =
         std::filesystem::last_write_time(local / "untouched.txt", error);
     ASSERT_FALSE(error);
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        make_runtime(profile, local, storage_path),
-        *storage,
-        key,
-        input,
-        *result);
+    const auto executed =
+        execute_at(profile, local, storage_path, *storage, key, input, *result);
     ASSERT_FALSE(executed.has_value()) << executed.error().detail;
-    EXPECT_EQ(
-        executed.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::CompositionMismatch);
+    EXPECT_EQ(executed.error().code, CoordErrorCode::CompositionMismatch);
     EXPECT_EQ(std::filesystem::last_write_time(local / "untouched.txt"),
               concurrent_mtime);
     EXPECT_FALSE(std::filesystem::exists(profile / "state.db"));
@@ -4046,12 +3998,8 @@ TEST(SyncCoordinatorTest,
     EXPECT_TRUE(result->plan.operations.empty());
     EXPECT_FALSE(result->requires_publication);
 
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        make_runtime(profile, local, storage_path),
-        *storage,
-        key,
-        input,
-        *result);
+    const auto executed =
+        execute_at(profile, local, storage_path, *storage, key, input, *result);
     ASSERT_TRUE(executed.has_value()) << executed.error().detail;
 }
 
@@ -4098,26 +4046,19 @@ TEST(SyncCoordinatorTest, ConcurrentUntouchedDirectoryMtimeChangeIsNotMasked) {
 
     auto input = empty_publication_input();
     input.local_tree = kasumi::Snapshot{
-        .rows = {
-            kasumi::NodeRow{.path = "",
-                            .mtime = canonical_mtime(root_mtime),
-                            .is_directory = true},
-            kasumi::NodeRow{.path = "modified",
-                            .mtime = canonical_mtime(actual_modified_mtime),
-                            .is_directory = true},
-            kasumi::NodeRow{.path = "modified/tracked.txt",
-                            .hash = old_hash,
-                            .size = 3,
-                            .mtime = canonical_mtime(actual_tracked_mtime),
-                            .is_directory = false},
-            kasumi::NodeRow{.path = "untouched",
-                            .mtime = canonical_mtime(actual_untouched_mtime),
-                            .is_directory = true},
-            kasumi::NodeRow{.path = "untouched/other.txt",
-                            .hash = same_hash,
-                            .size = 4,
-                            .mtime = canonical_mtime(actual_other_mtime),
-                            .is_directory = false}}};
+        .rows = {dir_row("", canonical_mtime(root_mtime)),
+                 dir_row("modified", canonical_mtime(actual_modified_mtime)),
+                 kasumi::NodeRow{.path = "modified/tracked.txt",
+                                 .hash = old_hash,
+                                 .size = 3,
+                                 .mtime = canonical_mtime(actual_tracked_mtime),
+                                 .is_directory = false},
+                 dir_row("untouched", canonical_mtime(actual_untouched_mtime)),
+                 kasumi::NodeRow{.path = "untouched/other.txt",
+                                 .hash = same_hash,
+                                 .size = 4,
+                                 .mtime = canonical_mtime(actual_other_mtime),
+                                 .is_directory = false}}};
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = input.local_tree;
     input.storage.tree = input.local_tree;
@@ -4145,16 +4086,10 @@ TEST(SyncCoordinatorTest, ConcurrentUntouchedDirectoryMtimeChangeIsNotMasked) {
         std::filesystem::last_write_time(local / "untouched", error);
     ASSERT_FALSE(error);
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        make_runtime(profile, local, storage_path),
-        *storage,
-        key,
-        input,
-        *result);
+    const auto executed =
+        execute_at(profile, local, storage_path, *storage, key, input, *result);
     ASSERT_FALSE(executed.has_value());
-    EXPECT_EQ(
-        executed.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::CompositionMismatch);
+    EXPECT_EQ(executed.error().code, CoordErrorCode::CompositionMismatch);
     EXPECT_EQ(std::filesystem::last_write_time(local / "untouched"),
               concurrent_mtime);
     EXPECT_FALSE(std::filesystem::exists(profile / "state.db"));
@@ -4186,21 +4121,13 @@ TEST(SyncCoordinatorTest, AffectedParentMetadataIsRestoredAfterDownload) {
 
     auto input = empty_publication_input();
     input.local_tree = kasumi::Snapshot{
-        .rows = {kasumi::NodeRow{.path = "",
-                                 .mtime = canonical_mtime(actual_root_mtime),
-                                 .is_directory = true},
-                 kasumi::NodeRow{.path = "docs",
-                                 .mtime = canonical_mtime(actual_docs_mtime),
-                                 .is_directory = true}}};
+        .rows = {dir_row("", canonical_mtime(actual_root_mtime)),
+                 dir_row("docs", canonical_mtime(actual_docs_mtime))}};
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = input.local_tree;
     input.storage.tree = kasumi::Snapshot{
-        .rows = {kasumi::NodeRow{.path = "",
-                                 .mtime = canonical_mtime(actual_root_mtime),
-                                 .is_directory = true},
-                 kasumi::NodeRow{.path = "docs",
-                                 .mtime = canonical_mtime(actual_docs_mtime),
-                                 .is_directory = true},
+        .rows = {dir_row("", canonical_mtime(actual_root_mtime)),
+                 dir_row("docs", canonical_mtime(actual_docs_mtime)),
                  kasumi::NodeRow{.path = "docs/alpha.txt",
                                  .hash = hash,
                                  .size = 5,
@@ -4219,12 +4146,8 @@ TEST(SyncCoordinatorTest, AffectedParentMetadataIsRestoredAfterDownload) {
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        make_runtime(profile, local, storage_path),
-        *storage,
-        key,
-        input,
-        *result);
+    const auto executed =
+        execute_at(profile, local, storage_path, *storage, key, input, *result);
     ASSERT_TRUE(executed.has_value()) << executed.error().detail;
     EXPECT_EQ(std::filesystem::last_write_time(local), actual_root_mtime);
     EXPECT_EQ(std::filesystem::last_write_time(local / "docs"),
@@ -4239,17 +4162,12 @@ TEST(SyncCoordinatorTest, ConcurrentImmutablePublicationsRemainMultipleHeads) {
     auto storage = open_initialized_storage(storage_path);
     ASSERT_TRUE(storage.has_value());
 
-    const kasumi::Snapshot root_tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+    const kasumi::Snapshot root_tree{.rows = {dir_row("")}};
     auto branch_tree = [](std::string_view path, std::string_view contents) {
-        kasumi::Snapshot tree{
-            .rows = {
-                kasumi::NodeRow{.path = "", .is_directory = true},
-                kasumi::NodeRow{.path = std::string(path),
-                                .hash = kasumi::hasher::hash_string(contents),
-                                .size = contents.size(),
-                                .is_directory = false}}};
-        kasumi::finalize_snapshot(tree);
+        auto tree =
+            make_snapshot({file_row(std::string(path),
+                                    kasumi::hasher::hash_string(contents),
+                                    contents.size())});
         return tree;
     };
     const auto first_tree = branch_tree("first.txt", "one");
@@ -4288,8 +4206,7 @@ TEST(SyncCoordinatorTest, ConcurrentImmutablePublicationsRemainMultipleHeads) {
     publish(*second);
 
     const auto observed =
-        kasumi::application::observation::collect_storage_state(
-            *storage, key, local, false);
+        app_obs::collect_storage_state(*storage, key, local, false);
     ASSERT_TRUE(observed.has_value());
     std::vector<std::string> heads = observed->logical_heads;
     std::ranges::sort(heads);
@@ -4329,11 +4246,10 @@ TEST(SyncCoordinatorTest, RejectsInvalidCompositionRootInput) {
         .requires_state_commit = false,
     };
 
-    const auto execution = kasumi::application::sync::coordinator::execute(
-        runtime_data, transport, key, input, result);
+    const auto execution =
+        coord::execute(runtime_data, transport, key, input, result);
     ASSERT_FALSE(execution.has_value());
-    EXPECT_EQ(execution.error().code,
-              kasumi::application::sync::coordinator::ErrorCode::InvalidInput);
+    EXPECT_EQ(execution.error().code, CoordErrorCode::InvalidInput);
 }
 
 TEST(SyncCoordinatorTest, EmptyPlanStillPublishesConvergenceCommit) {
@@ -4359,9 +4275,7 @@ TEST(ReobservationTest, NormalizesLogicalHeadsAndReachableCommitIds) {
     left.storage.reachable_commit_ids = {"c", "a", "c"};
     right.storage.reachable_commit_ids = {"a", "c"};
 
-    EXPECT_TRUE(
-        kasumi::application::sync::coordinator::reobservation::same_observation(
-            left, right));
+    EXPECT_TRUE(coord::reobservation::same_observation(left, right));
 }
 
 TEST(ReobservationTest, IgnoresDirectoryMetadataButDetectsFileMetadata) {
@@ -4371,18 +4285,16 @@ TEST(ReobservationTest, IgnoresDirectoryMetadataButDetectsFileMetadata) {
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::seconds{1})
             .count();
-    EXPECT_TRUE(
-        kasumi::application::sync::coordinator::reobservation::same_observation(
-            directory_left, directory_right));
+    EXPECT_TRUE(coord::reobservation::same_observation(directory_left,
+                                                       directory_right));
 
     directory_right.local_tree.rows.push_back(kasumi::NodeRow{
         .path = "file.txt",
         .mtime = canonical_mtime(std::filesystem::file_time_type::clock::now()),
         .is_directory = false});
     kasumi::finalize_snapshot(directory_right.local_tree);
-    EXPECT_FALSE(
-        kasumi::application::sync::coordinator::reobservation::same_observation(
-            directory_left, directory_right));
+    EXPECT_FALSE(coord::reobservation::same_observation(directory_left,
+                                                        directory_right));
 }
 
 TEST(ReobservationTest, DetectsRemoteHeadChanges) {
@@ -4391,9 +4303,7 @@ TEST(ReobservationTest, DetectsRemoteHeadChanges) {
     left.storage.logical_heads = {std::string(64, 'a')};
     right.storage.logical_heads = {std::string(64, 'b')};
 
-    EXPECT_FALSE(
-        kasumi::application::sync::coordinator::reobservation::same_observation(
-            left, right));
+    EXPECT_FALSE(coord::reobservation::same_observation(left, right));
 }
 
 TEST(ReobservationTest, DetectsNewCiphertextVariantForTheSameLogicalHead) {
@@ -4413,9 +4323,7 @@ TEST(ReobservationTest, DetectsNewCiphertextVariantForTheSameLogicalHead) {
             {.commit_id = std::string(64, 'a'),
              .ciphertext_id = std::string(64, 'c')})};
 
-    EXPECT_FALSE(
-        kasumi::application::sync::coordinator::reobservation::same_observation(
-            left, right));
+    EXPECT_FALSE(coord::reobservation::same_observation(left, right));
 }
 
 TEST(ReobservationTest, DetectsAuthenticatedEpochPolicyChanges) {
@@ -4432,33 +4340,27 @@ TEST(ReobservationTest, DetectsAuthenticatedEpochPolicyChanges) {
     right.storage.epoch_policy = kasumi::reconciliation::EpochRetentionPolicy{
         .min_history_depth = 5, .min_history_age_hours = 24};
 
-    EXPECT_FALSE(
-        kasumi::application::sync::coordinator::reobservation::same_observation(
-            left, right));
+    EXPECT_FALSE(coord::reobservation::same_observation(left, right));
 }
 
 TEST(ReobservationTest, MissingKnownBaseHistoryFailsClosed) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("missing-known-base-history");
     kasumi::test::write_text(local / "base.txt", "base");
-    const auto tree =
-        kasumi::application::observation::collect_local_tree(local);
+    const auto tree = app_obs::collect_local_tree(local);
     ASSERT_TRUE(tree.has_value()) << tree.error();
     const auto commit = kasumi::history::make_bootstrap(*tree, 0);
     ASSERT_TRUE(commit.has_value()) << commit.error().detail;
     const auto id = authenticated_commit_id(key, *commit);
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime_data.database_path,
-        {.tree = *tree,
-         .height = 0,
-         .commit_id = id,
-         .ciphertext_id = std::string(64, 'c')}));
+    ASSERT_TRUE(init_and_save_state(runtime_data.database_path,
+                                    {.tree = *tree,
+                                     .height = 0,
+                                     .commit_id = id,
+                                     .ciphertext_id = std::string(64, 'c')}));
     auto storage = open_initialized_storage(storage_path);
     ASSERT_TRUE(storage.has_value());
-    const auto observed =
-        kasumi::application::observation::collect_reconciliation_input(
-            runtime_data, *storage, key, true);
+    const auto observed = app_obs::collect_reconciliation_input(
+        runtime_data, *storage, key, true);
 
     ASSERT_FALSE(observed.has_value());
     EXPECT_EQ(observed.error().code,
@@ -4470,8 +4372,7 @@ TEST(ReobservationTest, AuditStorageObjectsDisablesTrustedMarkerShortcut) {
         make_coordinator_env("audit-revalidates-marker");
     kasumi::test::write_text(local / "base.txt", "base");
 
-    const auto tree =
-        kasumi::application::observation::collect_local_tree(local);
+    const auto tree = app_obs::collect_local_tree(local);
     ASSERT_TRUE(tree.has_value()) << tree.error();
     auto storage = open_initialized_storage(storage_path);
     ASSERT_TRUE(storage.has_value());
@@ -4486,13 +4387,12 @@ TEST(ReobservationTest, AuditStorageObjectsDisablesTrustedMarkerShortcut) {
         kasumi::application::sync::publication::publish_commit(
             *storage, key, *prepared, profile);
     ASSERT_TRUE(published.has_value()) << published.error().detail;
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime_data.database_path,
-        {.tree = *tree,
-         .height = prepared->commit.height,
-         .commit_id = published->head.commit_id,
-         .ciphertext_id = published->head.ciphertext_id}));
+    ASSERT_TRUE(
+        init_and_save_state(runtime_data.database_path,
+                            {.tree = *tree,
+                             .height = prepared->commit.height,
+                             .commit_id = published->head.commit_id,
+                             .ciphertext_id = published->head.ciphertext_id}));
 
     const auto marker_id =
         kasumi::application::history_storage::marker_identifier(
@@ -4500,9 +4400,8 @@ TEST(ReobservationTest, AuditStorageObjectsDisablesTrustedMarkerShortcut) {
             published->head);
     kasumi::test::write_text(storage_path / marker_id, "corrupt marker bytes");
 
-    const auto observed =
-        kasumi::application::observation::collect_reconciliation_input(
-            runtime_data, *storage, key, true);
+    const auto observed = app_obs::collect_reconciliation_input(
+        runtime_data, *storage, key, true);
     ASSERT_FALSE(observed.has_value());
     EXPECT_EQ(observed.error().code,
               kasumi::reconciliation::ErrorCode::InvalidStorageTree);
@@ -4518,24 +4417,21 @@ TEST(ReobservationTest, ObservationOverlapPreservesBranchErrorPrecedence) {
         make_runtime(profile,
                      kasumi::test::workspace_path(workspace, "missing-local"),
                      storage_path);
-    const auto local_failure =
-        kasumi::application::observation::collect_reconciliation_input(
-            missing_local, *storage, key, false);
+    const auto local_failure = app_obs::collect_reconciliation_input(
+        missing_local, *storage, key, false);
     ASSERT_FALSE(local_failure.has_value());
     EXPECT_EQ(local_failure.error().code,
               kasumi::reconciliation::ErrorCode::InvalidLocalTree);
 
     kasumi::transport::Transport unavailable{};
-    const auto remote_failure =
-        kasumi::application::observation::collect_reconciliation_input(
-            runtime_data, unavailable, key, false);
+    const auto remote_failure = app_obs::collect_reconciliation_input(
+        runtime_data, unavailable, key, false);
     ASSERT_FALSE(remote_failure.has_value());
     EXPECT_EQ(remote_failure.error().code,
               kasumi::reconciliation::ErrorCode::InvalidStorageTree);
 
-    const auto both_fail =
-        kasumi::application::observation::collect_reconciliation_input(
-            missing_local, unavailable, key, false);
+    const auto both_fail = app_obs::collect_reconciliation_input(
+        missing_local, unavailable, key, false);
     ASSERT_FALSE(both_fail.has_value());
     EXPECT_EQ(both_fail.error().code,
               kasumi::reconciliation::ErrorCode::InvalidLocalTree);
@@ -4545,21 +4441,18 @@ TEST(ReobservationTest, KnownBaseNoLongerReachableFailsClosed) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("unreachable-known-base");
     kasumi::test::write_text(local / "base.txt", "base");
-    const auto tree =
-        kasumi::application::observation::collect_local_tree(local);
+    const auto tree = app_obs::collect_local_tree(local);
     ASSERT_TRUE(tree.has_value()) << tree.error();
     const auto base = kasumi::history::make_bootstrap(*tree, 0);
     ASSERT_TRUE(base.has_value()) << base.error().detail;
     const auto base_id = authenticated_commit_id(key, *base);
     const auto unrelated = kasumi::history::make_empty_bootstrap();
     ASSERT_TRUE(unrelated.has_value()) << unrelated.error().detail;
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime_data.database_path,
-        {.tree = *tree,
-         .height = 0,
-         .commit_id = base_id,
-         .ciphertext_id = std::string(64, 'c')}));
+    ASSERT_TRUE(init_and_save_state(runtime_data.database_path,
+                                    {.tree = *tree,
+                                     .height = 0,
+                                     .commit_id = base_id,
+                                     .ciphertext_id = std::string(64, 'c')}));
     auto storage = open_initialized_storage(storage_path);
     ASSERT_TRUE(storage.has_value());
     ASSERT_TRUE(kasumi::application::history_storage::publish_commit(
@@ -4571,9 +4464,8 @@ TEST(ReobservationTest, KnownBaseNoLongerReachableFailsClosed) {
     ASSERT_TRUE(kasumi::application::history_storage::remove_marker_variants(
         *storage, layout, old_head));
 
-    const auto observed =
-        kasumi::application::observation::collect_reconciliation_input(
-            runtime_data, *storage, key, true);
+    const auto observed = app_obs::collect_reconciliation_input(
+        runtime_data, *storage, key, true);
 
     ASSERT_FALSE(observed.has_value());
     EXPECT_EQ(observed.error().code,
@@ -4591,9 +4483,8 @@ TEST(ReobservationTest, StableFirstAttemptDoesNotCreateJournal) {
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
 
-    const auto stable =
-        kasumi::application::sync::coordinator::reobservation::stabilize(
-            runtime_data, storage, key, input, *result);
+    const auto stable = coord::reobservation::stabilize(
+        runtime_data, storage, key, input, *result);
     ASSERT_TRUE(stable.has_value()) << stable.error().detail;
     EXPECT_EQ(stable->input.storage.logical_heads, input.storage.logical_heads);
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
@@ -4606,11 +4497,10 @@ TEST(ReobservationTest,
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("pending-restart");
 
-    auto tree = kasumi::application::observation::collect_local_tree(local);
+    auto tree = app_obs::collect_local_tree(local);
     ASSERT_TRUE(tree.has_value()) << tree.error();
     const auto missing_hash = kasumi::hasher::hash_string("remote-only");
-    tree->rows.push_back(kasumi::NodeRow{
-        .path = "missing.txt", .hash = missing_hash, .size = 11});
+    tree->rows.push_back(file_row("missing.txt", missing_hash, 11));
     kasumi::finalize_snapshot(*tree);
     const auto prepared =
         kasumi::application::sync::publication::prepare_commit(
@@ -4623,20 +4513,18 @@ TEST(ReobservationTest,
             *storage, key, *prepared, profile);
     ASSERT_TRUE(published.has_value()) << published.error().detail;
 
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime_data.database_path,
-        kasumi::state_storage::StoredState{
-            .tree = *tree,
-            .height = prepared->commit.height,
-            .commit_id = published->head.commit_id,
-            .ciphertext_id = published->head.ciphertext_id,
-            .pending_materializations = {
-                *kasumi::find_row(*tree, "missing.txt")}}));
+    ASSERT_TRUE(
+        init_and_save_state(runtime_data.database_path,
+                            kasumi::state_storage::StoredState{
+                                .tree = *tree,
+                                .height = prepared->commit.height,
+                                .commit_id = published->head.commit_id,
+                                .ciphertext_id = published->head.ciphertext_id,
+                                .pending_materializations = {
+                                    *kasumi::find_row(*tree, "missing.txt")}}));
 
-    auto observed =
-        kasumi::application::observation::collect_reconciliation_input(
-            runtime_data, *storage, key, false);
+    auto observed = app_obs::collect_reconciliation_input(
+        runtime_data, *storage, key, false);
     ASSERT_TRUE(observed.has_value()) << observed.error().detail;
     EXPECT_EQ(kasumi::find_row(observed->local_tree, "missing.txt"), nullptr);
     ASSERT_EQ(observed->pending_materializations.size(), 1U);
@@ -4669,15 +4557,13 @@ TEST(ReobservationTest,
                                         return operation.action ==
                                                kasumi::Action::Download;
                                     }));
-    const auto stabilized =
-        kasumi::application::sync::coordinator::reobservation::stabilize(
-            runtime_data,
-            *storage,
-            key,
-            *observed,
-            *materialization,
-            nullptr,
-            confirmed_missing);
+    const auto stabilized = coord::reobservation::stabilize(runtime_data,
+                                                            *storage,
+                                                            key,
+                                                            *observed,
+                                                            *materialization,
+                                                            nullptr,
+                                                            confirmed_missing);
     ASSERT_TRUE(stabilized.has_value()) << stabilized.error().detail;
     EXPECT_EQ(stabilized->result.pending_materializations.size(), 1U);
     EXPECT_TRUE(std::ranges::none_of(stabilized->result.plan.operations,
@@ -4693,11 +4579,8 @@ TEST(ReobservationTest,
         make_coordinator_env("late-missing-replan");
 
     const auto missing_hash = kasumi::hasher::hash_string("unavailable");
-    kasumi::Snapshot remote_tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
-                 kasumi::NodeRow{
-                     .path = "missing.txt", .hash = missing_hash, .size = 11}}};
-    kasumi::finalize_snapshot(remote_tree);
+    auto remote_tree =
+        make_snapshot({file_row("missing.txt", missing_hash, 11)});
     const auto prepared =
         kasumi::application::sync::publication::prepare_commit(
             remote_tree, false, 0, {}, 100, key);
@@ -4752,9 +4635,8 @@ TEST(ReobservationTest,
     EXPECT_EQ((*accepted)->pending_materializations.front().path,
               "missing.txt");
 
-    const auto remote =
-        kasumi::application::observation::collect_reconciliation_input(
-            runtime_data, context.storage, key, false);
+    const auto remote = app_obs::collect_reconciliation_input(
+        runtime_data, context.storage, key, false);
     ASSERT_TRUE(remote.has_value()) << remote.error().detail;
     EXPECT_EQ(kasumi::find_row(remote->storage.tree, "missing.txt")->hash,
               missing_hash);
@@ -4793,8 +4675,7 @@ TEST(ReobservationTest,
     const auto accepted_commit = (*restored_state)->commit_id;
     const auto timeout_hash = kasumi::hasher::hash_string("timeout");
     auto timeout_tree = (*restored_state)->tree;
-    timeout_tree.rows.push_back(kasumi::NodeRow{
-        .path = "timeout.txt", .hash = timeout_hash, .size = 7});
+    timeout_tree.rows.push_back(file_row("timeout.txt", timeout_hash, 7));
     kasumi::finalize_snapshot(timeout_tree);
     const std::array parent_ids{accepted_commit};
     const auto timeout_commit =
@@ -4839,16 +4720,14 @@ TEST(ReobservationTest, ChangedSyncReobservesScopedHistory) {
     state.base = &*base;
     auto storage = make_reobserve_transport(state);
 
-    auto observed =
-        kasumi::application::observation::collect_reconciliation_input(
-            runtime_data, storage, key, false);
+    auto observed = app_obs::collect_reconciliation_input(
+        runtime_data, storage, key, false);
     ASSERT_TRUE(observed.has_value()) << observed.error().detail;
     auto result = kasumi::reconciliation::reconcile(*observed);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     ASSERT_TRUE(result->requires_publication);
-    auto stable =
-        kasumi::application::sync::coordinator::reobservation::stabilize(
-            runtime_data, storage, key, *observed, *result);
+    auto stable = coord::reobservation::stabilize(
+        runtime_data, storage, key, *observed, *result);
 
     ASSERT_TRUE(stable.has_value()) << stable.error().detail;
     EXPECT_EQ(state.list_count, 4);
@@ -4873,8 +4752,7 @@ TEST(ReobservationTest,
                 std::to_string(index));
         }
 
-        const auto tree =
-            kasumi::application::observation::collect_local_tree(local);
+        const auto tree = app_obs::collect_local_tree(local);
         ASSERT_TRUE(tree.has_value()) << tree.error();
         const auto commit = kasumi::history::make_bootstrap(*tree, 0);
         ASSERT_TRUE(commit.has_value()) << commit.error().detail;
@@ -4942,18 +4820,16 @@ TEST(ReobservationTest,
         };
 
         bool local_change_observed = false;
-        auto observed =
-            kasumi::application::observation::collect_reconciliation_input(
-                runtime_data, storage, key, false, {}, nullptr, [&] {
-                    local_change_observed = true;
-                });
+        auto observed = app_obs::collect_reconciliation_input(
+            runtime_data, storage, key, false, {}, nullptr, [&] {
+                local_change_observed = true;
+            });
         ASSERT_TRUE(observed.has_value()) << observed.error().detail;
         EXPECT_FALSE(local_change_observed);
         auto result = kasumi::reconciliation::reconcile(*observed);
         ASSERT_TRUE(result.has_value()) << result.error().detail;
-        auto stable =
-            kasumi::application::sync::coordinator::reobservation::stabilize(
-                runtime_data, storage, key, *observed, *result);
+        auto stable = coord::reobservation::stabilize(
+            runtime_data, storage, key, *observed, *result);
         ASSERT_TRUE(stable.has_value()) << stable.error().detail;
         const auto test_layout =
             kasumi::application::history_storage::derive_remote_layout(key);
@@ -4995,24 +4871,22 @@ TEST(ReobservationTest,
         reset_counts();
         kasumi::test::write_text(local / "new.txt", "new");
         state.require_local_change_overlap = true;
-        observed =
-            kasumi::application::observation::collect_reconciliation_input(
-                runtime_data, storage, key, false, {}, nullptr, [&] {
-                    std::lock_guard lock(state.mutex);
-                    state.local_change_observed = true;
-                    state.condition.notify_all();
-                });
+        observed = app_obs::collect_reconciliation_input(
+            runtime_data, storage, key, false, {}, nullptr, [&] {
+                std::lock_guard lock(state.mutex);
+                state.local_change_observed = true;
+                state.condition.notify_all();
+            });
         ASSERT_TRUE(observed.has_value()) << observed.error().detail;
         EXPECT_TRUE(state.local_change_observed);
         EXPECT_FALSE(state.local_change_overlap_timed_out);
         result = kasumi::reconciliation::reconcile(*observed);
         ASSERT_TRUE(result.has_value()) << result.error().detail;
         ASSERT_TRUE(result->requires_publication);
-        stable =
-            kasumi::application::sync::coordinator::reobservation::stabilize(
-                runtime_data, storage, key, *observed, *result);
+        stable = coord::reobservation::stabilize(
+            runtime_data, storage, key, *observed, *result);
         ASSERT_TRUE(stable.has_value()) << stable.error().detail;
-        ASSERT_TRUE(kasumi::application::sync::coordinator::execute(
+        ASSERT_TRUE(coord::execute(
             runtime_data, storage, key, stable->input, stable->result));
         EXPECT_EQ(state.presence_count, 0U);
         EXPECT_EQ(state.presence_batch_count, 0U);
@@ -5099,16 +4973,14 @@ TEST(ReobservationTest,
             kasumi::test::write_text(local / path,
                                      "batch-content-" + std::to_string(index));
         }
-        observed =
-            kasumi::application::observation::collect_reconciliation_input(
-                runtime_data, storage, key, false);
+        observed = app_obs::collect_reconciliation_input(
+            runtime_data, storage, key, false);
         ASSERT_TRUE(observed.has_value()) << observed.error().detail;
         result = kasumi::reconciliation::reconcile(*observed);
         ASSERT_TRUE(result.has_value()) << result.error().detail;
         ASSERT_TRUE(result->requires_publication);
-        stable =
-            kasumi::application::sync::coordinator::reobservation::stabilize(
-                runtime_data, storage, key, *observed, *result);
+        stable = coord::reobservation::stabilize(
+            runtime_data, storage, key, *observed, *result);
         ASSERT_TRUE(stable.has_value()) << stable.error().detail;
         EXPECT_EQ(std::ranges::count_if(stable->result.plan.operations,
                                         [](const auto& operation) {
@@ -5116,7 +4988,7 @@ TEST(ReobservationTest,
                                                    kasumi::Action::Upload;
                                         }),
                   3U);
-        ASSERT_TRUE(kasumi::application::sync::coordinator::execute(
+        ASSERT_TRUE(coord::execute(
             runtime_data, storage, key, stable->input, stable->result));
         EXPECT_EQ(state.presence_count, 0U);
         EXPECT_EQ(state.presence_batch_count, 0U);
@@ -5143,17 +5015,15 @@ TEST(ReobservationTest, LocalChangeRetriesAndUsesTheStableObservation) {
     auto storage = make_reobserve_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(storage));
 
-    auto observed =
-        kasumi::application::observation::collect_reconciliation_input(
-            runtime_data, storage, key, false);
+    auto observed = app_obs::collect_reconciliation_input(
+        runtime_data, storage, key, false);
     ASSERT_TRUE(observed.has_value());
     auto result = kasumi::reconciliation::reconcile(*observed);
     ASSERT_TRUE(result.has_value() && result->requires_publication);
 
     state.remaining_mutations = 1;
-    const auto stable =
-        kasumi::application::sync::coordinator::reobservation::stabilize(
-            runtime_data, storage, key, *observed, *result);
+    const auto stable = coord::reobservation::stabilize(
+        runtime_data, storage, key, *observed, *result);
     ASSERT_TRUE(stable.has_value()) << stable.error().detail;
     EXPECT_EQ(stable->input.local_tree.rows.back().hash,
               kasumi::hasher::hash_string("1"));
@@ -5178,21 +5048,17 @@ TEST(ReobservationTest, RepeatedLocalChangesExhaustThreeAttempts) {
     auto storage = make_reobserve_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(storage));
 
-    auto observed =
-        kasumi::application::observation::collect_reconciliation_input(
-            runtime_data, storage, key, false);
+    auto observed = app_obs::collect_reconciliation_input(
+        runtime_data, storage, key, false);
     ASSERT_TRUE(observed.has_value());
     auto result = kasumi::reconciliation::reconcile(*observed);
     ASSERT_TRUE(result.has_value() && result->requires_publication);
 
     state.remaining_mutations = 6;
-    const auto stable =
-        kasumi::application::sync::coordinator::reobservation::stabilize(
-            runtime_data, storage, key, *observed, *result);
+    const auto stable = coord::reobservation::stabilize(
+        runtime_data, storage, key, *observed, *result);
     ASSERT_FALSE(stable.has_value());
-    EXPECT_EQ(stable.error().code,
-              kasumi::application::sync::coordinator::ErrorCode::
-                  ConcurrentModification);
+    EXPECT_EQ(stable.error().code, CoordErrorCode::ConcurrentModification);
     EXPECT_NE(stable.error().detail.find("repeatedly"), std::string::npos);
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
     const auto listing = kasumi::transport::list(storage);
@@ -5209,12 +5075,8 @@ TEST(ReobservationTest,
     // File initially has "AAAA" (4 bytes). Scan it to get real metadata and
     // cache.
     kasumi::test::write_text(local_file, "AAAA");
-    const auto initial_scan =
-        kasumi::application::observation::scanner::scan_result(
-            local,
-            {},
-            kasumi::application::observation::scanner::ScanPolicy::
-                ReuseStrongFingerprint);
+    const auto initial_scan = app_obs::scanner::scan_result(
+        local, {}, app_obs::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(initial_scan.has_value());
     ASSERT_EQ(initial_scan->cache.size(), 1U);
     const auto old_mtime =
@@ -5229,9 +5091,7 @@ TEST(ReobservationTest,
     const auto hash_c = kasumi::hasher::hash_string("CCCC");
 
     const kasumi::Snapshot base_tree{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "file.txt", .hash = hash_a, .size = 4}}};
+        .rows = {dir_row(""), file_row("file.txt", hash_a, 4)}};
 
     // Prepare and publish base commit
     const auto prepared_base =
@@ -5244,8 +5104,7 @@ TEST(ReobservationTest,
     ASSERT_TRUE(published_base.has_value()) << published_base.error().detail;
 
     // Save base state to DB
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
+    ASSERT_TRUE(init_and_save_state(
         runtime_data.database_path,
         kasumi::state_storage::StoredState{
             .tree = base_tree,
@@ -5287,12 +5146,11 @@ TEST(ReobservationTest,
                                                                 *old_mtime));
 
     // Collect observation with stale session cache (which still has hash_a):
-    kasumi::application::observation::LocalObservationSession session{};
+    app_obs::LocalObservationSession session{};
     session.cache = initial_scan->cache;
 
-    auto observed =
-        kasumi::application::observation::collect_reconciliation_input(
-            runtime_data, *storage, key, false, {}, &session);
+    auto observed = app_obs::collect_reconciliation_input(
+        runtime_data, *storage, key, false, {}, &session);
     ASSERT_TRUE(observed.has_value()) << observed.error().detail;
     // With stale cache, scanner reused hash_a:
     EXPECT_EQ(kasumi::find_row(observed->local_tree, "file.txt")->hash, hash_a);
@@ -5310,9 +5168,8 @@ TEST(ReobservationTest,
     // destructive Download! It must detect that actual on-disk hash is hash_b
     // ("BBBB"), update local_tree to hash_b, evict stale cache entry, and
     // re-reconcile as a CONFLICT (exclusive_destination = true)!
-    const auto stable =
-        kasumi::application::sync::coordinator::reobservation::stabilize(
-            runtime_data, *storage, key, *observed, *result, &session);
+    const auto stable = coord::reobservation::stabilize(
+        runtime_data, *storage, key, *observed, *result, &session);
     ASSERT_TRUE(stable.has_value()) << stable.error().detail;
 
     // Local tree must have been corrected to hash_b:
@@ -5347,12 +5204,8 @@ TEST(ReobservationTest,
     // File initially has "AAAA" (4 bytes). Scan it to get real metadata and
     // cache.
     kasumi::test::write_text(local_file, "AAAA");
-    const auto initial_scan =
-        kasumi::application::observation::scanner::scan_result(
-            local,
-            {},
-            kasumi::application::observation::scanner::ScanPolicy::
-                ReuseStrongFingerprint);
+    const auto initial_scan = app_obs::scanner::scan_result(
+        local, {}, app_obs::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(initial_scan.has_value());
     ASSERT_EQ(initial_scan->cache.size(), 1U);
     const auto old_mtime =
@@ -5366,9 +5219,7 @@ TEST(ReobservationTest,
     const auto hash_b = kasumi::hasher::hash_string("BBBB");
 
     const kasumi::Snapshot base_tree{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "file.txt", .hash = hash_a, .size = 4}}};
+        .rows = {dir_row(""), file_row("file.txt", hash_a, 4)}};
 
     // Prepare and publish base commit
     const auto prepared_base =
@@ -5381,8 +5232,7 @@ TEST(ReobservationTest,
     ASSERT_TRUE(published_base.has_value()) << published_base.error().detail;
 
     // Save base state to DB
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
+    ASSERT_TRUE(init_and_save_state(
         runtime_data.database_path,
         kasumi::state_storage::StoredState{
             .tree = base_tree,
@@ -5392,8 +5242,7 @@ TEST(ReobservationTest,
         }));
 
     // Prepare and publish remote commit deleting file.txt
-    const kasumi::Snapshot remote_tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+    const kasumi::Snapshot remote_tree{.rows = {dir_row("")}};
     const std::array base_parents{published_base->head.commit_id};
     const auto prepared_remote =
         kasumi::application::sync::publication::prepare_commit(
@@ -5415,12 +5264,11 @@ TEST(ReobservationTest,
     ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(local_file,
                                                                 *old_mtime));
 
-    kasumi::application::observation::LocalObservationSession session{};
+    app_obs::LocalObservationSession session{};
     session.cache = initial_scan->cache;
 
-    auto observed =
-        kasumi::application::observation::collect_reconciliation_input(
-            runtime_data, *storage, key, false, {}, &session);
+    auto observed = app_obs::collect_reconciliation_input(
+        runtime_data, *storage, key, false, {}, &session);
     ASSERT_TRUE(observed.has_value()) << observed.error().detail;
     // With stale cache, scanner reused hash_a:
     EXPECT_EQ(kasumi::find_row(observed->local_tree, "file.txt")->hash, hash_a);
@@ -5434,9 +5282,8 @@ TEST(ReobservationTest,
     EXPECT_EQ(result->plan.operations.front().action,
               kasumi::Action::DeleteLocal);
 
-    const auto stable =
-        kasumi::application::sync::coordinator::reobservation::stabilize(
-            runtime_data, *storage, key, *observed, *result, &session);
+    const auto stable = coord::reobservation::stabilize(
+        runtime_data, *storage, key, *observed, *result, &session);
     ASSERT_TRUE(stable.has_value()) << stable.error().detail;
 
     // Local tree must have been corrected to hash_b:
@@ -5473,12 +5320,9 @@ TEST(ReobservationTest,
                                    .hash = missing_hash,
                                    .size = 15,
                                    .is_directory = false};
-    kasumi::Snapshot base_tree{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            auth_row,
-        }};
-    kasumi::finalize_snapshot(base_tree);
+    auto base_tree = make_snapshot({
+        auth_row,
+    });
     const auto commit = kasumi::history::make_bootstrap(base_tree, 0);
     ASSERT_TRUE(commit.has_value());
     const auto commit_id = authenticated_commit_id(key, *commit);
@@ -5489,14 +5333,13 @@ TEST(ReobservationTest,
         *base, key, *commit, profile);
     ASSERT_TRUE(published.has_value());
 
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime_data.database_path,
-        {.tree = base_tree,
-         .height = 0,
-         .commit_id = commit_id,
-         .ciphertext_id = published->head.ciphertext_id,
-         .pending_materializations = {auth_row}}));
+    ASSERT_TRUE(
+        init_and_save_state(runtime_data.database_path,
+                            {.tree = base_tree,
+                             .height = 0,
+                             .commit_id = commit_id,
+                             .ciphertext_id = published->head.ciphertext_id,
+                             .pending_materializations = {auth_row}}));
 
     ReobserveTransportState state{};
     state.base = &*base;
@@ -5504,9 +5347,8 @@ TEST(ReobservationTest,
     auto storage = make_reobserve_transport(state);
     ASSERT_TRUE(kasumi::transport::initialize(storage));
 
-    auto observed =
-        kasumi::application::observation::collect_reconciliation_input(
-            runtime_data, storage, key, false);
+    auto observed = app_obs::collect_reconciliation_input(
+        runtime_data, storage, key, false);
     ASSERT_TRUE(observed.has_value());
     observed->known_missing_content_objects.insert(missing_hash);
     observed->pending_deletion_authority = {auth_row};
@@ -5516,9 +5358,8 @@ TEST(ReobservationTest,
     ASSERT_TRUE(result->requires_publication);
 
     state.remaining_mutations = 1;
-    const auto stable =
-        kasumi::application::sync::coordinator::reobservation::stabilize(
-            runtime_data, storage, key, *observed, *result);
+    const auto stable = coord::reobservation::stabilize(
+        runtime_data, storage, key, *observed, *result);
     ASSERT_TRUE(stable.has_value()) << stable.error().detail;
     EXPECT_EQ(stable->input.pending_deletion_authority.size(), 1U);
     EXPECT_EQ(stable->input.pending_deletion_authority.front().path,
@@ -5562,12 +5403,8 @@ TEST(SyncCoordinatorTest, StateOnlyPlanRestoresObservedRemoteRootMtime) {
 
     auto storage = open_initialized_storage(storage_path);
     ASSERT_TRUE(storage.has_value());
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        make_runtime(profile, local, storage_path),
-        *storage,
-        key,
-        input,
-        *result);
+    const auto executed =
+        execute_at(profile, local, storage_path, *storage, key, input, *result);
 
     ASSERT_TRUE(executed.has_value()) << executed.error().detail;
     std::error_code error;
@@ -5601,17 +5438,11 @@ TEST(SyncCoordinatorTest,
     ASSERT_FALSE(error);
     auto storage = open_initialized_storage(storage_path);
     ASSERT_TRUE(storage.has_value());
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        make_runtime(profile, local, storage_path),
-        *storage,
-        key,
-        input,
-        *result);
+    const auto executed =
+        execute_at(profile, local, storage_path, *storage, key, input, *result);
 
     ASSERT_FALSE(executed.has_value());
-    EXPECT_EQ(executed.error().code,
-              kasumi::application::sync::coordinator::ErrorCode::
-                  ConcurrentModification);
+    EXPECT_EQ(executed.error().code, CoordErrorCode::ConcurrentModification);
     EXPECT_EQ(std::filesystem::last_write_time(local, error), changed_mtime);
     EXPECT_FALSE(error);
     EXPECT_FALSE(std::filesystem::exists(profile / "state.db"));
@@ -5634,9 +5465,7 @@ TEST(SyncCoordinatorTest, LocalOnlyDatabaseFailureRollsBackAppliedDownload) {
     input.storage.logical_heads = {std::string(64, 'a')};
     input.storage.tree = input.local_tree;
     input.storage.tree.rows.push_back(
-        kasumi::NodeRow{.path = "remote-dir",
-                        .mtime = canonical_mtime(directory_mtime),
-                        .is_directory = true});
+        dir_row("remote-dir", canonical_mtime(directory_mtime)));
     kasumi::finalize_snapshot(input.storage.tree);
     input.base_tree = input.local_tree;
     input.storage.reachable_commits = {kasumi::history::LoadedCommit{
@@ -5648,12 +5477,10 @@ TEST(SyncCoordinatorTest, LocalOnlyDatabaseFailureRollsBackAppliedDownload) {
     ASSERT_FALSE(result->requires_publication);
     ASSERT_TRUE(result->requires_local_mutation);
 
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        runtime_data, *storage, key, input, *result);
+    const auto executed =
+        coord::execute(runtime_data, *storage, key, input, *result);
     ASSERT_FALSE(executed.has_value());
-    EXPECT_EQ(
-        executed.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::DatabaseFailure)
+    EXPECT_EQ(executed.error().code, CoordErrorCode::DatabaseFailure)
         << executed.error().detail;
     EXPECT_FALSE(std::filesystem::exists(local / "remote-dir"));
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
@@ -5722,37 +5549,20 @@ TEST(SyncCoordinatorTest,
                 std::filesystem::file_time_type::clock::now() -
                 std::chrono::hours{3});
         kasumi::Snapshot local_tree{
-            .rows = {kasumi::NodeRow{.path = "",
-                                     .mtime = canonical_mtime(directory_mtime),
-                                     .is_directory = true}}};
+            .rows = {dir_row("", canonical_mtime(directory_mtime))}};
         if (originally_exists) {
             local_tree.rows.push_back(
-                kasumi::NodeRow{.path = "remote",
-                                .mtime = canonical_mtime(directory_mtime),
-                                .is_directory = true});
-            local_tree.rows.push_back(
-                kasumi::NodeRow{.path = "remote/alpha.txt",
-                                .hash = kasumi::hasher::hash_string("old"),
-                                .size = 3,
-                                .mtime = canonical_mtime(old_mtime),
-                                .is_directory = false});
+                dir_row("remote", canonical_mtime(directory_mtime)));
+            local_tree.rows.push_back(text_row(
+                "remote/alpha.txt", "old", canonical_mtime(old_mtime)));
         }
         kasumi::finalize_snapshot(local_tree);
 
-        kasumi::Snapshot remote_tree{
-            .rows = {
-                kasumi::NodeRow{.path = "",
-                                .mtime = canonical_mtime(directory_mtime),
-                                .is_directory = true},
-                kasumi::NodeRow{.path = "remote",
-                                .mtime = canonical_mtime(directory_mtime),
-                                .is_directory = true},
-                kasumi::NodeRow{.path = "remote/alpha.txt",
-                                .hash = kasumi::hasher::hash_string("remote"),
-                                .size = 6,
-                                .mtime = canonical_mtime(remote_mtime),
-                                .is_directory = false}}};
-        kasumi::finalize_snapshot(remote_tree);
+        auto remote_tree = make_snapshot(
+            {dir_row("", canonical_mtime(directory_mtime)),
+             dir_row("remote", canonical_mtime(directory_mtime)),
+             text_row(
+                 "remote/alpha.txt", "remote", canonical_mtime(remote_mtime))});
 
         auto input = empty_publication_input();
         input.local_tree = local_tree;
@@ -5788,12 +5598,10 @@ TEST(SyncCoordinatorTest,
         sqlite3_free(sqlite_error);
         ASSERT_EQ(sqlite3_close(database), SQLITE_OK);
 
-        const auto executed = kasumi::application::sync::coordinator::execute(
-            runtime_data, *storage, key, input, *result);
+        const auto executed =
+            coord::execute(runtime_data, *storage, key, input, *result);
         ASSERT_FALSE(executed.has_value());
-        EXPECT_EQ(
-            executed.error().code,
-            kasumi::application::sync::coordinator::ErrorCode::DatabaseFailure)
+        EXPECT_EQ(executed.error().code, CoordErrorCode::DatabaseFailure)
             << executed.error().detail;
         if (originally_exists) {
             EXPECT_TRUE(std::filesystem::is_regular_file(local_file));
@@ -5852,8 +5660,7 @@ TEST(SyncCoordinatorTest,
         kasumi::test::write_text(local / "alpha.txt", "alpha");
 
         AmbiguousPublicationState* state = nullptr;
-        auto storage = make_ambiguous_transport(state);
-        ASSERT_TRUE(kasumi::transport::initialize(storage));
+        auto storage = make_initialized_ambiguous_storage(state);
         state->upload_corruption = corruption;
         state->claim_present_after_upload = true;
 
@@ -5909,11 +5716,7 @@ TEST(SyncCoordinatorTest, AmbiguousContentPutRollsForwardFromVerifiedEffect) {
 
     auto input = empty_publication_input();
     input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "alpha.txt",
-                        .hash = kasumi::hasher::hash_string("alpha"),
-                        .size = 5,
-                        .mtime = canonical_mtime(local / "alpha.txt"),
-                        .is_directory = false});
+        text_row("alpha.txt", "alpha", canonical_mtime(local / "alpha.txt")));
     input.local_tree.rows.front().mtime = canonical_mtime(local);
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = input.storage.tree;
@@ -5921,12 +5724,11 @@ TEST(SyncCoordinatorTest, AmbiguousContentPutRollsForwardFromVerifiedEffect) {
     ASSERT_TRUE(result.has_value()) << result.error().detail;
 
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = make_initialized_ambiguous_storage(state);
     state->fail_content_put_after_store = true;
 
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        runtime_data, storage, key, input, *result);
+    const auto executed =
+        coord::execute(runtime_data, storage, key, input, *result);
 
     ASSERT_TRUE(executed.has_value()) << executed.error().detail;
     EXPECT_EQ(state->put_count, 4U);
@@ -5943,11 +5745,7 @@ TEST(SyncCoordinatorTest, UnknownContentPutEffectPreservesJournalForRecovery) {
 
     auto input = empty_publication_input();
     input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "alpha.txt",
-                        .hash = kasumi::hasher::hash_string("alpha"),
-                        .size = 5,
-                        .mtime = canonical_mtime(local / "alpha.txt"),
-                        .is_directory = false});
+        text_row("alpha.txt", "alpha", canonical_mtime(local / "alpha.txt")));
     input.local_tree.rows.front().mtime = canonical_mtime(local);
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = input.storage.tree;
@@ -5955,30 +5753,24 @@ TEST(SyncCoordinatorTest, UnknownContentPutEffectPreservesJournalForRecovery) {
     ASSERT_TRUE(result.has_value()) << result.error().detail;
 
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = make_initialized_ambiguous_storage(state);
     state->fail_content_put_after_store = true;
     state->fail_content_get = true;
 
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        runtime_data, storage, key, input, *result);
+    const auto executed =
+        coord::execute(runtime_data, storage, key, input, *result);
 
     ASSERT_FALSE(executed.has_value());
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    const auto pending = kasumi::application::sync::journal::load(*paths, key);
+    const auto pending = sync_journal::load(*paths, key);
     ASSERT_TRUE(pending.has_value() && pending->has_value());
     EXPECT_TRUE(std::filesystem::exists(profile / ".transactions" /
                                         (*pending)->operation_id));
 
     state->fail_content_get = false;
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, storage, key);
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    ASSERT_TRUE(
+        recover_expect(runtime_data, storage, key, RecoveryResult::RolledBack));
     EXPECT_FALSE(std::filesystem::exists(paths->final_path));
 }
 
@@ -5990,10 +5782,7 @@ TEST(SyncCoordinatorTest,
 
     auto input = empty_publication_input();
     input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "alpha.txt",
-                        .hash = kasumi::hasher::hash_string("alpha"),
-                        .size = 5,
-                        .is_directory = false});
+        file_row("alpha.txt", kasumi::hasher::hash_string("alpha"), 5));
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = input.storage.tree;
     const auto result = kasumi::reconciliation::reconcile(input);
@@ -6001,18 +5790,15 @@ TEST(SyncCoordinatorTest,
     ASSERT_TRUE(result->requires_publication);
 
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = make_initialized_ambiguous_storage(state);
     state->upload_corruption =
         AmbiguousPublicationState::UploadCorruption::Truncated;
     state->claim_present_after_upload = true;
 
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        runtime_data, storage, key, input, *result);
+    const auto executed =
+        coord::execute(runtime_data, storage, key, input, *result);
     ASSERT_FALSE(executed.has_value());
-    EXPECT_EQ(
-        executed.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::MutationFailure);
+    EXPECT_EQ(executed.error().code, CoordErrorCode::MutationFailure);
     EXPECT_EQ(state->put_count, 2U);
     EXPECT_EQ(state->get_count, 2U);
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
@@ -6037,8 +5823,7 @@ TEST(SyncCoordinatorTest, StablePublicationPerformsNoListOrPresence) {
     kasumi::test::write_text(local / "alpha.txt", "alpha");
 
     auto input = empty_publication_input();
-    const auto local_tree =
-        kasumi::application::observation::collect_local_tree(local);
+    const auto local_tree = app_obs::collect_local_tree(local);
     ASSERT_TRUE(local_tree.has_value()) << local_tree.error();
     input.local_tree = *local_tree;
     input.base_tree = input.storage.tree;
@@ -6047,10 +5832,9 @@ TEST(SyncCoordinatorTest, StablePublicationPerformsNoListOrPresence) {
     ASSERT_TRUE(result->requires_publication);
 
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        runtime_data, storage, key, input, *result);
+    auto storage = make_initialized_ambiguous_storage(state);
+    const auto executed =
+        coord::execute(runtime_data, storage, key, input, *result);
 
     ASSERT_TRUE(executed.has_value()) << executed.error().detail;
     EXPECT_EQ(state->list_count, 0);
@@ -6117,10 +5901,7 @@ TEST(ReconciliationTest, DownloadDoesNotChangeSharedTree) {
     input.storage.history_present = true;
     input.storage.logical_heads = {std::string(64, 'a')};
     input.storage.tree = input.local_tree;
-    input.storage.tree.rows.push_back(kasumi::NodeRow{.path = "remote.txt",
-                                                      .hash = content,
-                                                      .size = 6,
-                                                      .is_directory = false});
+    input.storage.tree.rows.push_back(file_row("remote.txt", content, 6));
     kasumi::finalize_snapshot(input.storage.tree);
     input.base_tree = input.local_tree;
 
@@ -6139,10 +5920,7 @@ TEST(ReconciliationTest, LocalUploadChangesSharedTree) {
     input.storage.tree = input.local_tree;
     input.base_tree = input.local_tree;
     input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "local.txt",
-                        .hash = kasumi::hasher::hash_string("local"),
-                        .size = 5,
-                        .is_directory = false});
+        file_row("local.txt", kasumi::hasher::hash_string("local"), 5));
     kasumi::finalize_snapshot(input.local_tree);
 
     const auto result = kasumi::reconciliation::reconcile(input);
@@ -6157,10 +5935,9 @@ TEST(ReconciliationTest,
      UnexpectedSymlinkEvidenceDoesNotSuppressDirectoryRemoval) {
     auto input = empty_publication_input();
     const auto managed_hash = kasumi::hasher::hash_string("managed");
+    input.local_tree.rows.push_back(dir_row("Projects"));
     input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "Projects", .is_directory = true});
-    input.local_tree.rows.push_back(kasumi::NodeRow{
-        .path = "Projects/main.cpp", .hash = managed_hash, .size = 7});
+        file_row("Projects/main.cpp", managed_hash, 7));
     kasumi::finalize_snapshot(input.local_tree);
     input.base_tree = input.local_tree;
     input.storage.tree =
@@ -6224,11 +6001,7 @@ TEST(ReconciliationTest,
     kasumi::find_row(input.local_tree, "A.txt")->mtime =
         canonical_mtime(local_mtime);
     input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "B.txt",
-                        .hash = kasumi::hasher::hash_string("new"),
-                        .size = 3,
-                        .mtime = canonical_mtime(local_mtime),
-                        .is_directory = false});
+        text_row("B.txt", "new", canonical_mtime(local_mtime)));
     kasumi::finalize_snapshot(input.local_tree);
 
     const auto result = kasumi::reconciliation::reconcile(input);
@@ -6278,15 +6051,9 @@ TEST(ReconciliationTest, MissingReferencedObjectIsRepairOnly) {
     input.storage.logical_heads = {std::string(64, 'a')};
     input.storage.tree = input.local_tree;
     input.storage.tree.rows.push_back(
-        kasumi::NodeRow{.path = "repair.txt",
-                        .hash = kasumi::hasher::hash_string("repair"),
-                        .size = 6,
-                        .is_directory = false});
+        file_row("repair.txt", kasumi::hasher::hash_string("repair"), 6));
     input.storage.tree.rows.push_back(
-        kasumi::NodeRow{.path = "repair-alias.txt",
-                        .hash = kasumi::hasher::hash_string("repair"),
-                        .size = 6,
-                        .is_directory = false});
+        file_row("repair-alias.txt", kasumi::hasher::hash_string("repair"), 6));
     kasumi::finalize_snapshot(input.storage.tree);
     input.local_tree = input.storage.tree;
     input.base_tree = input.storage.tree;
@@ -6317,25 +6084,17 @@ TEST(ReconciliationTest, PersistedPendingDoesNotBecomeRepairSourceOrDeletion) {
     const auto missing_hash = kasumi::hasher::hash_string("missing");
     const auto existing_hash = kasumi::hasher::hash_string("existing");
     const auto new_hash = kasumi::hasher::hash_string("new");
-    kasumi::Snapshot base{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "docs", .is_directory = true},
-            kasumi::NodeRow{
-                .path = "docs/missing.txt", .hash = missing_hash, .size = 7},
-            kasumi::NodeRow{
-                .path = "docs/existing.txt", .hash = existing_hash, .size = 8},
-        }};
-    kasumi::finalize_snapshot(base);
+    auto base = make_snapshot({
+        dir_row("docs"),
+        file_row("docs/missing.txt", missing_hash, 7),
+        file_row("docs/existing.txt", existing_hash, 8),
+    });
 
-    auto input = empty_publication_input();
-    set_persisted_base(input, base);
+    auto input = make_base_input(base);
+    input.local_tree.rows.push_back(dir_row("docs"));
     input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs", .is_directory = true});
-    input.local_tree.rows.push_back(kasumi::NodeRow{
-        .path = "docs/existing.txt", .hash = existing_hash, .size = 8});
-    input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "new.txt", .hash = new_hash, .size = 3});
+        file_row("docs/existing.txt", existing_hash, 8));
+    input.local_tree.rows.push_back(file_row("new.txt", new_hash, 3));
     kasumi::finalize_snapshot(input.local_tree);
     input.pending_materializations = {
         *kasumi::find_row(base, "docs/missing.txt")};
@@ -6376,18 +6135,12 @@ TEST(ReconciliationTest, PersistedPendingDoesNotBecomeRepairSourceOrDeletion) {
 
 TEST(ReconciliationTest, PendingObjectReturningSchedulesVerifiedDownload) {
     const auto hash = kasumi::hasher::hash_string("pending");
-    kasumi::Snapshot base{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "docs", .is_directory = true},
-            kasumi::NodeRow{
-                .path = "docs/pending.txt", .hash = hash, .size = 7},
-        }};
-    kasumi::finalize_snapshot(base);
-    auto input = empty_publication_input();
-    set_persisted_base(input, base);
-    input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs", .is_directory = true});
+    auto base = make_snapshot({
+        dir_row("docs"),
+        file_row("docs/pending.txt", hash, 7),
+    });
+    auto input = make_base_input(base);
+    input.local_tree.rows.push_back(dir_row("docs"));
     kasumi::finalize_snapshot(input.local_tree);
     input.pending_materializations = {
         *kasumi::find_row(base, "docs/pending.txt")};
@@ -6406,19 +6159,13 @@ TEST(ReconciliationTest, PendingObjectReturningSchedulesVerifiedDownload) {
 TEST(ReconciliationTest, RemoteReplacementAndDeletionResolvePendingRows) {
     const auto old_hash = kasumi::hasher::hash_string("old");
     const auto new_hash = kasumi::hasher::hash_string("replacement");
-    kasumi::Snapshot base{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "docs", .is_directory = true},
-            kasumi::NodeRow{
-                .path = "docs/pending.txt", .hash = old_hash, .size = 3},
-        }};
-    kasumi::finalize_snapshot(base);
+    auto base = make_snapshot({
+        dir_row("docs"),
+        file_row("docs/pending.txt", old_hash, 3),
+    });
     const auto make_input = [&] {
-        auto input = empty_publication_input();
-        set_persisted_base(input, base);
-        input.local_tree.rows.push_back(
-            kasumi::NodeRow{.path = "docs", .is_directory = true});
+        auto input = make_base_input(base);
+        input.local_tree.rows.push_back(dir_row("docs"));
         kasumi::finalize_snapshot(input.local_tree);
         input.pending_materializations = {
             *kasumi::find_row(base, "docs/pending.txt")};
@@ -6446,11 +6193,10 @@ TEST(ReconciliationTest, RemoteReplacementAndDeletionResolvePendingRows) {
     EXPECT_EQ(replacement_result->pending_materializations.front().size, 11U);
 
     auto deletion = make_input();
-    deletion.storage.tree = kasumi::Snapshot{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "docs", .is_directory = true},
-        }};
+    deletion.storage.tree = kasumi::Snapshot{.rows = {
+                                                 dir_row(""),
+                                                 dir_row("docs"),
+                                             }};
     kasumi::finalize_snapshot(deletion.storage.tree);
     deletion.storage.generation = 8;
     deletion.storage.logical_heads = {std::string(64, 'c')};
@@ -6468,10 +6214,7 @@ TEST(ReconciliationTest, RejectsNonCanonicalRows) {
     input.storage.logical_heads = {std::string(64, 'a')};
     input.storage.tree = input.local_tree;
     input.storage.tree.rows.push_back(
-        kasumi::NodeRow{.path = "same.txt",
-                        .hash = kasumi::hasher::hash_string("same"),
-                        .size = 4,
-                        .is_directory = false});
+        file_row("same.txt", kasumi::hasher::hash_string("same"), 4));
     kasumi::finalize_snapshot(input.storage.tree);
     input.local_tree = input.storage.tree;
     input.base_tree = input.storage.tree;
@@ -6494,9 +6237,7 @@ TEST(ReconciliationTest, NewRemoteDirectoryPreservesLocalMtime) {
     input.storage.tree = input.local_tree;
     input.base_tree = input.local_tree;
     input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs",
-                        .mtime = canonical_mtime(directory_mtime),
-                        .is_directory = true});
+        dir_row("docs", canonical_mtime(directory_mtime)));
     kasumi::finalize_snapshot(input.local_tree);
 
     const auto result = kasumi::reconciliation::reconcile(input);
@@ -6521,9 +6262,7 @@ TEST(ReconciliationTest, ExistingAncestorsUseLocalMetadata) {
     input.storage.logical_heads = {std::string(64, 'a')};
     input.storage.tree = input.local_tree;
     input.storage.tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs",
-                        .mtime = canonical_mtime(storage_directory_mtime),
-                        .is_directory = true});
+        dir_row("docs", canonical_mtime(storage_directory_mtime)));
     kasumi::finalize_snapshot(input.storage.tree);
     input.base_tree = input.storage.tree;
     input.local_tree = input.storage.tree;
@@ -6531,10 +6270,7 @@ TEST(ReconciliationTest, ExistingAncestorsUseLocalMetadata) {
     kasumi::find_row(input.local_tree, "docs")->mtime =
         canonical_mtime(local_directory_mtime);
     input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs/new.txt",
-                        .hash = kasumi::hasher::hash_string("new"),
-                        .size = 3,
-                        .is_directory = false});
+        file_row("docs/new.txt", kasumi::hasher::hash_string("new"), 3));
     kasumi::finalize_snapshot(input.local_tree);
 
     const auto result = kasumi::reconciliation::reconcile(input);
@@ -6556,22 +6292,14 @@ TEST(ReconciliationTest, DeletedAncestorsUseSurvivingLocalMetadata) {
     input.storage.history_present = true;
     input.storage.logical_heads = {std::string(64, 'a')};
     input.storage.tree = input.local_tree;
+    input.storage.tree.rows.push_back(dir_row("docs"));
     input.storage.tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs", .is_directory = true});
-    input.storage.tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs/alpha.txt",
-                        .hash = kasumi::hasher::hash_string("alpha"),
-                        .size = 5,
-                        .is_directory = false});
+        file_row("docs/alpha.txt", kasumi::hasher::hash_string("alpha"), 5));
     kasumi::finalize_snapshot(input.storage.tree);
     input.base_tree = input.storage.tree;
     input.local_tree = kasumi::Snapshot{
-        .rows = {kasumi::NodeRow{.path = "",
-                                 .mtime = canonical_mtime(root_mtime),
-                                 .is_directory = true},
-                 kasumi::NodeRow{.path = "docs",
-                                 .mtime = canonical_mtime(directory_mtime),
-                                 .is_directory = true}}};
+        .rows = {dir_row("", canonical_mtime(root_mtime)),
+                 dir_row("docs", canonical_mtime(directory_mtime))}};
     kasumi::finalize_snapshot(input.local_tree);
 
     const auto result = kasumi::reconciliation::reconcile(input);
@@ -6598,18 +6326,16 @@ TEST(ReconciliationTest, DeletedAncestorsUseSurvivingLocalMetadata) {
 }
 
 TEST(ReconciliationTest, OrdersNestedLocalSubtreeDeletionSafely) {
-    kasumi::Snapshot shared{.rows = {{.path = "", .is_directory = true},
-                                     {.path = "a", .is_directory = true},
-                                     {.path = "a/b", .is_directory = true},
-                                     {.path = "a/b/c.txt",
-                                      .hash = kasumi::hasher::hash_string("c"),
-                                      .size = 1},
-                                     {.path = "a/d.txt",
-                                      .hash = kasumi::hasher::hash_string("d"),
-                                      .size = 1}}};
-    kasumi::finalize_snapshot(shared);
-    kasumi::Snapshot remote{.rows = {{.path = "", .is_directory = true}}};
-    kasumi::finalize_snapshot(remote);
+    auto shared = make_snapshot({{.path = "", .is_directory = true},
+                                 {.path = "a", .is_directory = true},
+                                 {.path = "a/b", .is_directory = true},
+                                 {.path = "a/b/c.txt",
+                                  .hash = kasumi::hasher::hash_string("c"),
+                                  .size = 1},
+                                 {.path = "a/d.txt",
+                                  .hash = kasumi::hasher::hash_string("d"),
+                                  .size = 1}});
+    auto remote = make_snapshot({{.path = "", .is_directory = true}});
     const auto base_id = std::string(64, 'a');
     const auto head_id = std::string(64, 'b');
     auto input = empty_publication_input();
@@ -6654,10 +6380,7 @@ TEST(ReconciliationTest, MissingObservedParentRejectsCandidateConstruction) {
     input.storage.tree = input.local_tree;
     input.base_tree = input.local_tree;
     input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs/alpha.txt",
-                        .hash = kasumi::hasher::hash_string("alpha"),
-                        .size = 5,
-                        .is_directory = false});
+        file_row("docs/alpha.txt", kasumi::hasher::hash_string("alpha"), 5));
     kasumi::finalize_snapshot(input.local_tree);
 
     const auto result = kasumi::reconciliation::reconcile(input);
@@ -6673,15 +6396,9 @@ TEST(ReconciliationTest, FileObservedAsParentRejectsCandidateConstruction) {
     input.storage.tree = input.local_tree;
     input.base_tree = input.local_tree;
     input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs",
-                        .hash = kasumi::hasher::hash_string("file"),
-                        .size = 4,
-                        .is_directory = false});
+        file_row("docs", kasumi::hasher::hash_string("file"), 4));
     input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs/alpha.txt",
-                        .hash = kasumi::hasher::hash_string("alpha"),
-                        .size = 5,
-                        .is_directory = false});
+        file_row("docs/alpha.txt", kasumi::hasher::hash_string("alpha"), 5));
     kasumi::finalize_snapshot(input.local_tree);
 
     const auto result = kasumi::reconciliation::reconcile(input);
@@ -6698,14 +6415,9 @@ TEST(ReconciliationTest, RepairDoesNotChangeDirectoryMetadata) {
     input.storage.logical_heads = {std::string(64, 'a')};
     input.storage.tree = input.local_tree;
     input.storage.tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs",
-                        .mtime = canonical_mtime(directory_mtime),
-                        .is_directory = true});
+        dir_row("docs", canonical_mtime(directory_mtime)));
     input.storage.tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs/alpha.txt",
-                        .hash = kasumi::hasher::hash_string("alpha"),
-                        .size = 5,
-                        .is_directory = false});
+        file_row("docs/alpha.txt", kasumi::hasher::hash_string("alpha"), 5));
     kasumi::finalize_snapshot(input.storage.tree);
     input.local_tree = input.storage.tree;
     input.base_tree = input.storage.tree;
@@ -6722,14 +6434,9 @@ TEST(ReconciliationTest, RepairDoesNotChangeDirectoryMetadata) {
 TEST(ReconciliationTest, PendingReferencesUseTrustedAncestorMetadata) {
     const auto root_mtime = timestamp_ns(std::chrono::nanoseconds{401});
     const auto directory_mtime = timestamp_ns(std::chrono::nanoseconds{402});
-    kasumi::Snapshot local_tree{
-        .rows = {kasumi::NodeRow{.path = "",
-                                 .mtime = canonical_mtime(root_mtime),
-                                 .is_directory = true},
-                 kasumi::NodeRow{.path = "docs",
-                                 .mtime = canonical_mtime(directory_mtime),
-                                 .is_directory = true}}};
-    kasumi::finalize_snapshot(local_tree);
+    auto local_tree =
+        make_snapshot({dir_row("", canonical_mtime(root_mtime)),
+                       dir_row("docs", canonical_mtime(directory_mtime))});
     const auto candidate = local_tree;
     const kasumi::NodeRow pending{.path = "docs/remote.txt",
                                   .hash = kasumi::hasher::hash_string("remote"),
@@ -6746,18 +6453,12 @@ TEST(ReconciliationTest, PendingReferencesUseTrustedAncestorMetadata) {
 
 TEST(ReconciliationTest, ResolveMissingAuthorityEmptyLeavesPendingProtected) {
     const auto missing_hash = kasumi::hasher::hash_string("missing");
-    kasumi::Snapshot base{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "docs", .is_directory = true},
-            kasumi::NodeRow{
-                .path = "docs/missing.txt", .hash = missing_hash, .size = 7},
-        }};
-    kasumi::finalize_snapshot(base);
-    auto input = empty_publication_input();
-    set_persisted_base(input, base);
-    input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs", .is_directory = true});
+    auto base = make_snapshot({
+        dir_row("docs"),
+        file_row("docs/missing.txt", missing_hash, 7),
+    });
+    auto input = make_base_input(base);
+    input.local_tree.rows.push_back(dir_row("docs"));
     kasumi::finalize_snapshot(input.local_tree);
     input.pending_materializations = {
         *kasumi::find_row(base, "docs/missing.txt")};
@@ -6782,18 +6483,12 @@ TEST(ReconciliationTest, ResolveMissingAuthorityEmptyLeavesPendingProtected) {
 
 TEST(ReconciliationTest, ResolveMissingExactAuthorityPublishesLogicalDeletion) {
     const auto missing_hash = kasumi::hasher::hash_string("missing");
-    kasumi::Snapshot base{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "docs", .is_directory = true},
-            kasumi::NodeRow{
-                .path = "docs/missing.txt", .hash = missing_hash, .size = 7},
-        }};
-    kasumi::finalize_snapshot(base);
-    auto input = empty_publication_input();
-    set_persisted_base(input, base);
-    input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs", .is_directory = true});
+    auto base = make_snapshot({
+        dir_row("docs"),
+        file_row("docs/missing.txt", missing_hash, 7),
+    });
+    auto input = make_base_input(base);
+    input.local_tree.rows.push_back(dir_row("docs"));
     kasumi::finalize_snapshot(input.local_tree);
     const auto pending_row = *kasumi::find_row(base, "docs/missing.txt");
     input.pending_materializations = {pending_row};
@@ -6817,24 +6512,18 @@ TEST(ReconciliationTest, ResolveMissingExactAuthorityPublishesLogicalDeletion) {
 TEST(ReconciliationTest, ResolveMissingAuthorityMismatchPreservesPath) {
     const auto missing_hash = kasumi::hasher::hash_string("missing");
     const auto other_hash = kasumi::hasher::hash_string("other");
-    kasumi::Snapshot base{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "docs", .is_directory = true},
-            kasumi::NodeRow{
-                .path = "docs/missing.txt", .hash = missing_hash, .size = 7},
-        }};
-    kasumi::finalize_snapshot(base);
-    auto input = empty_publication_input();
-    set_persisted_base(input, base);
-    input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs", .is_directory = true});
+    auto base = make_snapshot({
+        dir_row("docs"),
+        file_row("docs/missing.txt", missing_hash, 7),
+    });
+    auto input = make_base_input(base);
+    input.local_tree.rows.push_back(dir_row("docs"));
     kasumi::finalize_snapshot(input.local_tree);
     const auto pending_row = *kasumi::find_row(base, "docs/missing.txt");
     input.pending_materializations = {pending_row};
     input.known_missing_content_objects.insert(missing_hash);
-    input.pending_deletion_authority = {kasumi::NodeRow{
-        .path = "docs/missing.txt", .hash = other_hash, .size = 7}};
+    input.pending_deletion_authority = {
+        file_row("docs/missing.txt", other_hash, 7)};
 
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
@@ -6852,18 +6541,12 @@ TEST(ReconciliationTest, ResolveMissingAuthorityMismatchPreservesPath) {
 
 TEST(ReconciliationTest, ResolveMissingAuthorityPayloadAvailablePreservesPath) {
     const auto missing_hash = kasumi::hasher::hash_string("missing");
-    kasumi::Snapshot base{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "docs", .is_directory = true},
-            kasumi::NodeRow{
-                .path = "docs/missing.txt", .hash = missing_hash, .size = 7},
-        }};
-    kasumi::finalize_snapshot(base);
-    auto input = empty_publication_input();
-    set_persisted_base(input, base);
-    input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs", .is_directory = true});
+    auto base = make_snapshot({
+        dir_row("docs"),
+        file_row("docs/missing.txt", missing_hash, 7),
+    });
+    auto input = make_base_input(base);
+    input.local_tree.rows.push_back(dir_row("docs"));
     kasumi::finalize_snapshot(input.local_tree);
     const auto pending_row = *kasumi::find_row(base, "docs/missing.txt");
     input.pending_materializations = {pending_row};
@@ -6887,20 +6570,13 @@ TEST(ReconciliationTest, ResolveMissingAuthorityPayloadAvailablePreservesPath) {
 TEST(ReconciliationTest,
      ResolveMissingAuthorityCompatibleLocalSourcePreservesPath) {
     const auto missing_hash = kasumi::hasher::hash_string("missing");
-    kasumi::Snapshot base{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "docs", .is_directory = true},
-            kasumi::NodeRow{
-                .path = "docs/missing.txt", .hash = missing_hash, .size = 7},
-        }};
-    kasumi::finalize_snapshot(base);
-    auto input = empty_publication_input();
-    set_persisted_base(input, base);
-    input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs", .is_directory = true});
-    input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "spare.txt", .hash = missing_hash, .size = 7});
+    auto base = make_snapshot({
+        dir_row("docs"),
+        file_row("docs/missing.txt", missing_hash, 7),
+    });
+    auto input = make_base_input(base);
+    input.local_tree.rows.push_back(dir_row("docs"));
+    input.local_tree.rows.push_back(file_row("spare.txt", missing_hash, 7));
     kasumi::finalize_snapshot(input.local_tree);
     const auto pending_row = *kasumi::find_row(base, "docs/missing.txt");
     input.pending_materializations = {pending_row};
@@ -6927,18 +6603,13 @@ TEST(ReconciliationTest,
      ResolveMissingTwoEligibleAuthoritiesRemovesBothInSinglePlan) {
     const auto hash_a = kasumi::hasher::hash_string("missing-a");
     const auto hash_b = kasumi::hasher::hash_string("missing-b");
-    kasumi::Snapshot base{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "docs", .is_directory = true},
-            kasumi::NodeRow{.path = "docs/a.txt", .hash = hash_a, .size = 7},
-            kasumi::NodeRow{.path = "docs/b.txt", .hash = hash_b, .size = 8},
-        }};
-    kasumi::finalize_snapshot(base);
-    auto input = empty_publication_input();
-    set_persisted_base(input, base);
-    input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs", .is_directory = true});
+    auto base = make_snapshot({
+        dir_row("docs"),
+        file_row("docs/a.txt", hash_a, 7),
+        file_row("docs/b.txt", hash_b, 8),
+    });
+    auto input = make_base_input(base);
+    input.local_tree.rows.push_back(dir_row("docs"));
     kasumi::finalize_snapshot(input.local_tree);
     const auto row_a = *kasumi::find_row(base, "docs/a.txt");
     const auto row_b = *kasumi::find_row(base, "docs/b.txt");
@@ -6970,20 +6641,13 @@ TEST(ReconciliationTest,
 TEST(ReconciliationTest, ResolveMissingNewPendingRowNotAuthorizedIsPreserved) {
     const auto hash_old = kasumi::hasher::hash_string("missing-old");
     const auto hash_new = kasumi::hasher::hash_string("missing-new");
-    kasumi::Snapshot base{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "docs", .is_directory = true},
-            kasumi::NodeRow{
-                .path = "docs/old.txt", .hash = hash_old, .size = 7},
-            kasumi::NodeRow{
-                .path = "docs/new.txt", .hash = hash_new, .size = 8},
-        }};
-    kasumi::finalize_snapshot(base);
-    auto input = empty_publication_input();
-    set_persisted_base(input, base);
-    input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs", .is_directory = true});
+    auto base = make_snapshot({
+        dir_row("docs"),
+        file_row("docs/old.txt", hash_old, 7),
+        file_row("docs/new.txt", hash_new, 8),
+    });
+    auto input = make_base_input(base);
+    input.local_tree.rows.push_back(dir_row("docs"));
     kasumi::finalize_snapshot(input.local_tree);
     const auto row_old = *kasumi::find_row(base, "docs/old.txt");
     const auto row_new = *kasumi::find_row(base, "docs/new.txt");
@@ -7016,20 +6680,13 @@ TEST(ReconciliationTest, ResolveMissingNewPendingRowNotAuthorizedIsPreserved) {
 TEST(ReconciliationTest,
      SharedHashPreservesMissingContentProtectionForUnauthorizedPath) {
     const auto shared_hash = kasumi::hasher::hash_string("shared-payload");
-    kasumi::Snapshot base{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "docs", .is_directory = true},
-            kasumi::NodeRow{
-                .path = "docs/a.txt", .hash = shared_hash, .size = 14},
-            kasumi::NodeRow{
-                .path = "docs/b.txt", .hash = shared_hash, .size = 14},
-        }};
-    kasumi::finalize_snapshot(base);
-    auto input = empty_publication_input();
-    set_persisted_base(input, base);
-    input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "docs", .is_directory = true});
+    auto base = make_snapshot({
+        dir_row("docs"),
+        file_row("docs/a.txt", shared_hash, 14),
+        file_row("docs/b.txt", shared_hash, 14),
+    });
+    auto input = make_base_input(base);
+    input.local_tree.rows.push_back(dir_row("docs"));
     kasumi::finalize_snapshot(input.local_tree);
     const auto row_a = *kasumi::find_row(base, "docs/a.txt");
     input.pending_materializations = {row_a};
@@ -7080,7 +6737,7 @@ TEST(ReconciliationTest,
 
     input.base_tree = kasumi::Snapshot{
         .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
+            dir_row(""),
             kasumi::NodeRow{.path = "FooBar",
                             .hash = base_foobar_hash,
                             .size = 11,
@@ -7101,7 +6758,7 @@ TEST(ReconciliationTest,
 
     input.storage.tree = kasumi::Snapshot{
         .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
+            dir_row(""),
             kasumi::NodeRow{.path = "FooBar",
                             .hash = remote_foobar_hash,
                             .size = 13,
@@ -7131,7 +6788,7 @@ TEST(ReconciliationTest,
     // "foo.kasumiconflict_remote"
     input.local_tree = kasumi::Snapshot{
         .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
+            dir_row(""),
             kasumi::NodeRow{.path = "FILE.txt.kasumiconflict_remote",
                             .hash = dummy_hash,
                             .size = 5,
@@ -7224,7 +6881,7 @@ TEST(ReconciliationTest, ConflictReservationAvoidsUnicodeCaseCollisions) {
 
     input.base_tree = kasumi::Snapshot{
         .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
+            dir_row(""),
             kasumi::NodeRow{.path = "ä.txt",
                             .hash = base_hash,
                             .size = 4,
@@ -7235,7 +6892,7 @@ TEST(ReconciliationTest, ConflictReservationAvoidsUnicodeCaseCollisions) {
 
     input.storage.tree = kasumi::Snapshot{
         .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
+            dir_row(""),
             kasumi::NodeRow{.path = "ä.txt",
                             .hash = remote_hash,
                             .size = 6,
@@ -7246,7 +6903,7 @@ TEST(ReconciliationTest, ConflictReservationAvoidsUnicodeCaseCollisions) {
 
     input.local_tree = kasumi::Snapshot{
         .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
+            dir_row(""),
             kasumi::NodeRow{.path = "Ä.txt.kasumiconflict_remote",
                             .hash = dummy_hash,
                             .size = 5,
@@ -7388,9 +7045,7 @@ TEST(ReconciliationTest, UnicodeMissingObjectPathsPreserveRecoverySources) {
 }
 
 TEST(ReconciliationTest, LogicalHeadOrderDoesNotChangeReconciliationResult) {
-    kasumi::Snapshot tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
-    kasumi::finalize_snapshot(tree);
+    auto tree = make_snapshot({});
 
     const auto commit_r = kasumi::history::make_commit(0, {}, tree, 1);
     ASSERT_TRUE(commit_r.has_value()) << commit_r.error().detail;
@@ -7488,15 +7143,8 @@ TEST(ReconciliationTest, LocalNewerModifyModifyPreservesRemoteInSharedTree) {
 
     const auto make_tree = [&](std::string_view content,
                                std::filesystem::file_time_type mtime) {
-        kasumi::Snapshot tree{
-            .rows = {
-                kasumi::NodeRow{.path = "", .is_directory = true},
-                kasumi::NodeRow{.path = "file.txt",
-                                .hash = kasumi::hasher::hash_string(content),
-                                .size = content.size(),
-                                .mtime = canonical_mtime(mtime),
-                                .is_directory = false}}};
-        kasumi::finalize_snapshot(tree);
+        auto tree = make_snapshot(
+            {text_row("file.txt", content, canonical_mtime(mtime))});
         return tree;
     };
 
@@ -7602,26 +7250,26 @@ TEST(ReconciliationTest,
     const auto remote_hash = kasumi::hasher::hash_string("REMOTE");
     const auto existing_hash = kasumi::hasher::hash_string("PRE_EXISTING");
 
-    auto base_tree = kasumi::Snapshot{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
-                 kasumi::NodeRow{.path = "file.txt",
-                                 .hash = base_hash,
-                                 .size = 4,
-                                 .mtime = canonical_mtime(t1),
-                                 .is_directory = false}}};
+    auto base_tree =
+        kasumi::Snapshot{.rows = {dir_row(""),
+                                  kasumi::NodeRow{.path = "file.txt",
+                                                  .hash = base_hash,
+                                                  .size = 4,
+                                                  .mtime = canonical_mtime(t1),
+                                                  .is_directory = false}}};
     kasumi::finalize_snapshot(base_tree);
 
-    auto storage_tree = kasumi::Snapshot{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
-                 kasumi::NodeRow{.path = "file.txt",
-                                 .hash = remote_hash,
-                                 .size = 6,
-                                 .mtime = canonical_mtime(t1),
-                                 .is_directory = false}}};
+    auto storage_tree =
+        kasumi::Snapshot{.rows = {dir_row(""),
+                                  kasumi::NodeRow{.path = "file.txt",
+                                                  .hash = remote_hash,
+                                                  .size = 6,
+                                                  .mtime = canonical_mtime(t1),
+                                                  .is_directory = false}}};
     kasumi::finalize_snapshot(storage_tree);
 
     auto local_tree = kasumi::Snapshot{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
+        .rows = {dir_row(""),
                  kasumi::NodeRow{.path = "file.txt",
                                  .hash = local_hash,
                                  .size = 5,
@@ -7743,41 +7391,31 @@ TEST(ReconciliationTest,
     const auto deep_hash = kasumi::hasher::hash_string("DEEP-PAYLOAD");
 
     const auto make_file_tree = [&](std::filesystem::file_time_type mtime) {
-        kasumi::Snapshot tree{
-            .rows = {kasumi::NodeRow{.path = "",
-                                     .mtime = canonical_mtime(t1),
-                                     .is_directory = true},
-                     kasumi::NodeRow{.path = "node",
-                                     .hash = file_hash,
-                                     .size = 12,
-                                     .mtime = canonical_mtime(mtime),
-                                     .is_directory = false}}};
-        kasumi::finalize_snapshot(tree);
+        auto tree =
+            make_snapshot({dir_row("", canonical_mtime(t1)),
+                           kasumi::NodeRow{.path = "node",
+                                           .hash = file_hash,
+                                           .size = 12,
+                                           .mtime = canonical_mtime(mtime),
+                                           .is_directory = false}});
         return tree;
     };
 
     const auto make_dir_tree = [&](std::filesystem::file_time_type mtime) {
-        kasumi::Snapshot tree{
-            .rows = {kasumi::NodeRow{.path = "",
-                                     .mtime = canonical_mtime(t1),
-                                     .is_directory = true},
-                     kasumi::NodeRow{.path = "node",
-                                     .mtime = canonical_mtime(mtime),
-                                     .is_directory = true},
-                     kasumi::NodeRow{.path = "node/child.txt",
-                                     .hash = child_hash,
-                                     .size = 13,
-                                     .mtime = canonical_mtime(mtime),
-                                     .is_directory = false},
-                     kasumi::NodeRow{.path = "node/nested",
-                                     .mtime = canonical_mtime(mtime),
-                                     .is_directory = true},
-                     kasumi::NodeRow{.path = "node/nested/deep.txt",
-                                     .hash = deep_hash,
-                                     .size = 12,
-                                     .mtime = canonical_mtime(mtime),
-                                     .is_directory = false}}};
-        kasumi::finalize_snapshot(tree);
+        auto tree =
+            make_snapshot({dir_row("", canonical_mtime(t1)),
+                           dir_row("node", canonical_mtime(mtime)),
+                           kasumi::NodeRow{.path = "node/child.txt",
+                                           .hash = child_hash,
+                                           .size = 13,
+                                           .mtime = canonical_mtime(mtime),
+                                           .is_directory = false},
+                           dir_row("node/nested", canonical_mtime(mtime)),
+                           kasumi::NodeRow{.path = "node/nested/deep.txt",
+                                           .hash = deep_hash,
+                                           .size = 12,
+                                           .mtime = canonical_mtime(mtime),
+                                           .is_directory = false}});
         return tree;
     };
 
@@ -7848,41 +7486,31 @@ TEST(ReconciliationTest,
     const auto deep_hash = kasumi::hasher::hash_string("DEEP-PAYLOAD");
 
     const auto make_file_tree = [&](std::filesystem::file_time_type mtime) {
-        kasumi::Snapshot tree{
-            .rows = {kasumi::NodeRow{.path = "",
-                                     .mtime = canonical_mtime(t1),
-                                     .is_directory = true},
-                     kasumi::NodeRow{.path = "node",
-                                     .hash = file_hash,
-                                     .size = 12,
-                                     .mtime = canonical_mtime(mtime),
-                                     .is_directory = false}}};
-        kasumi::finalize_snapshot(tree);
+        auto tree =
+            make_snapshot({dir_row("", canonical_mtime(t1)),
+                           kasumi::NodeRow{.path = "node",
+                                           .hash = file_hash,
+                                           .size = 12,
+                                           .mtime = canonical_mtime(mtime),
+                                           .is_directory = false}});
         return tree;
     };
 
     const auto make_dir_tree = [&](std::filesystem::file_time_type mtime) {
-        kasumi::Snapshot tree{
-            .rows = {kasumi::NodeRow{.path = "",
-                                     .mtime = canonical_mtime(t1),
-                                     .is_directory = true},
-                     kasumi::NodeRow{.path = "node",
-                                     .mtime = canonical_mtime(mtime),
-                                     .is_directory = true},
-                     kasumi::NodeRow{.path = "node/child.txt",
-                                     .hash = child_hash,
-                                     .size = 13,
-                                     .mtime = canonical_mtime(mtime),
-                                     .is_directory = false},
-                     kasumi::NodeRow{.path = "node/nested",
-                                     .mtime = canonical_mtime(mtime),
-                                     .is_directory = true},
-                     kasumi::NodeRow{.path = "node/nested/deep.txt",
-                                     .hash = deep_hash,
-                                     .size = 12,
-                                     .mtime = canonical_mtime(mtime),
-                                     .is_directory = false}}};
-        kasumi::finalize_snapshot(tree);
+        auto tree =
+            make_snapshot({dir_row("", canonical_mtime(t1)),
+                           dir_row("node", canonical_mtime(mtime)),
+                           kasumi::NodeRow{.path = "node/child.txt",
+                                           .hash = child_hash,
+                                           .size = 13,
+                                           .mtime = canonical_mtime(mtime),
+                                           .is_directory = false},
+                           dir_row("node/nested", canonical_mtime(mtime)),
+                           kasumi::NodeRow{.path = "node/nested/deep.txt",
+                                           .hash = deep_hash,
+                                           .size = 12,
+                                           .mtime = canonical_mtime(mtime),
+                                           .is_directory = false}});
         return tree;
     };
 
@@ -7954,43 +7582,33 @@ TEST(ReconciliationTest,
     const auto existing_hash = kasumi::hasher::hash_string("PRE_EXISTING");
 
     // Local directory subtree + existing conflict file artifact
-    kasumi::Snapshot local_tree{
-        .rows = {kasumi::NodeRow{.path = "",
-                                 .mtime = canonical_mtime(t1),
-                                 .is_directory = true},
-                 kasumi::NodeRow{.path = "node",
-                                 .mtime = canonical_mtime(t1),
-                                 .is_directory = true},
-                 kasumi::NodeRow{.path = "node/child.txt",
-                                 .hash = child_hash,
-                                 .size = 13,
-                                 .mtime = canonical_mtime(t1),
-                                 .is_directory = false},
-                 kasumi::NodeRow{.path = "node/nested",
-                                 .mtime = canonical_mtime(t1),
-                                 .is_directory = true},
-                 kasumi::NodeRow{.path = "node/nested/deep.txt",
-                                 .hash = deep_hash,
-                                 .size = 12,
-                                 .mtime = canonical_mtime(t1),
-                                 .is_directory = false},
-                 kasumi::NodeRow{.path = "node.kasumiconflict_remote",
-                                 .hash = existing_hash,
-                                 .size = 12,
-                                 .mtime = canonical_mtime(t1),
-                                 .is_directory = false}}};
-    kasumi::finalize_snapshot(local_tree);
+    auto local_tree =
+        make_snapshot({dir_row("", canonical_mtime(t1)),
+                       dir_row("node", canonical_mtime(t1)),
+                       kasumi::NodeRow{.path = "node/child.txt",
+                                       .hash = child_hash,
+                                       .size = 13,
+                                       .mtime = canonical_mtime(t1),
+                                       .is_directory = false},
+                       dir_row("node/nested", canonical_mtime(t1)),
+                       kasumi::NodeRow{.path = "node/nested/deep.txt",
+                                       .hash = deep_hash,
+                                       .size = 12,
+                                       .mtime = canonical_mtime(t1),
+                                       .is_directory = false},
+                       kasumi::NodeRow{.path = "node.kasumiconflict_remote",
+                                       .hash = existing_hash,
+                                       .size = 12,
+                                       .mtime = canonical_mtime(t1),
+                                       .is_directory = false}});
 
-    kasumi::Snapshot storage_tree{
-        .rows = {kasumi::NodeRow{.path = "",
-                                 .mtime = canonical_mtime(t1),
-                                 .is_directory = true},
-                 kasumi::NodeRow{.path = "node",
-                                 .hash = file_hash,
-                                 .size = 12,
-                                 .mtime = canonical_mtime(t2),
-                                 .is_directory = false}}};
-    kasumi::finalize_snapshot(storage_tree);
+    auto storage_tree =
+        make_snapshot({dir_row("", canonical_mtime(t1)),
+                       kasumi::NodeRow{.path = "node",
+                                       .hash = file_hash,
+                                       .size = 12,
+                                       .mtime = canonical_mtime(t2),
+                                       .is_directory = false}});
 
     auto base_tree = kasumi::Snapshot{
         .rows = {kasumi::NodeRow{
@@ -8028,14 +7646,12 @@ TEST(SyncCoordinatorTest, EmptyPlanPublishesAndPersistsConvergenceCommit) {
 
     const auto make_tree =
         [](std::initializer_list<std::pair<std::string, std::string>> files) {
-            kasumi::Snapshot tree{
-                .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+            kasumi::Snapshot tree{.rows = {dir_row("")}};
             for (const auto& [path, contents] : files) {
-                tree.rows.push_back(kasumi::NodeRow{
-                    .path = path,
-                    .hash = kasumi::hasher::hash_string(contents),
-                    .size = contents.size(),
-                    .is_directory = false});
+                tree.rows.push_back(
+                    file_row(path,
+                             kasumi::hasher::hash_string(contents),
+                             contents.size()));
             }
             kasumi::finalize_snapshot(tree);
             return tree;
@@ -8122,8 +7738,8 @@ TEST(SyncCoordinatorTest, EmptyPlanPublishesAndPersistsConvergenceCommit) {
     ASSERT_TRUE(result->plan.operations.empty());
     ASSERT_TRUE(result->requires_publication);
     const auto local_before = kasumi::test::snapshot_tree(local);
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        runtime_data, storage, key, input, *result);
+    const auto executed =
+        coord::execute(runtime_data, storage, key, input, *result);
     ASSERT_TRUE(executed) << executed.error().detail;
     EXPECT_EQ(kasumi::test::snapshot_tree(local), local_before);
     const auto stored =
@@ -8193,21 +7809,11 @@ TEST(SyncCoordinatorTest, PublishedCommitMatchesCandidateTreeMetadata) {
     const auto directory_mtime = canonical_mtime(local / "docs");
     const auto root_mtime = canonical_mtime(local);
 
-    kasumi::Snapshot local_tree{
-        .rows = {kasumi::NodeRow{
-                     .path = "", .mtime = root_mtime, .is_directory = true},
-                 kasumi::NodeRow{.path = "docs",
-                                 .mtime = directory_mtime,
-                                 .is_directory = true},
-                 kasumi::NodeRow{.path = "docs/alpha.txt",
-                                 .hash = kasumi::hasher::hash_string("alpha"),
-                                 .size = 5,
-                                 .mtime = file_mtime,
-                                 .is_directory = false}}};
-    kasumi::finalize_snapshot(local_tree);
-    kasumi::Snapshot storage_tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
-    kasumi::finalize_snapshot(storage_tree);
+    auto local_tree = make_snapshot(
+        {kasumi::NodeRow{.path = "", .mtime = root_mtime, .is_directory = true},
+         dir_row("docs", directory_mtime),
+         text_row("docs/alpha.txt", "alpha", file_mtime)});
+    auto storage_tree = make_snapshot({});
 
     auto storage = kasumi::transport::open_transport(storage_path.string());
     ASSERT_TRUE(storage.has_value());
@@ -8227,8 +7833,8 @@ TEST(SyncCoordinatorTest, PublishedCommitMatchesCandidateTreeMetadata) {
     ASSERT_TRUE(result->requires_publication);
 
     const auto runtime_data = make_runtime(profile, local, storage_path);
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        runtime_data, *storage, key, input, *result);
+    const auto executed =
+        coord::execute(runtime_data, *storage, key, input, *result);
     ASSERT_TRUE(executed) << executed.error().detail;
 
     const auto stored =
@@ -8261,9 +7867,7 @@ TEST(SyncCoordinatorTest, RejectsMismatchedResultBeforeRemotePruning) {
     ASSERT_TRUE(opened.has_value());
     auto& storage = *opened;
 
-    kasumi::Snapshot local_tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
-    kasumi::finalize_snapshot(local_tree);
+    auto local_tree = make_snapshot({});
     kasumi::reconciliation::Input input{
         .local_tree = local_tree,
         .base_tree = {},
@@ -8287,12 +7891,10 @@ TEST(SyncCoordinatorTest, RejectsMismatchedResultBeforeRemotePruning) {
     ASSERT_TRUE(result.has_value());
     result->target_generation = 99;
 
-    const auto execution = kasumi::application::sync::coordinator::execute(
-        runtime_data, storage, key, input, *result);
+    const auto execution =
+        coord::execute(runtime_data, storage, key, input, *result);
     ASSERT_FALSE(execution.has_value());
-    EXPECT_EQ(
-        execution.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::CompositionMismatch);
+    EXPECT_EQ(execution.error().code, CoordErrorCode::CompositionMismatch);
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
 }
 
@@ -8300,18 +7902,13 @@ TEST(SyncCoordinatorTest, CompositionMismatchMatrixHasNoSideEffects) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("transaction-composition-matrix");
     AmbiguousPublicationState* state = nullptr;
-    auto opened = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(opened));
+    auto opened = make_initialized_ambiguous_storage(state);
     kasumi::test::write_text(local / "file.txt", "file");
     auto input = empty_publication_input();
     input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "file.txt",
-                        .hash = kasumi::hasher::hash_string("file"),
-                        .size = 4,
-                        .is_directory = false});
+        file_row("file.txt", kasumi::hasher::hash_string("file"), 4));
     kasumi::finalize_snapshot(input.local_tree);
-    input.base_tree = kasumi::Snapshot{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+    input.base_tree = kasumi::Snapshot{.rows = {dir_row("")}};
     kasumi::finalize_snapshot(input.base_tree);
     input.storage.tree = input.base_tree;
     const auto expected = kasumi::reconciliation::reconcile(input);
@@ -8400,12 +7997,10 @@ TEST(SyncCoordinatorTest, CompositionMismatchMatrixHasNoSideEffects) {
     for (const auto& [name, mutate] : mutations) {
         auto result = *expected;
         mutate(result);
-        const auto execution = kasumi::application::sync::coordinator::execute(
-            runtime_data, opened, key, input, result);
+        const auto execution =
+            coord::execute(runtime_data, opened, key, input, result);
         ASSERT_FALSE(execution.has_value()) << name;
-        EXPECT_EQ(execution.error().code,
-                  kasumi::application::sync::coordinator::ErrorCode::
-                      CompositionMismatch)
+        EXPECT_EQ(execution.error().code, CoordErrorCode::CompositionMismatch)
             << name;
         EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
         EXPECT_FALSE(std::filesystem::exists(runtime_data.database_path))
@@ -8422,27 +8017,21 @@ TEST(SyncCoordinatorTest, ConcurrentAddedFileDoesNotAbortSyncAndIsPreserved) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("concurrent-added-file");
     AmbiguousPublicationState* state = nullptr;
-    auto opened = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(opened));
+    auto opened = make_initialized_ambiguous_storage(state);
     kasumi::test::write_text(local / "file.txt", "file");
     auto input = empty_publication_input();
     input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "file.txt",
-                        .hash = kasumi::hasher::hash_string("file"),
-                        .size = 4,
-                        .mtime = canonical_mtime(local / "file.txt"),
-                        .is_directory = false});
+        text_row("file.txt", "file", canonical_mtime(local / "file.txt")));
     kasumi::finalize_snapshot(input.local_tree);
-    input.base_tree = kasumi::Snapshot{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+    input.base_tree = kasumi::Snapshot{.rows = {dir_row("")}};
     const auto expected = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(expected.has_value());
 
     // Arquivo novo criado concorrentemente durante o upload/sincronização
     kasumi::test::write_text(local / "screenshot.png", "image-bytes");
 
-    const auto execution = kasumi::application::sync::coordinator::execute(
-        runtime_data, opened, key, input, *expected);
+    const auto execution =
+        coord::execute(runtime_data, opened, key, input, *expected);
     // Não deve abortar o sync!
     ASSERT_TRUE(execution.has_value()) << execution.error().detail;
     // O arquivo novo deve continuar intacto no disco para ser sincronizado na
@@ -8500,12 +8089,10 @@ void run_sync_mutation_interruption(
     } else {
         ASSERT_FALSE(std::filesystem::exists(target));
     }
-    auto base_tree =
-        kasumi::application::observation::collect_local_tree(local);
+    auto base_tree = app_obs::collect_local_tree(local);
     ASSERT_TRUE(base_tree.has_value()) << base_tree.error();
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = make_initialized_ambiguous_storage(state);
     auto runtime = make_runtime(profile, local, root / "storage");
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
     const auto base_commit =
@@ -8514,14 +8101,13 @@ void run_sync_mutation_interruption(
     const auto base =
         sync::publication::publish_commit(storage, key, *base_commit, profile);
     ASSERT_TRUE(base.has_value()) << base.error().detail;
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime.database_path,
-        kasumi::state_storage::StoredState{.tree = *base_tree,
-                                           .height = base_commit->commit.height,
-                                           .commit_id = base->head.commit_id,
-                                           .ciphertext_id =
-                                               base->head.ciphertext_id}));
+    ASSERT_TRUE(
+        init_and_save_state(runtime.database_path,
+                            kasumi::state_storage::StoredState{
+                                .tree = *base_tree,
+                                .height = base_commit->commit.height,
+                                .commit_id = base->head.commit_id,
+                                .ciphertext_id = base->head.ciphertext_id}));
 
     auto remote_tree = *base_tree;
     if (deleting) {
@@ -8552,8 +8138,7 @@ void run_sync_mutation_interruption(
     ASSERT_FALSE(::testing::Test::HasFatalFailure());
 
     const auto observed =
-        kasumi::application::observation::collect_reconciliation_input(
-            runtime, storage, key, false);
+        app_obs::collect_reconciliation_input(runtime, storage, key, false);
     ASSERT_TRUE(observed.has_value()) << observed.error().detail;
     const auto planned = kasumi::reconciliation::reconcile(*observed);
     ASSERT_TRUE(planned.has_value()) << planned.error().detail;
@@ -9357,8 +8942,7 @@ TEST(MutationSafetyTest, BackupCorruptedDuringGetIsRejectedOnEveryAttempt) {
         operation, 0, local, transaction, {.backup_slot = 0});
     ASSERT_TRUE(prepared.has_value());
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = make_initialized_ambiguous_storage(state);
     add_storage_object(storage, root / "source", hash);
     state->on_content_get = [&]() -> kasumi::transport::Result {
         kasumi::test::write_text(transaction.root / "0.backup", "CORRUPT!");
@@ -9771,12 +9355,10 @@ void check_mutation_plan_sequence(bool directory,
     ASSERT_TRUE(std::filesystem::create_directory(profile));
     ASSERT_TRUE(std::filesystem::create_directory(local));
     kasumi::test::write_text(local / "file.txt", directory ? "B-V2" : "BASE");
-    auto base_tree =
-        kasumi::application::observation::collect_local_tree(local);
+    auto base_tree = app_obs::collect_local_tree(local);
     ASSERT_TRUE(base_tree.has_value());
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = make_initialized_ambiguous_storage(state);
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
     const auto base_commit =
         sync::publication::prepare_commit(*base_tree, false, 0, {}, 100, key);
@@ -9785,13 +9367,12 @@ void check_mutation_plan_sequence(bool directory,
         sync::publication::publish_commit(storage, key, *base_commit, profile);
     ASSERT_TRUE(base.has_value());
     const auto runtime = make_runtime(profile, local, root / "storage");
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime.database_path,
-        {.tree = *base_tree,
-         .height = base_commit->commit.height,
-         .commit_id = base->head.commit_id,
-         .ciphertext_id = base->head.ciphertext_id}));
+    ASSERT_TRUE(
+        init_and_save_state(runtime.database_path,
+                            {.tree = *base_tree,
+                             .height = base_commit->commit.height,
+                             .commit_id = base->head.commit_id,
+                             .ciphertext_id = base->head.ciphertext_id}));
     kasumi::test::write_text(local / "file.txt", "B-V2");
     const auto timestamp = std::filesystem::file_time_type::clock::now();
     ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(
@@ -9841,8 +9422,7 @@ void check_mutation_plan_sequence(bool directory,
             storage, root / "remote-b", kasumi::hasher::hash_string("B-V2"));
     }
     const auto input =
-        kasumi::application::observation::collect_reconciliation_input(
-            runtime, storage, key, false);
+        app_obs::collect_reconciliation_input(runtime, storage, key, false);
     ASSERT_TRUE(input.has_value()) << input.error().detail;
     const auto result = kasumi::reconciliation::reconcile(*input);
     ASSERT_TRUE(result.has_value());
@@ -9922,9 +9502,8 @@ void check_mutation_plan_sequence(bool directory,
                     kasumi::state_storage::load_state(runtime.database_path);
                 ASSERT_TRUE(persisted.has_value() && *persisted);
                 EXPECT_EQ((**persisted).commit_id, base->head.commit_id);
-                const auto remote_after =
-                    kasumi::application::observation::collect_storage_state(
-                        storage, key, profile, false);
+                const auto remote_after = app_obs::collect_storage_state(
+                    storage, key, profile, false);
                 ASSERT_TRUE(remote_after.has_value()) << remote_after.error();
                 ASSERT_EQ(remote_after->logical_heads.size(), 1U);
                 EXPECT_EQ(remote_after->logical_heads.front(),
@@ -10005,13 +9584,11 @@ TEST(MutationPlanSequenceTest,
          {.path = "file.txt", .hash = remote_hash, .size = 6},
          {.path = "repair.txt", .hash = repair_hash, .size = 6}}};
     kasumi::finalize_snapshot(tree);
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime.database_path,
-        {.tree = tree,
-         .height = 0,
-         .commit_id = head,
-         .ciphertext_id = std::string(64, 'c')}));
+    ASSERT_TRUE(init_and_save_state(runtime.database_path,
+                                    {.tree = tree,
+                                     .height = 0,
+                                     .commit_id = head,
+                                     .ciphertext_id = std::string(64, 'c')}));
     auto record = sync::journal::create_record(
         0,
         0,
@@ -10051,8 +9628,7 @@ TEST(MutationPlanSequenceTest,
     ASSERT_TRUE(paths);
     ASSERT_TRUE(sync::journal::save(*paths, *record, key));
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = make_initialized_ambiguous_storage(state);
     add_storage_object(storage, root / "remote-source", remote_hash);
     bool interrupted = false;
     state->on_content_get = [&]() -> kasumi::transport::Result {
@@ -10378,21 +9954,14 @@ TEST(MutationSafetyTest, RecoveryDoesNotPrepareAnUnknownDestinationOnRetry) {
     const auto repair_hash = kasumi::hasher::hash_string("REPAIR");
     const auto remote_hash = kasumi::hasher::hash_string("REMOTE");
     kasumi::test::write_text(local / "repair.txt", "REPAIR");
-    kasumi::Snapshot tree{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "file.txt", .hash = remote_hash, .size = 6},
-            kasumi::NodeRow{
-                .path = "repair.txt", .hash = repair_hash, .size = 6}}};
-    kasumi::finalize_snapshot(tree);
+    auto tree = make_snapshot({file_row("file.txt", remote_hash, 6),
+                               file_row("repair.txt", repair_hash, 6)});
     const std::string head(64, 'a');
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime.database_path,
-        {.tree = tree,
-         .height = 0,
-         .commit_id = head,
-         .ciphertext_id = std::string(64, 'b')}));
+    ASSERT_TRUE(init_and_save_state(runtime.database_path,
+                                    {.tree = tree,
+                                     .height = 0,
+                                     .commit_id = head,
+                                     .ciphertext_id = std::string(64, 'b')}));
     const auto plan = kasumi::make_sync_plan(
         {kasumi::Operation{.action = kasumi::Action::Upload,
                            .path = "repair.txt",
@@ -10440,31 +10009,23 @@ TEST(SyncCoordinatorTest, ConcurrentModifiedFileFailsSync) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("concurrent-modified-file");
     AmbiguousPublicationState* state = nullptr;
-    auto opened = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(opened));
+    auto opened = make_initialized_ambiguous_storage(state);
     kasumi::test::write_text(local / "file.txt", "file");
     auto input = empty_publication_input();
     input.local_tree.rows.push_back(
-        kasumi::NodeRow{.path = "file.txt",
-                        .hash = kasumi::hasher::hash_string("file"),
-                        .size = 4,
-                        .mtime = canonical_mtime(local / "file.txt"),
-                        .is_directory = false});
+        text_row("file.txt", "file", canonical_mtime(local / "file.txt")));
     kasumi::finalize_snapshot(input.local_tree);
-    input.base_tree = kasumi::Snapshot{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+    input.base_tree = kasumi::Snapshot{.rows = {dir_row("")}};
     const auto expected = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(expected.has_value());
 
     // Modifica o conteúdo de um arquivo existente sendo publicado
     kasumi::test::write_text(local / "file.txt", "tampered-content");
 
-    const auto execution = kasumi::application::sync::coordinator::execute(
-        runtime_data, opened, key, input, *expected);
+    const auto execution =
+        coord::execute(runtime_data, opened, key, input, *expected);
     ASSERT_FALSE(execution.has_value());
-    EXPECT_EQ(
-        execution.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::MutationFailure);
+    EXPECT_EQ(execution.error().code, CoordErrorCode::MutationFailure);
     EXPECT_NE(execution.error().detail.find("file.txt"), std::string::npos)
         << "Detail should mention the modified file: "
         << execution.error().detail;
@@ -10474,8 +10035,7 @@ TEST(SyncCoordinatorTest, AmbiguousPublicationWithReachableCommitRollsForward) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("execute-ambiguous-reachable");
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = make_initialized_ambiguous_storage(state);
     state->fail_marker_put = true;
     state->persist_marker_on_failure = true;
     auto input = empty_publication_input();
@@ -10483,8 +10043,8 @@ TEST(SyncCoordinatorTest, AmbiguousPublicationWithReachableCommitRollsForward) {
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value());
 
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        runtime_data, storage, key, input, *result);
+    const auto executed =
+        coord::execute(runtime_data, storage, key, input, *result);
     ASSERT_TRUE(executed.has_value());
     const auto state_db =
         kasumi::state_storage::load_state(runtime_data.database_path);
@@ -10502,8 +10062,7 @@ TEST(SyncCoordinatorTest,
     const auto runtime = make_runtime(profile, local, storage_path);
 
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = make_initialized_ambiguous_storage(state);
     state->fail_marker_put = true;
     state->persist_marker_on_failure = true;
     state->fail_marker_get = true;
@@ -10512,17 +10071,14 @@ TEST(SyncCoordinatorTest,
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value());
 
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        runtime, storage, key, input, *result);
+    const auto executed = coord::execute(runtime, storage, key, input, *result);
     ASSERT_FALSE(executed.has_value());
-    EXPECT_EQ(executed.error().code,
-              kasumi::application::sync::coordinator::ErrorCode::
-                  RecoveryIndeterminate);
+    EXPECT_EQ(executed.error().code, CoordErrorCode::RecoveryIndeterminate);
     EXPECT_FALSE(std::filesystem::exists(runtime.database_path));
 
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    const auto pending = kasumi::application::sync::journal::load(*paths, key);
+    const auto pending = sync_journal::load(*paths, key);
     ASSERT_TRUE(pending.has_value() && *pending);
     EXPECT_EQ((*pending)->phase, kasumi::transaction::Phase::CommitVerified);
     EXPECT_TRUE(std::filesystem::exists(profile / ".transactions" /
@@ -10533,13 +10089,8 @@ TEST(SyncCoordinatorTest,
     EXPECT_EQ(*marker, kasumi::transport::Presence::Present);
     state->fail_marker_put = false;
     state->fail_marker_get = false;
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime, storage, key);
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(
+        recover_expect(runtime, storage, key, RecoveryResult::RolledForward));
     const auto stored =
         kasumi::state_storage::load_state(runtime.database_path);
     ASSERT_TRUE(stored.has_value() && *stored);
@@ -10550,33 +10101,25 @@ TEST(SyncCoordinatorTest,
     EXPECT_EQ(*visible_after_recovery, kasumi::transport::Presence::Present);
     EXPECT_FALSE(std::filesystem::exists(paths->final_path));
 
-    const auto repeated =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime, storage, key);
-    ASSERT_TRUE(repeated.has_value());
-    EXPECT_EQ(
-        *repeated,
-        kasumi::application::sync::coordinator::RecoveryResult::NoJournal);
+    ASSERT_TRUE(
+        recover_expect(runtime, storage, key, RecoveryResult::NoJournal));
 }
 
 TEST(SyncCoordinatorTest, AmbiguousPublicationWithoutCommitRollsBack) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("execute-ambiguous-absent");
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = make_initialized_ambiguous_storage(state);
     state->fail_marker_put = true;
     auto input = empty_publication_input();
     input.local_tree.rows.front().mtime = canonical_mtime(local);
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value());
 
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        runtime_data, storage, key, input, *result);
+    const auto executed =
+        coord::execute(runtime_data, storage, key, input, *result);
     ASSERT_FALSE(executed.has_value()) << executed.error().detail;
-    EXPECT_EQ(
-        executed.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::PublicationFailure);
+    EXPECT_EQ(executed.error().code, CoordErrorCode::PublicationFailure);
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
     EXPECT_FALSE(std::filesystem::exists(profile / "state.db"));
     EXPECT_TRUE(std::filesystem::is_empty(profile / ".transactions"));
@@ -10586,8 +10129,7 @@ TEST(SyncCoordinatorTest, AmbiguousPublicationPreservesRecoveryTransaction) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("execute-ambiguous-unknown");
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = make_initialized_ambiguous_storage(state);
     state->fail_marker_put = true;
     state->fail_list_after_marker = true;
     auto input = empty_publication_input();
@@ -10595,12 +10137,10 @@ TEST(SyncCoordinatorTest, AmbiguousPublicationPreservesRecoveryTransaction) {
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value());
 
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        runtime_data, storage, key, input, *result);
+    const auto executed =
+        coord::execute(runtime_data, storage, key, input, *result);
     ASSERT_FALSE(executed.has_value()) << executed.error().detail;
-    EXPECT_EQ(
-        executed.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::PublicationFailure)
+    EXPECT_EQ(executed.error().code, CoordErrorCode::PublicationFailure)
         << executed.error().detail;
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
     EXPECT_FALSE(std::filesystem::exists(profile / "state.db"));
@@ -10612,8 +10152,8 @@ TEST(SyncCoordinatorTest, RecoveryWithoutJournalLeavesStateUntouched) {
         make_coordinator_env("transaction-no-journal");
     const auto transactions = profile / ".transactions";
     const auto orphan_id = std::string(32, 'a');
-    auto orphan_workspace = kasumi::application::sync::coordinator::detail::
-        create_transaction_workspace(profile, orphan_id, key);
+    auto orphan_workspace =
+        coord::detail::create_transaction_workspace(profile, orphan_id, key);
     ASSERT_TRUE(orphan_workspace.has_value())
         << orphan_workspace.error().detail;
     const auto orphan = orphan_workspace->root;
@@ -10628,16 +10168,12 @@ TEST(SyncCoordinatorTest, RecoveryWithoutJournalLeavesStateUntouched) {
     ASSERT_TRUE(opened.has_value());
     auto& storage = *opened;
 
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, storage, key);
+    const auto recovered = coord::recover_if_needed(runtime_data, storage, key);
     if (!recovered) {
         ADD_FAILURE() << recovered.error().detail;
         return;
     }
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::NoJournal);
+    EXPECT_EQ(*recovered, RecoveryResult::NoJournal);
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
     EXPECT_FALSE(std::filesystem::exists(orphan));
     EXPECT_TRUE(std::filesystem::exists(transactions / "invalid"));
@@ -10651,8 +10187,8 @@ TEST(SyncCoordinatorTest, RecoveryWithoutJournalLeavesStateUntouched) {
 TEST(SyncCoordinatorTest, ReadOnlyOrphanWorkspaceIsCleanedOnRecovery) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("transaction-read-only-orphan");
-    auto orphan_workspace = kasumi::application::sync::coordinator::detail::
-        create_transaction_workspace(profile, std::string(32, 'd'), key);
+    auto orphan_workspace = coord::detail::create_transaction_workspace(
+        profile, std::string(32, 'd'), key);
     ASSERT_TRUE(orphan_workspace.has_value())
         << orphan_workspace.error().detail;
     const auto orphan = orphan_workspace->root;
@@ -10668,13 +10204,8 @@ TEST(SyncCoordinatorTest, ReadOnlyOrphanWorkspaceIsCleanedOnRecovery) {
     ASSERT_FALSE(permission_error);
 
     kasumi::transport::Transport unavailable{};
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::NoJournal);
+    ASSERT_TRUE(recover_unavailable_expect(
+        runtime_data, key, RecoveryResult::NoJournal));
     EXPECT_FALSE(std::filesystem::exists(orphan));
 }
 
@@ -10713,12 +10244,9 @@ TEST(SyncCoordinatorTest, SymlinkOrphanWorkspaceIsRejectedWithoutDeletion) {
     kasumi::transport::Transport unavailable{};
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
     const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
+        coord::recover_if_needed(runtime_data, unavailable, key);
     ASSERT_FALSE(recovered.has_value());
-    EXPECT_EQ(
-        recovered.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::WorkspaceFailure);
+    EXPECT_EQ(recovered.error().code, CoordErrorCode::WorkspaceFailure);
     EXPECT_NE(recovered.error().detail.find(link.string()), std::string::npos);
 #ifdef _WIN32
     EXPECT_NE(GetFileAttributesW(link.c_str()) & FILE_ATTRIBUTE_REPARSE_POINT,
@@ -10747,8 +10275,8 @@ TEST(SyncCoordinatorTest, NestedReparsePointCannotEscapeOrphanWorkspace) {
     ASSERT_TRUE(std::filesystem::create_directories(profile));
     ASSERT_TRUE(std::filesystem::create_directories(local));
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
-    auto owned = kasumi::application::sync::coordinator::detail::
-        create_transaction_workspace(profile, std::string(32, '7'), key);
+    auto owned = coord::detail::create_transaction_workspace(
+        profile, std::string(32, '7'), key);
     ASSERT_TRUE(owned.has_value()) << owned.error().detail;
     ASSERT_TRUE(std::filesystem::create_directories(outside));
     kasumi::test::write_text(outside / "keep.txt", "keep");
@@ -10761,12 +10289,9 @@ TEST(SyncCoordinatorTest, NestedReparsePointCannotEscapeOrphanWorkspace) {
         profile, local, kasumi::test::workspace_path(workspace, "storage"));
     kasumi::transport::Transport unavailable{};
     const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
+        coord::recover_if_needed(runtime_data, unavailable, key);
     ASSERT_FALSE(recovered.has_value());
-    EXPECT_EQ(
-        recovered.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::WorkspaceFailure);
+    EXPECT_EQ(recovered.error().code, CoordErrorCode::WorkspaceFailure);
     EXPECT_NE(recovered.error().detail.find("outside"), std::string::npos);
     EXPECT_EQ(kasumi::test::read_text(outside / "keep.txt"), "keep");
     RemoveDirectoryW((orphan / "outside").c_str());
@@ -10780,26 +10305,18 @@ TEST(SyncCoordinatorTest, LocalOnlyRecoveryRollsForwardWithoutStorage) {
     const auto transaction_id = save_local_only_recovery_record(
         profile, kasumi::transaction::Phase::LocalChangesApplied, key);
     ASSERT_FALSE(transaction_id.empty());
-    kasumi::Snapshot root{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
-    kasumi::finalize_snapshot(root);
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime_data.database_path,
-        kasumi::state_storage::StoredState{.tree = root,
-                                           .height = 0,
-                                           .commit_id = std::string(64, 'a'),
-                                           .ciphertext_id =
-                                               std::string(64, 'c')}));
+    auto root = make_snapshot({});
+    ASSERT_TRUE(
+        init_and_save_state(runtime_data.database_path,
+                            kasumi::state_storage::StoredState{
+                                .tree = root,
+                                .height = 0,
+                                .commit_id = std::string(64, 'a'),
+                                .ciphertext_id = std::string(64, 'c')}));
 
     kasumi::transport::Transport unavailable{};
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(recover_unavailable_expect(
+        runtime_data, key, RecoveryResult::RolledForward));
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
     EXPECT_FALSE(
         std::filesystem::exists(profile / ".transactions" / transaction_id));
@@ -10811,39 +10328,28 @@ TEST(SyncCoordinatorTest, LocalOnlyRecoveryRecognizesExactPendingTargetState) {
     const auto id = save_local_only_recovery_record(
         profile, kasumi::transaction::Phase::LocalChangesApplied, key);
     ASSERT_FALSE(id.empty());
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    auto record = kasumi::application::sync::journal::load(*paths, key);
+    auto record = sync_journal::load(*paths, key);
     ASSERT_TRUE(record.has_value() && *record);
     (*record)->pending_paths = {"pending.txt"};
-    ASSERT_TRUE(
-        kasumi::application::sync::journal::save(*paths, **record, key));
+    ASSERT_TRUE(sync_journal::save(*paths, **record, key));
 
-    kasumi::Snapshot tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
-                 kasumi::NodeRow{.path = "pending.txt",
-                                 .hash = kasumi::hasher::hash_string("pending"),
-                                 .size = 7}}};
-    kasumi::finalize_snapshot(tree);
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime_data.database_path,
-        kasumi::state_storage::StoredState{
-            .tree = tree,
-            .height = 0,
-            .commit_id = std::string(64, 'a'),
-            .ciphertext_id = std::string(64, 'c'),
-            .pending_materializations = {
-                *kasumi::find_row(tree, "pending.txt")}}));
+    auto tree = make_snapshot(
+        {file_row("pending.txt", kasumi::hasher::hash_string("pending"), 7)});
+    ASSERT_TRUE(
+        init_and_save_state(runtime_data.database_path,
+                            kasumi::state_storage::StoredState{
+                                .tree = tree,
+                                .height = 0,
+                                .commit_id = std::string(64, 'a'),
+                                .ciphertext_id = std::string(64, 'c'),
+                                .pending_materializations = {
+                                    *kasumi::find_row(tree, "pending.txt")}}));
 
     kasumi::transport::Transport unavailable{};
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(recover_unavailable_expect(
+        runtime_data, key, RecoveryResult::RolledForward));
     const auto state =
         kasumi::state_storage::load_state(runtime_data.database_path);
     ASSERT_TRUE(state.has_value() && *state);
@@ -10857,43 +10363,30 @@ TEST(SyncCoordinatorTest, LocalOnlyRecoveryRejectsSameHeadWithThirdPendingSet) {
     const auto id = save_local_only_recovery_record(
         profile, kasumi::transaction::Phase::LocalChangesApplied, key);
     ASSERT_FALSE(id.empty());
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    auto record = kasumi::application::sync::journal::load(*paths, key);
+    auto record = sync_journal::load(*paths, key);
     ASSERT_TRUE(record.has_value() && *record);
     (*record)->pending_paths = {"target.txt"};
-    ASSERT_TRUE(
-        kasumi::application::sync::journal::save(*paths, **record, key));
+    ASSERT_TRUE(sync_journal::save(*paths, **record, key));
 
-    kasumi::Snapshot tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
-                 kasumi::NodeRow{.path = "other.txt",
-                                 .hash = kasumi::hasher::hash_string("other"),
-                                 .size = 5},
-                 kasumi::NodeRow{.path = "target.txt",
-                                 .hash = kasumi::hasher::hash_string("target"),
-                                 .size = 6}}};
-    kasumi::finalize_snapshot(tree);
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime_data.database_path,
-        kasumi::state_storage::StoredState{
-            .tree = tree,
-            .height = 0,
-            .commit_id = std::string(64, 'a'),
-            .ciphertext_id = std::string(64, 'c'),
-            .pending_materializations = {
-                *kasumi::find_row(tree, "other.txt")}}));
+    auto tree = make_snapshot(
+        {file_row("other.txt", kasumi::hasher::hash_string("other"), 5),
+         file_row("target.txt", kasumi::hasher::hash_string("target"), 6)});
+    ASSERT_TRUE(
+        init_and_save_state(runtime_data.database_path,
+                            kasumi::state_storage::StoredState{
+                                .tree = tree,
+                                .height = 0,
+                                .commit_id = std::string(64, 'a'),
+                                .ciphertext_id = std::string(64, 'c'),
+                                .pending_materializations = {
+                                    *kasumi::find_row(tree, "other.txt")}}));
     const auto before = kasumi::test::read_binary(runtime_data.database_path);
 
     kasumi::transport::Transport unavailable{};
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
-    ASSERT_FALSE(recovered.has_value());
-    EXPECT_EQ(
-        recovered.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    ASSERT_TRUE(recover_unavailable_error_expect(
+        runtime_data, key, CoordErrorCode::RecoveryConflict));
     EXPECT_EQ(kasumi::test::read_binary(runtime_data.database_path), before);
     EXPECT_TRUE(std::filesystem::exists(paths->final_path));
 }
@@ -10906,13 +10399,8 @@ TEST(SyncCoordinatorTest, LocalOnlyRecoveryRollsBackWithoutStorage) {
     ASSERT_FALSE(transaction_id.empty());
 
     kasumi::transport::Transport unavailable{};
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    ASSERT_TRUE(recover_unavailable_expect(
+        runtime_data, key, RecoveryResult::RolledBack));
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
     EXPECT_FALSE(
         std::filesystem::exists(profile / ".transactions" / transaction_id));
@@ -10941,13 +10429,12 @@ TEST(SyncCoordinatorTest, FailedRepairRollsBackRenameAndNextRecoveryCompletes) {
                            .alt_path = {},
                            .size = 6}},
         0);
-    auto record = kasumi::application::sync::journal::create_record(
-        0, 0, plan, false, head_id);
+    auto record = sync_journal::create_record(0, 0, plan, false, head_id);
     ASSERT_TRUE(record.has_value());
     ASSERT_EQ(record->plan.operations[0].action, kasumi::Action::RenameLocal);
     ASSERT_EQ(record->plan.operations[1].action, kasumi::Action::Upload);
-    auto transaction = kasumi::application::sync::coordinator::detail::
-        create_transaction_workspace(profile, record->operation_id, key);
+    auto transaction = coord::detail::create_transaction_workspace(
+        profile, record->operation_id, key);
     ASSERT_TRUE(transaction.has_value()) << transaction.error().detail;
     const auto transaction_root = transaction->root;
 
@@ -10971,41 +10458,29 @@ TEST(SyncCoordinatorTest, FailedRepairRollsBackRenameAndNextRecoveryCompletes) {
         record->progress[0]));
     record->progress[0].state = kasumi::transaction::OperationState::Applied;
     record->phase = kasumi::transaction::Phase::FilesStaged;
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    ASSERT_TRUE(kasumi::application::sync::journal::save(*paths, *record, key));
+    ASSERT_TRUE(sync_journal::save(*paths, *record, key));
 
-    kasumi::Snapshot target{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "destination.txt",
-                            .hash = kasumi::hasher::hash_string("original"),
-                            .size = 8},
-            kasumi::NodeRow{.path = "repair.txt",
-                            .hash = kasumi::hasher::hash_string("repair"),
-                            .size = 6}}};
-    kasumi::finalize_snapshot(target);
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime_data.database_path,
-        kasumi::state_storage::StoredState{.tree = target,
-                                           .height = 0,
-                                           .commit_id = head_id,
-                                           .ciphertext_id =
-                                               std::string(64, 'c')}));
+    auto target = make_snapshot(
+        {file_row(
+             "destination.txt", kasumi::hasher::hash_string("original"), 8),
+         file_row("repair.txt", kasumi::hasher::hash_string("repair"), 6)});
+    ASSERT_TRUE(
+        init_and_save_state(runtime_data.database_path,
+                            kasumi::state_storage::StoredState{
+                                .tree = target,
+                                .height = 0,
+                                .commit_id = head_id,
+                                .ciphertext_id = std::string(64, 'c')}));
     auto storage = open_initialized_storage(storage_path);
     ASSERT_TRUE(storage.has_value());
 
-    const auto interrupted =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, *storage, key);
-    ASSERT_FALSE(interrupted.has_value());
-    EXPECT_EQ(
-        interrupted.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::MutationFailure);
+    ASSERT_TRUE(recover_error_expect(
+        runtime_data, *storage, key, CoordErrorCode::MutationFailure));
     EXPECT_EQ(kasumi::test::read_text(local / "source.txt"), "original");
     EXPECT_FALSE(std::filesystem::exists(local / "destination.txt"));
-    auto checkpoint = kasumi::application::sync::journal::load(*paths, key);
+    auto checkpoint = sync_journal::load(*paths, key);
     ASSERT_TRUE(checkpoint.has_value() && *checkpoint);
     EXPECT_EQ((*checkpoint)->phase, kasumi::transaction::Phase::FilesStaged);
     EXPECT_EQ((*checkpoint)->progress[0].state,
@@ -11014,13 +10489,8 @@ TEST(SyncCoordinatorTest, FailedRepairRollsBackRenameAndNextRecoveryCompletes) {
               kasumi::transaction::OperationState::Pending);
 
     kasumi::test::write_text(local / "repair.txt", "repair");
-    const auto resumed =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, *storage, key);
-    ASSERT_TRUE(resumed.has_value()) << resumed.error().detail;
-    EXPECT_EQ(
-        *resumed,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(recover_expect(
+        runtime_data, *storage, key, RecoveryResult::RolledForward));
     EXPECT_FALSE(std::filesystem::exists(local / "source.txt"));
     EXPECT_EQ(kasumi::test::read_text(local / "destination.txt"), "original");
     EXPECT_EQ(kasumi::transport::presence(*storage,
@@ -11052,38 +10522,30 @@ TEST(SyncCoordinatorTest, LocalOnlyRecoveryVerifiesPresentRepairBeforeApplied) {
                            .alt_path = {},
                            .size = 6}},
         0);
-    auto record = kasumi::application::sync::journal::create_record(
-        0, 0, plan, false, std::string(64, 'a'));
+    auto record =
+        sync_journal::create_record(0, 0, plan, false, std::string(64, 'a'));
     ASSERT_TRUE(record.has_value());
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    ASSERT_TRUE(kasumi::application::sync::journal::save(*paths, *record, key));
-    auto transaction_workspace =
-        kasumi::application::sync::coordinator::detail::
-            create_transaction_workspace(profile, record->operation_id, key);
+    ASSERT_TRUE(sync_journal::save(*paths, *record, key));
+    auto transaction_workspace = coord::detail::create_transaction_workspace(
+        profile, record->operation_id, key);
     ASSERT_TRUE(transaction_workspace.has_value())
         << transaction_workspace.error().detail;
     const auto transaction_root = transaction_workspace->root;
 
-    kasumi::Snapshot tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
-                 kasumi::NodeRow{.path = "repair.txt",
-                                 .hash = kasumi::hasher::hash_string("repair"),
-                                 .size = 6,
-                                 .is_directory = false}}};
-    kasumi::finalize_snapshot(tree);
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime_data.database_path,
-        kasumi::state_storage::StoredState{.tree = tree,
-                                           .height = 0,
-                                           .commit_id = std::string(64, 'a'),
-                                           .ciphertext_id =
-                                               std::string(64, 'c')}));
+    auto tree = make_snapshot(
+        {file_row("repair.txt", kasumi::hasher::hash_string("repair"), 6)});
+    ASSERT_TRUE(
+        init_and_save_state(runtime_data.database_path,
+                            kasumi::state_storage::StoredState{
+                                .tree = tree,
+                                .height = 0,
+                                .commit_id = std::string(64, 'a'),
+                                .ciphertext_id = std::string(64, 'c')}));
 
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = make_initialized_ambiguous_storage(state);
     const auto encrypted =
         kasumi::test::workspace_path(workspace, "repair.enc");
     ASSERT_TRUE(
@@ -11093,13 +10555,8 @@ TEST(SyncCoordinatorTest, LocalOnlyRecoveryVerifiesPresentRepairBeforeApplied) {
     std::error_code remove_error;
     std::filesystem::remove(encrypted, remove_error);
     ASSERT_FALSE(remove_error);
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, storage, key);
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(recover_expect(
+        runtime_data, storage, key, RecoveryResult::RolledForward));
     EXPECT_EQ(state->put_count, 2U);
     EXPECT_EQ(state->get_count, 3U);
     EXPECT_EQ(kasumi::transport::presence(storage,
@@ -11118,13 +10575,7 @@ TEST(SyncCoordinatorTest, FailedRepairRemainsDurableAcrossRecoveryAttempts) {
     const auto head_id = std::string(64, 'a');
     const auto content_hash = kasumi::hasher::hash_string("alpha");
     const auto content_id = kasumi::hash_hex(content_hash);
-    kasumi::Snapshot tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
-                 kasumi::NodeRow{.path = "alpha.txt",
-                                 .hash = content_hash,
-                                 .size = 5,
-                                 .is_directory = false}}};
-    kasumi::finalize_snapshot(tree);
+    auto tree = make_snapshot({file_row("alpha.txt", content_hash, 5)});
 
     auto input = empty_publication_input();
     input.local_tree = tree;
@@ -11138,18 +10589,16 @@ TEST(SyncCoordinatorTest, FailedRepairRemainsDurableAcrossRecoveryAttempts) {
             kasumi::history::Commit{.height = 0, .parents = {}, .tree = tree}}};
     input.audit_storage_objects = true;
 
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime_data.database_path,
-        kasumi::state_storage::StoredState{.tree = tree,
-                                           .height = 0,
-                                           .commit_id = head_id,
-                                           .ciphertext_id =
-                                               std::string(64, 'c')}));
+    ASSERT_TRUE(
+        init_and_save_state(runtime_data.database_path,
+                            kasumi::state_storage::StoredState{
+                                .tree = tree,
+                                .height = 0,
+                                .commit_id = head_id,
+                                .ciphertext_id = std::string(64, 'c')}));
 
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = make_initialized_ambiguous_storage(state);
     const auto count_commits = [&] {
         return std::ranges::count_if(state->objects, [&](const auto& entry) {
             return entry.first.find('/') != std::string::npos &&
@@ -11171,16 +10620,14 @@ TEST(SyncCoordinatorTest, FailedRepairRemainsDurableAcrossRecoveryAttempts) {
     ASSERT_TRUE(result->requires_storage_repair);
     ASSERT_FALSE(result->requires_publication);
 
-    const auto first = kasumi::application::sync::coordinator::execute(
-        runtime_data, storage, key, input, *result);
+    const auto first =
+        coord::execute(runtime_data, storage, key, input, *result);
     ASSERT_FALSE(first.has_value());
-    EXPECT_EQ(
-        first.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::MutationFailure);
+    EXPECT_EQ(first.error().code, CoordErrorCode::MutationFailure);
 
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    auto record = kasumi::application::sync::journal::load(*paths, key);
+    auto record = sync_journal::load(*paths, key);
     ASSERT_TRUE(record.has_value());
     ASSERT_TRUE(record->has_value());
     const auto transaction_id = (*record)->operation_id;
@@ -11196,13 +10643,8 @@ TEST(SyncCoordinatorTest, FailedRepairRemainsDurableAcrossRecoveryAttempts) {
             .value(),
         kasumi::transport::Presence::Present);
 
-    const auto second =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, storage, key);
-    ASSERT_FALSE(second.has_value());
-    EXPECT_EQ(
-        second.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::MutationFailure);
+    ASSERT_TRUE(recover_error_expect(
+        runtime_data, storage, key, CoordErrorCode::MutationFailure));
     EXPECT_TRUE(std::filesystem::exists(profile / "transaction.bin.enc"));
     EXPECT_TRUE(std::filesystem::exists(transaction_root));
     EXPECT_EQ(
@@ -11212,13 +10654,8 @@ TEST(SyncCoordinatorTest, FailedRepairRemainsDurableAcrossRecoveryAttempts) {
 
     state->upload_corruption =
         AmbiguousPublicationState::UploadCorruption::None;
-    const auto third =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, storage, key);
-    ASSERT_TRUE(third.has_value()) << third.error().detail;
-    EXPECT_EQ(
-        *third,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(recover_expect(
+        runtime_data, storage, key, RecoveryResult::RolledForward));
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
     EXPECT_FALSE(std::filesystem::exists(transaction_root));
     EXPECT_EQ(state->put_count, 5U);
@@ -11249,13 +10686,8 @@ TEST(SyncCoordinatorTest, DurableRepairKeepsARealHistoryHead) {
     kasumi::test::write_text(local / "alpha.txt", "alpha");
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
 
-    kasumi::Snapshot tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
-                 kasumi::NodeRow{.path = "alpha.txt",
-                                 .hash = kasumi::hasher::hash_string("alpha"),
-                                 .size = 5,
-                                 .is_directory = false}}};
-    kasumi::finalize_snapshot(tree);
+    auto tree = make_snapshot(
+        {file_row("alpha.txt", kasumi::hasher::hash_string("alpha"), 5)});
     auto real_storage =
         kasumi::transport::open_transport(real_storage_path.string());
     ASSERT_TRUE(real_storage.has_value());
@@ -11275,8 +10707,7 @@ TEST(SyncCoordinatorTest, DurableRepairKeepsARealHistoryHead) {
     ASSERT_TRUE(published.has_value());
 
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = make_initialized_ambiguous_storage(state);
     const auto copied = kasumi::test::workspace_path(workspace, "copied");
     ASSERT_TRUE(std::filesystem::create_directories(copied));
     auto listing = kasumi::transport::list(*real_storage);
@@ -11346,25 +10777,21 @@ TEST(SyncCoordinatorTest, DurableRepairKeepsARealHistoryHead) {
     ASSERT_FALSE(result->requires_publication);
     const auto runtime_data = make_runtime(
         profile, local, kasumi::test::workspace_path(workspace, "unused"));
-    ASSERT_FALSE(kasumi::application::sync::coordinator::execute(
-                     runtime_data, storage, key, input, *result)
-                     .has_value());
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    ASSERT_FALSE(
+        coord::execute(runtime_data, storage, key, input, *result).has_value());
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    auto pending = kasumi::application::sync::journal::load(*paths, key);
+    auto pending = sync_journal::load(*paths, key);
     ASSERT_TRUE(pending.has_value() && *pending);
     const auto transaction_root =
         profile / ".transactions" / (*pending)->operation_id;
     EXPECT_TRUE(std::filesystem::exists(transaction_root));
 
-    ASSERT_FALSE(kasumi::application::sync::coordinator::recover_if_needed(
-                     runtime_data, storage, key)
-                     .has_value());
+    ASSERT_FALSE(
+        coord::recover_if_needed(runtime_data, storage, key).has_value());
     state->upload_corruption =
         AmbiguousPublicationState::UploadCorruption::None;
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, storage, key);
+    const auto recovered = coord::recover_if_needed(runtime_data, storage, key);
     ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
 
     auto after = kasumi::transport::list(storage);
@@ -11433,32 +10860,27 @@ TEST(SyncCoordinatorTest,
                  .size = 0,
                  .exclusive_destination = false});
         }
-        auto record = kasumi::application::sync::journal::create_record(
+        auto record = sync_journal::create_record(
             0, 0, kasumi::make_sync_plan(std::move(operations), 1));
         ASSERT_TRUE(record.has_value()) << record.error();
         record->phase = phase;
         for (auto& progress : record->progress) {
             progress.state = operation_state;
         }
-        const auto paths =
-            kasumi::application::sync::journal::make_paths(profile);
+        const auto paths = sync_journal::make_paths(profile);
         ASSERT_TRUE(paths.has_value()) << paths.error();
-        ASSERT_TRUE(
-            kasumi::application::sync::journal::save(*paths, *record, key));
-        auto transaction_workspace = kasumi::application::sync::coordinator::
-            detail::create_transaction_workspace(
+        ASSERT_TRUE(sync_journal::save(*paths, *record, key));
+        auto transaction_workspace =
+            coord::detail::create_transaction_workspace(
                 profile, record->operation_id, key);
         ASSERT_TRUE(transaction_workspace.has_value())
             << transaction_workspace.error().detail;
         const auto transaction_root = transaction_workspace->root;
 
-        const auto recovered =
-            kasumi::application::sync::coordinator::recover_if_needed(
-                make_runtime(profile, local, storage_path), *storage, key);
+        const auto recovered = coord::recover_if_needed(
+            make_runtime(profile, local, storage_path), *storage, key);
         ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-        EXPECT_EQ(
-            *recovered,
-            kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+        EXPECT_EQ(*recovered, RecoveryResult::RolledBack);
         EXPECT_TRUE(std::filesystem::is_regular_file(local / "untouched.txt"));
         EXPECT_EQ(std::filesystem::file_size(local / "untouched.txt"), 9U);
         EXPECT_FALSE(std::filesystem::exists(paths->final_path));
@@ -11479,8 +10901,8 @@ TEST(SyncCoordinatorTest,
     ASSERT_TRUE(std::filesystem::create_directories(profile));
     ASSERT_TRUE(std::filesystem::create_directories(local));
     std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
-    auto transaction_workspace = kasumi::application::sync::coordinator::
-        detail::create_transaction_workspace(profile, transaction_id, key);
+    auto transaction_workspace = coord::detail::create_transaction_workspace(
+        profile, transaction_id, key);
     ASSERT_TRUE(transaction_workspace.has_value())
         << transaction_workspace.error().detail;
     const auto transaction_root = transaction_workspace->root;
@@ -11492,10 +10914,10 @@ TEST(SyncCoordinatorTest,
         .storage_location =
             kasumi::test::workspace_path(workspace, "storage").string(),
     };
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    auto record = kasumi::application::sync::journal::create_record(
-        0, 0, kasumi::make_sync_plan({}, 0));
+    auto record =
+        sync_journal::create_record(0, 0, kasumi::make_sync_plan({}, 0));
     ASSERT_TRUE(record.has_value());
     record->operation_id = transaction_id;
     record->phase = kasumi::transaction::Phase::CleanupCompleted;
@@ -11506,16 +10928,11 @@ TEST(SyncCoordinatorTest,
         {.commit_id = record->commit_id,
          .ciphertext_id = record->ciphertext_id});
     static_cast<void>(set_test_genesis_epoch(*record, key));
-    ASSERT_TRUE(kasumi::application::sync::journal::save(*paths, *record, key));
+    ASSERT_TRUE(sync_journal::save(*paths, *record, key));
 
     kasumi::transport::Transport unavailable{};
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(recover_unavailable_expect(
+        runtime_data, key, RecoveryResult::RolledForward));
     EXPECT_FALSE(std::filesystem::exists(paths->final_path));
     EXPECT_FALSE(std::filesystem::exists(transaction_root));
 }
@@ -11529,17 +10946,12 @@ TEST(SyncCoordinatorTest,
     ASSERT_FALSE(id.empty());
     const auto transaction_root = profile / ".transactions" / id;
     ASSERT_GT(std::filesystem::remove_all(transaction_root), 0U);
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
 
     kasumi::transport::Transport unavailable{};
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(recover_unavailable_expect(
+        runtime_data, key, RecoveryResult::RolledForward));
     EXPECT_FALSE(std::filesystem::exists(paths->final_path));
 }
 
@@ -11553,7 +10965,7 @@ TEST(SyncCoordinatorTest, CleanupRecoveryAfterOwnerMarkerWasRemoved) {
     kasumi::test::write_text(transaction_root / "partial.bin", "deleted first");
     kasumi::test::write_text(transaction_root / "residual.bin",
                              "retain until retry");
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
     kasumi::transport::Transport unavailable{};
     bool interrupted_after_partial_removal = false;
@@ -11572,8 +10984,7 @@ TEST(SyncCoordinatorTest, CleanupRecoveryAfterOwnerMarkerWasRemoved) {
         });
 
     const auto first_recovery =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
+        coord::recover_if_needed(runtime_data, unavailable, key);
     kasumi::platform::workspace_fault_test::clear_cleanup_interrupt_hook();
 
     ASSERT_TRUE(interrupted_after_partial_removal);
@@ -11609,8 +11020,7 @@ TEST(SyncCoordinatorTest, CleanupRecoveryAfterOwnerMarkerWasRemoved) {
         invalid_proof[invalid_proof.size() - 2] == '0' ? '1' : '0';
     kasumi::test::write_text(owner_sidecar, invalid_proof);
     const auto rejected =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
+        coord::recover_if_needed(runtime_data, unavailable, key);
     ASSERT_FALSE(rejected.has_value());
     EXPECT_NE(rejected.error().detail.find("authentication mismatch"),
               std::string::npos)
@@ -11623,8 +11033,7 @@ TEST(SyncCoordinatorTest, CleanupRecoveryAfterOwnerMarkerWasRemoved) {
     ASSERT_TRUE(std::filesystem::create_directory(quarantine));
     kasumi::test::write_text(quarantine / "foreign-sentinel", "preserve");
     const auto replacement =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
+        coord::recover_if_needed(runtime_data, unavailable, key);
     ASSERT_FALSE(replacement.has_value());
     EXPECT_TRUE(std::filesystem::exists(quarantine / "foreign-sentinel"));
     EXPECT_TRUE(std::filesystem::exists(
@@ -11632,14 +11041,8 @@ TEST(SyncCoordinatorTest, CleanupRecoveryAfterOwnerMarkerWasRemoved) {
     ASSERT_EQ(std::filesystem::remove_all(quarantine), 2U);
     std::filesystem::rename(original_quarantine, quarantine);
 
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
-
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(recover_unavailable_expect(
+        runtime_data, key, RecoveryResult::RolledForward));
     EXPECT_FALSE(std::filesystem::exists(paths->final_path));
     EXPECT_FALSE(std::filesystem::exists(transaction_root));
     EXPECT_FALSE(std::filesystem::exists(quarantine));
@@ -11661,22 +11064,18 @@ TEST(SyncCoordinatorTest,
     const auto owner_sidecar = transactions / (".kasumi-workspace-owner-" + id);
     kasumi::test::write_text(owner_sidecar, owner_proof);
     ASSERT_GT(std::filesystem::remove_all(root), 0U);
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
     kasumi::transport::Transport unavailable{};
 
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            make_runtime(profile,
-                         local,
-                         kasumi::test::workspace_path(workspace, "storage")),
-            unavailable,
-            key);
+    const auto recovered = coord::recover_if_needed(
+        make_runtime(
+            profile, local, kasumi::test::workspace_path(workspace, "storage")),
+        unavailable,
+        key);
 
     ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    EXPECT_EQ(*recovered, RecoveryResult::RolledForward);
     EXPECT_FALSE(std::filesystem::exists(root));
     EXPECT_FALSE(std::filesystem::exists(owner_sidecar));
     EXPECT_FALSE(std::filesystem::exists(paths->final_path));
@@ -11694,22 +11093,18 @@ TEST(SyncCoordinatorTest,
     const auto quarantine =
         profile / ".transactions" / (".kasumi-cleanup-" + id + "-simulated");
     std::filesystem::rename(transaction_root, quarantine);
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
     kasumi::transport::Transport unavailable{};
 
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            make_runtime(profile,
-                         local,
-                         kasumi::test::workspace_path(workspace, "storage")),
-            unavailable,
-            key);
+    const auto recovered = coord::recover_if_needed(
+        make_runtime(
+            profile, local, kasumi::test::workspace_path(workspace, "storage")),
+        unavailable,
+        key);
 
     ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    EXPECT_EQ(*recovered, RecoveryResult::RolledForward);
     EXPECT_FALSE(std::filesystem::exists(paths->final_path));
     EXPECT_FALSE(std::filesystem::exists(transaction_root));
     EXPECT_FALSE(std::filesystem::exists(quarantine));
@@ -11725,22 +11120,18 @@ TEST(SyncCoordinatorTest,
     const auto root = profile / ".transactions" / id;
     ASSERT_TRUE(std::filesystem::remove(root / ".kasumi-workspace-owner"));
     kasumi::test::write_text(root / "legacy-data.bin", "preserve");
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
     kasumi::transport::Transport unavailable{};
 
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            make_runtime(profile,
-                         local,
-                         kasumi::test::workspace_path(workspace, "storage")),
-            unavailable,
-            key);
+    const auto recovered = coord::recover_if_needed(
+        make_runtime(
+            profile, local, kasumi::test::workspace_path(workspace, "storage")),
+        unavailable,
+        key);
 
     ASSERT_FALSE(recovered.has_value());
-    EXPECT_EQ(
-        recovered.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::WorkspaceFailure);
+    EXPECT_EQ(recovered.error().code, CoordErrorCode::WorkspaceFailure);
     EXPECT_NE(recovered.error().detail.find("ownership proof is unavailable"),
               std::string::npos);
     EXPECT_TRUE(std::filesystem::exists(root));
@@ -11769,18 +11160,14 @@ TEST(SyncCoordinatorTest,
                                     FILE_ATTRIBUTE_NORMAL,
                                     nullptr);
     ASSERT_NE(handle, INVALID_HANDLE_VALUE);
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
     kasumi::transport::Transport unavailable{};
 
-    const auto first =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
+    const auto first = coord::recover_if_needed(runtime_data, unavailable, key);
     EXPECT_FALSE(first.has_value());
     if (!first) {
-        EXPECT_EQ(first.error().code,
-                  kasumi::application::sync::coordinator::ErrorCode::
-                      WorkspaceFailure);
+        EXPECT_EQ(first.error().code, CoordErrorCode::WorkspaceFailure);
         EXPECT_NE(
             first.error().detail.find("failed to remove transaction workspace"),
             std::string::npos);
@@ -11792,8 +11179,7 @@ TEST(SyncCoordinatorTest,
     EXPECT_TRUE(CloseHandle(handle));
 
     const auto second =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
+        coord::recover_if_needed(runtime_data, unavailable, key);
     ASSERT_TRUE(second.has_value()) << second.error().detail;
     EXPECT_FALSE(std::filesystem::exists(paths->final_path));
     EXPECT_FALSE(std::filesystem::exists(transaction_root));
@@ -11821,27 +11207,20 @@ TEST(SyncCoordinatorTest,
                                     FILE_ATTRIBUTE_NORMAL,
                                     nullptr);
     ASSERT_NE(handle, INVALID_HANDLE_VALUE);
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
     kasumi::transport::Transport unavailable{};
 
-    const auto first =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
+    const auto first = coord::recover_if_needed(runtime_data, unavailable, key);
     EXPECT_FALSE(first.has_value());
-    auto checkpoint = kasumi::application::sync::journal::load(*paths, key);
+    auto checkpoint = sync_journal::load(*paths, key);
     ASSERT_TRUE(checkpoint.has_value() && *checkpoint);
     EXPECT_EQ((*checkpoint)->phase, kasumi::transaction::Phase::Started);
     EXPECT_TRUE(std::filesystem::exists(transaction_root));
     EXPECT_TRUE(CloseHandle(handle));
 
-    const auto second =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
-    ASSERT_TRUE(second.has_value()) << second.error().detail;
-    EXPECT_EQ(
-        *second,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    ASSERT_TRUE(recover_unavailable_expect(
+        runtime_data, key, RecoveryResult::RolledBack));
     EXPECT_FALSE(std::filesystem::exists(paths->final_path));
     EXPECT_FALSE(std::filesystem::exists(transaction_root));
 #endif
@@ -11859,8 +11238,8 @@ TEST(SyncCoordinatorTest, TransientOrphanSharingViolationIsRetried) {
     ASSERT_TRUE(std::filesystem::create_directories(profile));
     ASSERT_TRUE(std::filesystem::create_directories(local));
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
-    auto owned = kasumi::application::sync::coordinator::detail::
-        create_transaction_workspace(profile, std::string(32, 'f'), key);
+    auto owned = coord::detail::create_transaction_workspace(
+        profile, std::string(32, 'f'), key);
     ASSERT_TRUE(owned.has_value()) << owned.error().detail;
     const auto staged = orphan / "0.upload.plain";
     kasumi::test::write_text(staged, "locked");
@@ -11891,8 +11270,7 @@ TEST(SyncCoordinatorTest, TransientOrphanSharingViolationIsRetried) {
         profile, local, kasumi::test::workspace_path(workspace, "storage"));
     kasumi::transport::Transport unavailable{};
     const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
+        coord::recover_if_needed(runtime_data, unavailable, key);
     kasumi::platform::workspace_fault_test::clear_retry_hook();
     if (held_handle != INVALID_HANDLE_VALUE) {
         CloseHandle(held_handle);
@@ -11919,8 +11297,8 @@ TEST(SyncCoordinatorTest, LockedOrphanFailsExplicitlyAndNextRecoverySucceeds) {
     ASSERT_TRUE(std::filesystem::create_directories(profile));
     ASSERT_TRUE(std::filesystem::create_directories(local));
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
-    auto owned = kasumi::application::sync::coordinator::detail::
-        create_transaction_workspace(profile, std::string(32, '9'), key);
+    auto owned = coord::detail::create_transaction_workspace(
+        profile, std::string(32, '9'), key);
     ASSERT_TRUE(owned.has_value()) << owned.error().detail;
     const auto staged = orphan / "0.upload.plain";
     kasumi::test::write_text(staged, "locked");
@@ -11935,21 +11313,16 @@ TEST(SyncCoordinatorTest, LockedOrphanFailsExplicitlyAndNextRecoverySucceeds) {
     const auto runtime_data = make_runtime(
         profile, local, kasumi::test::workspace_path(workspace, "storage"));
     kasumi::transport::Transport unavailable{};
-    const auto first =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
+    const auto first = coord::recover_if_needed(runtime_data, unavailable, key);
     ASSERT_FALSE(first.has_value());
-    EXPECT_EQ(
-        first.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::WorkspaceFailure);
+    EXPECT_EQ(first.error().code, CoordErrorCode::WorkspaceFailure);
     EXPECT_NE(first.error().detail.find(orphan.string()), std::string::npos);
     EXPECT_TRUE(std::filesystem::exists(orphan));
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
     EXPECT_TRUE(CloseHandle(handle));
 
     const auto second =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
+        coord::recover_if_needed(runtime_data, unavailable, key);
     ASSERT_TRUE(second.has_value()) << second.error().detail;
     EXPECT_FALSE(std::filesystem::exists(orphan));
 #endif
@@ -11980,17 +11353,12 @@ TEST(SyncCoordinatorTest, InvalidJournalIsRejectedBeforeMutation) {
     auto& storage = *opened;
     ASSERT_TRUE(kasumi::transport::initialize(storage));
     std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
     kasumi::test::write_binary(paths->final_path, {std::byte{0x01}});
 
-    const auto result =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, storage, key);
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(
-        result.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::JournalFailure);
+    ASSERT_TRUE(recover_error_expect(
+        runtime_data, storage, key, CoordErrorCode::JournalFailure));
     EXPECT_EQ(kasumi::test::read_text(runtime_data.local_dir / "important.txt"),
               "UNCHANGED");
     EXPECT_TRUE(std::filesystem::exists(evidence));
@@ -12013,7 +11381,7 @@ TEST(SyncCoordinatorTest,
         .size = payload.size()};
     kasumi::test::write_text(local / operation.path, payload);
 
-    auto record = kasumi::application::sync::journal::create_record(
+    auto record = sync_journal::create_record(
         0, 0, kasumi::make_sync_plan({operation}, 0), true);
     ASSERT_TRUE(record.has_value());
     ASSERT_EQ(record->plan.operations.size(), 1U);
@@ -12039,25 +11407,19 @@ TEST(SyncCoordinatorTest,
     record->phase = kasumi::transaction::Phase::FilesStaged;
     const auto expected_progress = record->progress[0];
 
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    ASSERT_TRUE(kasumi::application::sync::journal::save(*paths, *record, key));
+    ASSERT_TRUE(sync_journal::save(*paths, *record, key));
     ASSERT_FALSE(std::filesystem::exists(local / operation.path));
     ASSERT_TRUE(std::filesystem::remove_all(transaction_workspace.root));
 
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
-    ASSERT_FALSE(recovered.has_value());
-    EXPECT_EQ(
-        recovered.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    ASSERT_TRUE(recover_unavailable_error_expect(
+        runtime_data, key, CoordErrorCode::RecoveryConflict));
     EXPECT_TRUE(std::filesystem::exists(paths->final_path));
     EXPECT_FALSE(std::filesystem::exists(local / operation.path));
     EXPECT_FALSE(std::filesystem::exists(runtime_data.database_path));
 
-    const auto preserved =
-        kasumi::application::sync::journal::load(*paths, key);
+    const auto preserved = sync_journal::load(*paths, key);
     ASSERT_TRUE(preserved.has_value() && *preserved);
     EXPECT_EQ((*preserved)->phase, kasumi::transaction::Phase::FilesStaged);
     ASSERT_EQ((*preserved)->plan.operations.size(), 1U);
@@ -12074,13 +11436,8 @@ TEST(SyncCoordinatorTest,
     EXPECT_EQ((*preserved)->progress[0].had_original,
               expected_progress.had_original);
 
-    const auto retried =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
-    ASSERT_FALSE(retried.has_value());
-    EXPECT_EQ(
-        retried.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    ASSERT_TRUE(recover_unavailable_error_expect(
+        runtime_data, key, CoordErrorCode::RecoveryConflict));
     EXPECT_TRUE(std::filesystem::exists(paths->final_path));
     EXPECT_FALSE(std::filesystem::exists(local / operation.path));
 }
@@ -12097,7 +11454,7 @@ TEST(SyncCoordinatorTest,
                           .size = 16};
     kasumi::test::write_text(local / operation.path, "ORIGINAL-PAYLOAD");
 
-    auto record = kasumi::application::sync::journal::create_record(
+    auto record = sync_journal::create_record(
         0, 0, kasumi::make_sync_plan({operation}, 0), true);
     ASSERT_TRUE(record.has_value());
     ASSERT_TRUE(std::filesystem::create_directories(profile / ".transactions" /
@@ -12120,20 +11477,15 @@ TEST(SyncCoordinatorTest,
     record->progress[0].state = kasumi::transaction::OperationState::Applied;
     record->phase = kasumi::transaction::Phase::FilesStaged;
 
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    ASSERT_TRUE(kasumi::application::sync::journal::save(*paths, *record, key));
+    ASSERT_TRUE(sync_journal::save(*paths, *record, key));
     ASSERT_TRUE(
         std::filesystem::exists(transaction_workspace.root / "0.backup"));
 
     kasumi::test::write_text(local / operation.path, "NEW-USER-PAYLOAD");
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
-    ASSERT_FALSE(recovered.has_value());
-    EXPECT_EQ(
-        recovered.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    ASSERT_TRUE(recover_unavailable_error_expect(
+        runtime_data, key, CoordErrorCode::RecoveryConflict));
     EXPECT_EQ(kasumi::test::read_text(local / operation.path),
               "NEW-USER-PAYLOAD");
     EXPECT_TRUE(std::filesystem::exists(paths->final_path));
@@ -12142,13 +11494,8 @@ TEST(SyncCoordinatorTest,
               "ORIGINAL-PAYLOAD");
     EXPECT_FALSE(std::filesystem::exists(runtime_data.database_path));
 
-    const auto repeated =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
-    ASSERT_FALSE(repeated.has_value());
-    EXPECT_EQ(
-        repeated.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    ASSERT_TRUE(recover_unavailable_error_expect(
+        runtime_data, key, CoordErrorCode::RecoveryConflict));
     EXPECT_EQ(kasumi::test::read_text(local / operation.path),
               "NEW-USER-PAYLOAD");
     EXPECT_TRUE(std::filesystem::exists(paths->final_path));
@@ -12167,13 +11514,8 @@ TEST(SyncCoordinatorTest,
     ASSERT_GT(std::filesystem::remove_all(transaction_root), 0U);
 
     kasumi::transport::Transport unavailable{};
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    ASSERT_TRUE(recover_unavailable_expect(
+        runtime_data, key, RecoveryResult::RolledBack));
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
     EXPECT_FALSE(std::filesystem::exists(transaction_root));
 }
@@ -12195,7 +11537,7 @@ TEST(SyncCoordinatorTest,
         .size = 6};
     kasumi::test::write_text(local / delete_operation.path, payload);
 
-    auto record = kasumi::application::sync::journal::create_record(
+    auto record = sync_journal::create_record(
         0,
         0,
         kasumi::make_sync_plan({delete_operation, upload_operation}, 0),
@@ -12227,20 +11569,17 @@ TEST(SyncCoordinatorTest,
         record->progress[1]));
     record->progress[1].state = kasumi::transaction::OperationState::Applied;
     record->phase = kasumi::transaction::Phase::FilesStaged;
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    ASSERT_TRUE(kasumi::application::sync::journal::save(*paths, *record, key));
+    ASSERT_TRUE(sync_journal::save(*paths, *record, key));
     ASSERT_TRUE(std::filesystem::remove_all(transaction_workspace.root) > 0);
 
     auto storage = open_initialized_storage(storage_path);
     ASSERT_TRUE(storage.has_value());
     const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, *storage, key);
+        coord::recover_if_needed(runtime_data, *storage, key);
     ASSERT_FALSE(recovered.has_value());
-    EXPECT_EQ(
-        recovered.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    EXPECT_EQ(recovered.error().code, CoordErrorCode::RecoveryConflict);
     EXPECT_NE(recovered.error().detail.find(
                   "workspace missing while local rollback is required"),
               std::string::npos)
@@ -12248,8 +11587,7 @@ TEST(SyncCoordinatorTest,
     EXPECT_TRUE(std::filesystem::exists(paths->final_path));
     EXPECT_FALSE(std::filesystem::exists(local / delete_operation.path));
     EXPECT_FALSE(std::filesystem::exists(runtime_data.database_path));
-    const auto preserved =
-        kasumi::application::sync::journal::load(*paths, key);
+    const auto preserved = sync_journal::load(*paths, key);
     ASSERT_TRUE(preserved.has_value() && *preserved);
     EXPECT_EQ((*preserved)->phase, kasumi::transaction::Phase::FilesStaged);
     EXPECT_EQ((*preserved)->progress[1].state,
@@ -12286,7 +11624,7 @@ TEST(SyncCoordinatorTest, StartedTransactionRollsBackBeforePublication) {
         .size = 0,
         .exclusive_destination = false,
     };
-    auto record = kasumi::application::sync::journal::create_record(
+    auto record = sync_journal::create_record(
         0, 0, kasumi::make_sync_plan({operation}, 1));
     ASSERT_TRUE(record.has_value());
     ASSERT_EQ(record->plan.operations.size(), 1U);
@@ -12294,9 +11632,8 @@ TEST(SyncCoordinatorTest, StartedTransactionRollsBackBeforePublication) {
     EXPECT_NE(record->progress[0].backup_slot,
               std::numeric_limits<std::uint32_t>::max());
 
-    auto transaction_workspace =
-        kasumi::application::sync::coordinator::detail::
-            create_transaction_workspace(profile, record->operation_id, key);
+    auto transaction_workspace = coord::detail::create_transaction_workspace(
+        profile, record->operation_id, key);
     ASSERT_TRUE(transaction_workspace.has_value())
         << transaction_workspace.error().detail;
     const auto transaction_root = transaction_workspace->root;
@@ -12329,19 +11666,14 @@ TEST(SyncCoordinatorTest, StartedTransactionRollsBackBeforePublication) {
     EXPECT_TRUE(
         std::filesystem::exists(transaction_workspace->root / "0.backup"));
 
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    ASSERT_TRUE(kasumi::application::sync::journal::save(*paths, *record, key));
-    const auto result =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, storage, key);
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(
-        *result,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    ASSERT_TRUE(sync_journal::save(*paths, *record, key));
+    ASSERT_TRUE(
+        recover_expect(runtime_data, storage, key, RecoveryResult::RolledBack));
     EXPECT_TRUE(std::filesystem::exists(document));
     EXPECT_EQ(kasumi::test::read_text(document), "before-transaction");
-    const auto loaded = kasumi::application::sync::journal::load(*paths, key);
+    const auto loaded = sync_journal::load(*paths, key);
     ASSERT_TRUE(loaded.has_value());
     EXPECT_FALSE(*loaded);
     EXPECT_FALSE(std::filesystem::exists(transaction_root));
@@ -12355,13 +11687,8 @@ TEST(SyncCoordinatorTest, StartedPhaseRollsBackWithoutRemoteAccess) {
     ASSERT_FALSE(id.empty());
 
     kasumi::transport::Transport unavailable{};
-    const auto result =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(
-        *result,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    ASSERT_TRUE(recover_unavailable_expect(
+        runtime_data, key, RecoveryResult::RolledBack));
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
     EXPECT_FALSE(std::filesystem::exists(profile / ".transactions" / id));
 }
@@ -12374,13 +11701,8 @@ TEST(SyncCoordinatorTest, FilesStagedPhaseRollsBackWithoutRemoteAccess) {
     ASSERT_FALSE(id.empty());
 
     kasumi::transport::Transport unavailable{};
-    const auto result =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(
-        *result,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    ASSERT_TRUE(recover_unavailable_expect(
+        runtime_data, key, RecoveryResult::RolledBack));
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
     EXPECT_FALSE(std::filesystem::exists(profile / ".transactions" / id));
 }
@@ -12394,13 +11716,8 @@ TEST(SyncCoordinatorTest, CommitPreparedAbsenceRollsBack) {
     auto opened = open_initialized_storage(storage_path);
     ASSERT_TRUE(opened.has_value());
 
-    const auto result =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, *opened, key);
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(
-        *result,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    ASSERT_TRUE(
+        recover_expect(runtime_data, *opened, key, RecoveryResult::RolledBack));
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
     EXPECT_FALSE(std::filesystem::exists(profile / ".transactions" / id));
 }
@@ -12413,13 +11730,8 @@ TEST(SyncCoordinatorTest, CommitPreparedInspectionFailurePreservesTransaction) {
     ASSERT_FALSE(id.empty());
 
     kasumi::transport::Transport unavailable{};
-    const auto result =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, unavailable, key);
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(
-        *result,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    ASSERT_TRUE(recover_unavailable_expect(
+        runtime_data, key, RecoveryResult::RolledBack));
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
     EXPECT_FALSE(std::filesystem::exists(profile / ".transactions" / id));
 }
@@ -12433,13 +11745,8 @@ TEST(SyncCoordinatorTest, CommitUploadedAbsenceRollsBack) {
     auto opened = open_initialized_storage(storage_path);
     ASSERT_TRUE(opened.has_value());
 
-    const auto result =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, *opened, key);
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(
-        *result,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    ASSERT_TRUE(
+        recover_expect(runtime_data, *opened, key, RecoveryResult::RolledBack));
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
     EXPECT_FALSE(std::filesystem::exists(profile / ".transactions" / id));
     EXPECT_FALSE(std::filesystem::exists(profile / "state.db"));
@@ -12455,13 +11762,8 @@ TEST(SyncCoordinatorTest, DatabaseCommittedAbsencePreservesTransaction) {
     auto opened = open_initialized_storage(storage_path);
     ASSERT_TRUE(opened.has_value());
 
-    const auto result =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, *opened, key);
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(
-        result.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    ASSERT_TRUE(recover_error_expect(
+        runtime_data, *opened, key, CoordErrorCode::RecoveryConflict));
     EXPECT_TRUE(std::filesystem::exists(profile / "transaction.bin.enc"));
     EXPECT_TRUE(std::filesystem::exists(profile / ".transactions" / id));
     const auto loaded =
@@ -12473,8 +11775,7 @@ TEST(SyncCoordinatorTest, DatabaseCommittedAbsencePreservesTransaction) {
 TEST(SyncCoordinatorTest, CommitPreparedReachabilityPersistsPublishedPhase) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("transaction-prepared-published", false);
-    const kasumi::Snapshot tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+    const kasumi::Snapshot tree{.rows = {dir_row("")}};
     auto prepared = kasumi::application::sync::publication::prepare_commit(
         tree, false, 0, {}, 100, key);
     ASSERT_TRUE(prepared.has_value());
@@ -12492,16 +11793,11 @@ TEST(SyncCoordinatorTest, CommitPreparedReachabilityPersistsPublishedPhase) {
     ASSERT_FALSE(id.empty());
     std::filesystem::create_directory(profile / "state.db");
 
-    const auto result =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, *opened, key);
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(
-        result.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::DatabaseFailure);
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    ASSERT_TRUE(recover_error_expect(
+        runtime_data, *opened, key, CoordErrorCode::DatabaseFailure));
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    const auto loaded = kasumi::application::sync::journal::load(*paths, key);
+    const auto loaded = sync_journal::load(*paths, key);
     ASSERT_TRUE(loaded.has_value() && *loaded);
     EXPECT_EQ((*loaded)->phase, kasumi::transaction::Phase::EpochVerified);
     EXPECT_TRUE(std::filesystem::exists(profile / ".transactions" / id));
@@ -12510,12 +11806,8 @@ TEST(SyncCoordinatorTest, CommitPreparedReachabilityPersistsPublishedPhase) {
 TEST(SyncCoordinatorTest, DatabaseCommittedRecoveryKeepsStateDatabaseBytes) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("transaction-database-no-rewrite", false);
-    kasumi::Snapshot tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
-                 kasumi::NodeRow{.path = "missing.txt",
-                                 .hash = kasumi::hasher::hash_string("remote"),
-                                 .size = 6}}};
-    kasumi::finalize_snapshot(tree);
+    auto tree = make_snapshot(
+        {file_row("missing.txt", kasumi::hasher::hash_string("remote"), 6)});
     auto prepared = kasumi::application::sync::publication::prepare_commit(
         tree, false, 0, {}, 100, key);
     ASSERT_TRUE(prepared.has_value());
@@ -12525,15 +11817,14 @@ TEST(SyncCoordinatorTest, DatabaseCommittedRecoveryKeepsStateDatabaseBytes) {
         *opened, key, *prepared, local);
     ASSERT_TRUE(published.has_value());
     ASSERT_TRUE(std::filesystem::create_directories(profile));
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime_data.database_path,
-        {.tree = tree,
-         .height = prepared->commit.height,
-         .commit_id = prepared->commit_id,
-         .ciphertext_id = std::string(64, 'c'),
-         .pending_materializations = {
-             *kasumi::find_row(tree, "missing.txt")}}));
+    ASSERT_TRUE(
+        init_and_save_state(runtime_data.database_path,
+                            {.tree = tree,
+                             .height = prepared->commit.height,
+                             .commit_id = prepared->commit_id,
+                             .ciphertext_id = std::string(64, 'c'),
+                             .pending_materializations = {
+                                 *kasumi::find_row(tree, "missing.txt")}}));
     const auto before = kasumi::test::read_binary(runtime_data.database_path);
     const auto id =
         save_recovery_record(profile,
@@ -12542,21 +11833,15 @@ TEST(SyncCoordinatorTest, DatabaseCommittedRecoveryKeepsStateDatabaseBytes) {
                              prepared->commit_id,
                              published->head.ciphertext_id);
     ASSERT_FALSE(id.empty());
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    auto record = kasumi::application::sync::journal::load(*paths, key);
+    auto record = sync_journal::load(*paths, key);
     ASSERT_TRUE(record.has_value() && *record);
     (*record)->pending_paths = {"missing.txt"};
-    ASSERT_TRUE(
-        kasumi::application::sync::journal::save(*paths, **record, key));
+    ASSERT_TRUE(sync_journal::save(*paths, **record, key));
 
-    const auto result =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, *opened, key);
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(
-        *result,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(recover_expect(
+        runtime_data, *opened, key, RecoveryResult::RolledForward));
     EXPECT_EQ(kasumi::test::read_binary(runtime_data.database_path), before);
 }
 
@@ -12564,12 +11849,8 @@ TEST(SyncCoordinatorTest,
      PublishedPartialCommitRollsForwardWhenDatabaseWasNotCommitted) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("published-pending-rollforward");
-    kasumi::Snapshot tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
-                 kasumi::NodeRow{.path = "missing.txt",
-                                 .hash = kasumi::hasher::hash_string("remote"),
-                                 .size = 6}}};
-    kasumi::finalize_snapshot(tree);
+    auto tree = make_snapshot(
+        {file_row("missing.txt", kasumi::hasher::hash_string("remote"), 6)});
     const auto prepared =
         kasumi::application::sync::publication::prepare_commit(
             tree, false, 0, {}, 100, key);
@@ -12588,21 +11869,15 @@ TEST(SyncCoordinatorTest,
                              prepared->commit_id,
                              published->head.ciphertext_id);
     ASSERT_FALSE(id.empty());
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    auto record = kasumi::application::sync::journal::load(*paths, key);
+    auto record = sync_journal::load(*paths, key);
     ASSERT_TRUE(record.has_value() && *record);
     (*record)->pending_paths = {"missing.txt"};
-    ASSERT_TRUE(
-        kasumi::application::sync::journal::save(*paths, **record, key));
+    ASSERT_TRUE(sync_journal::save(*paths, **record, key));
 
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, *storage, key);
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(recover_expect(
+        runtime_data, *storage, key, RecoveryResult::RolledForward));
     const auto state =
         kasumi::state_storage::load_state(runtime_data.database_path);
     ASSERT_TRUE(state.has_value() && *state);
@@ -12613,12 +11888,8 @@ TEST(SyncCoordinatorTest,
 TEST(SyncCoordinatorTest, DatabaseCommittedRecoveryRejectsDifferentPendingSet) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("committed-pending-conflict");
-    kasumi::Snapshot tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
-                 kasumi::NodeRow{.path = "missing.txt",
-                                 .hash = kasumi::hasher::hash_string("remote"),
-                                 .size = 6}}};
-    kasumi::finalize_snapshot(tree);
+    auto tree = make_snapshot(
+        {file_row("missing.txt", kasumi::hasher::hash_string("remote"), 6)});
     const auto prepared =
         kasumi::application::sync::publication::prepare_commit(
             tree, false, 0, {}, 100, key);
@@ -12629,13 +11900,12 @@ TEST(SyncCoordinatorTest, DatabaseCommittedRecoveryRejectsDifferentPendingSet) {
         kasumi::application::sync::publication::publish_commit(
             *storage, key, *prepared, local);
     ASSERT_TRUE(published.has_value()) << published.error().detail;
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime_data.database_path,
-        {.tree = tree,
-         .height = prepared->commit.height,
-         .commit_id = prepared->commit_id,
-         .ciphertext_id = published->head.ciphertext_id}));
+    ASSERT_TRUE(
+        init_and_save_state(runtime_data.database_path,
+                            {.tree = tree,
+                             .height = prepared->commit.height,
+                             .commit_id = prepared->commit_id,
+                             .ciphertext_id = published->head.ciphertext_id}));
     const auto before = kasumi::test::read_binary(runtime_data.database_path);
 
     const auto id =
@@ -12645,21 +11915,15 @@ TEST(SyncCoordinatorTest, DatabaseCommittedRecoveryRejectsDifferentPendingSet) {
                              prepared->commit_id,
                              published->head.ciphertext_id);
     ASSERT_FALSE(id.empty());
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    auto record = kasumi::application::sync::journal::load(*paths, key);
+    auto record = sync_journal::load(*paths, key);
     ASSERT_TRUE(record.has_value() && *record);
     (*record)->pending_paths = {"missing.txt"};
-    ASSERT_TRUE(
-        kasumi::application::sync::journal::save(*paths, **record, key));
+    ASSERT_TRUE(sync_journal::save(*paths, **record, key));
 
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, *storage, key);
-    ASSERT_FALSE(recovered.has_value());
-    EXPECT_EQ(
-        recovered.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    ASSERT_TRUE(recover_error_expect(
+        runtime_data, *storage, key, CoordErrorCode::RecoveryConflict));
     EXPECT_EQ(kasumi::test::read_binary(runtime_data.database_path), before);
     EXPECT_TRUE(std::filesystem::exists(paths->final_path));
 }
@@ -12669,8 +11933,7 @@ TEST(SyncCoordinatorTest,
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("transaction-conflicting-state");
 
-    const kasumi::Snapshot tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+    const kasumi::Snapshot tree{.rows = {dir_row("")}};
     auto storage = open_initialized_storage(storage_path);
     ASSERT_TRUE(storage.has_value());
     auto parent = kasumi::application::sync::publication::prepare_commit(
@@ -12701,21 +11964,15 @@ TEST(SyncCoordinatorTest,
     ASSERT_TRUE(parent_visible.has_value());
     EXPECT_EQ(*parent_visible, kasumi::transport::Presence::Present);
 
-    kasumi::Snapshot third_tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true},
-                 kasumi::NodeRow{.path = "third.txt",
-                                 .hash = kasumi::hasher::hash_string("third"),
-                                 .size = 5,
-                                 .is_directory = false}}};
-    kasumi::finalize_snapshot(third_tree);
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime_data.database_path,
-        kasumi::state_storage::StoredState{.tree = third_tree,
-                                           .height = 42,
-                                           .commit_id = std::string(64, 'd'),
-                                           .ciphertext_id =
-                                               std::string(64, 'e')}));
+    auto third_tree = make_snapshot(
+        {file_row("third.txt", kasumi::hasher::hash_string("third"), 5)});
+    ASSERT_TRUE(
+        init_and_save_state(runtime_data.database_path,
+                            kasumi::state_storage::StoredState{
+                                .tree = third_tree,
+                                .height = 42,
+                                .commit_id = std::string(64, 'd'),
+                                .ciphertext_id = std::string(64, 'e')}));
     const auto third_before =
         kasumi::test::read_binary(runtime_data.database_path);
 
@@ -12727,22 +11984,17 @@ TEST(SyncCoordinatorTest,
                              candidate_published->head.ciphertext_id,
                              {parent->commit_id});
     ASSERT_FALSE(transaction_id.empty());
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
 
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, *storage, key);
-    ASSERT_FALSE(recovered.has_value());
-    EXPECT_EQ(
-        recovered.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    ASSERT_TRUE(recover_error_expect(
+        runtime_data, *storage, key, CoordErrorCode::RecoveryConflict));
     EXPECT_EQ(kasumi::test::read_binary(runtime_data.database_path),
               third_before);
     EXPECT_TRUE(std::filesystem::exists(paths->final_path));
     EXPECT_TRUE(
         std::filesystem::exists(profile / ".transactions" / transaction_id));
-    const auto pending = kasumi::application::sync::journal::load(*paths, key);
+    const auto pending = sync_journal::load(*paths, key);
     ASSERT_TRUE(pending.has_value() && *pending);
     EXPECT_TRUE((*pending)->observed_head_id.empty());
     EXPECT_NE((*pending)->phase, kasumi::transaction::Phase::CleanupCompleted);
@@ -12764,13 +12016,8 @@ TEST(SyncCoordinatorTest,
             .ciphertext_id = std::string(64, 'e')}));
     const auto same_height_before =
         kasumi::test::read_binary(runtime_data.database_path);
-    const auto same_height =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, *storage, key);
-    ASSERT_FALSE(same_height.has_value());
-    EXPECT_EQ(
-        same_height.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    ASSERT_TRUE(recover_error_expect(
+        runtime_data, *storage, key, CoordErrorCode::RecoveryConflict));
     EXPECT_EQ(kasumi::test::read_binary(runtime_data.database_path),
               same_height_before);
     EXPECT_TRUE(std::filesystem::exists(paths->final_path));
@@ -12784,13 +12031,8 @@ TEST(SyncCoordinatorTest,
     ASSERT_TRUE(parent_after_same_height.has_value());
     EXPECT_EQ(*parent_after_same_height, kasumi::transport::Presence::Present);
 
-    const auto repeated =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, *storage, key);
-    ASSERT_FALSE(repeated.has_value());
-    EXPECT_EQ(
-        repeated.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::RecoveryConflict);
+    ASSERT_TRUE(recover_error_expect(
+        runtime_data, *storage, key, CoordErrorCode::RecoveryConflict));
     EXPECT_EQ(kasumi::test::read_binary(runtime_data.database_path),
               same_height_before);
     EXPECT_TRUE(std::filesystem::exists(paths->final_path));
@@ -12807,15 +12049,14 @@ TEST(SyncCoordinatorTest,
     ASSERT_TRUE(storage.has_value());
 
     auto initial_input = empty_publication_input();
-    auto initial_local =
-        kasumi::application::observation::collect_local_tree(local);
+    auto initial_local = app_obs::collect_local_tree(local);
     ASSERT_TRUE(initial_local.has_value());
     initial_input.local_tree = *initial_local;
     auto initial_result = kasumi::reconciliation::reconcile(initial_input);
     ASSERT_TRUE(initial_result.has_value()) << initial_result.error().detail;
     ASSERT_TRUE(initial_result->requires_publication);
-    ASSERT_TRUE(kasumi::application::sync::coordinator::execute(
-        runtime, *storage, key, initial_input, *initial_result));
+    ASSERT_TRUE(
+        coord::execute(runtime, *storage, key, initial_input, *initial_result));
 
     const auto previous =
         kasumi::state_storage::load_state(runtime.database_path);
@@ -12825,8 +12066,7 @@ TEST(SyncCoordinatorTest,
 
     kasumi::test::write_text(local / "after.txt", "after");
     const auto observed =
-        kasumi::application::observation::collect_reconciliation_input(
-            runtime, *storage, key, true);
+        app_obs::collect_reconciliation_input(runtime, *storage, key, true);
     ASSERT_TRUE(observed.has_value()) << observed.error().detail;
     const auto next = kasumi::reconciliation::reconcile(*observed);
     ASSERT_TRUE(next.has_value()) << next.error().detail;
@@ -12837,17 +12077,15 @@ TEST(SyncCoordinatorTest,
     transport_state.storage_root = storage_path;
     transport_state.fail_head_verification_unknown = true;
     auto recovering_storage = make_reobserve_transport(transport_state);
-    const auto interrupted = kasumi::application::sync::coordinator::execute(
-        runtime, recovering_storage, key, *observed, *next);
+    const auto interrupted =
+        coord::execute(runtime, recovering_storage, key, *observed, *next);
     ASSERT_FALSE(interrupted.has_value());
-    EXPECT_EQ(interrupted.error().code,
-              kasumi::application::sync::coordinator::ErrorCode::
-                  RecoveryIndeterminate);
+    EXPECT_EQ(interrupted.error().code, CoordErrorCode::RecoveryIndeterminate);
     EXPECT_EQ(kasumi::test::read_binary(runtime.database_path), previous_bytes);
 
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    const auto pending = kasumi::application::sync::journal::load(*paths, key);
+    const auto pending = sync_journal::load(*paths, key);
     ASSERT_TRUE(pending.has_value() && *pending);
     ASSERT_FALSE((*pending)->observed_head_id.empty());
     EXPECT_EQ((*pending)->observed_head_id, (*previous)->commit_id);
@@ -12856,13 +12094,8 @@ TEST(SyncCoordinatorTest,
     EXPECT_TRUE(std::filesystem::exists(paths->final_path));
 
     transport_state.fail_head_verification_unknown = false;
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime, recovering_storage, key);
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(recover_expect(
+        runtime, recovering_storage, key, RecoveryResult::RolledForward));
     const auto current =
         kasumi::state_storage::load_state(runtime.database_path);
     ASSERT_TRUE(current.has_value() && *current);
@@ -12896,15 +12129,13 @@ TEST(SyncCoordinatorTest,
         ASSERT_TRUE(std::filesystem::create_directories(local));
         const auto runtime_data = make_runtime(
             profile, local, kasumi::test::workspace_path(workspace, "storage"));
-        const kasumi::Snapshot tree{
-            .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+        const kasumi::Snapshot tree{.rows = {dir_row("")}};
         auto prepared = kasumi::application::sync::publication::prepare_commit(
             tree, false, 0, {}, 100, key);
         ASSERT_TRUE(prepared.has_value());
 
         AmbiguousPublicationState* remote = nullptr;
-        auto storage = make_ambiguous_transport(remote);
-        ASSERT_TRUE(kasumi::transport::initialize(storage));
+        auto storage = make_initialized_ambiguous_storage(remote);
         std::string ciphertext_id;
         if (phase >= kasumi::transaction::Phase::CommitUploaded) {
             auto object =
@@ -12970,17 +12201,14 @@ TEST(SyncCoordinatorTest,
         ASSERT_FALSE(transaction_id.empty());
 
         const auto recovered =
-            kasumi::application::sync::coordinator::recover_if_needed(
-                runtime_data, storage, key);
+            coord::recover_if_needed(runtime_data, storage, key);
 
         ASSERT_TRUE(recovered.has_value())
             << static_cast<int>(phase) << ": " << recovered.error().detail;
         const bool visible = phase >= kasumi::transaction::Phase::HeadPublished;
         EXPECT_EQ(*recovered,
-                  visible ? kasumi::application::sync::coordinator::
-                                RecoveryResult::RolledForward
-                          : kasumi::application::sync::coordinator::
-                                RecoveryResult::RolledBack)
+                  visible ? coord::RecoveryResult::RolledForward
+                          : coord::RecoveryResult::RolledBack)
             << static_cast<int>(phase);
         EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
         EXPECT_FALSE(std::filesystem::exists(profile / ".transactions" /
@@ -13022,8 +12250,7 @@ TEST(SyncCoordinatorTest,
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("commit-verified-visible-head");
     const auto runtime = make_runtime(profile, local, storage_path);
-    const kasumi::Snapshot tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+    const kasumi::Snapshot tree{.rows = {dir_row("")}};
     auto prepared = kasumi::application::sync::publication::prepare_commit(
         tree, false, 0, {}, 100, key);
     ASSERT_TRUE(prepared.has_value());
@@ -13045,13 +12272,8 @@ TEST(SyncCoordinatorTest,
                              object->head.ciphertext_id);
     ASSERT_FALSE(transaction_id.empty());
 
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime, *storage, key);
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(
+        recover_expect(runtime, *storage, key, RecoveryResult::RolledForward));
     const auto state = kasumi::state_storage::load_state(runtime.database_path);
     ASSERT_TRUE(state.has_value() && *state);
     EXPECT_EQ((*state)->commit_id, prepared->commit_id);
@@ -13061,13 +12283,8 @@ TEST(SyncCoordinatorTest,
     EXPECT_EQ(*visible, kasumi::transport::Presence::Present);
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
 
-    const auto repeated =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime, *storage, key);
-    ASSERT_TRUE(repeated.has_value());
-    EXPECT_EQ(
-        *repeated,
-        kasumi::application::sync::coordinator::RecoveryResult::NoJournal);
+    ASSERT_TRUE(
+        recover_expect(runtime, *storage, key, RecoveryResult::NoJournal));
 }
 
 TEST(SyncCoordinatorTest,
@@ -13076,16 +12293,14 @@ TEST(SyncCoordinatorTest,
         make_coordinator_env("genesis-policy-recovery");
     auto runtime = make_runtime(
         profile, local, kasumi::test::workspace_path(workspace, "storage"));
-    const kasumi::Snapshot tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+    const kasumi::Snapshot tree{.rows = {dir_row("")}};
     const auto prepared =
         kasumi::application::sync::publication::prepare_commit(
             tree, false, 0, {}, 100, key);
     ASSERT_TRUE(prepared.has_value());
 
     AmbiguousPublicationState* remote = nullptr;
-    auto storage = make_ambiguous_transport(remote);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = make_initialized_ambiguous_storage(remote);
     const auto published =
         kasumi::application::sync::publication::publish_commit(
             storage, key, *prepared, local);
@@ -13097,9 +12312,9 @@ TEST(SyncCoordinatorTest,
                              prepared->commit_id,
                              published->head.ciphertext_id);
     ASSERT_FALSE(transaction_id.empty());
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    const auto journal = kasumi::application::sync::journal::load(*paths, key);
+    const auto journal = sync_journal::load(*paths, key);
     ASSERT_TRUE(journal.has_value() && *journal);
     const auto prepared_epoch_id = (*journal)->epoch_id;
 
@@ -13109,14 +12324,8 @@ TEST(SyncCoordinatorTest,
     runtime.min_history_age_hours = kasumi::application::history_storage::
                                         epoch::default_min_history_age_hours +
                                     1;
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime, storage, key);
-
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(
+        recover_expect(runtime, storage, key, RecoveryResult::RolledForward));
     const auto state = kasumi::state_storage::load_state(runtime.database_path);
     ASSERT_TRUE(state.has_value() && *state);
     EXPECT_EQ((*state)->epoch_id, prepared_epoch_id);
@@ -13157,20 +12366,15 @@ TEST(SyncCoordinatorTest,
         const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
         const auto content_id = kasumi::hash_hex(
             kasumi::hasher::hash_string("logical 975 MiB content"));
-        kasumi::Snapshot tree{
-            .rows = {
-                kasumi::NodeRow{.path = "", .is_directory = true},
-                kasumi::NodeRow{.path = "large.bin",
-                                .hash =
-                                    kasumi::hash_from_hex(content_id).value(),
-                                .size = logical_size,
-                                .is_directory = false},
-            }};
-        kasumi::finalize_snapshot(tree);
+        auto tree = make_snapshot({
+            kasumi::NodeRow{.path = "large.bin",
+                            .hash = kasumi::hash_from_hex(content_id).value(),
+                            .size = logical_size,
+                            .is_directory = false},
+        });
 
         AmbiguousPublicationState* state = nullptr;
-        auto storage = make_ambiguous_transport(state);
-        ASSERT_TRUE(kasumi::transport::initialize(storage));
+        auto storage = make_initialized_ambiguous_storage(state);
         const auto seeded =
             kasumi::test::workspace_path(workspace, "already-uploaded.enc");
         kasumi::test::write_text(seeded, "opaque uploaded object");
@@ -13190,8 +12394,7 @@ TEST(SyncCoordinatorTest,
                                .hash = content_id,
                                .size = logical_size}},
             0);
-        auto record =
-            kasumi::application::sync::journal::create_record(0, 0, plan, true);
+        auto record = sync_journal::create_record(0, 0, plan, true);
         ASSERT_TRUE(record.has_value());
         record->phase = phase;
         record->progress.front().state =
@@ -13206,16 +12409,14 @@ TEST(SyncCoordinatorTest,
         if (phase >= kasumi::transaction::Phase::EpochPrepared) {
             static_cast<void>(set_test_genesis_epoch(*record, key));
         }
-        const auto paths =
-            kasumi::application::sync::journal::make_paths(profile);
+        const auto paths = sync_journal::make_paths(profile);
         ASSERT_TRUE(paths.has_value());
-        auto transaction_workspace = kasumi::application::sync::coordinator::
-            detail::create_transaction_workspace(
+        auto transaction_workspace =
+            coord::detail::create_transaction_workspace(
                 profile, record->operation_id, key);
         ASSERT_TRUE(transaction_workspace.has_value())
             << transaction_workspace.error().detail;
-        ASSERT_TRUE(
-            kasumi::application::sync::journal::save(*paths, *record, key));
+        ASSERT_TRUE(sync_journal::save(*paths, *record, key));
         if (phase == kasumi::transaction::Phase::DatabaseCommitted) {
             ASSERT_TRUE(
                 kasumi::state_storage::initialize(runtime_data.database_path));
@@ -13229,13 +12430,10 @@ TEST(SyncCoordinatorTest,
         state->content_put_count = 0;
 
         const auto recovered =
-            kasumi::application::sync::coordinator::recover_if_needed(
-                runtime_data, storage, key);
+            coord::recover_if_needed(runtime_data, storage, key);
 
         ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-        EXPECT_EQ(*recovered,
-                  kasumi::application::sync::coordinator::RecoveryResult::
-                      RolledForward);
+        EXPECT_EQ(*recovered, RecoveryResult::RolledForward);
         EXPECT_EQ(state->content_put_count, 0U) << static_cast<int>(phase);
     }
 }
@@ -13260,21 +12458,20 @@ TEST(SyncCoordinatorTest, PublishedTransactionRollsForwardAfterRecovery) {
     auto& storage = *opened;
     ASSERT_TRUE(kasumi::transport::initialize(storage));
     std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
-    auto transaction_workspace = kasumi::application::sync::coordinator::
-        detail::create_transaction_workspace(profile, transaction_id, key);
+    auto transaction_workspace = coord::detail::create_transaction_workspace(
+        profile, transaction_id, key);
     ASSERT_TRUE(transaction_workspace.has_value())
         << transaction_workspace.error().detail;
     const auto transaction_root = transaction_workspace->root;
-    kasumi::Snapshot history_tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+    kasumi::Snapshot history_tree{.rows = {dir_row("")}};
     auto prepared = kasumi::application::sync::publication::prepare_commit(
         history_tree, false, 0, {}, 100, key);
     ASSERT_TRUE(prepared.has_value());
     auto published = kasumi::application::sync::publication::publish_commit(
         storage, key, *prepared, runtime_data.local_dir);
     ASSERT_TRUE(published.has_value());
-    auto record = kasumi::application::sync::journal::create_record(
-        0, 0, kasumi::make_sync_plan({}, 0));
+    auto record =
+        sync_journal::create_record(0, 0, kasumi::make_sync_plan({}, 0));
     ASSERT_TRUE(record.has_value());
     record->operation_id = transaction_id;
     record->phase = kasumi::transaction::Phase::CommitUploaded;
@@ -13284,21 +12481,17 @@ TEST(SyncCoordinatorTest, PublishedTransactionRollsForwardAfterRecovery) {
     record->marker_id = kasumi::application::history_storage::marker_identifier(
         kasumi::application::history_storage::derive_remote_layout(key),
         published->head);
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    ASSERT_TRUE(kasumi::application::sync::journal::save(*paths, *record, key));
+    ASSERT_TRUE(sync_journal::save(*paths, *record, key));
 
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, storage, key);
+    const auto recovered = coord::recover_if_needed(runtime_data, storage, key);
     if (!recovered) {
         ADD_FAILURE() << recovered.error().detail;
         return;
     }
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
-    const auto loaded = kasumi::application::sync::journal::load(*paths, key);
+    EXPECT_EQ(*recovered, RecoveryResult::RolledForward);
+    const auto loaded = sync_journal::load(*paths, key);
     ASSERT_TRUE(loaded.has_value());
     EXPECT_FALSE(*loaded);
     EXPECT_FALSE(std::filesystem::exists(transaction_root));
@@ -13308,8 +12501,7 @@ TEST(SyncCoordinatorTest, PublishedTransactionRollsForwardAfterRecovery) {
 TEST(SyncCoordinatorTest, PublishedRecoveryRollsForwardWithoutWorkspace) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("transaction-published-no-workspace", false);
-    const kasumi::Snapshot tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+    const kasumi::Snapshot tree{.rows = {dir_row("")}};
     auto prepared = kasumi::application::sync::publication::prepare_commit(
         tree, false, 0, {}, 100, key);
     ASSERT_TRUE(prepared.has_value());
@@ -13327,13 +12519,8 @@ TEST(SyncCoordinatorTest, PublishedRecoveryRollsForwardWithoutWorkspace) {
     ASSERT_FALSE(id.empty());
     ASSERT_GT(std::filesystem::remove_all(profile / ".transactions" / id), 0U);
 
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, *opened, key);
-    ASSERT_TRUE(recovered.has_value());
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(recover_expect(
+        runtime_data, *opened, key, RecoveryResult::RolledForward));
     const auto state =
         kasumi::state_storage::load_state(runtime_data.database_path);
     ASSERT_TRUE(state.has_value() && *state);
@@ -13346,10 +12533,8 @@ TEST(SyncCoordinatorTest, PruningFailurePreservesDatabaseCommittedPhase) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("recovery-pruning-retry", false);
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
-    const kasumi::Snapshot tree{
-        .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+    auto storage = make_initialized_ambiguous_storage(state);
+    const kasumi::Snapshot tree{.rows = {dir_row("")}};
     auto prepared = kasumi::application::sync::publication::prepare_commit(
         tree, false, 0, {}, 100, key);
     ASSERT_TRUE(prepared.has_value());
@@ -13357,13 +12542,11 @@ TEST(SyncCoordinatorTest, PruningFailurePreservesDatabaseCommittedPhase) {
         storage, key, *prepared, local);
     ASSERT_TRUE(published.has_value());
     ASSERT_TRUE(std::filesystem::create_directories(profile));
-    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
-    ASSERT_TRUE(kasumi::state_storage::save_state(
-        runtime_data.database_path,
-        {.tree = prepared->commit.tree,
-         .height = prepared->commit.height,
-         .commit_id = prepared->commit_id,
-         .ciphertext_id = std::string(64, 'c')}));
+    ASSERT_TRUE(init_and_save_state(runtime_data.database_path,
+                                    {.tree = prepared->commit.tree,
+                                     .height = prepared->commit.height,
+                                     .commit_id = prepared->commit_id,
+                                     .ciphertext_id = std::string(64, 'c')}));
     const auto id =
         save_recovery_record(profile,
                              kasumi::transaction::Phase::DatabaseCommitted,
@@ -13371,41 +12554,27 @@ TEST(SyncCoordinatorTest, PruningFailurePreservesDatabaseCommittedPhase) {
                              prepared->commit_id,
                              published->head.ciphertext_id);
     ASSERT_FALSE(id.empty());
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
     for (int attempt = 0; attempt < 2; ++attempt) {
         state->fail_list_at = state->list_count + 2;
         const auto failed =
-            kasumi::application::sync::coordinator::recover_if_needed(
-                runtime_data, storage, key);
+            coord::recover_if_needed(runtime_data, storage, key);
         ASSERT_FALSE(failed.has_value());
-        EXPECT_EQ(failed.error().code,
-                  kasumi::application::sync::coordinator::ErrorCode::
-                      RecoveryIndeterminate);
-        const auto pending =
-            kasumi::application::sync::journal::load(*paths, key);
+        EXPECT_EQ(failed.error().code, CoordErrorCode::RecoveryIndeterminate);
+        const auto pending = sync_journal::load(*paths, key);
         ASSERT_TRUE(pending.has_value() && *pending);
         EXPECT_EQ((*pending)->phase,
                   kasumi::transaction::Phase::DatabaseCommitted);
         EXPECT_TRUE(std::filesystem::exists(profile / ".transactions" / id));
     }
     state->fail_list_at = 0;
-    const auto third =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, storage, key);
-    ASSERT_TRUE(third.has_value());
-    EXPECT_EQ(
-        *third,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(recover_expect(
+        runtime_data, storage, key, RecoveryResult::RolledForward));
     EXPECT_FALSE(std::filesystem::exists(paths->final_path));
     EXPECT_FALSE(std::filesystem::exists(profile / ".transactions" / id));
-    const auto fourth =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, storage, key);
-    ASSERT_TRUE(fourth.has_value());
-    EXPECT_EQ(
-        *fourth,
-        kasumi::application::sync::coordinator::RecoveryResult::NoJournal);
+    ASSERT_TRUE(
+        recover_expect(runtime_data, storage, key, RecoveryResult::NoJournal));
 }
 
 TEST(SyncCoordinatorTest, UploadSubBatchChunkingAndSafeResumption) {
@@ -13420,11 +12589,7 @@ TEST(SyncCoordinatorTest, UploadSubBatchChunkingAndSafeResumption) {
         const auto content = "payload_" + std::to_string(i);
         kasumi::test::write_text(local / filename, content);
         input.local_tree.rows.push_back(
-            kasumi::NodeRow{.path = filename,
-                            .hash = kasumi::hasher::hash_string(content),
-                            .size = content.size(),
-                            .mtime = canonical_mtime(local / filename),
-                            .is_directory = false});
+            text_row(filename, content, canonical_mtime(local / filename)));
     }
     input.local_tree.rows.front().mtime = canonical_mtime(local);
     kasumi::finalize_snapshot(input.local_tree);
@@ -13435,22 +12600,20 @@ TEST(SyncCoordinatorTest, UploadSubBatchChunkingAndSafeResumption) {
     ASSERT_EQ(result->plan.operations.size(), file_count);
 
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = make_initialized_ambiguous_storage(state);
 
     // Fail content put at item 257 (the first upload in the second sub-batch)
     state->fail_content_put_at = 257;
 
-    const auto first_exec = kasumi::application::sync::coordinator::execute(
-        runtime_data, storage, key, input, *result);
+    const auto first_exec =
+        coord::execute(runtime_data, storage, key, input, *result);
     ASSERT_FALSE(first_exec.has_value());
 
     // Check that journal exists and sub-batch 1 (items 0..255) is checkpointed
     // as Applied
-    const auto paths = kasumi::application::sync::journal::make_paths(profile);
+    const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
-    const auto journal_rec =
-        kasumi::application::sync::journal::load(*paths, key);
+    const auto journal_rec = sync_journal::load(*paths, key);
     ASSERT_TRUE(journal_rec.has_value() && *journal_rec);
 
     std::size_t applied_count = 0;
@@ -13463,13 +12626,9 @@ TEST(SyncCoordinatorTest, UploadSubBatchChunkingAndSafeResumption) {
 
     // Call recover_if_needed: should recognize progress and declare
     // ResumableTransaction
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, storage, key);
+    const auto recovered = coord::recover_if_needed(runtime_data, storage, key);
     ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(*recovered,
-              kasumi::application::sync::coordinator::RecoveryResult::
-                  ResumableTransaction);
+    EXPECT_EQ(*recovered, RecoveryResult::ResumableTransaction);
     EXPECT_TRUE(std::filesystem::exists(paths->final_path));
 
     // Reset failure and reset content put counter
@@ -13478,8 +12637,8 @@ TEST(SyncCoordinatorTest, UploadSubBatchChunkingAndSafeResumption) {
 
     // Second execution: must resume, elide the 256 already-applied uploads, and
     // upload only 4 files!
-    const auto second_exec = kasumi::application::sync::coordinator::execute(
-        runtime_data, storage, key, input, *result);
+    const auto second_exec =
+        coord::execute(runtime_data, storage, key, input, *result);
     ASSERT_TRUE(second_exec.has_value()) << second_exec.error().detail;
 
     // Exactly 4 files uploaded in the second execution!
@@ -13489,13 +12648,8 @@ TEST(SyncCoordinatorTest, UploadSubBatchChunkingAndSafeResumption) {
     EXPECT_FALSE(std::filesystem::exists(paths->final_path));
 
     // Subsequent recovery returns NoJournal
-    const auto post_recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, storage, key);
-    ASSERT_TRUE(post_recovered.has_value());
-    EXPECT_EQ(
-        *post_recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::NoJournal);
+    ASSERT_TRUE(
+        recover_expect(runtime_data, storage, key, RecoveryResult::NoJournal));
 }
 
 TEST(SyncCoordinatorTest,
@@ -13503,17 +12657,15 @@ TEST(SyncCoordinatorTest,
     auto [workspace, profile, local, storage_path, runtime_data, key] =
         make_coordinator_env("resolve-missing-pub-failure");
     AmbiguousPublicationState* state = nullptr;
-    auto storage = make_ambiguous_transport(state);
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto storage = make_initialized_ambiguous_storage(state);
 
     const auto hash_a = kasumi::hasher::hash_string("payload-a");
     const auto hash_b = kasumi::hasher::hash_string("payload-b");
-    const kasumi::Snapshot base_tree{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "a.txt", .hash = hash_a, .size = 9},
-            kasumi::NodeRow{.path = "b.txt", .hash = hash_b, .size = 9},
-        }};
+    const kasumi::Snapshot base_tree{.rows = {
+                                         dir_row(""),
+                                         file_row("a.txt", hash_a, 9),
+                                         file_row("b.txt", hash_b, 9),
+                                     }};
     ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
     const auto row_a = *kasumi::find_row(base_tree, "a.txt");
     const auto row_b = *kasumi::find_row(base_tree, "b.txt");
@@ -13529,8 +12681,7 @@ TEST(SyncCoordinatorTest,
             .pending_materializations = {row_a, row_b},
         }));
 
-    auto input = empty_publication_input();
-    set_persisted_base(input, base_tree);
+    auto input = make_base_input(base_tree);
     input.pending_materializations = {row_a, row_b};
     input.known_missing_content_objects.insert(hash_a);
     input.known_missing_content_objects.insert(hash_b);
@@ -13543,12 +12694,10 @@ TEST(SyncCoordinatorTest,
     // Inject failure at marker put (publication failure)
     state->fail_marker_put = true;
 
-    const auto executed = kasumi::application::sync::coordinator::execute(
-        runtime_data, storage, key, input, *result);
+    const auto executed =
+        coord::execute(runtime_data, storage, key, input, *result);
     ASSERT_FALSE(executed.has_value());
-    EXPECT_EQ(
-        executed.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::PublicationFailure);
+    EXPECT_EQ(executed.error().code, CoordErrorCode::PublicationFailure);
 
     // Verify physical content removal authority was never exercised
     EXPECT_EQ(state->remove_count, 0U);
@@ -13572,18 +12721,16 @@ TEST(SyncCoordinatorTest,
     auto& storage = *opened;
 
     const auto hash_a = kasumi::hasher::hash_string("payload-a");
-    const kasumi::Snapshot initial_tree{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-            kasumi::NodeRow{.path = "a.txt", .hash = hash_a, .size = 9},
-        }};
+    const kasumi::Snapshot initial_tree{.rows = {
+                                            dir_row(""),
+                                            file_row("a.txt", hash_a, 9),
+                                        }};
     ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
 
     // Prepare publication where a.txt is logically deleted
-    const kasumi::Snapshot resolved_tree{
-        .rows = {
-            kasumi::NodeRow{.path = "", .is_directory = true},
-        }};
+    const kasumi::Snapshot resolved_tree{.rows = {
+                                             dir_row(""),
+                                         }};
     auto prepared = kasumi::application::sync::publication::prepare_commit(
         resolved_tree, false, 0, {}, 100, key);
     ASSERT_TRUE(prepared.has_value());
@@ -13604,13 +12751,8 @@ TEST(SyncCoordinatorTest,
     ASSERT_FALSE(transaction_id.empty());
 
     // Recovery runs
-    const auto recovered =
-        kasumi::application::sync::coordinator::recover_if_needed(
-            runtime_data, storage, key);
-    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(
-        *recovered,
-        kasumi::application::sync::coordinator::RecoveryResult::RolledForward);
+    ASSERT_TRUE(recover_expect(
+        runtime_data, storage, key, RecoveryResult::RolledForward));
 
     // State database converged: a.txt is deleted, pending materializations is
     // empty!
