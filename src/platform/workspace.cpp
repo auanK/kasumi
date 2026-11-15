@@ -209,8 +209,11 @@ create_workspace(std::string_view purpose) {
                 return std::unexpected(id.error());
             }
 
-            const auto root =
-                base / ("kasumi-" + std::string{purpose} + "-" + *id);
+            std::string name{"kasumi-"};
+            name += purpose;
+            name += '-';
+            name += *id;
+            const auto root = base / name;
             auto created = private_storage::create_directory(root);
             if (created) {
                 return identify_created_workspace(root);

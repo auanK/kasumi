@@ -93,7 +93,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
     history_storage::maintenance_protocol::RegistrationState writer;
     SyncStage current_stage = SyncStage::Observing;
     const auto notify_stage = [&](SyncStage stage,
-                                  SyncCompleted summary_arg = {},
+                                  std::optional<SyncCompleted> summary_arg =
+                                      std::nullopt,
                                   std::uint32_t total_items = 0) {
         current_stage = stage;
         if (context.on_progress) {

@@ -1833,7 +1833,7 @@ InstallResult install_prepared_executable(const std::filesystem::path& prepared,
             const std::filesystem::path& destination,
             std::string_view expected_digest,
             std::string_view copy_error,
-            std::string_view attr_label,
+            [[maybe_unused]] std::string_view attr_label,
             std::string_view mismatch_error) -> InstallResult {
         std::error_code copy_ec;
         if (!std::filesystem::copy_file(source,
