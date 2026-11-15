@@ -83,16 +83,30 @@ Result ensure_parent_directory(const std::filesystem::path& path) {
 
 Result copy_file_overwrite(const std::filesystem::path& source,
                            const std::filesystem::path& destination) {
+    std::error_code error;
+    const auto dest_status =
+        std::filesystem::symlink_status(destination, error);
+    if (error && error != std::errc::no_such_file_or_directory) {
+        return std::unexpected(make_error(error));
+    }
+    if (std::filesystem::is_symlink(dest_status) ||
+        std::filesystem::is_directory(dest_status)) {
+        return std::unexpected(Error{
+            .code = ErrorCode::InvalidContext,
+            .message = "destination cannot be a symlink or directory",
+            .native_code = 0,
+        });
+    }
 #if defined(_WIN32)
     if (!CopyFileW(source.c_str(), destination.c_str(), FALSE)) {
         const auto win_err = GetLastError();
-        const std::error_code error(static_cast<int>(win_err),
-                                    std::system_category());
-        return std::unexpected(make_error(error));
+        const std::error_code win_error(static_cast<int>(win_err),
+                                        std::system_category());
+        return std::unexpected(make_error(win_error));
     }
     return {};
 #else
-    std::error_code error;
+    error.clear();
     std::filesystem::copy_file(
         source,
         destination,
@@ -138,26 +152,26 @@ Result local_put(void* context,
         return std::unexpected(destination.error());
     }
 
-    auto parent_result = ensure_parent_directory(*destination);
-
-    if (!parent_result) {
-        return parent_result;
-    }
-
     std::error_code error;
 
-    const bool source_exists = std::filesystem::is_regular_file(source, error);
-
-    if (error) {
+    const auto source_status = std::filesystem::symlink_status(source, error);
+    if (error && error != std::errc::no_such_file_or_directory) {
         return std::unexpected(make_error(error));
     }
 
-    if (!source_exists) {
+    if (std::filesystem::is_symlink(source_status) ||
+        !std::filesystem::is_regular_file(source_status)) {
         return std::unexpected(Error{
             .code = ErrorCode::ObjectNotFound,
             .message = "source file does not exist",
             .native_code = 0,
         });
+    }
+
+    auto parent_result = ensure_parent_directory(*destination);
+
+    if (!parent_result) {
+        return parent_result;
     }
 
     return copy_file_overwrite(source, *destination);
@@ -200,29 +214,7 @@ Result local_copy(void* context,
     if (!source) {
         return std::unexpected(source.error());
     }
-    auto destination = resolve_object_path(*state, destination_identifier);
-    if (!destination) {
-        return std::unexpected(destination.error());
-    }
-
-    std::error_code error;
-    if (!std::filesystem::is_regular_file(*source, error)) {
-        if (error) {
-            return std::unexpected(make_error(error));
-        }
-        return std::unexpected(Error{
-            .code = ErrorCode::ObjectNotFound,
-            .message = "source object does not exist",
-            .native_code = 0,
-        });
-    }
-
-    auto parent_result = ensure_parent_directory(*destination);
-    if (!parent_result) {
-        return parent_result;
-    }
-
-    return copy_file_overwrite(*source, *destination);
+    return local_put(context, *source, destination_identifier);
 }
 
 PresenceResult local_presence(void* context, std::string_view identifier) {

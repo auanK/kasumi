@@ -36,11 +36,7 @@ extern char** environ;
 namespace kasumi::transport::rclone_detail {
 namespace {
 
-Error make_error(ErrorCode code, std::string message, int native_code = 0) {
-    return Error{.code = code,
-                 .message = std::move(message),
-                 .native_code = native_code};
-}
+using detail::make_error;
 
 bool environment_name_equal(std::string_view left,
                             std::string_view right) noexcept {
@@ -416,6 +412,7 @@ void clear_secrets(State& state) noexcept {
     std::fill(state.password.begin(), state.password.end(), '\0');
     state.username.clear();
     state.password.clear();
+    state.base_url.clear();
 }
 
 bool reset_failed_attempt(State& state) noexcept {
@@ -424,7 +421,6 @@ bool reset_failed_attempt(State& state) noexcept {
     state.port = 0;
     state.ready = false;
     clear_secrets(state);
-    state.base_url.clear();
     return stopped;
 }
 

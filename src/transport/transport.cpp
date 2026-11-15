@@ -14,9 +14,7 @@ namespace kasumi::transport {
 
 namespace {
 
-Error make_error(ErrorCode code, std::string message) {
-    return Error{.code = code, .message = std::move(message), .native_code = 0};
-}
+using detail::make_error;
 
 bool forbidden_character(char character) noexcept {
     const auto byte = static_cast<unsigned char>(character);
@@ -85,21 +83,14 @@ std::expected<void, Error> validate_location_text(std::string_view location) {
 }
 
 Error invalid_transport_error() {
-    return Error{
-        .code = ErrorCode::InvalidContext,
-        .message = "incomplete transport operations table",
-        .native_code = 0,
-    };
+    return make_error(ErrorCode::InvalidContext,
+                      "incomplete transport operations table");
 }
 
 bool valid_storage_operations(const StorageOperations& operations) noexcept {
     return operations.initialize != nullptr && operations.put != nullptr &&
            operations.get != nullptr && operations.presence != nullptr &&
            operations.list != nullptr && operations.remove != nullptr;
-}
-
-bool valid_list_prefix(std::string_view prefix) noexcept {
-    return detail::valid_relative_identifier(prefix, true);
 }
 
 using BackendConfiguration =
@@ -160,10 +151,6 @@ std::expected<Transport, Error> accept_backend_transport(Transport transport) {
     return transport;
 }
 
-bool valid_batch_identifier(std::string_view identifier) noexcept {
-    return detail::valid_relative_identifier(identifier, true);
-}
-
 bool valid_object_identifier(std::string_view identifier) {
     return detail::valid_relative_identifier(identifier, false);
 }
@@ -178,14 +165,7 @@ std::expected<void, Error> validate_copy_batch(const CopyBatch& batch) {
     std::unordered_set<std::string> destinations;
     for (const auto& item : batch.items) {
         const auto safe = [](std::string_view identifier) {
-            if (!valid_object_identifier(identifier) ||
-                std::any_of(identifier.begin(),
-                            identifier.end(),
-                            forbidden_character)) {
-                return false;
-            }
-            const auto path = platform::path::from_utf8(identifier);
-            return path.lexically_normal() == path;
+            return detail::valid_relative_identifier(identifier, true);
         };
         if (!safe(item.source_identifier) ||
             !safe(item.destination_identifier) ||
@@ -212,7 +192,7 @@ std::expected<void, Error> validate_batch(const PutBatch& batch) {
 
     std::unordered_set<std::string> unique_identifiers;
     for (const auto& identifier : batch.identifiers) {
-        if (!valid_batch_identifier(identifier)) {
+        if (!detail::valid_relative_identifier(identifier, true)) {
             return std::unexpected(make_error(ErrorCode::InvalidIdentifier,
                                               "invalid identifier in batch"));
         }
@@ -284,7 +264,8 @@ validate_put_files_batch(const PutFilesBatch& batch) {
 
     std::unordered_set<std::string> destinations;
     for (const auto& item : batch.items) {
-        if (!valid_batch_identifier(item.destination_identifier) ||
+        if (!detail::valid_relative_identifier(item.destination_identifier,
+                                               true) ||
             !destinations.insert(item.destination_identifier).second) {
             return std::unexpected(
                 make_error(ErrorCode::InvalidIdentifier,
@@ -326,7 +307,7 @@ std::expected<void, Error> validate_remove_batch(const RemoveBatch& batch) {
 
     std::unordered_set<std::string> identifiers;
     for (const auto& item : batch.items) {
-        if (!valid_batch_identifier(item.identifier) ||
+        if (!detail::valid_relative_identifier(item.identifier, true) ||
             std::any_of(item.identifier.begin(),
                         item.identifier.end(),
                         forbidden_character) ||
@@ -343,7 +324,7 @@ std::expected<void, Error> validate_remove_batch(const RemoveBatch& batch) {
 std::expected<void, Error> validate_batch(const GetBatch& batch) {
     std::error_code error;
     if (!batch.source_prefix.empty() &&
-        !valid_list_prefix(batch.source_prefix)) {
+        !detail::valid_relative_identifier(batch.source_prefix, true)) {
         return std::unexpected(make_error(ErrorCode::InvalidIdentifier,
                                           "invalid prefix in batch"));
     }
@@ -356,7 +337,7 @@ std::expected<void, Error> validate_batch(const GetBatch& batch) {
 
     std::unordered_set<std::string> unique_identifiers;
     for (const auto& identifier : batch.identifiers) {
-        if (!valid_batch_identifier(identifier) ||
+        if (!detail::valid_relative_identifier(identifier, true) ||
             !unique_identifiers.insert(identifier).second) {
             return std::unexpected(
                 make_error(ErrorCode::InvalidIdentifier,
@@ -380,7 +361,7 @@ validate_physical_hash_batch_request(const PhysicalHashBatchRequest& request) {
 
     std::unordered_set<std::string> identifiers;
     for (const auto& object : request.objects) {
-        if (!valid_batch_identifier(object.identifier) ||
+        if (!detail::valid_relative_identifier(object.identifier, true) ||
             object.identifier.find_first_of("\r\n") != std::string_view::npos) {
             return std::unexpected(
                 make_error(ErrorCode::InvalidIdentifier,
@@ -457,7 +438,8 @@ validate_control_read_batch_request(const ControlReadBatchRequest& request) {
     }
     std::unordered_set<std::string> prefixes;
     for (const auto& prefix : request.list_prefixes) {
-        if (!valid_list_prefix(prefix) || !prefixes.insert(prefix).second) {
+        if (!detail::valid_relative_identifier(prefix, true) ||
+            !prefixes.insert(prefix).second) {
             return std::unexpected(
                 make_error(ErrorCode::InvalidIdentifier,
                            "duplicate or invalid prefix in control batch"));
@@ -465,7 +447,7 @@ validate_control_read_batch_request(const ControlReadBatchRequest& request) {
     }
     std::unordered_set<std::string> identifiers;
     for (const auto& identifier : request.presence_identifiers) {
-        if (!valid_batch_identifier(identifier) ||
+        if (!detail::valid_relative_identifier(identifier, true) ||
             !identifiers.insert(identifier).second) {
             return std::unexpected(
                 make_error(ErrorCode::InvalidIdentifier,
@@ -494,26 +476,16 @@ open_transport(std::string_view location,
         return std::unexpected(configuration.error());
     }
 
-    if (const auto* local =
-            std::get_if<detail::LocalConfiguration>(&*configuration)) {
-        auto transport = detail::open_local_backend(*local);
-        if (!transport) {
-            return std::unexpected(transport.error());
-        }
-        return accept_backend_transport(std::move(*transport));
+    auto transport =
+        std::holds_alternative<detail::LocalConfiguration>(*configuration)
+            ? detail::open_local_backend(
+                  std::get<detail::LocalConfiguration>(*configuration))
+            : detail::open_rclone_backend(
+                  std::get<detail::RcloneConfiguration>(*configuration));
+    if (!transport) {
+        return std::unexpected(transport.error());
     }
-
-    if (const auto* rclone =
-            std::get_if<detail::RcloneConfiguration>(&*configuration)) {
-        auto transport = detail::open_rclone_backend(*rclone);
-        if (!transport) {
-            return std::unexpected(transport.error());
-        }
-        return accept_backend_transport(std::move(*transport));
-    }
-
-    return std::unexpected(
-        make_error(ErrorCode::InvalidContext, "unrecognized backend"));
+    return accept_backend_transport(std::move(*transport));
 }
 
 bool valid(const Transport& transport) noexcept {
@@ -702,7 +674,7 @@ ListingResult list(Transport& transport, std::string_view prefix) {
     if (state == nullptr || transport.storage.list_prefix == nullptr) {
         return std::unexpected(invalid_transport_error());
     }
-    if (!valid_list_prefix(prefix)) {
+    if (!detail::valid_relative_identifier(prefix, true)) {
         return std::unexpected(
             make_error(ErrorCode::InvalidIdentifier, "invalid listing prefix"));
     }
@@ -814,7 +786,9 @@ namespace detail {
 
 bool valid_relative_identifier(std::string_view identifier,
                                bool require_normal) noexcept {
-    if (identifier.empty() || identifier.find('\\') != std::string_view::npos) {
+    if (identifier.empty() || identifier.find('\\') != std::string_view::npos ||
+        std::any_of(
+            identifier.begin(), identifier.end(), forbidden_character)) {
         return false;
     }
     const auto path = platform::path::from_utf8(identifier);

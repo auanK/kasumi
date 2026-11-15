@@ -29,11 +29,7 @@ constexpr auto remove_timeout = std::chrono::seconds{120};
 constexpr auto control_read_deadline = std::chrono::minutes{2};
 constexpr auto transfer_timeout = std::chrono::minutes{30};
 
-Error make_error(ErrorCode code, std::string message, int native_code = 0) {
-    return Error{.code = code,
-                 .message = std::move(message),
-                 .native_code = native_code};
-}
+using detail::make_error;
 
 Error invalid_context_error() {
     return make_error(ErrorCode::InvalidContext, "RC session is not ready");
@@ -137,12 +133,12 @@ std::string rooted_remote_fs(const State& state) {
 }
 
 std::expected<nlohmann::json, Error>
-request_json_impl(State& state,
-                  std::string_view endpoint,
-                  const nlohmann::json& request,
-                  std::size_t response_limit,
-                  std::chrono::milliseconds read_timeout,
-                  bool retry_transient_reads) {
+request_json(State& state,
+             std::string_view endpoint,
+             const nlohmann::json& request,
+             std::size_t response_limit,
+             std::chrono::milliseconds read_timeout,
+             bool retry_transient_reads = false) {
     const auto body = request.dump();
     const auto response =
         retry_transient_reads
@@ -163,22 +159,12 @@ request_json_impl(State& state,
 }
 
 std::expected<nlohmann::json, Error>
-request_json(State& state,
-             std::string_view endpoint,
-             const nlohmann::json& request,
-             std::size_t response_limit,
-             std::chrono::milliseconds read_timeout) {
-    return request_json_impl(
-        state, endpoint, request, response_limit, read_timeout, false);
-}
-
-std::expected<nlohmann::json, Error>
 request_read_json(State& state,
                   std::string_view endpoint,
                   const nlohmann::json& request,
                   std::size_t response_limit,
                   std::chrono::milliseconds deadline) {
-    return request_json_impl(
+    return request_json(
         state, endpoint, request, response_limit, deadline, true);
 }
 
@@ -230,11 +216,8 @@ run_job_batch(State& state,
         {"inputs", inputs},
         {"concurrency", concurrency},
     };
-    auto response =
-        read_only ? request_read_json(
-                        state, "job/batch", request, response_limit, timeout)
-                  : request_json(
-                        state, "job/batch", request, response_limit, timeout);
+    auto response = request_json(
+        state, "job/batch", request, response_limit, timeout, read_only);
     if (!response) {
         if (unsupported_endpoint(response.error(), "job/batch")) {
             return std::unexpected(
@@ -398,16 +381,9 @@ stat_remote(State& state, std::string_view remote, bool files_only = true) {
 }
 
 bool not_found(const Error& error) noexcept {
-    if (error.code == ErrorCode::ProtocolFailure) {
-        if (error.native_code == 404) {
-            return true;
-        }
-        if (error.message.find("directory not found") != std::string::npos ||
-            error.message.find("not found") != std::string::npos) {
-            return true;
-        }
-    }
-    return false;
+    return error.code == ErrorCode::ProtocolFailure &&
+           (error.native_code == 404 ||
+            error.message.find("not found") != std::string::npos);
 }
 
 struct SplitLocalPath {
@@ -509,6 +485,21 @@ Result rclone_put(void* context,
                            identifier);
 }
 
+std::expected<nlohmann::json, Error>
+build_include_rules(std::span<const std::string> identifiers) {
+    nlohmann::json include_rules = nlohmann::json::array();
+    for (const auto& identifier : identifiers) {
+        // Reject rclone filter glob/brace metacharacters so an identifier
+        // cannot expand an IncludeRule beyond its exact relative path.
+        if (!valid_identifier(identifier) ||
+            identifier.find_first_of("*?[]{}") != std::string::npos) {
+            return std::unexpected(invalid_identifier_error());
+        }
+        include_rules.push_back("/" + identifier);
+    }
+    return include_rules;
+}
+
 Result rclone_put_batch(void* context, const PutBatch& batch) {
     auto* state = ready_state(context);
     if (state == nullptr) {
@@ -519,15 +510,23 @@ Result rclone_put_batch(void* context, const PutBatch& batch) {
         return {};
     }
 
+    const auto include_rules = build_include_rules(batch.identifiers);
+    if (!include_rules) {
+        return std::unexpected(include_rules.error());
+    }
+
     const auto absolute_source = absolute_path(batch.source_root);
     if (!absolute_source) {
         return std::unexpected(absolute_source.error());
     }
     const auto source_path = platform::path::to_utf8(*absolute_source);
 
-    nlohmann::json payload = {{"srcFs", source_path},
-                              {"dstFs", rooted_remote_fs(*state)},
-                              {"createEmptySrcDirs", false}};
+    nlohmann::json payload = {
+        {"srcFs", source_path},
+        {"dstFs", rooted_remote_fs(*state)},
+        {"createEmptySrcDirs", false},
+        {"_filter", {{"IncludeRule", *include_rules}}},
+    };
     nlohmann::json config = {{"NoTraverse", true}, {"NoUpdateModTime", true}};
     if (batch.max_parallel_transfers > 0) {
         config["Transfers"] = batch.max_parallel_transfers;
@@ -541,6 +540,21 @@ Result rclone_put_batch(void* context, const PutBatch& batch) {
         return std::unexpected(copied.error());
     }
     return {};
+}
+
+Result execute_copy_batch(State& state,
+                          const nlohmann::json& inputs,
+                          std::size_t concurrency) {
+    const auto response = run_job_batch(state,
+                                        inputs,
+                                        concurrency,
+                                        maximum_response_size,
+                                        transfer_timeout,
+                                        false);
+    if (!response) {
+        return std::unexpected(response.error());
+    }
+    return parse_copy_batch_response(*response, inputs);
 }
 
 Result rclone_put_files_batch(void* context, const PutFilesBatch& batch) {
@@ -580,21 +594,7 @@ Result rclone_put_files_batch(void* context, const PutFilesBatch& batch) {
         });
     }
 
-    const auto response = run_job_batch(*state,
-                                        inputs,
-                                        batch.concurrency,
-                                        maximum_response_size,
-                                        transfer_timeout,
-                                        false);
-    if (!response) {
-        return std::unexpected(response.error());
-    }
-
-    const auto validated = parse_copy_batch_response(*response, inputs);
-    if (!validated) {
-        return validated;
-    }
-    return {};
+    return execute_copy_batch(*state, inputs, batch.concurrency);
 }
 
 Result rclone_get(void* context,
@@ -613,6 +613,18 @@ Result rclone_get(void* context,
     if (!local) {
         return std::unexpected(local.error());
     }
+    std::error_code error;
+    const auto pre_status =
+        std::filesystem::symlink_status(local->absolute, error);
+    if (error && error != std::errc::no_such_file_or_directory) {
+        return std::unexpected(filesystem_error(error));
+    }
+    if (std::filesystem::is_symlink(pre_status) ||
+        std::filesystem::is_directory(pre_status)) {
+        return std::unexpected(
+            make_error(ErrorCode::InvalidContext,
+                       "local destination cannot be a symlink or directory"));
+    }
     if (const auto parent = ensure_parent_directory(local->absolute); !parent) {
         return parent;
     }
@@ -627,11 +639,14 @@ Result rclone_get(void* context,
         return copied;
     }
 
-    std::error_code error;
-    if (!std::filesystem::is_regular_file(local->absolute, error)) {
-        if (error) {
-            return std::unexpected(filesystem_error(error));
-        }
+    error.clear();
+    const auto post_status =
+        std::filesystem::symlink_status(local->absolute, error);
+    if (error) {
+        return std::unexpected(filesystem_error(error));
+    }
+    if (std::filesystem::is_symlink(post_status) ||
+        !std::filesystem::is_regular_file(post_status)) {
         return std::unexpected(
             make_error(ErrorCode::ProtocolFailure,
                        "local destination did not become regular file"));
@@ -690,21 +705,7 @@ Result rclone_copy_batch(void* context, const CopyBatch& batch) {
         });
     }
 
-    const auto response = run_job_batch(*state,
-                                        inputs,
-                                        batch.concurrency,
-                                        maximum_response_size,
-                                        transfer_timeout,
-                                        false);
-    if (!response) {
-        return std::unexpected(response.error());
-    }
-
-    const auto validated = parse_copy_batch_response(*response, inputs);
-    if (!validated) {
-        return validated;
-    }
-    return {};
+    return execute_copy_batch(*state, inputs, batch.concurrency);
 }
 
 Result rclone_get_batch(void* context, const GetBatch& batch) {
@@ -725,12 +726,9 @@ Result rclone_get_batch(void* context, const GetBatch& batch) {
         return std::unexpected(absolute_destination.error());
     }
 
-    nlohmann::json include_rules = nlohmann::json::array();
-    for (const auto& identifier : batch.identifiers) {
-        if (!valid_identifier(identifier)) {
-            return std::unexpected(invalid_identifier_error());
-        }
-        include_rules.push_back("/" + identifier);
+    const auto include_rules = build_include_rules(batch.identifiers);
+    if (!include_rules) {
+        return std::unexpected(include_rules.error());
     }
 
     nlohmann::json payload = {
@@ -740,7 +738,7 @@ Result rclone_get_batch(void* context, const GetBatch& batch) {
              : join_remote_path(rooted_remote_fs(*state), batch.source_prefix)},
         {"dstFs", platform::path::to_utf8(*absolute_destination)},
         {"createEmptySrcDirs", false},
-        {"_filter", {{"IncludeRule", std::move(include_rules)}}},
+        {"_filter", {{"IncludeRule", *include_rules}}},
     };
     if (batch.max_parallel_transfers > 0) {
         payload["_config"] = {
@@ -820,14 +818,25 @@ PresenceResult rclone_presence(void* context, std::string_view identifier) {
                                "remote object is a directory");
 }
 
-ListingResult list_remote_objects(State& state, std::string_view prefix) {
+ListingResult
+list_remote_objects(void* context,
+                    std::optional<std::string_view> prefix = std::nullopt) {
+    auto* state = ready_state(context);
+    if (state == nullptr) {
+        return std::unexpected(invalid_context_error());
+    }
+    if (prefix && !valid_identifier(*prefix)) {
+        return std::unexpected(invalid_identifier_error());
+    }
+    const std::string_view effective_prefix =
+        prefix.value_or(std::string_view{});
     const auto response =
-        request_read_json(state,
+        request_read_json(*state,
                           "operations/list",
                           nlohmann::json{
-                              {"fs", rooted_remote_fs(state)},
-                              {"remote", prefix},
-                              {"opt", stat_opt(true, prefix.empty())},
+                              {"fs", rooted_remote_fs(*state)},
+                              {"remote", effective_prefix},
+                              {"opt", stat_opt(true, effective_prefix.empty())},
                           },
                           maximum_list_response_size,
                           control_read_deadline);
@@ -839,26 +848,15 @@ ListingResult list_remote_objects(State& state, std::string_view prefix) {
         }
         return std::unexpected(response.error());
     }
-    return parse_list_response_json(*response, prefix);
+    return parse_list_response_json(*response, effective_prefix);
 }
 
 ListingResult rclone_list(void* context) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
-    }
-    return list_remote_objects(*state, {});
+    return list_remote_objects(context);
 }
 
 ListingResult rclone_list_prefix(void* context, std::string_view prefix) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
-    }
-    if (!valid_identifier(prefix)) {
-        return std::unexpected(invalid_identifier_error());
-    }
-    return list_remote_objects(*state, prefix);
+    return list_remote_objects(context, prefix);
 }
 
 std::expected<std::string, Error> rclone_physical_hash(
@@ -1109,12 +1107,7 @@ rclone_physical_hash_batch(void* context,
         return std::unexpected(response.error());
     }
 
-    auto report = parse_physical_hash_batch_response_json(*response, request);
-    if (!report) {
-        return std::unexpected(report.error());
-    }
-
-    return report;
+    return parse_physical_hash_batch_response_json(*response, request);
 }
 
 ControlReadBatchResponse
@@ -1137,11 +1130,12 @@ parse_control_read_batch_response_json(const nlohmann::json& response,
         }
         std::optional<int> status;
         if (item.contains("status")) {
-            if (!item.at("status").is_number_integer()) {
-                return std::unexpected(make_error(ErrorCode::ProtocolFailure,
-                                                  "invalid job/batch status"));
+            auto parsed_status =
+                parse_job_batch_status(item.at("status"), "control");
+            if (!parsed_status) {
+                return std::unexpected(parsed_status.error());
             }
-            status = item.at("status").get<int>();
+            status = *parsed_status;
         }
         if (item.contains("error")) {
             if (!item.at("error").is_string() ||
@@ -1281,15 +1275,25 @@ rclone_control_read_batch(void* context,
 
     // Admission depends on the ordering LIST writers -> STAT barrier;
     // rclone executes inputs sequentially when concurrency <= 1.
-    if (!request.list_prefixes.empty()) {
+    if (!request.list_prefixes.empty() &&
+        request.presence_identifiers.size() <= max_presence_batch_chunk_size) {
         return execute_single_control_read_batch(*state, request, 1);
     }
 
-    if (request.presence_identifiers.empty()) {
+    if (request.list_prefixes.empty() && request.presence_identifiers.empty()) {
         return ControlReadBatchResult{};
     }
 
     ControlReadBatchResult aggregated;
+    if (!request.list_prefixes.empty()) {
+        ControlReadBatchRequest list_req;
+        list_req.list_prefixes = request.list_prefixes;
+        auto list_res = execute_single_control_read_batch(*state, list_req, 1);
+        if (!list_res) {
+            return std::unexpected(list_res.error());
+        }
+        aggregated.listings = std::move(list_res->listings);
+    }
     aggregated.presences.reserve(request.presence_identifiers.size());
 
     for (std::size_t offset = 0; offset < request.presence_identifiers.size();
@@ -1459,9 +1463,7 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
         }
 
         if (status == 404 ||
-            (has_error &&
-             (err_msg.find("not found") != std::string::npos ||
-              err_msg.find("directory not found") != std::string::npos))) {
+            (has_error && err_msg.find("not found") != std::string::npos)) {
             report.items[target_index].result = Removal::AlreadyAbsent;
         } else if (status >= 200 && status < 300 && !has_error) {
             report.items[target_index].result = Removal::Removed;

@@ -1002,6 +1002,8 @@ TEST(RcloneStorageTest, UploadsBatchWithNoTraverseAndNoUpdateModTime) {
         EXPECT_EQ(req.at("srcFs"), kasumi::platform::path::to_utf8(source));
         EXPECT_EQ(req.at("dstFs"), "test:root");
         EXPECT_EQ(req.at("createEmptySrcDirs"), false);
+        EXPECT_EQ(req.at("_filter").at("IncludeRule"),
+                  (nlohmann::json{"/obj1", "/obj2"}));
 
         const auto& config = req.at("_config");
         EXPECT_EQ(config.at("NoTraverse"), true);
@@ -1014,6 +1016,8 @@ TEST(RcloneStorageTest, UploadsBatchWithNoTraverseAndNoUpdateModTime) {
 
     {
         const auto& req = requests[1];
+        EXPECT_EQ(req.at("_filter").at("IncludeRule"),
+                  (nlohmann::json{"/obj1"}));
         const auto& config = req.at("_config");
         EXPECT_EQ(config.at("NoTraverse"), true);
         EXPECT_EQ(config.at("NoUpdateModTime"), true);
@@ -1022,6 +1026,31 @@ TEST(RcloneStorageTest, UploadsBatchWithNoTraverseAndNoUpdateModTime) {
         EXPECT_FALSE(config.contains("IgnoreExisting"));
         EXPECT_FALSE(config.contains("SizeOnly"));
     }
+}
+
+TEST(RcloneStorageTest, BatchRejectsGlobMetacharactersAndControlCharacters) {
+    RcServerState remote;
+    auto& state = start_configured_state(remote);
+    auto workspace = kasumi::test::make_temp_workspace("rclone-batch-filter");
+    const auto root = kasumi::test::workspace_path(workspace, "root");
+    std::filesystem::create_directories(root);
+    const auto operations = rclone_detail::make_storage_operations();
+
+    for (const auto* bad : {"obj*", "obj?", "obj[0]", "{a,b}", "obj\nrule"}) {
+        const auto put_res = operations.put_batch(
+            &state, {.source_root = root, .identifiers = {bad}});
+        ASSERT_FALSE(put_res.has_value());
+        EXPECT_EQ(put_res.error().code,
+                  kasumi::transport::ErrorCode::InvalidIdentifier);
+
+        const auto get_res = operations.get_batch(
+            &state, {.destination_root = root, .identifiers = {bad}});
+        ASSERT_FALSE(get_res.has_value());
+        EXPECT_EQ(get_res.error().code,
+                  kasumi::transport::ErrorCode::InvalidIdentifier);
+    }
+
+    stop_rc_server(remote);
 }
 
 kasumi::transport::PhysicalHashBatchRequest batch_request() {
@@ -1680,9 +1709,14 @@ TEST(RcloneStorageTest, PresenceBatchPartitioningAtExactBoundaryAndAbove) {
                 captured_requests.push_back(body);
             }
             nlohmann::json results = nlohmann::json::array();
-            for (std::size_t i = 0; i < body.at("inputs").size(); ++i) {
-                results.push_back(nlohmann::json{{"item", {{"IsDir", false}}},
-                                                 {"status", 200}});
+            for (const auto& item_req : body.at("inputs")) {
+                if (item_req.value("_path", "") == "operations/list") {
+                    results.push_back(nlohmann::json{
+                        {"list", nlohmann::json::array()}, {"status", 200}});
+                } else {
+                    results.push_back(nlohmann::json{
+                        {"item", {{"IsDir", false}}}, {"status", 200}});
+                }
             }
             response.set_content(nlohmann::json{{"results", results}}.dump(),
                                  "application/json");
@@ -1723,6 +1757,29 @@ TEST(RcloneStorageTest, PresenceBatchPartitioningAtExactBoundaryAndAbove) {
         EXPECT_EQ(captured_requests.size(), 2U);
         EXPECT_EQ(captured_requests[0].at("inputs").size(), 128U);
         EXPECT_EQ(captured_requests[1].at("inputs").size(), 1U);
+        captured_requests.clear();
+    }
+
+    // 3. With list_prefixes + >128 presence_identifiers: list runs first,
+    // then presence checks are chunked at 128
+    std::vector<std::string> ids_130;
+    ids_130.reserve(130);
+    for (int i = 0; i < 130; ++i) {
+        ids_130.push_back("content/id_" + std::to_string(i));
+    }
+    auto mixed =
+        operations.control_read_batch(&state,
+                                      {.list_prefixes = {"history/writers"},
+                                       .presence_identifiers = ids_130});
+    ASSERT_TRUE(mixed.has_value());
+    EXPECT_EQ(mixed->listings.size(), 1U);
+    EXPECT_EQ(mixed->presences.size(), 130U);
+    {
+        std::lock_guard lock(requests_mutex);
+        ASSERT_EQ(captured_requests.size(), 3U);
+        EXPECT_EQ(captured_requests[0].at("inputs").size(), 1U);
+        EXPECT_EQ(captured_requests[1].at("inputs").size(), 128U);
+        EXPECT_EQ(captured_requests[2].at("inputs").size(), 2U);
     }
 
     stop_rc_server(remote);

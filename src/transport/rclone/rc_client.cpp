@@ -49,10 +49,7 @@ std::chrono::milliseconds artificial_latency() noexcept {
     return value;
 }
 
-enum class RcMethod {
-    CorePid,
-    CoreQuit,
-};
+using detail::make_error;
 
 std::expected<std::string, Error>
 post_rc_impl(State& state,
@@ -62,12 +59,6 @@ post_rc_impl(State& state,
              std::chrono::milliseconds read_timeout,
              int attempt,
              int attempts);
-
-Error make_error(ErrorCode code, std::string message, int native_code = 0) {
-    return Error{.code = code,
-                 .message = std::move(message),
-                 .native_code = native_code};
-}
 
 Error with_request_context(const State& state,
                            Error error,
@@ -86,16 +77,6 @@ Error with_request_context(const State& state,
         platform::path::to_utf8(state.configuration.executable),
         error.message);
     return error;
-}
-
-std::string_view endpoint(RcMethod method) noexcept {
-    switch (method) {
-        case RcMethod::CorePid:
-            return "core/pid";
-        case RcMethod::CoreQuit:
-            return "core/quit";
-    }
-    return {};
 }
 
 bool drain_finished(const State& state) {
@@ -211,38 +192,19 @@ bool transient_read_failure(const Error& error) noexcept {
 }
 
 std::expected<void, Error> validate_rc_handshake(State& state, int child_pid) {
-    const auto response = post_rc(state,
-                                  endpoint(RcMethod::CorePid),
-                                  "{}",
-                                  maximum_response_size,
-                                  default_read_timeout);
+    const auto response = post_rc(
+        state, "core/pid", "{}", maximum_response_size, default_read_timeout);
     if (!response) {
         return std::unexpected(response.error());
     }
     try {
         const auto json = nlohmann::json::parse(*response);
         if (!json.is_object() || !json.contains("pid") ||
-            (!json["pid"].is_number_integer() &&
-             !json["pid"].is_number_unsigned())) {
+            !json["pid"].is_number_integer() || json["pid"] <= 0) {
             return std::unexpected(make_error(ErrorCode::ProtocolFailure,
                                               "invalid core/pid response"));
         }
-        std::uint64_t remote_pid = 0;
-        if (json["pid"].is_number_integer()) {
-            const auto signed_pid = json["pid"].get<std::int64_t>();
-            if (signed_pid <= 0) {
-                return std::unexpected(make_error(ErrorCode::ProtocolFailure,
-                                                  "invalid core/pid response"));
-            }
-            remote_pid = static_cast<std::uint64_t>(signed_pid);
-        } else {
-            remote_pid = json["pid"].get<std::uint64_t>();
-            if (remote_pid == 0) {
-                return std::unexpected(make_error(ErrorCode::ProtocolFailure,
-                                                  "invalid core/pid response"));
-            }
-        }
-        if (remote_pid != static_cast<std::uint64_t>(child_pid)) {
+        if (json["pid"] != child_pid) {
             return std::unexpected(
                 make_error(ErrorCode::ProtocolFailure,
                            "RC PID does not match started process"));
@@ -306,24 +268,22 @@ post_rc_read_only(State& state,
     const auto expires_at = std::chrono::steady_clock::now() + deadline;
     Error last_error;
     for (int attempt = 0; attempt < maximum_read_attempts; ++attempt) {
+        const auto contextualize = [&](Error err) {
+            return with_request_context(state,
+                                        std::move(err),
+                                        endpoint,
+                                        started,
+                                        attempt + 1,
+                                        maximum_read_attempts);
+        };
         if (platform::cancellation::requested()) {
-            return std::unexpected(with_request_context(
-                state,
-                make_error(ErrorCode::Cancelled, "operation cancelled by user"),
-                endpoint,
-                started,
-                attempt + 1,
-                maximum_read_attempts));
+            return std::unexpected(contextualize(make_error(
+                ErrorCode::Cancelled, "operation cancelled by user")));
         }
         const auto now = std::chrono::steady_clock::now();
         if (now >= expires_at) {
-            return std::unexpected(with_request_context(
-                state,
-                make_error(ErrorCode::Timeout, "RC read deadline exceeded"),
-                endpoint,
-                started,
-                attempt + 1,
-                maximum_read_attempts));
+            return std::unexpected(contextualize(
+                make_error(ErrorCode::Timeout, "RC read deadline exceeded")));
         }
         const auto remaining =
             std::max(std::chrono::milliseconds{1},
@@ -337,13 +297,7 @@ post_rc_read_only(State& state,
                                    attempt + 1,
                                    maximum_read_attempts);
         if (!result) {
-            result =
-                std::unexpected(with_request_context(state,
-                                                     std::move(result.error()),
-                                                     endpoint,
-                                                     started,
-                                                     attempt + 1,
-                                                     maximum_read_attempts));
+            result = std::unexpected(contextualize(std::move(result.error())));
         }
         if (result || !transient_read_failure(result.error())) {
             return result;
@@ -354,13 +308,8 @@ post_rc_read_only(State& state,
         }
         const auto retry_at = std::chrono::steady_clock::now();
         if (retry_at + read_retry_delay >= expires_at) {
-            return std::unexpected(with_request_context(
-                state,
-                make_error(ErrorCode::Timeout, "RC read deadline exceeded"),
-                endpoint,
-                started,
-                attempt + 1,
-                maximum_read_attempts));
+            return std::unexpected(contextualize(
+                make_error(ErrorCode::Timeout, "RC read deadline exceeded")));
         }
         std::this_thread::sleep_for(read_retry_delay);
     }
@@ -384,7 +333,7 @@ bool request_core_quit_best_effort(State& state) noexcept {
     bool acknowledged = false;
     try {
         acknowledged = post_rc(state,
-                               endpoint(RcMethod::CoreQuit),
+                               "core/quit",
                                "{}",
                                maximum_response_size,
                                default_read_timeout)
