@@ -138,24 +138,8 @@ std::filesystem::path executable_name(std::filesystem::path value) {
 }
 
 std::filesystem::path::string_type executable_search_path() {
-#if defined(_WIN32)
-    std::wstring result;
-    auto required = GetEnvironmentVariableW(L"PATH", nullptr, 0);
-    while (required != 0) {
-        result.resize(required);
-        const auto length =
-            GetEnvironmentVariableW(L"PATH", result.data(), required);
-        if (length < required) {
-            result.resize(length);
-            return result;
-        }
-        required = length;
-    }
-    return {};
-#else
-    const char* value = std::getenv("PATH");
-    return value != nullptr ? value : "";
-#endif
+    auto value = platform::path::environment_value("PATH");
+    return value ? value->native() : std::filesystem::path::string_type{};
 }
 
 ChildEnvironment controlled_environment(const State& state) {
@@ -712,3 +696,19 @@ void destroy_state(void* context) noexcept {
 }
 
 } // namespace kasumi::transport::rclone_detail
+
+namespace kasumi::transport::detail {
+
+std::expected<Transport, Error>
+open_rclone_backend(RcloneConfiguration configuration) {
+    auto state = rclone_detail::start_state(std::move(configuration));
+    if (!state) {
+        return std::unexpected(state.error());
+    }
+    return Transport{
+        .state = TransportStateHandle{*state, rclone_detail::destroy_state},
+        .storage = rclone_detail::make_storage_operations(),
+    };
+}
+
+} // namespace kasumi::transport::detail

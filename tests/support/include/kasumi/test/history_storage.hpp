@@ -294,17 +294,10 @@ struct FakeState {
     std::size_t reveal_on_list_count = 0;
     std::size_t get_count = 0;
     std::size_t get_batch_count = 0;
-    std::size_t copy_count = 0;
-    std::size_t copy_batch_count = 0;
-    std::size_t copy_batch_item_count = 0;
-    std::size_t copy_batch_concurrency = 0;
     std::size_t presence_count = 0;
     std::size_t remove_count = 0;
     std::size_t put_count = 0;
     std::size_t put_batch_count = 0;
-    std::size_t put_files_batch_count = 0;
-    std::size_t put_files_batch_item_count = 0;
-    std::size_t put_files_batch_concurrency = 0;
     std::size_t remove_batch_count = 0;
     std::size_t remove_batch_item_count = 0;
     std::size_t remove_batch_concurrency = 0;
@@ -317,19 +310,12 @@ struct FakeState {
     std::size_t epoch_get_count = 0;
     std::size_t orphan_payload_get_count = 0;
     std::size_t orphan_payload_get_bytes = 0;
-    std::size_t native_copy_bytes = 0;
     std::size_t physical_hash_count = 0;
     std::size_t physical_hash_batch_count = 0;
     std::size_t barrier_verification_count = 0;
     std::map<std::string, std::string> physical_hashes;
     bool physical_hash_supported = false;
     bool physical_hash_mismatch = false;
-    bool copy_supported = false;
-    bool copy_batch_supported = false;
-    std::optional<kasumi::transport::ErrorCode> copy_batch_failure;
-    std::size_t copy_batch_fail_after_items = 0;
-    bool copy_destination_mismatch = false;
-    std::optional<kasumi::transport::ErrorCode> copy_failure;
     std::string physical_hash_mismatch_identifier;
     std::string physical_hash_unsupported_identifier;
     std::string physical_hash_failure_identifier;
@@ -347,9 +333,6 @@ struct FakeState {
     bool fail_commit_put = false;
     bool persist_commit_on_put_failure = false;
 
-    bool put_files_batch_supported = false;
-    std::optional<kasumi::transport::ErrorCode> put_files_batch_failure;
-    std::size_t put_files_batch_fail_after_items = 0;
     bool remove_batch_supported = false;
     std::optional<kasumi::transport::ErrorCode> remove_batch_failure;
     std::size_t remove_batch_fail_after_items = 0;
@@ -382,7 +365,6 @@ struct FakeState {
         kasumi::transport::ErrorCode::Io;
     std::string remove_then_fail_identifier;
     int remove_failure_native_code = 0;
-    std::optional<kasumi::transport::ErrorCode> copy_failure_after_effect;
     std::string corrupt_get_identifier;
     bool directory_destination = false;
     bool reverse_listing = false;
@@ -422,15 +404,10 @@ FakeState* fake_state(void* context) {
 [[maybe_unused]] void reset_fake_traffic(FakeState& state) {
     state.list_count = state.full_list_count = state.prefix_list_count = 0;
     state.full_list_identifier_count = 0;
-    state.get_count = state.get_batch_count = state.copy_count = 0;
-    state.copy_batch_count = state.copy_batch_item_count = 0;
-    state.copy_batch_concurrency = 0;
+    state.get_count = state.get_batch_count = 0;
     state.presence_count = state.remove_count = state.put_count = 0;
     state.source_remove_count = 0;
     state.put_batch_count = state.commit_put_count = state.marker_put_count = 0;
-    state.put_files_batch_count = 0;
-    state.put_files_batch_item_count = 0;
-    state.put_files_batch_concurrency = 0;
     state.remove_batch_count = 0;
     state.remove_batch_item_count = 0;
     state.remove_batch_concurrency = 0;
@@ -439,7 +416,6 @@ FakeState* fake_state(void* context) {
     state.commit_get_count = state.marker_get_count = state.epoch_get_count = 0;
     state.orphan_payload_get_count = 0;
     state.orphan_payload_get_bytes = 0;
-    state.native_copy_bytes = 0;
     state.physical_hash_count = state.physical_hash_batch_count = 0;
     state.barrier_verification_count = 0;
     state.control_read_batch_count = 0;
@@ -538,88 +514,6 @@ kasumi::transport::Result fake_put(void* context,
     return {};
 }
 
-kasumi::transport::Result fake_copy(void* context,
-                                    std::string_view source_identifier,
-                                    std::string_view destination_identifier) {
-    auto* state = fake_state(context);
-    ++state->copy_count;
-    if (!state->copy_supported) {
-        return std::unexpected(kasumi::transport::Error{
-            .code = kasumi::transport::ErrorCode::Unsupported,
-            .message = "native copy unavailable"});
-    }
-    if (state->copy_failure) {
-        return std::unexpected(kasumi::transport::Error{
-            .code = *state->copy_failure, .message = "injected copy failure"});
-    }
-    const auto found = state->objects.find(std::string{source_identifier});
-    if (found == state->objects.end()) {
-        return std::unexpected(kasumi::transport::Error{
-            .code = kasumi::transport::ErrorCode::ObjectNotFound,
-            .message = "source object missing"});
-    }
-    state->objects[std::string{destination_identifier}] = found->second;
-    state->native_copy_bytes += found->second.size();
-    const auto hash =
-        state->physical_hashes.find(std::string{source_identifier});
-    if (hash == state->physical_hashes.end()) {
-        state->physical_hashes.erase(std::string{destination_identifier});
-    } else {
-        state->physical_hashes[std::string{destination_identifier}] =
-            hash->second;
-    }
-    if (state->copy_destination_mismatch) {
-        state->physical_hash_mismatch_identifier =
-            std::string{destination_identifier};
-    }
-    state->gc_events.emplace_back("copy:" + std::string{source_identifier} +
-                                  "|" + std::string{destination_identifier});
-    if (state->copy_failure_after_effect) {
-        const auto failure = *state->copy_failure_after_effect;
-        state->copy_failure_after_effect.reset();
-        return std::unexpected(kasumi::transport::Error{
-            .code = failure,
-            .message = "injected copy error after destination effect"});
-    }
-    return {};
-}
-
-kasumi::transport::Result
-fake_copy_batch(void* context, const kasumi::transport::CopyBatch& batch) {
-    auto* state = fake_state(context);
-    ++state->copy_batch_count;
-    state->copy_batch_item_count += batch.items.size();
-    state->copy_batch_concurrency = batch.concurrency;
-    state->gc_events.emplace_back("copy_batch:" +
-                                  std::to_string(batch.items.size()));
-    if (!state->copy_batch_supported) {
-        return std::unexpected(kasumi::transport::Error{
-            .code = kasumi::transport::ErrorCode::Unsupported,
-            .message = "copy batch unavailable"});
-    }
-    for (std::size_t index = 0; index < batch.items.size(); ++index) {
-        const auto& item = batch.items[index];
-        auto copied = fake_copy(
-            context, item.source_identifier, item.destination_identifier);
-        if (!copied) {
-            return copied;
-        }
-        if (state->copy_batch_failure &&
-            state->copy_batch_fail_after_items != 0 &&
-            index + 1 == state->copy_batch_fail_after_items) {
-            return std::unexpected(kasumi::transport::Error{
-                .code = *state->copy_batch_failure,
-                .message = "injected copy batch failure after remote effect"});
-        }
-    }
-    if (state->copy_batch_failure) {
-        return std::unexpected(
-            kasumi::transport::Error{.code = *state->copy_batch_failure,
-                                     .message = "injected copy batch failure"});
-    }
-    return {};
-}
-
 inline kasumi::transport::Result
 fake_put_batch(void* context, const kasumi::transport::PutBatch& batch) {
     auto* state = fake_state(context);
@@ -630,44 +524,6 @@ fake_put_batch(void* context, const kasumi::transport::PutBatch& batch) {
         if (!result) {
             return result;
         }
-    }
-    return {};
-}
-
-inline kasumi::transport::Result
-fake_put_files_batch(void* context,
-                     const kasumi::transport::PutFilesBatch& batch) {
-    auto* state = fake_state(context);
-    ++state->put_files_batch_count;
-    state->put_files_batch_item_count += batch.items.size();
-    state->put_files_batch_concurrency = batch.concurrency;
-    state->gc_events.emplace_back("put_files_batch:" +
-                                  std::to_string(batch.items.size()));
-    if (!state->put_files_batch_supported) {
-        return std::unexpected(kasumi::transport::Error{
-            .code = kasumi::transport::ErrorCode::Unsupported,
-            .message = "explicit put files batch unavailable"});
-    }
-    for (std::size_t index = 0; index < batch.items.size(); ++index) {
-        auto result = fake_put(context,
-                               batch.items[index].source,
-                               batch.items[index].destination_identifier);
-        if (!result) {
-            return result;
-        }
-        if (state->put_files_batch_failure &&
-            state->put_files_batch_fail_after_items != 0 &&
-            index + 1 == state->put_files_batch_fail_after_items) {
-            return std::unexpected(kasumi::transport::Error{
-                .code = *state->put_files_batch_failure,
-                .message =
-                    "injected put files batch failure after remote effect"});
-        }
-    }
-    if (state->put_files_batch_failure) {
-        return std::unexpected(kasumi::transport::Error{
-            .code = *state->put_files_batch_failure,
-            .message = "injected put files batch failure"});
     }
     return {};
 }
@@ -1269,10 +1125,7 @@ make_fake_transport(FakeState*& state) {
             kasumi::transport::StorageOperations{
                 .initialize = fake_initialize,
                 .put = fake_put,
-                .put_files_batch = fake_put_files_batch,
                 .get = fake_get,
-                .copy = fake_copy,
-                .copy_batch = fake_copy_batch,
                 .presence = fake_presence,
                 .list = fake_list,
                 .list_prefix = fake_list_prefix,

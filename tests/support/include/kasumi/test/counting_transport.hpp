@@ -90,24 +90,6 @@ counter_put_batch(void* context, const kasumi::transport::PutBatch& batch) {
 }
 
 inline kasumi::transport::Result
-counter_put_files_batch(void* context,
-                        const kasumi::transport::PutFilesBatch& batch) {
-    auto* state = static_cast<ContentCounterState*>(context);
-    auto result = kasumi::transport::put_files_batch(*state->base, batch);
-    if (result ||
-        result.error().code != kasumi::transport::ErrorCode::Unsupported) {
-        std::lock_guard lock(state->mutex);
-        for (const auto& item : batch.items) {
-            if (is_content_identifier(item.destination_identifier)) {
-                ++state->content_puts;
-                state->put_identifiers.push_back(item.destination_identifier);
-            }
-        }
-    }
-    return result;
-}
-
-inline kasumi::transport::Result
 counter_get(void* context,
             std::string_view identifier,
             const std::filesystem::path& destination) {
@@ -133,41 +115,6 @@ counter_get_batch(void* context, const kasumi::transport::GetBatch& batch) {
         }
     }
     return kasumi::transport::get_batch(*state->base, batch);
-}
-
-inline kasumi::transport::Result
-counter_copy(void* context,
-             std::string_view source_identifier,
-             std::string_view destination_identifier) {
-    auto* state = static_cast<ContentCounterState*>(context);
-    auto result = kasumi::transport::copy(
-        *state->base, source_identifier, destination_identifier);
-    if (result ||
-        result.error().code != kasumi::transport::ErrorCode::Unsupported) {
-        if (is_content_identifier(source_identifier) ||
-            is_content_identifier(destination_identifier)) {
-            std::lock_guard lock(state->mutex);
-            ++state->content_copies;
-        }
-    }
-    return result;
-}
-
-inline kasumi::transport::Result
-counter_copy_batch(void* context, const kasumi::transport::CopyBatch& batch) {
-    auto* state = static_cast<ContentCounterState*>(context);
-    auto result = kasumi::transport::copy_batch(*state->base, batch);
-    if (result ||
-        result.error().code != kasumi::transport::ErrorCode::Unsupported) {
-        std::lock_guard lock(state->mutex);
-        for (const auto& item : batch.items) {
-            if (is_content_identifier(item.source_identifier) ||
-                is_content_identifier(item.destination_identifier)) {
-                ++state->content_copies;
-            }
-        }
-    }
-    return result;
 }
 
 inline kasumi::transport::PresenceResult
@@ -232,11 +179,8 @@ make_counting_transport(ContentCounterState& state) {
                 .initialize = counter_initialize,
                 .put = counter_put,
                 .put_batch = counter_put_batch,
-                .put_files_batch = counter_put_files_batch,
                 .get = counter_get,
                 .get_batch = counter_get_batch,
-                .copy = counter_copy,
-                .copy_batch = counter_copy_batch,
                 .presence = counter_presence,
                 .list = counter_list,
                 .list_prefix = counter_list_prefix,

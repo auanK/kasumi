@@ -2951,24 +2951,11 @@ TEST(DirectoryLocalMoveTest, ContentCounterConcurrentCallbacksAreThreadSafe) {
                 -> kasumi::transport::Result {
                 return {};
             },
-            .put_files_batch = [](void*,
-                                  const kasumi::transport::PutFilesBatch&)
-                -> kasumi::transport::Result {
-                return {};
-            },
             .get = [](void*, std::string_view, const std::filesystem::path&)
                 -> kasumi::transport::Result {
                 return {};
             },
             .get_batch = [](void*, const kasumi::transport::GetBatch&)
-                -> kasumi::transport::Result {
-                return {};
-            },
-            .copy = [](void*, std::string_view, std::string_view)
-                -> kasumi::transport::Result {
-                return {};
-            },
-            .copy_batch = [](void*, const kasumi::transport::CopyBatch&)
                 -> kasumi::transport::Result {
                 return {};
             },

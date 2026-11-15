@@ -168,9 +168,7 @@ target_link_libraries(
 add_library(kasumi_transport STATIC
     src/transport/types.cpp
     src/transport/transport.cpp
-    src/transport/local.cpp
     src/transport/local/storage.cpp
-    src/transport/rclone.cpp
     src/transport/rclone/storage.cpp
     src/transport/rclone/session.cpp
     src/transport/rclone/rc_client.cpp

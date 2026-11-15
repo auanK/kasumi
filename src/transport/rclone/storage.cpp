@@ -256,75 +256,6 @@ parse_job_batch_status(const nlohmann::json& status_json,
                                           " job/batch result status"));
 }
 
-Result parse_copy_batch_response(const nlohmann::json& response,
-                                 const nlohmann::json& inputs) {
-    if (!response.is_object() || response.contains("error") ||
-        !response.contains("results") || !response.at("results").is_array() ||
-        response.at("results").size() != inputs.size()) {
-        return std::unexpected(
-            make_error(ErrorCode::ProtocolFailure,
-                       "invalid or incomplete copy job/batch response"));
-    }
-
-    bool failed = false;
-    for (std::size_t index = 0; index < inputs.size(); ++index) {
-        const auto& result = response.at("results").at(index);
-        const auto& input = inputs.at(index);
-        if (!result.is_object()) {
-            return std::unexpected(
-                make_error(ErrorCode::ProtocolFailure,
-                           "invalid copy job/batch subresult"));
-        }
-        if (result.contains("path") &&
-            (!result.at("path").is_string() ||
-             result.at("path") != input.at("_path"))) {
-            return std::unexpected(
-                make_error(ErrorCode::ProtocolFailure,
-                           "copy job/batch result path does not match input"));
-        }
-        if (result.contains("input")) {
-            auto parameters = input;
-            parameters.erase("_path");
-            const auto& echo = result.at("input");
-            if ((!echo.is_object() || echo != parameters) && echo != input) {
-                return std::unexpected(make_error(
-                    ErrorCode::ProtocolFailure,
-                    "copy job/batch result input does not match request"));
-            }
-        }
-
-        bool item_failed = false;
-        if (result.contains("status")) {
-            auto parsed_status =
-                parse_job_batch_status(result.at("status"), "copy");
-            if (!parsed_status) {
-                return std::unexpected(parsed_status.error());
-            }
-            item_failed = *parsed_status < 200 || *parsed_status >= 300;
-        }
-        if (result.contains("error")) {
-            if (!result.at("error").is_string() ||
-                result.at("error").get_ref<const std::string&>().empty() ||
-                !result.contains("status")) {
-                return std::unexpected(
-                    make_error(ErrorCode::ProtocolFailure,
-                               "invalid copy job/batch error result"));
-            }
-            item_failed = true;
-        }
-        if (item_failed) {
-            failed = true;
-        }
-    }
-
-    if (failed) {
-        return std::unexpected(
-            make_error(ErrorCode::ProtocolFailure,
-                       "one or more copy job/batch subcommands failed"));
-    }
-    return {};
-}
-
 std::expected<std::filesystem::path, Error>
 absolute_path(const std::filesystem::path& path) {
     std::error_code error;
@@ -485,8 +416,13 @@ Result rclone_put(void* context,
                            identifier);
 }
 
-std::expected<nlohmann::json, Error>
-build_include_rules(std::span<const std::string> identifiers) {
+Result sync_copy_batch(State& state,
+                       std::string_view src_fs,
+                       std::string_view dst_fs,
+                       std::span<const std::string> identifiers,
+                       std::size_t max_parallel_transfers,
+                       nlohmann::json base_config,
+                       bool read_only) {
     nlohmann::json include_rules = nlohmann::json::array();
     for (const auto& identifier : identifiers) {
         // Reject rclone filter glob/brace metacharacters so an identifier
@@ -497,7 +433,28 @@ build_include_rules(std::span<const std::string> identifiers) {
         }
         include_rules.push_back("/" + identifier);
     }
-    return include_rules;
+    nlohmann::json payload = {
+        {"srcFs", std::string{src_fs}},
+        {"dstFs", std::string{dst_fs}},
+        {"createEmptySrcDirs", false},
+        {"_filter", {{"IncludeRule", include_rules}}},
+    };
+    if (max_parallel_transfers > 0) {
+        base_config["Transfers"] = max_parallel_transfers;
+    }
+    if (!base_config.empty()) {
+        payload["_config"] = std::move(base_config);
+    }
+    const auto copied = request_json(state,
+                                     "sync/copy",
+                                     payload,
+                                     maximum_response_size,
+                                     transfer_timeout,
+                                     read_only);
+    if (!copied) {
+        return std::unexpected(copied.error());
+    }
+    return {};
 }
 
 Result rclone_put_batch(void* context, const PutBatch& batch) {
@@ -505,96 +462,20 @@ Result rclone_put_batch(void* context, const PutBatch& batch) {
     if (state == nullptr) {
         return std::unexpected(invalid_context_error());
     }
-
     if (batch.identifiers.empty()) {
         return {};
     }
-
-    const auto include_rules = build_include_rules(batch.identifiers);
-    if (!include_rules) {
-        return std::unexpected(include_rules.error());
-    }
-
     const auto absolute_source = absolute_path(batch.source_root);
     if (!absolute_source) {
         return std::unexpected(absolute_source.error());
     }
-    const auto source_path = platform::path::to_utf8(*absolute_source);
-
-    nlohmann::json payload = {
-        {"srcFs", source_path},
-        {"dstFs", rooted_remote_fs(*state)},
-        {"createEmptySrcDirs", false},
-        {"_filter", {{"IncludeRule", *include_rules}}},
-    };
-    nlohmann::json config = {{"NoTraverse", true}, {"NoUpdateModTime", true}};
-    if (batch.max_parallel_transfers > 0) {
-        config["Transfers"] = batch.max_parallel_transfers;
-    }
-    payload["_config"] = std::move(config);
-
-    const auto copied = request_json(
-        *state, "sync/copy", payload, maximum_response_size, transfer_timeout);
-
-    if (!copied) {
-        return std::unexpected(copied.error());
-    }
-    return {};
-}
-
-Result execute_copy_batch(State& state,
-                          const nlohmann::json& inputs,
-                          std::size_t concurrency) {
-    const auto response = run_job_batch(state,
-                                        inputs,
-                                        concurrency,
-                                        maximum_response_size,
-                                        transfer_timeout,
-                                        false);
-    if (!response) {
-        return std::unexpected(response.error());
-    }
-    return parse_copy_batch_response(*response, inputs);
-}
-
-Result rclone_put_files_batch(void* context, const PutFilesBatch& batch) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
-    }
-    if (batch.items.empty()) {
-        return {};
-    }
-    if (batch.concurrency == 0) {
-        return std::unexpected(
-            make_error(ErrorCode::InvalidContext,
-                       "put files batch concurrency must be positive"));
-    }
-
-    nlohmann::json inputs = nlohmann::json::array();
-    std::unordered_set<std::string> destinations;
-    for (const auto& item : batch.items) {
-        if (!valid_identifier(item.destination_identifier) ||
-            !destinations.insert(item.destination_identifier).second) {
-            return std::unexpected(invalid_identifier_error());
-        }
-        const auto local = split_local_path(item.source, "invalid source file");
-        if (!local) {
-            return std::unexpected(local.error());
-        }
-        if (auto valid = require_regular_source(local->absolute); !valid) {
-            return valid;
-        }
-        inputs.push_back(nlohmann::json{
-            {"_path", "operations/copyfile"},
-            {"srcFs", local->parent},
-            {"srcRemote", local->name},
-            {"dstFs", rooted_remote_fs(*state)},
-            {"dstRemote", item.destination_identifier},
-        });
-    }
-
-    return execute_copy_batch(*state, inputs, batch.concurrency);
+    return sync_copy_batch(*state,
+                           platform::path::to_utf8(*absolute_source),
+                           rooted_remote_fs(*state),
+                           batch.identifiers,
+                           batch.max_parallel_transfers,
+                           {{"NoTraverse", true}, {"NoUpdateModTime", true}},
+                           false);
 }
 
 Result rclone_get(void* context,
@@ -654,60 +535,6 @@ Result rclone_get(void* context,
     return {};
 }
 
-Result rclone_copy(void* context,
-                   std::string_view source_identifier,
-                   std::string_view destination_identifier) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
-    }
-    if (!valid_identifier(source_identifier) ||
-        !valid_identifier(destination_identifier) ||
-        source_identifier == destination_identifier) {
-        return std::unexpected(invalid_identifier_error());
-    }
-
-    return copyfile_object(*state,
-                           rooted_remote_fs(*state),
-                           source_identifier,
-                           rooted_remote_fs(*state),
-                           destination_identifier,
-                           "remote source does not exist");
-}
-
-Result rclone_copy_batch(void* context, const CopyBatch& batch) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
-    }
-    if (batch.items.empty()) {
-        return {};
-    }
-    if (batch.concurrency == 0) {
-        return std::unexpected(
-            make_error(ErrorCode::InvalidContext,
-                       "copy batch concurrency must be positive"));
-    }
-
-    nlohmann::json inputs = nlohmann::json::array();
-    for (const auto& item : batch.items) {
-        if (!valid_identifier(item.source_identifier) ||
-            !valid_identifier(item.destination_identifier) ||
-            item.source_identifier == item.destination_identifier) {
-            return std::unexpected(invalid_identifier_error());
-        }
-        inputs.push_back(nlohmann::json{
-            {"_path", "operations/copyfile"},
-            {"srcFs", rooted_remote_fs(*state)},
-            {"srcRemote", item.source_identifier},
-            {"dstFs", rooted_remote_fs(*state)},
-            {"dstRemote", item.destination_identifier},
-        });
-    }
-
-    return execute_copy_batch(*state, inputs, batch.concurrency);
-}
-
 Result rclone_get_batch(void* context, const GetBatch& batch) {
     auto* state = ready_state(context);
     if (state == nullptr) {
@@ -720,38 +547,20 @@ Result rclone_get_batch(void* context, const GetBatch& batch) {
     if (batch.identifiers.empty()) {
         return {};
     }
-
     const auto absolute_destination = absolute_path(batch.destination_root);
     if (!absolute_destination) {
         return std::unexpected(absolute_destination.error());
     }
-
-    const auto include_rules = build_include_rules(batch.identifiers);
-    if (!include_rules) {
-        return std::unexpected(include_rules.error());
-    }
-
-    nlohmann::json payload = {
-        {"srcFs",
-         batch.source_prefix.empty()
-             ? rooted_remote_fs(*state)
-             : join_remote_path(rooted_remote_fs(*state), batch.source_prefix)},
-        {"dstFs", platform::path::to_utf8(*absolute_destination)},
-        {"createEmptySrcDirs", false},
-        {"_filter", {{"IncludeRule", *include_rules}}},
-    };
-    if (batch.max_parallel_transfers > 0) {
-        payload["_config"] = {
-            {"Transfers", batch.max_parallel_transfers},
-        };
-    }
-
-    const auto copied = request_read_json(
-        *state, "sync/copy", payload, maximum_response_size, transfer_timeout);
-    if (!copied) {
-        return std::unexpected(copied.error());
-    }
-    return {};
+    return sync_copy_batch(
+        *state,
+        batch.source_prefix.empty()
+            ? rooted_remote_fs(*state)
+            : join_remote_path(rooted_remote_fs(*state), batch.source_prefix),
+        platform::path::to_utf8(*absolute_destination),
+        batch.identifiers,
+        batch.max_parallel_transfers,
+        nlohmann::json::object(),
+        true);
 }
 
 ListingResult parse_list_response_json(const nlohmann::json& response,
@@ -1526,11 +1335,8 @@ StorageOperations make_storage_operations() noexcept {
         .initialize = rclone_initialize,
         .put = rclone_put,
         .put_batch = rclone_put_batch,
-        .put_files_batch = rclone_put_files_batch,
         .get = rclone_get,
         .get_batch = rclone_get_batch,
-        .copy = rclone_copy,
-        .copy_batch = rclone_copy_batch,
         .presence = rclone_presence,
         .list = rclone_list,
         .list_prefix = rclone_list_prefix,
