@@ -71,18 +71,18 @@ The protected set includes:
 - valid Epoch objects and retained orphan Epoch objects;
 - all protocol/control objects by construction.
 
-Before the first DELETE the collector verifies:
+Before the first DELETE the collector enforces:
 
 ```text
 DELETE_SET ∩ PROTECTED_SET = ∅
 ```
 
-It also verifies that candidates are sorted and unique, that every candidate is
-a classified Content or valid reachable Commit variant, that no control object
-is a candidate, that every reachable Commit retains at least one valid variant
-outside the deletion set, and that every HEAD-selected variant is outside the
-deletion set. Removing all variants of a Commit with multiple individually
-redundant variants is rejected before mutation.
+During candidate selection, the collector constructs a deterministically ordered,
+deduplicated deletion list (valid redundant reachable Commit variants followed
+by orphan Content identifiers) while excluding every identifier in
+`PROTECTED_SET` (which retains all HEAD-selected variants and at least one
+valid variant per unmarked reachable Commit) and failing closed if any
+candidate is empty, is a control object, or intersects `PROTECTED_SET`.
 
 Unreachable Commit variants remain out of scope: the collector does not delete
 whole unreachable Commits. Unknown, invalid, or ambiguously classified objects

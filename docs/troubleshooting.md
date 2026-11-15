@@ -448,13 +448,10 @@ The table below clarifies the purpose and operational behavior of Kasumi's diagn
 | `kasumi remote contents <profile> --audit` | Audit all physical payloads | Yes (all present) | No | None | Point-in-time observation |
 | `kasumi remote summary <profile>` | Overview of vault state | No | No | None | Point-in-time observation |
 
-The exclusive lock prevents another normal application command using the same profile on this machine from running concurrently. Remote inspection does not take that lock; it can observe changing remote state. Fsck and GC run pending Sync transaction recovery first, which may change local files or complete remote publication. Manual writer removal takes the local lock but does not run recovery or acquire a remote barrier; the operator must verify that the associated process is inactive. Fsck's audit itself does not intentionally modify remote objects. GC modifies remote objects only after its barrier, probe, single authenticated observation, and global plan validation pass.
+The exclusive lock prevents another normal application command using the same profile on this machine from running concurrently. Remote inspection does not take that lock; it can observe changing remote state. Fsck and GC run pending Sync transaction recovery first, which may change local files or complete remote publication. Manual writer or barrier removal takes the local lock but does not run recovery or acquire a remote barrier; the operator must verify that the associated process is inactive. Fsck's audit itself does not intentionally modify remote objects. GC modifies remote objects only after its barrier, probe, single authenticated observation, and global plan validation pass.
 
 Fsck counts distinct payloads referenced by the effective current tree; physical
 content inspection can include retained historical versions. Neither count is
-the total number of protocol objects. `remote summary` missing/orphan counters
-can also reflect the initial observation before the private history cache adds
-older Commits; use `remote contents`, `remote health`, and `remote orphans` for
-their respective inventories. A cached head can display zero parents/time in
+the total number of protocol objects. A cached head can display zero parents/time in
 `remote heads` without being genesis; `remote commit <profile> <id>` inspects
 complete retained metadata. See [History Inspection](architecture/remote-history-inspection.md).
