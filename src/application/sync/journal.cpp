@@ -283,76 +283,51 @@ bool same_progress(const transaction::OperationProgress& a,
            a.previous_hash == b.previous_hash;
 }
 
-struct Delta {
+std::uint8_t compute_delta_flags(const transaction::Record& prev,
+                                 const transaction::Record& curr,
+                                 std::vector<std::uint32_t>& changed_progress) {
     std::uint8_t flags = 0;
-    transaction::Phase phase = transaction::Phase::Started;
-    std::vector<std::pair<std::uint32_t, transaction::OperationProgress>>
-        progress_changes;
-    std::string commit_id;
-    std::string ciphertext_id;
-    std::string marker_id;
-    std::vector<std::string> parent_ids;
-    std::string epoch_vault_id;
-    std::string epoch_id;
-    std::int64_t epoch_issued_at = 0;
-    std::uint32_t epoch_min_history_depth = 0;
-    std::uint32_t epoch_min_history_age_hours = 0;
-    std::vector<std::string> observed_pending_paths;
-    std::vector<std::string> pending_paths;
-};
-
-Delta compute_delta(const transaction::Record& prev,
-                    const transaction::Record& curr) {
-    Delta delta;
-    if (curr.phase != prev.phase) {
-        delta.flags |= HasPhase;
-        delta.phase = curr.phase;
-    }
-
+    if (curr.phase != prev.phase)
+        flags |= HasPhase;
     for (std::size_t i = 0;
          i < curr.progress.size() && i < prev.progress.size();
          ++i) {
-        if (!same_progress(curr.progress[i], prev.progress[i])) {
-            delta.progress_changes.emplace_back(static_cast<std::uint32_t>(i),
-                                                curr.progress[i]);
-        }
+        if (!same_progress(curr.progress[i], prev.progress[i]))
+            changed_progress.push_back(static_cast<std::uint32_t>(i));
     }
-    if (!delta.progress_changes.empty()) {
-        delta.flags |= HasProgress;
-    }
-
+    if (!changed_progress.empty())
+        flags |= HasProgress;
     if (curr.commit_id != prev.commit_id ||
         curr.ciphertext_id != prev.ciphertext_id ||
-        curr.marker_id != prev.marker_id ||
-        curr.parent_ids != prev.parent_ids) {
-        delta.flags |= HasPublication;
-        delta.commit_id = curr.commit_id;
-        delta.ciphertext_id = curr.ciphertext_id;
-        delta.marker_id = curr.marker_id;
-        delta.parent_ids = curr.parent_ids;
-    }
-
+        curr.marker_id != prev.marker_id || curr.parent_ids != prev.parent_ids)
+        flags |= HasPublication;
     if (curr.epoch_vault_id != prev.epoch_vault_id ||
         curr.epoch_id != prev.epoch_id ||
         curr.epoch_issued_at != prev.epoch_issued_at ||
         curr.epoch_min_history_depth != prev.epoch_min_history_depth ||
-        curr.epoch_min_history_age_hours != prev.epoch_min_history_age_hours) {
-        delta.flags |= HasEpoch;
-        delta.epoch_vault_id = curr.epoch_vault_id;
-        delta.epoch_id = curr.epoch_id;
-        delta.epoch_issued_at = curr.epoch_issued_at;
-        delta.epoch_min_history_depth = curr.epoch_min_history_depth;
-        delta.epoch_min_history_age_hours = curr.epoch_min_history_age_hours;
-    }
-
+        curr.epoch_min_history_age_hours != prev.epoch_min_history_age_hours)
+        flags |= HasEpoch;
     if (curr.observed_pending_paths != prev.observed_pending_paths ||
-        curr.pending_paths != prev.pending_paths) {
-        delta.flags |= HasPendingPaths;
-        delta.observed_pending_paths = curr.observed_pending_paths;
-        delta.pending_paths = curr.pending_paths;
-    }
+        curr.pending_paths != prev.pending_paths)
+        flags |= HasPendingPaths;
+    return flags;
+}
 
-    return delta;
+void assign_mutable_fields(transaction::Record& dst,
+                           const transaction::Record& src) {
+    dst.phase = src.phase;
+    dst.progress = src.progress;
+    dst.commit_id = src.commit_id;
+    dst.ciphertext_id = src.ciphertext_id;
+    dst.marker_id = src.marker_id;
+    dst.parent_ids = src.parent_ids;
+    dst.epoch_vault_id = src.epoch_vault_id;
+    dst.epoch_id = src.epoch_id;
+    dst.epoch_issued_at = src.epoch_issued_at;
+    dst.epoch_min_history_depth = src.epoch_min_history_depth;
+    dst.epoch_min_history_age_hours = src.epoch_min_history_age_hours;
+    dst.observed_pending_paths = src.observed_pending_paths;
+    dst.pending_paths = src.pending_paths;
 }
 
 std::expected<std::uint32_t, std::string>
@@ -381,17 +356,21 @@ validate_log_entry_header(std::span<const std::uint8_t> bytes,
     return payload_size;
 }
 
-std::vector<std::byte> encode_delta(const Delta& delta) {
+std::vector<std::byte>
+encode_delta(std::uint8_t flags,
+             const transaction::Record& record,
+             std::span<const std::uint32_t> changed_progress) {
     wire::Writer writer;
-    wire::write<std::uint8_t>(writer, delta.flags);
-    if (delta.flags & HasPhase) {
+    wire::write<std::uint8_t>(writer, flags);
+    if (flags & HasPhase) {
         wire::write<std::uint8_t>(writer,
-                                  static_cast<std::uint8_t>(delta.phase));
+                                  static_cast<std::uint8_t>(record.phase));
     }
-    if (delta.flags & HasProgress) {
+    if (flags & HasProgress) {
         wire::write<std::uint32_t>(
-            writer, static_cast<std::uint32_t>(delta.progress_changes.size()));
-        for (const auto& [idx, prog] : delta.progress_changes) {
+            writer, static_cast<std::uint32_t>(changed_progress.size()));
+        for (const auto idx : changed_progress) {
+            const auto& prog = record.progress[idx];
             wire::write<std::uint32_t>(writer, idx);
             wire::write<std::uint8_t>(writer,
                                       static_cast<std::uint8_t>(prog.state));
@@ -400,51 +379,24 @@ std::vector<std::byte> encode_delta(const Delta& delta) {
             wire::write_string(writer, prog.previous_hash);
         }
     }
-    if (delta.flags & HasPublication) {
-        wire::write_string(writer, delta.commit_id);
-        wire::write_string(writer, delta.ciphertext_id);
-        wire::write_string(writer, delta.marker_id);
-        wire::write_strings(writer, delta.parent_ids);
+    if (flags & HasPublication) {
+        wire::write_string(writer, record.commit_id);
+        wire::write_string(writer, record.ciphertext_id);
+        wire::write_string(writer, record.marker_id);
+        wire::write_strings(writer, record.parent_ids);
     }
-    if (delta.flags & HasEpoch) {
-        wire::write_string(writer, delta.epoch_vault_id);
-        wire::write_string(writer, delta.epoch_id);
-        wire::write<std::int64_t>(writer, delta.epoch_issued_at);
-        wire::write<std::uint32_t>(writer, delta.epoch_min_history_depth);
-        wire::write<std::uint32_t>(writer, delta.epoch_min_history_age_hours);
+    if (flags & HasEpoch) {
+        wire::write_string(writer, record.epoch_vault_id);
+        wire::write_string(writer, record.epoch_id);
+        wire::write<std::int64_t>(writer, record.epoch_issued_at);
+        wire::write<std::uint32_t>(writer, record.epoch_min_history_depth);
+        wire::write<std::uint32_t>(writer, record.epoch_min_history_age_hours);
     }
-    if (delta.flags & HasPendingPaths) {
-        wire::write_strings(writer, delta.observed_pending_paths);
-        wire::write_strings(writer, delta.pending_paths);
+    if (flags & HasPendingPaths) {
+        wire::write_strings(writer, record.observed_pending_paths);
+        wire::write_strings(writer, record.pending_paths);
     }
     return std::move(writer.buffer);
-}
-
-// Changes own their allocations before disk confirmation; commit only
-// moves/swaps.
-void apply_prepared_delta(transaction::Record& record, Delta& delta) noexcept {
-    if (delta.flags & HasPhase)
-        record.phase = delta.phase;
-    for (auto& [index, progress] : delta.progress_changes) {
-        record.progress[index] = std::move(progress);
-    }
-    if (delta.flags & HasPublication) {
-        record.commit_id.swap(delta.commit_id);
-        record.ciphertext_id.swap(delta.ciphertext_id);
-        record.marker_id.swap(delta.marker_id);
-        record.parent_ids.swap(delta.parent_ids);
-    }
-    if (delta.flags & HasEpoch) {
-        record.epoch_vault_id.swap(delta.epoch_vault_id);
-        record.epoch_id.swap(delta.epoch_id);
-        record.epoch_issued_at = delta.epoch_issued_at;
-        record.epoch_min_history_depth = delta.epoch_min_history_depth;
-        record.epoch_min_history_age_hours = delta.epoch_min_history_age_hours;
-    }
-    if (delta.flags & HasPendingPaths) {
-        record.observed_pending_paths.swap(delta.observed_pending_paths);
-        record.pending_paths.swap(delta.pending_paths);
-    }
 }
 
 std::expected<void, std::string> apply_delta(transaction::Record& record,
@@ -458,14 +410,12 @@ std::expected<void, std::string> apply_delta(transaction::Record& record,
     if (flags == 0 || (flags & ~std::uint8_t{0x1f}) != 0) {
         return std::unexpected("unknown or empty delta flags");
     }
-    Delta prepared;
-    prepared.flags = flags;
     if (flags & HasPhase) {
         auto ph = wire::read<std::uint8_t>(reader);
         if (!ph || !transaction::valid(static_cast<transaction::Phase>(*ph))) {
             return std::unexpected("invalid or truncated phase in delta");
         }
-        prepared.phase = static_cast<transaction::Phase>(*ph);
+        record.phase = static_cast<transaction::Phase>(*ph);
     }
     if (flags & HasProgress) {
         auto count = wire::read<std::uint32_t>(reader);
@@ -497,28 +447,28 @@ std::expected<void, std::string> apply_delta(transaction::Record& record,
             if (*slot != record.progress[*idx].backup_slot) {
                 return std::unexpected("delta changed immutable backup slot");
             }
-            prepared.progress_changes.emplace_back(
-                *idx,
-                transaction::OperationProgress{
-                    .previous_hash = std::move(*prev_h),
-                    .backup_slot = *slot,
-                    .state = static_cast<transaction::OperationState>(*st),
-                    .had_original = *had_orig == 1,
-                });
+            record.progress[*idx] = transaction::OperationProgress{
+                .previous_hash = std::move(*prev_h),
+                .backup_slot = *slot,
+                .state = static_cast<transaction::OperationState>(*st),
+                .had_original = *had_orig == 1,
+            };
         }
     }
     if (flags & HasPublication) {
         auto commit_id = wire::read_string(reader, 4096);
         auto ciphertext_id = wire::read_string(reader, 4096);
         auto marker_id = wire::read_string(reader, 4096);
+        std::vector<std::string> parent_ids;
         if (!commit_id || !ciphertext_id || !marker_id ||
             !wire::read_strings(
-                reader, prepared.parent_ids, history::maximum_parent_count)) {
+                reader, parent_ids, history::maximum_parent_count)) {
             return std::unexpected("truncated publication fields in delta");
         }
-        prepared.commit_id = std::move(*commit_id);
-        prepared.ciphertext_id = std::move(*ciphertext_id);
-        prepared.marker_id = std::move(*marker_id);
+        record.commit_id = std::move(*commit_id);
+        record.ciphertext_id = std::move(*ciphertext_id);
+        record.marker_id = std::move(*marker_id);
+        record.parent_ids = std::move(parent_ids);
     }
     if (flags & HasEpoch) {
         auto vault_id = wire::read_string(reader, 4096);
@@ -529,27 +479,26 @@ std::expected<void, std::string> apply_delta(transaction::Record& record,
         if (!vault_id || !epoch_id || !issued_at || !depth || !age) {
             return std::unexpected("truncated epoch fields in delta");
         }
-        prepared.epoch_vault_id = std::move(*vault_id);
-        prepared.epoch_id = std::move(*epoch_id);
-        prepared.epoch_issued_at = *issued_at;
-        prepared.epoch_min_history_depth = *depth;
-        prepared.epoch_min_history_age_hours = *age;
+        record.epoch_vault_id = std::move(*vault_id);
+        record.epoch_id = std::move(*epoch_id);
+        record.epoch_issued_at = *issued_at;
+        record.epoch_min_history_depth = *depth;
+        record.epoch_min_history_age_hours = *age;
     }
     if (flags & HasPendingPaths) {
         if (!wire::read_strings(reader,
-                                prepared.observed_pending_paths,
+                                record.observed_pending_paths,
                                 maximum_pending_path_count)) {
             return std::unexpected("truncated observed_pending_paths count");
         }
         if (!wire::read_strings(
-                reader, prepared.pending_paths, maximum_pending_path_count)) {
+                reader, record.pending_paths, maximum_pending_path_count)) {
             return std::unexpected("invalid pending_paths count");
         }
     }
     if (!reader.data.empty()) {
         return std::unexpected("trailing bytes after delta completion");
     }
-    apply_prepared_delta(record, prepared);
     return {};
 }
 
@@ -783,6 +732,33 @@ std::expected<void, std::string> write_file(const std::filesystem::path& path,
     return {};
 }
 
+std::expected<void, std::string>
+seal_aead_frame(std::span<std::uint8_t> frame,
+                std::size_t frame_aad_size,
+                std::span<const std::uint8_t> aad,
+                const crypto::Key& key,
+                std::span<const std::byte> plaintext = {}) {
+    if (auto random = platform::random::fill_bytes(
+            frame.subspan(frame_aad_size, nonce_size));
+        !random) {
+        return random;
+    }
+    crypto_aead_lock(
+        plaintext.empty()
+            ? nullptr
+            : frame.data() + frame_aad_size + nonce_size + mac_size,
+        frame.data() + frame_aad_size + nonce_size,
+        key.data(),
+        frame.data() + frame_aad_size,
+        aad.data(),
+        aad.size(),
+        plaintext.empty()
+            ? nullptr
+            : reinterpret_cast<const std::uint8_t*>(plaintext.data()),
+        plaintext.size());
+    return {};
+}
+
 std::expected<void, std::string> write_tip(const Paths& paths,
                                            const Tip& tip,
                                            const transaction::Record& record,
@@ -795,18 +771,10 @@ std::expected<void, std::string> write_tip(const Paths& paths,
     encode_le<std::uint64_t>(tip.bytes, bytes.data() + 36);
     encode_le<std::uint64_t>(tip.count, bytes.data() + 44);
     std::memcpy(bytes.data() + 52, tip.chain.data(), 32);
-    auto random = platform::random::fill_bytes(
-        std::span{bytes}.subspan(tip_aad_size, nonce_size));
-    if (!random)
-        return random;
-    crypto_aead_lock(nullptr,
-                     bytes.data() + tip_aad_size + nonce_size,
-                     key.data(),
-                     bytes.data() + tip_aad_size,
-                     bytes.data(),
-                     tip_aad_size,
-                     nullptr,
-                     0);
+    if (auto sealed = seal_aead_frame(
+            bytes, tip_aad_size, std::span{bytes}.first(tip_aad_size), key);
+        !sealed)
+        return sealed;
     const auto final = retirement ? retirement_path(paths) : tip_path(paths);
     auto temporary = final;
     temporary += ".new";
@@ -1056,18 +1024,10 @@ std::expected<Tip, std::string> save_snapshot(const Paths& paths,
     std::vector<std::uint8_t> bytes(header_size + encoded->size());
     std::copy(journal_magic.begin(), journal_magic.end(), bytes.begin());
     encode_le<std::uint64_t>(encoded->size(), bytes.data() + 4);
-    auto random = platform::random::fill_bytes(
-        std::span{bytes}.subspan(aad_size, nonce_size));
-    if (!random)
-        return std::unexpected(random.error());
-    crypto_aead_lock(bytes.data() + header_size,
-                     bytes.data() + aad_size + nonce_size,
-                     key.data(),
-                     bytes.data() + aad_size,
-                     bytes.data(),
-                     aad_size,
-                     reinterpret_cast<const std::uint8_t*>(encoded->data()),
-                     encoded->size());
+    if (auto sealed = seal_aead_frame(
+            bytes, aad_size, std::span{bytes}.first(aad_size), key, *encoded);
+        !sealed)
+        return std::unexpected(sealed.error());
     auto written = write_file(paths.temporary_path, bytes, record, false, 0);
     if (!written)
         return std::unexpected(written.error());
@@ -1133,11 +1093,6 @@ bool same_artifact(const std::optional<platform::FileFingerprint>& a,
     return a && b && a->kind == b->kind && a->value == b->value;
 }
 
-struct SaveDeltaResult {
-    Tip tip;
-    Delta changes;
-};
-
 bool is_known_artifact_name(std::string_view name) noexcept {
     constexpr std::array<std::string_view, 7> known_names{
         "snapshot.enc",
@@ -1149,6 +1104,36 @@ bool is_known_artifact_name(std::string_view name) noexcept {
         "retired.enc.new",
     };
     return std::ranges::find(known_names, name) != known_names.end();
+}
+
+std::expected<bool, std::string>
+validate_artifact_directory(const std::filesystem::path& directory,
+                            std::string_view file_label) {
+    bool has_retired_file = false;
+    std::error_code ec;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(directory, ec)) {
+        if (ec) {
+            return std::unexpected("failed to enumerate journal artifacts: " +
+                                   ec.message());
+        }
+        const auto name = entry.path().filename().string();
+        if (!is_known_artifact_name(name)) {
+            return std::unexpected("unknown journal artifact");
+        }
+        if (name == "retired.enc") {
+            has_retired_file = true;
+        }
+        if (auto validated = validate_file_or_absent(entry.path(), file_label);
+            !validated) {
+            return std::unexpected(validated.error());
+        }
+    }
+    if (ec) {
+        return std::unexpected("failed to enumerate journal artifacts: " +
+                               ec.message());
+    }
+    return has_retired_file;
 }
 
 bool is_reset_checkpoint(const transaction::Record& record) noexcept {
@@ -1164,13 +1149,12 @@ kasumi::Hash journal_key_id(const KeyGuard& journal_key) {
                               journal_key.value.size());
 }
 
-std::expected<SaveDeltaResult, std::string>
-save_delta(const Paths& paths,
-           const transaction::Record& record,
-           const crypto::Key& key,
-           const transaction::Record& previous,
-           const Tip& previous_tip,
-           SaveMode mode) {
+std::expected<Tip, std::string> save_delta(const Paths& paths,
+                                           const transaction::Record& record,
+                                           const crypto::Key& key,
+                                           const transaction::Record& previous,
+                                           const Tip& previous_tip,
+                                           SaveMode mode) {
     if (!same_identity(previous, record))
         return std::unexpected("active journal identity changed; complete "
                                "recovery/clear before a new transaction");
@@ -1181,19 +1165,21 @@ save_delta(const Paths& paths,
         previous.phase <= transaction::Phase::LocalChangesApplied;
     if (mode == SaveMode::Rollback && !rollback_reset && !local_rollback)
         return std::unexpected("invalid rollback checkpoint");
-    auto delta = compute_delta(previous, record);
+    std::vector<std::uint32_t> changed_progress;
+    const auto flags = compute_delta_flags(previous, record, changed_progress);
     if (mode == SaveMode::Advance) {
         if (record.phase < previous.phase)
             return std::unexpected("checkpoint phase regressed");
-        for (const auto& [index, progress] : delta.progress_changes)
-            if (progress.state < previous.progress[index].state)
+        for (const auto index : changed_progress)
+            if (record.progress[index].state < previous.progress[index].state)
                 return std::unexpected("checkpoint progress regressed");
     }
     if (local_rollback) {
-        for (const auto& [index, progress] : delta.progress_changes)
-            if (progress.state < previous.progress[index].state &&
+        for (const auto index : changed_progress)
+            if (record.progress[index].state < previous.progress[index].state &&
                 (!is_local_mutation(record.plan.operations[index].action) ||
-                 progress.state != transaction::OperationState::Prepared ||
+                 record.progress[index].state !=
+                     transaction::OperationState::Prepared ||
                  previous.progress[index].state <
                      transaction::OperationState::BackupCreated))
                 return std::unexpected("invalid local rollback progress");
@@ -1229,7 +1215,7 @@ save_delta(const Paths& paths,
     auto snapshot_sync = platform::durability::sync_file(paths.final_path);
     if (!snapshot_sync)
         return std::unexpected(snapshot_sync.error());
-    if (delta.flags == 0) {
+    if (flags == 0) {
         if (!missing(*log_status)) {
             auto synced = platform::durability::sync_file(paths.log_path);
             if (!synced)
@@ -1242,11 +1228,11 @@ save_delta(const Paths& paths,
             platform::durability::sync_parent_directory(paths.final_path);
         if (!parent)
             return std::unexpected(parent.error());
-        return SaveDeltaResult{previous_tip, std::move(delta)};
+        return previous_tip;
     }
     if (previous_tip.count >= maximum_delta_count)
         return std::unexpected("journal delta count exceeds limit");
-    auto encoded = encode_delta(delta);
+    auto encoded = encode_delta(flags, record, changed_progress);
     PayloadGuard encoded_guard{encoded};
     if (encoded.size() > maximum_payload_size ||
         previous_tip.bytes > maximum_log_size ||
@@ -1260,18 +1246,9 @@ save_delta(const Paths& paths,
                                     record.operation_id);
     std::vector<std::uint8_t> bytes(log_header_size + encoded.size());
     std::copy_n(aad.begin(), 48, bytes.begin());
-    auto random =
-        platform::random::fill_bytes(std::span{bytes}.subspan(48, nonce_size));
-    if (!random)
-        return std::unexpected(random.error());
-    crypto_aead_lock(bytes.data() + log_header_size,
-                     bytes.data() + 48 + nonce_size,
-                     log_key.value.data(),
-                     bytes.data() + 48,
-                     aad.data(),
-                     aad.size(),
-                     reinterpret_cast<const std::uint8_t*>(encoded.data()),
-                     encoded.size());
+    if (auto sealed = seal_aead_frame(bytes, 48, aad, log_key.value, encoded);
+        !sealed)
+        return std::unexpected(sealed.error());
     auto written =
         write_file(paths.log_path, bytes, record, true, previous_tip.count);
     if (!written)
@@ -1286,7 +1263,7 @@ save_delta(const Paths& paths,
     auto confirmed = write_tip(paths, tip, record, key);
     if (!confirmed)
         return std::unexpected(confirmed.error());
-    return SaveDeltaResult{tip, std::move(delta)};
+    return tip;
 }
 
 std::expected<void, std::string> validate_retirement(const Paths& paths,
@@ -1363,14 +1340,10 @@ std::expected<void, std::string> clear_locked(const Paths& paths,
         return parent;
     // Reject the whole cleanup before touching any malformed or unknown
     // artifact.
-    for (const auto& entry : std::filesystem::directory_iterator(root)) {
-        const auto name = entry.path().filename().string();
-        if (!is_known_artifact_name(name))
+    if (auto ok = validate_artifact_directory(root, "cleanup artifact"); !ok) {
+        if (ok.error() == "unknown journal artifact")
             return std::unexpected("unknown journal cleanup artifact");
-        auto validated =
-            validate_file_or_absent(entry.path(), "cleanup artifact");
-        if (!validated)
-            return validated;
+        return std::unexpected(ok.error());
     }
     const Paths root_paths{root / "snapshot.enc",
                            root / "snapshot.enc.new",
@@ -1598,28 +1571,27 @@ save(const Paths& paths,
                                   .count = session->tip_count,
                                   .chain = session->tip_chain};
             if (artifacts_match && *disk_tip == session_tip) {
-                auto saved = save_delta(paths,
-                                        record,
-                                        journal_key.value,
-                                        *session->confirmed_record,
-                                        session_tip,
-                                        mode);
-                if (!saved) {
+                auto saved_tip = save_delta(paths,
+                                            record,
+                                            journal_key.value,
+                                            *session->confirmed_record,
+                                            session_tip,
+                                            mode);
+                if (!saved_tip) {
                     invalidate();
-                    return std::unexpected(saved.error());
+                    return std::unexpected(saved_tip.error());
                 }
                 if (journal_fault_test::cleanup_fail("session-update"))
                     throw std::bad_alloc{};
                 journal_fault_test::hit(
-                    "before-session-update", &record, saved->tip.count);
+                    "before-session-update", &record, saved_tip->count);
                 if (auto refreshed =
-                        SessionAccess::refresh(*session, paths, saved->tip);
+                        SessionAccess::refresh(*session, paths, *saved_tip);
                     !refreshed) {
                     invalidate();
                     return refreshed;
                 }
-                apply_prepared_delta(*session->confirmed_record,
-                                     saved->changes);
+                assign_mutable_fields(*session->confirmed_record, record);
                 return {};
             }
             invalidate();
@@ -1675,21 +1647,21 @@ save(const Paths& paths,
             invalidate();
             return std::unexpected(previous.error());
         }
-        auto saved = save_delta(paths,
-                                record,
-                                journal_key.value,
-                                previous->record,
-                                previous->tip,
-                                mode);
-        if (!saved) {
+        auto saved_tip = save_delta(paths,
+                                    record,
+                                    journal_key.value,
+                                    previous->record,
+                                    previous->tip,
+                                    mode);
+        if (!saved_tip) {
             invalidate();
-            return std::unexpected(saved.error());
+            return std::unexpected(saved_tip.error());
         }
         if (session) {
             if (journal_fault_test::cleanup_fail("session-update"))
                 throw std::bad_alloc{};
-            apply_prepared_delta(previous->record, saved->changes);
-            auto bound = bind(std::move(previous->record), saved->tip);
+            assign_mutable_fields(previous->record, record);
+            auto bound = bind(std::move(previous->record), *saved_tip);
             if (!bound) {
                 invalidate();
                 return bound;
@@ -1867,29 +1839,6 @@ InspectionResult inspect(const Paths& paths,
         KeyGuard journal_key{
             crypto::derive_key(key, crypto::KeyPurpose::Journal)};
 
-        const auto inspect_entries = [](const std::filesystem::path& directory,
-                                        bool& has_retired_file) -> bool {
-            std::error_code ec;
-            for (const auto& entry :
-                 std::filesystem::directory_iterator(directory, ec)) {
-                if (ec) {
-                    return false;
-                }
-                const auto name = entry.path().filename().string();
-                if (!is_known_artifact_name(name)) {
-                    return false;
-                }
-                if (name == "retired.enc") {
-                    has_retired_file = true;
-                }
-                if (!validate_file_or_absent(entry.path(),
-                                             "journal artifact")) {
-                    return false;
-                }
-            }
-            return !ec;
-        };
-
         const auto validate_retired_tip = [&](const Paths& target_paths) {
             auto proof = read_tip(target_paths, journal_key.value, true);
             return proof &&
@@ -1898,10 +1847,10 @@ InspectionResult inspect(const Paths& paths,
 
         if (!missing(*retired_status)) {
             std::error_code ec;
-            bool has_retired_file = false;
-            if (std::filesystem::is_empty(retired, ec) ||
-                !inspect_entries(retired, has_retired_file) ||
-                !has_retired_file) {
+            auto has_retired_file =
+                validate_artifact_directory(retired, "journal artifact");
+            if (std::filesystem::is_empty(retired, ec) || !has_retired_file ||
+                !*has_retired_file) {
                 return InspectionResult::Corrupted;
             }
             const Paths root_paths{retired / "snapshot.enc",
@@ -1912,8 +1861,7 @@ InspectionResult inspect(const Paths& paths,
                        : InspectionResult::Corrupted;
         }
 
-        bool unused_retired_file = false;
-        if (!inspect_entries(active, unused_retired_file)) {
+        if (!validate_artifact_directory(active, "journal artifact")) {
             return InspectionResult::Corrupted;
         }
 
