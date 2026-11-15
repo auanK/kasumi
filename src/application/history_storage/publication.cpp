@@ -6,7 +6,6 @@
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
 #include "crypto/physical_hash.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -62,15 +61,12 @@ inline constexpr std::string_view physical_hash_algorithm = "sha256";
 std::expected<bool, Error>
 verify_remote_physical_hash(transport::Transport& storage,
                             std::string_view identifier,
-                            std::string_view local_hash,
-                            std::string_view trace_name) {
+                            std::string_view local_hash) {
     if (local_hash.empty()) {
         return false;
     }
-    const auto trace = platform::perf_trace::begin();
     auto remote_hash =
         transport::physical_hash(storage, identifier, physical_hash_algorithm);
-    platform::perf_trace::finish(trace_name, trace);
     if (!remote_hash) {
         if (remote_hash.error().code == transport::ErrorCode::Unsupported) {
             return false;
@@ -117,13 +113,11 @@ publish_commit_object_impl(transport::Transport& storage,
             ErrorCode::LimitExceeded, "commit height cannot have a child"));
     }
 
-    const auto serialization_trace = platform::perf_trace::begin();
     auto canonical = history::serialize(commit);
     if (!canonical) {
         return std::unexpected(detail::history_error(canonical.error()));
     }
     const auto commit_id = crypto::commit_identifier(key, *canonical);
-    platform::perf_trace::finish("commit serialization", serialization_trace);
     auto temporary = detail::make_workspace(workspace_root);
     if (!temporary) {
         return std::unexpected(temporary.error());
@@ -191,10 +185,8 @@ publish_commit_object_impl(transport::Transport& storage,
             !written) {
             return std::unexpected(written.error());
         }
-        const auto encryption_trace = platform::perf_trace::begin();
         const bool encrypted_commit = crypto::encrypt_file(
             plaintext, ciphertext, key, crypto::FilePurpose::History);
-        platform::perf_trace::finish("commit encryption", encryption_trace);
         if (!encrypted_commit) {
             return std::unexpected(detail::error(ErrorCode::CryptoFailure,
                                                  "could not encrypt commit"));
@@ -218,10 +210,8 @@ publish_commit_object_impl(transport::Transport& storage,
         if (!budget) {
             return std::unexpected(budget.error());
         }
-        const auto put_trace = platform::perf_trace::begin();
         auto published = transport::put(
             storage, ciphertext, commit_object(layout, reference));
-        platform::perf_trace::finish("rc/put_commit", put_trace);
         if (!published) {
             if (!transport::mutation_result_is_ambiguous(published.error())) {
                 return std::unexpected(
@@ -264,14 +254,8 @@ verify_commit_object_impl(transport::Transport& storage,
         return std::unexpected(
             detail::error(ErrorCode::InvalidCommit, "commit ID mismatch"));
     }
-    if (!local_physical_hash.empty()) {
-        platform::perf_trace::count("commit physical hash calls");
-    }
-    auto physical =
-        verify_remote_physical_hash(storage,
-                                    commit_object(layout, reference),
-                                    local_physical_hash,
-                                    "commit remote hash verification");
+    auto physical = verify_remote_physical_hash(
+        storage, commit_object(layout, reference), local_physical_hash);
     if (!physical) {
         return std::unexpected(physical.error());
     }
@@ -351,10 +335,8 @@ publish_head_marker_impl(transport::Transport& storage,
                                                  local_physical_hash.error()));
         }
         physical_hash = std::move(*local_physical_hash);
-        const auto put_trace = platform::perf_trace::begin();
         auto uploaded =
             transport::put(storage, marker, marker_object(layout, reference));
-        platform::perf_trace::finish("rc/put_marker", put_trace);
         if (!uploaded) {
             if (!transport::mutation_result_is_ambiguous(uploaded.error())) {
                 return std::unexpected(
@@ -381,14 +363,8 @@ verify_head_marker_impl(transport::Transport& storage,
         return std::unexpected(detail::error(
             ErrorCode::InvalidInput, "invalid transport or head reference"));
     }
-    if (!local_physical_hash.empty()) {
-        platform::perf_trace::count("head physical hash calls");
-    }
-    auto physical =
-        verify_remote_physical_hash(storage,
-                                    marker_object(layout, reference),
-                                    local_physical_hash,
-                                    "head remote hash verification");
+    auto physical = verify_remote_physical_hash(
+        storage, marker_object(layout, reference), local_physical_hash);
     if (!physical) {
         return std::unexpected(physical.error());
     }

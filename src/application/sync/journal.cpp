@@ -453,56 +453,6 @@ std::vector<std::byte> encode_delta(const Delta& delta) {
     return std::move(writer.buffer);
 }
 
-// Capacity estimate excludes allocator/path bookkeeping and can double-count
-// SSO.
-std::uint64_t string_memory(const std::vector<std::string>& values) noexcept {
-    std::uint64_t bytes = values.capacity() * sizeof(std::string);
-    for (const auto& value : values)
-        bytes += value.capacity();
-    return bytes;
-}
-
-std::uint64_t selected_memory(const transaction::Record& record,
-                              const Delta& delta) noexcept {
-    std::uint64_t bytes = 0;
-    for (const auto& [index, progress] : delta.progress_changes) {
-        (void)progress;
-        bytes += record.progress[index].previous_hash.capacity();
-    }
-    if (delta.flags & HasPublication)
-        bytes += record.commit_id.capacity() + record.ciphertext_id.capacity() +
-                 record.marker_id.capacity() + string_memory(record.parent_ids);
-    if (delta.flags & HasEpoch)
-        bytes += record.epoch_vault_id.capacity() + record.epoch_id.capacity();
-    if (delta.flags & HasPendingPaths)
-        bytes += string_memory(record.observed_pending_paths) +
-                 string_memory(record.pending_paths);
-    return bytes;
-}
-
-std::uint64_t record_memory(const transaction::Record& record) noexcept {
-    std::uint64_t bytes =
-        sizeof(record) + record.plan.operations.capacity() * sizeof(Operation) +
-        record.progress.capacity() * sizeof(transaction::OperationProgress);
-    bytes += record.operation_id.capacity() +
-             record.observed_head_id.capacity() +
-             record.observed_base_id.capacity();
-    bytes += record.commit_id.capacity() + record.ciphertext_id.capacity() +
-             record.marker_id.capacity() + string_memory(record.parent_ids);
-    bytes += record.epoch_vault_id.capacity() + record.epoch_id.capacity();
-    bytes += string_memory(record.observed_pending_paths) +
-             string_memory(record.pending_paths);
-    for (const auto& operation : record.plan.operations) {
-        bytes += (operation.path.native().capacity() +
-                  operation.alt_path.native().capacity()) *
-                     sizeof(std::filesystem::path::value_type) +
-                 operation.hash.capacity();
-    }
-    for (const auto& progress : record.progress)
-        bytes += progress.previous_hash.capacity();
-    return bytes;
-}
-
 // Changes own their allocations before disk confirmation; commit only
 // moves/swaps.
 void apply_prepared_delta(transaction::Record& record, Delta& delta) noexcept {
@@ -816,12 +766,6 @@ read_bytes(const std::filesystem::path& path, std::uint64_t limit) {
     input.close();
     if (input.fail())
         return std::unexpected("failed to close journal artifact");
-    const auto filename = path.filename();
-    platform::perf_trace::count(
-        filename == "snapshot.enc"          ? "journal snapshot read bytes"
-        : filename == "transaction.log.enc" ? "journal log read bytes"
-                                            : "journal confirmation read bytes",
-        bytes.size());
     return bytes;
 }
 
@@ -863,8 +807,6 @@ std::expected<void, std::string> write_file(const std::filesystem::path& path,
         journal_fault_test::hit("append-payload", &record, index);
     output.write(reinterpret_cast<const char*>(bytes.data() + middle),
                  static_cast<std::streamsize>(bytes.size() - middle));
-    platform::perf_trace::count("journal written bytes total", bytes.size());
-    platform::perf_trace::count("journal bytes written", bytes.size());
     if (journal_fault_test::fail("write", record))
         output.setstate(std::ios::badbit);
     if (!output)
@@ -894,6 +836,7 @@ std::expected<void, std::string> write_file(const std::filesystem::path& path,
         return synced;
     journal_fault_test::hit(
         append ? "append-sync" : "temporary-sync", &record, index);
+    platform::perf_trace::count("journal written bytes total", bytes.size());
     return {};
 }
 
@@ -954,6 +897,9 @@ std::expected<void, std::string> write_tip(const Paths& paths,
         return synced;
     journal_fault_test::hit(
         retirement ? "retirement-proved" : "confirmed", &record, tip.count);
+    if (!retirement) {
+        platform::perf_trace::count("journal durable saves");
+    }
     return {};
 }
 
@@ -1037,8 +983,6 @@ bool same_identity(const transaction::Record& a, const transaction::Record& b) {
 
 std::expected<Replay, std::string> replay(const Paths& paths,
                                           const crypto::Key& key) {
-    const auto trace = platform::perf_trace::begin();
-    platform::perf_trace::count("journal full replays");
     auto tip = read_tip(paths, key);
     if (!tip)
         return std::unexpected(tip.error());
@@ -1135,7 +1079,6 @@ std::expected<Replay, std::string> replay(const Paths& paths,
     valid_record = validate_record_semantics(*record);
     if (!valid_record)
         return std::unexpected(valid_record.error());
-    platform::perf_trace::finish("journal replay", trace);
     return Replay{std::move(*record), *tip};
 }
 
@@ -1185,15 +1128,6 @@ std::expected<Tip, std::string> save_snapshot(const Paths& paths,
         paths.final_path.parent_path());
     if (!parent)
         return std::unexpected(parent.error());
-    platform::perf_trace::count("journal framing bytes total",
-                                header_size + tip_size);
-    platform::perf_trace::maximum("journal snapshot bytes", bytes.size());
-    platform::perf_trace::maximum("journal confirmation bytes", tip_size);
-    platform::perf_trace::count("journal serialized bytes total",
-                                plaintext.size());
-    platform::perf_trace::count("journal encrypted bytes total",
-                                plaintext.size());
-    platform::perf_trace::count("journal durable saves");
     return tip;
 }
 
@@ -1279,10 +1213,7 @@ save_delta(const Paths& paths,
            const transaction::Record& previous,
            const Tip& previous_tip,
            SaveMode mode) {
-    const auto identity_trace = platform::perf_trace::begin();
-    const bool identity_matches = same_identity(previous, record);
-    platform::perf_trace::finish("journal identity comparison", identity_trace);
-    if (!identity_matches)
+    if (!same_identity(previous, record))
         return std::unexpected("active journal identity changed; complete "
                                "recovery/clear before a new transaction");
     const bool rollback_reset = is_reset_checkpoint(record);
@@ -1292,10 +1223,7 @@ save_delta(const Paths& paths,
         previous.phase <= transaction::Phase::LocalChangesApplied;
     if (mode == SaveMode::Rollback && !rollback_reset && !local_rollback)
         return std::unexpected("invalid rollback checkpoint");
-    const auto trace = platform::perf_trace::begin();
     auto delta = compute_delta(previous, record);
-    platform::perf_trace::finish("journal delta calculation", trace);
-    platform::perf_trace::finish("journal delta calculation wall", trace);
     if (mode == SaveMode::Advance) {
         if (record.phase < previous.phase)
             return std::unexpected("checkpoint phase regressed");
@@ -1354,8 +1282,6 @@ save_delta(const Paths& paths,
             return std::unexpected(synced.error());
         auto parent =
             platform::durability::sync_parent_directory(paths.final_path);
-        if (parent)
-            platform::perf_trace::count("journal durable saves");
         if (!parent)
             return std::unexpected(parent.error());
         return SaveDeltaResult{previous_tip, std::move(delta)};
@@ -1366,9 +1292,7 @@ save_delta(const Paths& paths,
     if (!payload_size || previous_tip.bytes > maximum_log_size ||
         log_header_size + *payload_size > maximum_log_size - previous_tip.bytes)
         return std::unexpected("journal delta/log exceeds limit");
-    const auto encode_trace = platform::perf_trace::begin();
     auto encoded = encode_delta(delta);
-    platform::perf_trace::finish("journal encode wall", encode_trace);
     PayloadGuard encoded_guard{encoded};
     SensitiveBytes payload(encoded.size());
     std::memcpy(payload.data(), encoded.data(), encoded.size());
@@ -1396,7 +1320,6 @@ save_delta(const Paths& paths,
                      aad.size(),
                      payload.data(),
                      payload.size());
-    const auto durable_write_trace = platform::perf_trace::begin();
     auto written =
         write_file(paths.log_path, bytes, record, true, previous_tip.count);
     if (!written)
@@ -1409,21 +1332,8 @@ save_delta(const Paths& paths,
     ++tip.count;
     tip.chain = hasher::hash_bytes(bytes.data(), bytes.size());
     auto confirmed = write_tip(paths, tip, record, key);
-    platform::perf_trace::finish("journal durable write wall",
-                                 durable_write_trace);
     if (!confirmed)
         return std::unexpected(confirmed.error());
-    platform::perf_trace::count("journal durable saves");
-    platform::perf_trace::count("journal delta count");
-    platform::perf_trace::count("journal framing bytes total",
-                                log_header_size + tip_size);
-    platform::perf_trace::count("journal serialized bytes total",
-                                payload.size());
-    platform::perf_trace::count("journal encrypted bytes total",
-                                payload.size());
-    platform::perf_trace::maximum("journal log bytes", tip.bytes);
-    platform::perf_trace::maximum("journal record serialized bytes",
-                                  payload.size());
     return SaveDeltaResult{tip, std::move(delta)};
 }
 
@@ -1553,10 +1463,6 @@ std::expected<void, std::string> clear_locked(const Paths& paths,
             auto proved = write_tip(paths, previous->tip, record, key, true);
             if (!proved)
                 return proved;
-            platform::perf_trace::count("journal framing bytes total",
-                                        tip_size);
-            platform::perf_trace::maximum("journal retirement proof bytes",
-                                          tip_size);
         } else {
             auto proof = read_tip(paths, key, true);
             if (!proof)
@@ -1625,19 +1531,10 @@ save(const Paths& paths,
      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
      SaveMode mode,
      Session* session) {
-    platform::perf_trace::count("journal save calls");
-    const auto save_wall_trace = platform::perf_trace::begin();
-    struct JournalSaveGuard {
-        platform::perf_trace::Token token;
-        ~JournalSaveGuard() {
-            platform::perf_trace::finish("journal save wall", token);
-        }
-    } journal_save_guard{save_wall_trace};
     std::lock_guard lock(journal_mutex);
     KeyGuard journal_key{crypto::derive_key(key, crypto::KeyPurpose::Journal)};
     const auto invalidate = [&] {
         if (session) {
-            platform::perf_trace::count("journal session invalidations");
             session->invalidate();
         }
     };
@@ -1664,19 +1561,12 @@ save(const Paths& paths,
             invalidate();
             return std::unexpected("active journal session paths/key changed");
         }
-        const auto validation_trace = platform::perf_trace::begin();
         auto codec_validation = transaction::codec::validate(record);
         if (!codec_validation) {
-            platform::perf_trace::finish("journal validation",
-                                         validation_trace);
             invalidate();
             return codec_validation;
         }
-        const auto semantic_trace = platform::perf_trace::begin();
         auto semantic = validate_record_semantics(record, true);
-        platform::perf_trace::finish("journal semantic validation wall",
-                                     semantic_trace);
-        platform::perf_trace::finish("journal validation", validation_trace);
         if (!semantic) {
             invalidate();
             return semantic;
@@ -1719,10 +1609,6 @@ save(const Paths& paths,
             session->snapshot_fingerprint = snapshot->fingerprint;
             session->snapshot_bytes = snapshot->bytes;
             session->log_fingerprint = log->fingerprint;
-            session->memory_bytes = record_memory(confirmed);
-            platform::perf_trace::maximum(
-                "journal confirmed state estimated bytes",
-                session->memory_bytes);
             session->confirmed_record.emplace(std::move(confirmed));
             session->state = SessionState::Confirmed;
             return {};
@@ -1782,17 +1668,8 @@ save(const Paths& paths,
                                                ? next_snapshot.error()
                                                : next_log.error());
                 }
-                const auto update_trace = platform::perf_trace::begin();
-                const auto before_bytes =
-                    selected_memory(*session->confirmed_record, saved->changes);
                 apply_prepared_delta(*session->confirmed_record,
                                      saved->changes);
-                session->memory_bytes =
-                    session->memory_bytes - before_bytes +
-                    selected_memory(*session->confirmed_record, saved->changes);
-                platform::perf_trace::maximum(
-                    "journal confirmed state estimated bytes",
-                    session->memory_bytes);
                 session->tip_snapshot = saved->tip.snapshot;
                 session->tip_bytes = saved->tip.bytes;
                 session->tip_count = saved->tip.count;
@@ -1800,12 +1677,8 @@ save(const Paths& paths,
                 session->snapshot_fingerprint = next_snapshot->fingerprint;
                 session->snapshot_bytes = next_snapshot->bytes;
                 session->log_fingerprint = next_log->fingerprint;
-                platform::perf_trace::finish("journal confirmed state update",
-                                             update_trace);
-                platform::perf_trace::count("journal fast paths");
                 return {};
             }
-            platform::perf_trace::count("journal session fallbacks");
             invalidate();
         }
         auto outer =
@@ -2000,10 +1873,6 @@ load(const Paths& paths,
             session->tip_bytes = loaded->tip.bytes;
             session->tip_count = loaded->tip.count;
             session->tip_chain = loaded->tip.chain;
-            session->memory_bytes = record_memory(loaded->record);
-            platform::perf_trace::maximum(
-                "journal confirmed state estimated bytes",
-                session->memory_bytes);
             session->confirmed_record = loaded->record;
             session->state = SessionState::Confirmed;
         }
@@ -2022,13 +1891,11 @@ clear(const Paths& paths,
       Session* session) {
     std::lock_guard lock(journal_mutex);
     KeyGuard journal_key{crypto::derive_key(key, crypto::KeyPurpose::Journal)};
-    const auto trace = platform::perf_trace::begin();
     try {
         const auto key_id = journal_key_id(journal_key);
         if (session && session->is_valid() &&
             !session->bound_to(paths, key_id)) {
             session->invalidate();
-            platform::perf_trace::finish("journal clear", trace);
             return std::unexpected("active journal session paths/key changed");
         }
         auto result = clear_locked(paths, journal_key.value);
@@ -2038,12 +1905,10 @@ clear(const Paths& paths,
         } else if (!result && session) {
             session->invalidate();
         }
-        platform::perf_trace::finish("journal clear", trace);
         return result;
     } catch (const std::exception& error) {
         if (session)
             session->invalidate();
-        platform::perf_trace::finish("journal clear", trace);
         return std::unexpected(std::string{"failed to clear journal: "} +
                                error.what());
     }

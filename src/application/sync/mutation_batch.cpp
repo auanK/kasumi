@@ -2,7 +2,6 @@
 
 #include "application/sync/mutation_detail.hpp"
 #include "crypto/content.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/workspace.hpp"
 #include "transport/transport.hpp"
 
@@ -34,7 +33,8 @@ create_batch_staging_directory(const platform::Workspace& workspace,
                        first_index));
     }
 
-    // shortcut: process death can leave encrypted temp batches; add journal ownership if crash cleanup becomes a requirement.
+    // shortcut: process death can leave encrypted temp batches; add journal
+    // ownership if crash cleanup becomes a requirement.
     auto staging = platform::create_workspace("upload-batch");
     if (!staging) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
@@ -46,11 +46,11 @@ create_batch_staging_directory(const platform::Workspace& workspace,
             platform::validate_non_redirecting_directory(staging->root);
         !valid) {
         platform::cleanup_workspace(*staging);
-        return std::unexpected(make_error(
-            MutationErrorCode::UnsafePath,
-            "batch staging directory is unsafe: " + valid.error(),
-            staging->root,
-            first_index));
+        return std::unexpected(
+            make_error(MutationErrorCode::UnsafePath,
+                       "batch staging directory is unsafe: " + valid.error(),
+                       staging->root,
+                       first_index));
     }
     return staging->root;
 }
@@ -175,9 +175,6 @@ MutationResult transfer_upload_batch(const StagedUploadBatch& batch,
     if (batch.objects.empty()) {
         return {};
     }
-    platform::perf_trace::count("content transfer strategy batch");
-    platform::perf_trace::count("content transfer selected objects",
-                                batch.objects.size());
 
     transport::PutBatch request;
     request.source_root = batch.root;
@@ -205,8 +202,6 @@ MutationResult transfer_upload_batch(const StagedUploadBatch& batch,
 struct VerificationState {
     std::mutex mutex;
     std::size_t next_index = 0;
-    std::size_t active_workers = 0;
-    std::size_t peak_in_flight = 0;
     std::vector<std::optional<MutationError>> errors;
 };
 
@@ -239,9 +234,6 @@ MutationResult verify_upload_batch_individually(
                         break;
                     }
                     index = state.next_index++;
-                    ++state.active_workers;
-                    state.peak_in_flight =
-                        std::max(state.peak_in_flight, state.active_workers);
                 }
 
                 const auto& object = batch.objects[index];
@@ -258,7 +250,6 @@ MutationResult verify_upload_batch_individually(
 
                 {
                     std::lock_guard lock(state.mutex);
-                    --state.active_workers;
                     if (!result) {
                         state.errors[index] = result.error();
                     }
@@ -364,16 +355,9 @@ verify_upload_batch(const StagedUploadBatch& batch,
 
     if (!transport::prefers_physical_hash_batch(storage,
                                                 batch.objects.size())) {
-        platform::perf_trace::count("content verification strategy individual");
-        platform::perf_trace::count("content verification selected objects",
-                                    batch.objects.size());
         return verify_upload_batch_individually(
             batch, storage, key, workspace, parallelism);
     }
-
-    platform::perf_trace::count("content verification strategy bulk");
-    platform::perf_trace::count("content verification selected objects",
-                                batch.objects.size());
 
     transport::PhysicalHashBatchRequest request;
     request.scratch_root = batch.root;
@@ -386,7 +370,6 @@ verify_upload_batch(const StagedUploadBatch& batch,
         });
     }
 
-    platform::perf_trace::count("content bulk check calls");
     auto bulk = transport::physical_hash_batch(storage, request);
     if (bulk) {
         if (auto failure = bulk_verification_error(batch, *bulk)) {

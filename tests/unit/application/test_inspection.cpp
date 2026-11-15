@@ -8,7 +8,6 @@
 #include "crypto/key_derivation.hpp"
 #include "kasumi/test/history_storage.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "state_storage/database.hpp"
 
 #include <algorithm>
@@ -82,10 +81,6 @@ void persist_state(const TempWorkspace& workspace,
             .commit_id = head.commit_id,
             .ciphertext_id = head.ciphertext_id,
         }));
-}
-
-std::uint64_t perf_count(std::string_view name) {
-    return kasumi::platform::perf_trace::get_count(name);
 }
 
 void expect_same_heads(const kasumi::application::RemoteHeadsReport& actual,
@@ -228,29 +223,16 @@ TEST(ApplicationInspectionTest, WarmFrontierPreservesHeadsAndTreeResults) {
     }
     ASSERT_TRUE(previous.has_value());
 
-    kasumi::platform::perf_trace::force_enable(true);
     const auto cold_heads =
         inspect(workspace, InspectionOperation::RemoteHeads);
-    const auto cold_heads_frontier = perf_count("inspection frontier used");
-    const auto cold_heads_state = perf_count("inspection state load");
-    const auto cold_heads_observation =
-        perf_count("inspection cold observation");
-    const auto cold_heads_total = perf_count("total inspection");
-    kasumi::platform::perf_trace::force_enable(false);
 
     ASSERT_TRUE(cold_heads.has_value()) << cold_heads.error().detail;
     const auto* cold_heads_report =
         std::get_if<kasumi::application::RemoteHeadsReport>(
             &cold_heads->payload);
     ASSERT_NE(cold_heads_report, nullptr);
-    EXPECT_EQ(cold_heads_frontier, 0U);
-    EXPECT_EQ(cold_heads_state, 1U);
-    EXPECT_EQ(cold_heads_observation, 1U);
-    EXPECT_EQ(cold_heads_total, 1U);
 
-    kasumi::platform::perf_trace::force_enable(true);
     const auto cold_tree = inspect(workspace, InspectionOperation::RemoteTree);
-    kasumi::platform::perf_trace::force_enable(false);
     const auto cold_tree_report =
         require_report<kasumi::application::RemoteTreeReport>(cold_tree);
     ASSERT_TRUE(cold_tree_report.has_value());
@@ -264,45 +246,21 @@ TEST(ApplicationInspectionTest, WarmFrontierPreservesHeadsAndTreeResults) {
     const auto config_before = kasumi::test::read_binary(config);
     const auto remote_before = kasumi::transport::list(fixture.transport);
 
-    kasumi::platform::perf_trace::force_enable(true);
     const auto warm_heads =
         inspect(workspace, InspectionOperation::RemoteHeads);
-    const auto warm_heads_persisted =
-        perf_count("inspection persisted state available");
-    const auto warm_heads_frontier = perf_count("inspection frontier used");
-    const auto warm_heads_trusted =
-        perf_count("inspection trusted marker used");
-    const auto warm_heads_total = perf_count("total inspection");
-    const auto warm_heads_shutdown =
-        perf_count("inspection transport shutdown");
-    kasumi::platform::perf_trace::force_enable(false);
 
     ASSERT_TRUE(warm_heads.has_value()) << warm_heads.error().detail;
     const auto* warm_heads_report =
         std::get_if<kasumi::application::RemoteHeadsReport>(
             &warm_heads->payload);
     ASSERT_NE(warm_heads_report, nullptr);
-    EXPECT_EQ(warm_heads_persisted, 1U);
-    EXPECT_EQ(warm_heads_frontier, 1U);
-    EXPECT_EQ(warm_heads_trusted, 1U);
-    EXPECT_EQ(warm_heads_total, 1U);
-    EXPECT_EQ(warm_heads_shutdown, 1U);
     expect_same_heads(*warm_heads_report, *cold_heads_report);
 
-    kasumi::platform::perf_trace::force_enable(true);
     const auto warm_tree = inspect(workspace, InspectionOperation::RemoteTree);
-    const auto warm_tree_persisted =
-        perf_count("inspection persisted state available");
-    const auto warm_tree_frontier = perf_count("inspection frontier used");
-    const auto warm_tree_trusted = perf_count("inspection trusted marker used");
-    kasumi::platform::perf_trace::force_enable(false);
 
     const auto warm_tree_report =
         require_report<kasumi::application::RemoteTreeReport>(warm_tree);
     ASSERT_TRUE(warm_tree_report.has_value());
-    EXPECT_EQ(warm_tree_persisted, 1U);
-    EXPECT_EQ(warm_tree_frontier, 1U);
-    EXPECT_EQ(warm_tree_trusted, 1U);
     expect_same_tree(*warm_tree_report, *cold_tree_report);
     const auto remote_after = kasumi::transport::list(fixture.transport);
     EXPECT_EQ(kasumi::test::read_binary(database), database_before);
@@ -329,21 +287,13 @@ TEST(ApplicationInspectionTest,
         kasumi::test::workspace_path(workspace, "app/profiles/demo/db.sqlite");
     kasumi::test::write_text(database, "corrupt state database");
 
-    kasumi::platform::perf_trace::force_enable(true);
     const auto result = inspect(workspace);
-    const auto persisted = perf_count("inspection persisted state available");
-    const auto frontier = perf_count("inspection frontier used");
-    const auto cold = perf_count("inspection cold observation");
-    kasumi::platform::perf_trace::force_enable(false);
 
     const auto report =
         require_report<kasumi::application::RemoteHeadsReport>(result);
     ASSERT_TRUE(report.has_value());
     ASSERT_EQ(report->heads.size(), 1U);
     EXPECT_EQ(report->heads.front().commit_id, published.head.commit_id);
-    EXPECT_EQ(persisted, 0U);
-    EXPECT_EQ(frontier, 0U);
-    EXPECT_EQ(cold, 1U);
 }
 
 TEST(ApplicationInspectionTest,
@@ -374,22 +324,12 @@ TEST(ApplicationInspectionTest,
     ASSERT_TRUE(previous.has_value());
     persist_state(workspace, cached, *previous);
 
-    kasumi::platform::perf_trace::force_enable(true);
     const auto at_six = inspect(workspace, InspectionOperation::RemoteCommits);
-    const auto at_six_frontier = perf_count("inspection frontier used");
-    const auto at_six_full = perf_count("inspection full history observation");
-    const auto at_six_trusted = perf_count("inspection trusted marker used");
-    const auto at_six_gets = perf_count("rc/get_commit");
-    kasumi::platform::perf_trace::force_enable(false);
 
     const auto at_six_report =
         require_report<kasumi::application::RemoteCommitsReport>(at_six);
     ASSERT_TRUE(at_six_report.has_value());
     EXPECT_EQ(at_six_report->commits.size(), 7U);
-    EXPECT_EQ(at_six_frontier, 0U);
-    EXPECT_EQ(at_six_full, 1U);
-    EXPECT_EQ(at_six_trusted, 1U);
-    EXPECT_EQ(at_six_gets, 7U);
 
     for (std::uint64_t height = 7; height <= 8; ++height) {
         const auto commit = kasumi::history::make_commit(
@@ -403,14 +343,8 @@ TEST(ApplicationInspectionTest,
         previous = published.head;
     }
 
-    kasumi::platform::perf_trace::force_enable(true);
     const auto at_eight =
         inspect(workspace, InspectionOperation::RemoteCommits);
-    const auto at_eight_frontier = perf_count("inspection frontier used");
-    const auto at_eight_full =
-        perf_count("inspection full history observation");
-    const auto at_eight_gets = perf_count("rc/get_commit");
-    kasumi::platform::perf_trace::force_enable(false);
 
     ASSERT_TRUE(at_eight.has_value()) << at_eight.error().detail;
     const auto* at_eight_report =
@@ -420,9 +354,6 @@ TEST(ApplicationInspectionTest,
     ASSERT_EQ(at_eight_report->commits.size(), 9U);
     EXPECT_EQ(at_eight_report->commits.front().height, 8U);
     EXPECT_EQ(at_eight_report->commits.back().height, 0U);
-    EXPECT_EQ(at_eight_frontier, 0U);
-    EXPECT_EQ(at_eight_full, 1U);
-    EXPECT_EQ(at_eight_gets, 9U);
 }
 
 TEST(ApplicationInspectionTest, EmptyRemoteIsSuccessfulAndUntouched) {
@@ -761,11 +692,7 @@ TEST(ApplicationInspectionTest, ReportsOnlyLogicalHeadsInDeterministicOrder) {
     const auto second = publish(
         fixture, make_commit(1, {base.head.commit_id}, "b.txt", "b").value());
 
-    kasumi::platform::perf_trace::force_enable(true);
     const auto result = inspect(app_workspace);
-    const auto index_builds = perf_count("inspection commit index builds");
-    const auto index_entries = perf_count("inspection commit index entries");
-    kasumi::platform::perf_trace::force_enable(false);
 
     const auto report =
         require_report<kasumi::application::RemoteHeadsReport>(result);
@@ -779,8 +706,6 @@ TEST(ApplicationInspectionTest, ReportsOnlyLogicalHeadsInDeterministicOrder) {
     EXPECT_EQ(heads[0].commit_id, expected_first);
     EXPECT_EQ(heads[1].commit_id, expected_second);
     EXPECT_GE(report->ancestral_marker_count, 1U);
-    EXPECT_EQ(index_builds, 1U);
-    EXPECT_EQ(index_entries, 3U);
 }
 
 TEST(ApplicationInspectionTest, DoesNotMutateRemoteOrRequireMissingKey) {
@@ -1042,13 +967,7 @@ TEST(ApplicationInspectionTest,
             2, {branch_base.head.commit_id}, make_tree("newer", "newer"), 300)
             .value());
 
-    kasumi::platform::perf_trace::force_enable(true);
     const auto result = inspect(workspace, InspectionOperation::RemoteCommits);
-    const auto classification_index_builds =
-        perf_count("inspection commit classification index builds");
-    const auto classification_index_entries =
-        perf_count("inspection commit classification index entries");
-    kasumi::platform::perf_trace::force_enable(false);
     const auto report =
         require_report<kasumi::application::RemoteCommitsReport>(result);
     ASSERT_TRUE(report.has_value());
@@ -1068,19 +987,6 @@ TEST(ApplicationInspectionTest,
     EXPECT_FALSE(report->commits[3].logical_head);
     EXPECT_TRUE(report->commits[2].ancestral_marked);
     EXPECT_TRUE(report->commits[3].ancestral_marked);
-    EXPECT_EQ(classification_index_builds, 1U);
-    const auto classified =
-        report->logical_head_ids.size() +
-        static_cast<std::size_t>(
-            std::ranges::count_if(report->commits,
-                                  [](const auto& commit) {
-                                      return commit.physically_marked;
-                                  })) +
-        static_cast<std::size_t>(
-            std::ranges::count_if(report->commits, [](const auto& commit) {
-                return commit.ancestral_marked;
-            }));
-    EXPECT_EQ(classification_index_entries, classified);
 }
 
 TEST(ApplicationInspectionTest,
@@ -1434,18 +1340,14 @@ TEST(ApplicationInspectionTest,
     const auto published =
         publish(fixture, make_commit(0, {}, "only.txt", "only").value());
 
-    kasumi::platform::perf_trace::force_enable(true);
     const auto result = inspect_request(
         workspace,
         InspectionRequest{.operation = InspectionOperation::RemoteCommit,
                           .profile_name = "demo",
                           .commit_id = published.head.commit_id},
         Credentials{MasterKeyHex{test_key_hex()}});
-    const auto commit_gets = perf_count("rc/get_commit");
-    kasumi::platform::perf_trace::force_enable(false);
 
     ASSERT_TRUE(result.has_value()) << result.error().detail;
-    EXPECT_EQ(commit_gets, 1U);
     const auto& report =
         std::get<kasumi::application::RemoteCommitReport>(result->payload);
     ASSERT_EQ(report.variants.size(), 1U);
@@ -2039,13 +1941,7 @@ TEST(ApplicationInspectionTest,
                        kasumi::test::workspace_root(fixture.workspace)));
     const auto before = kasumi::test::snapshot_tree(remote_root);
 
-    kasumi::platform::perf_trace::force_enable(true);
     const auto result = inspect(workspace, InspectionOperation::RemoteOrphans);
-    const auto orphans_list = perf_count("transport list");
-    const auto orphans_prefix_list = perf_count("transport list prefix");
-    EXPECT_EQ(orphans_list, 1U);
-    EXPECT_EQ(orphans_prefix_list, 0U);
-    kasumi::platform::perf_trace::force_enable(false);
     const auto report =
         require_report<kasumi::application::RemoteOrphansReport>(result);
     ASSERT_TRUE(report.has_value());
@@ -2115,19 +2011,10 @@ TEST(ApplicationInspectionTest,
                        kasumi::test::workspace_root(fixture.workspace)));
 
     const auto inspect_health = [&] {
-        kasumi::platform::perf_trace::force_enable(true);
-        auto result = inspect(workspace, InspectionOperation::RemoteHealth);
-        return result;
+        return inspect(workspace, InspectionOperation::RemoteHealth);
     };
 
     const auto healthy = inspect_health();
-    const auto healthy_list = perf_count("transport list");
-    const auto healthy_prefix_list = perf_count("transport list prefix");
-    const auto healthy_epoch_gets = perf_count("rc/get_epoch");
-    kasumi::platform::perf_trace::force_enable(false);
-    EXPECT_EQ(healthy_list, 1U);
-    EXPECT_EQ(healthy_prefix_list, 0U);
-    EXPECT_EQ(healthy_epoch_gets, 2U);
     ASSERT_TRUE(healthy.has_value()) << healthy.error().detail;
     EXPECT_EQ(
         std::get<kasumi::application::RemoteHealthReport>(healthy->payload)
@@ -2140,13 +2027,6 @@ TEST(ApplicationInspectionTest,
         layout.writers_prefix + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     put_object(fixture, valid_writer);
     const auto degraded = inspect_health();
-    const auto degraded_list = perf_count("transport list");
-    const auto degraded_prefix_list = perf_count("transport list prefix");
-    const auto degraded_epoch_gets = perf_count("rc/get_epoch");
-    kasumi::platform::perf_trace::force_enable(false);
-    EXPECT_EQ(degraded_list, 1U);
-    EXPECT_EQ(degraded_prefix_list, 0U);
-    EXPECT_EQ(degraded_epoch_gets, 2U);
     ASSERT_TRUE(degraded.has_value()) << degraded.error().detail;
     EXPECT_EQ(
         std::get<kasumi::application::RemoteHealthReport>(degraded->payload)
@@ -2157,13 +2037,6 @@ TEST(ApplicationInspectionTest,
         layout.heads_prefix + std::string(64, 'd') + "-" + std::string(64, 'e');
     put_object(fixture, invalid_marker, "invalid");
     const auto critical = inspect_health();
-    const auto critical_list = perf_count("transport list");
-    const auto critical_prefix_list = perf_count("transport list prefix");
-    const auto critical_epoch_gets = perf_count("rc/get_epoch");
-    kasumi::platform::perf_trace::force_enable(false);
-    EXPECT_EQ(critical_list, 1U);
-    EXPECT_EQ(critical_prefix_list, 0U);
-    EXPECT_EQ(critical_epoch_gets, 2U);
     ASSERT_TRUE(critical.has_value()) << critical.error().detail;
     EXPECT_EQ(
         std::get<kasumi::application::RemoteHealthReport>(critical->payload)

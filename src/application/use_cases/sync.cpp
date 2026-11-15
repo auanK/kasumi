@@ -12,7 +12,6 @@
 #include "core/hasher.hpp"
 #include "core/reconciliation/plan.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "state_storage/database.hpp"
 
 #include <chrono>
@@ -77,13 +76,8 @@ SyncCompleted compute_sync_summary(const reconciliation::Result& result) {
 
 std::expected<Response, Error> run_sync(OperationContext& context) {
     const auto sync_start = std::chrono::steady_clock::now();
-    platform::perf_trace::maximum(
-        "configured content concurrency",
-        sync::coordinator::detail::content_concurrency());
-    const auto recovery_trace = platform::perf_trace::begin();
     auto recovery = sync::coordinator::recover_if_needed(
         context.runtime, context.storage, context.key);
-    platform::perf_trace::finish("transaction recovery", recovery_trace);
     if (!recovery) {
         auto err = transaction_error(
             context.operation, recovery.error(), context.summary);
@@ -109,7 +103,6 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 context.on_progress(
                     SyncProgress{.stage = SyncStage::Observing});
             }
-            const auto observation_trace = platform::perf_trace::begin();
             auto collected = observation::collect_reconciliation_input(
                 context.runtime,
                 context.storage,
@@ -118,17 +111,12 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 {},
                 &observation_session,
                 [&] {
-                    const auto writer_trace = platform::perf_trace::begin();
                     eager_writer.emplace(
                         history_storage::maintenance_protocol::register_writer(
                             context.storage,
                             layout,
                             context.runtime.database_path.parent_path()));
-                    platform::perf_trace::finish("writer registration",
-                                                 writer_trace);
                 });
-            platform::perf_trace::finish("initial observation",
-                                         observation_trace);
             if (!collected) {
                 auto err = plan_error(context.operation,
                                       collected.error().detail,
@@ -164,10 +152,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 context.on_progress(
                     SyncProgress{.stage = SyncStage::Calculating});
             }
-            const auto reconciliation_trace = platform::perf_trace::begin();
             auto reconciled = reconciliation::reconcile(*collected);
-            platform::perf_trace::finish("reconciliation",
-                                         reconciliation_trace);
             if (!reconciled) {
                 auto err = plan_error(
                     context.operation,
@@ -181,7 +166,6 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 context.initial_sync && !collected->storage.history_present;
             const bool allow_unreferenced_content_reuse = is_bootstrap;
 
-            const auto availability_trace = platform::perf_trace::begin();
             auto available =
                 sync::coordinator::reobservation::refresh_content_availability(
                     *collected,
@@ -192,8 +176,6 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     allow_unreferenced_content_reuse,
                     context.trust_existing_content,
                     &context.initial_content_identifiers);
-            platform::perf_trace::finish("content availability",
-                                         availability_trace);
             if (!available) {
                 auto err = transaction_error(
                     context.operation, available.error(), context.summary);
@@ -221,10 +203,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 (**eager_writer).storage = nullptr;
             }
             if (remote_write_required && !collected->storage.history_present) {
-                const auto initialize_trace = platform::perf_trace::begin();
                 auto initialized = transport::initialize(context.storage);
-                platform::perf_trace::finish("remote initialize",
-                                             initialize_trace);
                 if (!initialized) {
                     auto err = synchronization_error(
                         context.operation,
@@ -237,14 +216,11 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             if (active_sync &&
                 !history_storage::maintenance_protocol::registration_active(
                     writer)) {
-                const auto writer_trace = platform::perf_trace::begin();
                 auto registered =
                     history_storage::maintenance_protocol::register_writer(
                         context.storage,
                         layout,
                         context.runtime.database_path.parent_path());
-                platform::perf_trace::finish("writer registration",
-                                             writer_trace);
                 if (!registered) {
                     auto err = synchronization_error(context.operation,
                                                      registered.error().detail,
@@ -255,7 +231,6 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 writer = std::move(*registered);
             }
 
-            const auto reobservation_trace = platform::perf_trace::begin();
             auto stable = sync::coordinator::reobservation::stabilize(
                 context.runtime,
                 context.storage,
@@ -268,7 +243,6 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 allow_unreferenced_content_reuse,
                 context.trust_existing_content,
                 &context.initial_content_identifiers);
-            platform::perf_trace::finish("reobservation", reobservation_trace);
             if (!stable) {
                 auto err = transaction_error(
                     context.operation, stable.error(), context.summary);
@@ -291,16 +265,11 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 !stable->result.requires_local_mutation &&
                 !stable->result.requires_storage_repair &&
                 !stable->result.requires_state_commit) {
-                const auto finalization_trace = platform::perf_trace::begin();
                 if (observation_session.cache_dirty) {
                     static_cast<void>(state_storage::save_file_cache_delta(
                         context.runtime.database_path,
                         observation_session.cache));
-                } else {
-                    platform::perf_trace::count("file cache save avoided");
                 }
-                platform::perf_trace::finish("finalization",
-                                             finalization_trace);
                 summary.duration =
                     std::chrono::steady_clock::now() - sync_start;
                 return Response{.operation = context.operation,
@@ -316,7 +285,6 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 });
             }
 
-            const auto execution_trace = platform::perf_trace::begin();
             std::vector<Hash> confirmed_missing;
             std::expected<void, sync::coordinator::Error> synchronized;
             for (std::size_t attempt = 0; attempt < 3; ++attempt) {
@@ -442,8 +410,6 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     });
                 }
             }
-            platform::perf_trace::finish("transaction execution",
-                                         execution_trace);
             if (!synchronized) {
                 const auto fail_stage =
                     synchronized.error().code ==
@@ -472,14 +438,10 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 });
             }
 
-            const auto finalization_trace = platform::perf_trace::begin();
             if (observation_session.cache_dirty) {
                 static_cast<void>(state_storage::save_file_cache_delta(
                     context.runtime.database_path, observation_session.cache));
-            } else {
-                platform::perf_trace::count("file cache save avoided");
             }
-            platform::perf_trace::finish("finalization", finalization_trace);
             summary.duration = std::chrono::steady_clock::now() - sync_start;
             return Response{.operation = context.operation,
                             .runtime = context.summary,
@@ -500,11 +462,9 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             ? &**eager_writer
             : nullptr;
     if (pending != nullptr) {
-        const auto release_trace = platform::perf_trace::begin();
         auto released =
             history_storage::maintenance_protocol::release_registration(
                 *pending);
-        platform::perf_trace::finish("writer release", release_trace);
         if (outcome && !released) {
             auto err = synchronization_error(
                 context.operation, released.error().detail, context.summary);

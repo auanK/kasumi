@@ -1,6 +1,5 @@
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/remote_layout.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <new>
@@ -65,9 +64,7 @@ RemoveMarkersResult remove_marker_variants_impl(
 
         RemovedMarkers result;
         for (const auto& marker : markers) {
-            const auto remove_trace = platform::perf_trace::begin();
             auto removed = transport::remove(storage, marker);
-            platform::perf_trace::finish("rc/delete_marker", remove_trace);
             if (!removed) {
                 return std::unexpected(transport_error(removed.error()));
             }

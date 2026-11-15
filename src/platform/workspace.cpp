@@ -1,7 +1,6 @@
 #include "platform/workspace.hpp"
 
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
 #include "workspace_fault_test.hpp"
@@ -558,11 +557,7 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
 }
 
 void cleanup_workspace(const Workspace& workspace) noexcept {
-    const auto trace = perf_trace::begin();
-    if (!remove_workspace(workspace)) {
-        perf_trace::count("workspace cleanup failures", 1);
-    }
-    perf_trace::finish("workspace cleanup", trace);
+    static_cast<void>(remove_workspace(workspace));
 }
 
 std::expected<void, std::string>

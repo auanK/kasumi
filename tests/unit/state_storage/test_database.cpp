@@ -1,7 +1,6 @@
 #include "core/hasher.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "state_storage/database.hpp"
 #include "state_storage/database_connection.hpp"
 
@@ -1220,22 +1219,9 @@ TEST(StateStorageDatabaseTest, UnchangedCacheDeltaAvoidsRedundantWrites) {
         database_path,
         std::span<const kasumi::state_storage::FileCacheRow>{&row, 1}));
 
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
-
     ASSERT_TRUE(kasumi::state_storage::save_file_cache_delta(
         database_path,
         std::span<const kasumi::state_storage::FileCacheRow>{&row, 1}));
-
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("state db cache unchanged"),
-        1U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache inserts"),
-              0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache updates"),
-              0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("state db cache deletes"),
-              0U);
 }
 
 TEST(StateStorageDatabaseTest, ObsoleteEntriesRemovedByDelta) {

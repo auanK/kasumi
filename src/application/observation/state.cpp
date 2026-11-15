@@ -10,7 +10,6 @@
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "state_storage/database.hpp"
 
 #include <algorithm>
@@ -275,7 +274,6 @@ collect_local_observation(const std::filesystem::path& local_root,
             return scan_local_tree(local_root);
 
         ensure_file_cache_loaded(*session);
-        platform::perf_trace::count("local scanner invocations");
         auto previous = std::move(session->cache);
         const bool cache_was_dirty = session->cache_dirty;
         auto scanned = scanner::scan_result(
@@ -388,10 +386,8 @@ collect_reconciliation_input(
     input.ignore_list = local_ignore_list;
 
     std::jthread local_scan([&] {
-        const auto scan_trace = platform::perf_trace::begin();
         local_observation =
             collect_local_observation(runtime_data.local_dir, session);
-        platform::perf_trace::finish("local filesystem scan", scan_trace);
         if (local_observation && input.base_state_present &&
             !local_observation->snapshot.rows.empty() &&
             !input.base_tree.rows.empty() &&
@@ -448,8 +444,6 @@ collect_reconciliation_input(
             }
         }
     }
-    const auto remote_trace = platform::perf_trace::begin();
-    const auto remote_history_trace = platform::perf_trace::begin();
     std::span<const std::string> effective_trusted_markers{};
     if (!audit_storage_objects) {
         effective_trusted_markers =
@@ -463,10 +457,6 @@ collect_reconciliation_input(
                                      audit_storage_objects,
                                      frontier,
                                      effective_trusted_markers);
-    platform::perf_trace::finish("remote observation", remote_trace);
-    // Preserves the historical metric name in reports.
-    platform::perf_trace::finish("remote history observation",
-                                 remote_history_trace);
     local_scan.join();
     if (!local_observation) {
         return std::unexpected(

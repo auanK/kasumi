@@ -12,7 +12,6 @@
 #include "crypto/key_derivation.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/workspace.hpp"
 
 #include <algorithm>
@@ -278,10 +277,6 @@ std::expected<void, Error> observe_content_availability(
     std::ranges::sort(requested, {}, [](const auto& item) {
         return item.second;
     });
-    platform::perf_trace::count("sync content availability identifiers",
-                                requested.size());
-    platform::perf_trace::count("sync content presence requests",
-                                requested.size());
 
     std::vector<transport::Presence> presences;
     bool probed = false;
@@ -300,7 +295,6 @@ std::expected<void, Error> observe_content_availability(
             }
             presences = std::move(batch->presences);
             probed = true;
-            platform::perf_trace::count("sync content presence batches", 1);
         } else if (batch.error().code != transport::ErrorCode::Unsupported) {
             return std::unexpected(
                 detail::make_error(ErrorCode::ObservationFailure,

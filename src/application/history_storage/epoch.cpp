@@ -5,7 +5,6 @@
 #include "core/hasher.hpp"
 #include "core/history.hpp"
 #include "core/wire.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <array>
@@ -240,11 +239,7 @@ load_exact_reference(transport::Transport& storage,
     }
     const auto copy =
         temporary->workspace.root / ("epoch-" + std::to_string(request_index));
-    platform::perf_trace::count("epoch.get_calls", 1);
-    const auto get_trace = platform::perf_trace::begin();
     auto downloaded = detail::download(storage, *identifier, copy);
-
-    platform::perf_trace::finish("rc/get_epoch", get_trace);
     if (!downloaded) {
         return std::unexpected(
             error(ErrorCode::TransportFailure, downloaded.error().detail));
@@ -255,12 +250,7 @@ load_exact_reference(transport::Transport& storage,
         return std::unexpected(
             error(ErrorCode::WorkspaceFailure, bytes.error().detail));
     }
-    platform::perf_trace::count("epoch.bytes_downloaded", bytes->size());
-    auto opened = open(*bytes, reference, master_key);
-    if (opened) {
-        platform::perf_trace::count("epoch.authenticated_count", 1);
-    }
-    return opened;
+    return open(*bytes, reference, master_key);
 }
 
 LatestResult
@@ -269,21 +259,12 @@ load_latest_impl(transport::Transport& storage,
                  const std::filesystem::path& workspace_root,
                  std::optional<std::span<const std::string>> known_identifiers,
                  std::optional<Reference> trusted_ancestor) {
-    struct EpochTraceGuard {
-        platform::perf_trace::Token token{platform::perf_trace::begin()};
-        ~EpochTraceGuard() noexcept {
-            platform::perf_trace::finish("epoch loading", token);
-        }
-    } epoch_guard;
-
     const auto layout = derive_remote_layout(master_key);
     auto inventory =
         discover_epoch_inventory(storage, layout, known_identifiers);
     if (!inventory) {
         return std::unexpected(inventory.error());
     }
-    platform::perf_trace::count("epoch.candidates_observed",
-                                inventory->references.size());
     if (inventory->references.empty()) {
         return std::optional<VerifiedEpoch>{};
     }

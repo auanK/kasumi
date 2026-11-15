@@ -15,26 +15,25 @@
 #include "kasumi/test/history_storage.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/workspace.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
 
 #include <atomic>
 #include <chrono>
-#include <iomanip>
 #include <iostream>
 #include <mutex>
 #include <thread>
 
+// clang-format off
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-
 #include <aclapi.h>
 #endif
+// clang-format on
 
 #include <algorithm>
 #include <array>
@@ -196,8 +195,10 @@ stage_disposable_journal(SyncNode& node) {
             disposable_operations.push_back(operation);
         }
     }
-    if (disposable_operations.empty() || input->storage.logical_heads.size() != 1) {
-        return std::unexpected("reconciliation did not select disposable files");
+    if (disposable_operations.empty() ||
+        input->storage.logical_heads.size() != 1) {
+        return std::unexpected(
+            "reconciliation did not select disposable files");
     }
     auto plan = kasumi::make_sync_plan(std::move(disposable_operations),
                                        input->storage.generation);
@@ -215,18 +216,19 @@ stage_disposable_journal(SyncNode& node) {
     if (!paths) {
         return std::unexpected(paths.error());
     }
-    auto saved = kasumi::application::sync::journal::save(
-        *paths, *record, node.key);
+    auto saved =
+        kasumi::application::sync::journal::save(*paths, *record, node.key);
     if (!saved) {
         return std::unexpected(saved.error());
     }
-    auto workspace =
-        kasumi::application::sync::coordinator::detail::
-            create_transaction_workspace(node.profile, record->operation_id, node.key);
+    auto workspace = kasumi::application::sync::coordinator::detail::
+        create_transaction_workspace(
+            node.profile, record->operation_id, node.key);
     if (!workspace) {
         return std::unexpected(workspace.error().detail);
     }
-    for (std::size_t index = 0; index < record->plan.operations.size(); ++index) {
+    for (std::size_t index = 0; index < record->plan.operations.size();
+         ++index) {
         auto prepared = kasumi::application::sync::mutation::prepare_operation(
             record->plan.operations[index],
             index,
@@ -236,7 +238,8 @@ stage_disposable_journal(SyncNode& node) {
             record->plan.operations);
         if (!prepared) {
             return std::unexpected(
-                kasumi::application::sync::mutation::describe(prepared.error()));
+                kasumi::application::sync::mutation::describe(
+                    prepared.error()));
         }
         record->progress[index] = *prepared;
     }
@@ -952,8 +955,7 @@ TEST(DirectoryLocalMoveTest,
     ASSERT_TRUE(sync_ok(receiver));
     const auto accepted_after_noop =
         kasumi::state_storage::load_state(receiver.database);
-    ASSERT_TRUE(accepted_after_noop.has_value())
-        << accepted_after_noop.error();
+    ASSERT_TRUE(accepted_after_noop.has_value()) << accepted_after_noop.error();
     ASSERT_TRUE(accepted_after_noop->has_value());
     EXPECT_EQ((*accepted_after_noop)->commit_id,
               (*accepted_before_noop)->commit_id);
@@ -1017,12 +1019,13 @@ TEST(DirectoryLocalMoveTest,
     const auto* preview_report =
         std::get_if<kasumi::application::PlanReport>(&preview->data);
     ASSERT_NE(preview_report, nullptr);
-    EXPECT_TRUE(std::ranges::any_of(preview_report->items, [](const auto& item) {
-        return item.action ==
-                   kasumi::application::PlanAction::DeleteIgnoredLocalFile &&
-               kasumi::platform::path::to_logical_utf8(item.path) ==
-                   "Projects/cache.bak";
-    }));
+    EXPECT_TRUE(
+        std::ranges::any_of(preview_report->items, [](const auto& item) {
+            return item.action == kasumi::application::PlanAction::
+                                      DeleteIgnoredLocalFile &&
+                   kasumi::platform::path::to_logical_utf8(item.path) ==
+                       "Projects/cache.bak";
+        }));
     EXPECT_TRUE(local_entry_exists(receiver, "Projects/cache.bak"));
     reset_content_counts(receiver);
     ASSERT_TRUE(sync_ok(receiver));
@@ -1030,22 +1033,20 @@ TEST(DirectoryLocalMoveTest,
     EXPECT_FALSE(local_entry_exists(receiver, "Projects/main.cpp"));
     EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache.bak"));
     EXPECT_FALSE(local_entry_exists(receiver, "Projects"));
-    EXPECT_EQ(read_local_file(receiver, "Projects2/main.cpp"), "managed source");
+    EXPECT_EQ(read_local_file(receiver, "Projects2/main.cpp"),
+              "managed source");
     EXPECT_EQ(receiver.counters.content_gets, 0U);
     EXPECT_EQ(receiver.counters.content_puts, 0U);
 }
 
-TEST(DirectoryLocalMoveTest,
-     ProtectedIgnorePreventsPartialDisposableRemoval) {
+TEST(DirectoryLocalMoveTest, ProtectedIgnorePreventsPartialDisposableRemoval) {
     SyncNode sender, receiver;
     ASSERT_TRUE(init_pair(sender,
                           "disposable-mixed-sender",
                           receiver,
                           "disposable-mixed-receiver"));
 
-    write_local_file(sender,
-                     ".kasumiignore",
-                     "(?d)*.bak\n*.env\n");
+    write_local_file(sender, ".kasumiignore", "(?d)*.bak\n*.env\n");
     write_local_file(sender, "Projects/main.cpp", "managed source");
     ASSERT_TRUE(sync_pair(sender, receiver));
     write_local_file(receiver, "Projects/cache.bak", "disposable");
@@ -1101,18 +1102,24 @@ TEST(DirectoryLocalMoveTest,
     std::size_t delete_empty_count = 0;
     std::size_t delete_projects_count = 0;
     std::size_t delete_cache_bak_count = 0;
-    std::set<std::pair<kasumi::application::PlanAction, std::string>> unique_ops;
+    std::set<std::pair<kasumi::application::PlanAction, std::string>>
+        unique_ops;
     for (const auto& item : preview_report->items) {
         const auto p = kasumi::platform::path::to_logical_utf8(item.path);
         EXPECT_TRUE(unique_ops.emplace(item.action, p).second)
-            << "Duplicate operation found: action " << static_cast<int>(item.action)
-            << " for path " << p;
-        if (item.action == kasumi::application::PlanAction::DeleteLocalDirectory) {
-            if (p == "Projects/empty") ++delete_empty_count;
-            if (p == "Projects") ++delete_projects_count;
+            << "Duplicate operation found: action "
+            << static_cast<int>(item.action) << " for path " << p;
+        if (item.action ==
+            kasumi::application::PlanAction::DeleteLocalDirectory) {
+            if (p == "Projects/empty")
+                ++delete_empty_count;
+            if (p == "Projects")
+                ++delete_projects_count;
         }
-        if (item.action == kasumi::application::PlanAction::DeleteIgnoredLocalFile) {
-            if (p == "Projects/cache.bak") ++delete_cache_bak_count;
+        if (item.action ==
+            kasumi::application::PlanAction::DeleteIgnoredLocalFile) {
+            if (p == "Projects/cache.bak")
+                ++delete_cache_bak_count;
         }
     }
     EXPECT_EQ(delete_cache_bak_count, 1U);
@@ -1157,7 +1164,8 @@ TEST(DirectoryLocalMoveTest,
     reset_content_counts(receiver);
     ASSERT_TRUE(sync_ok(receiver));
 
-    EXPECT_EQ(read_local_file(receiver, "Projects/segredo.env"), "secret protected");
+    EXPECT_EQ(read_local_file(receiver, "Projects/segredo.env"),
+              "secret protected");
     EXPECT_TRUE(local_entry_exists(receiver, "Projects"));
     EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache/cache.bak"));
     EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache"));
@@ -1184,7 +1192,8 @@ TEST(DirectoryLocalMoveTest,
     ASSERT_TRUE(sync_pair(sender, receiver));
 
     write_local_file(receiver, "Projects/cache/cache.bak", "disposable cache");
-    write_local_file(receiver, "Projects/cache/segredo.env", "secret protected");
+    write_local_file(
+        receiver, "Projects/cache/segredo.env", "secret protected");
     ASSERT_TRUE(sync_ok(receiver));
 
     remove_local_subtree(sender, "Projects");
@@ -1192,8 +1201,10 @@ TEST(DirectoryLocalMoveTest,
 
     ASSERT_TRUE(sync_ok(receiver));
 
-    EXPECT_EQ(read_local_file(receiver, "Projects/cache/segredo.env"), "secret protected");
-    EXPECT_EQ(read_local_file(receiver, "Projects/cache/cache.bak"), "disposable cache");
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache/segredo.env"),
+              "secret protected");
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache/cache.bak"),
+              "disposable cache");
     EXPECT_TRUE(local_entry_exists(receiver, "Projects/cache"));
 }
 
@@ -1215,12 +1226,11 @@ TEST(DirectoryLocalMoveTest, NewLocalDisposableDirectoryIsNeverDiscarded) {
         std::get_if<kasumi::application::SyncCompleted>(&synchronized->data);
     ASSERT_NE(completed, nullptr);
     EXPECT_FALSE(completed->published);
-    const auto remote =
-        kasumi::application::observation::collect_storage_state(
-            receiver.context.storage,
-            receiver.key,
-            kasumi::test::workspace_root(receiver.workspace),
-            false);
+    const auto remote = kasumi::application::observation::collect_storage_state(
+        receiver.context.storage,
+        receiver.key,
+        kasumi::test::workspace_root(receiver.workspace),
+        false);
     ASSERT_TRUE(remote.has_value()) << remote.error();
     EXPECT_EQ(kasumi::find_row(remote->tree, "novo"), nullptr);
 }
@@ -1239,11 +1249,13 @@ TEST(DirectoryLocalMoveTest, NewRuleDoesNotRetroactivelyCleanOldResidue) {
 
     remove_local_subtree(sender, "Projects");
     ASSERT_TRUE(sync_pair(sender, receiver));
-    EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"), "legacy residue");
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"),
+              "legacy residue");
 
     write_local_file(receiver, ".kasumiignore", "(?d)*.bak\n");
     ASSERT_TRUE(sync_ok(receiver));
-    EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"), "legacy residue");
+    EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"),
+              "legacy residue");
     EXPECT_TRUE(local_entry_exists(receiver, "Projects"));
 }
 
@@ -1296,7 +1308,8 @@ TEST(DirectoryLocalMoveTest, NestedDisposableSubtreeIsRemovedBottomUp) {
     EXPECT_FALSE(local_entry_exists(receiver, "Projects"));
 }
 
-TEST(DirectoryLocalMoveTest, RuleBecomingProtectedDuringStabilizationPreventsDisposal) {
+TEST(DirectoryLocalMoveTest,
+     RuleBecomingProtectedDuringStabilizationPreventsDisposal) {
     SyncNode sender, receiver;
     ASSERT_TRUE(init_pair(sender,
                           "disposable-rule-race-sender",
@@ -1380,7 +1393,8 @@ TEST(DirectoryLocalMoveTest, ExternalSameContentReplacementIsPreserved) {
     EXPECT_EQ(current_identity, replacement_identity);
 }
 
-TEST(DirectoryLocalMoveTest, RecoveryRestoresFileRemovedBeforeAppliedCheckpoint) {
+TEST(DirectoryLocalMoveTest,
+     RecoveryRestoresFileRemovedBeforeAppliedCheckpoint) {
     SyncNode sender, receiver;
     ASSERT_TRUE(init_pair(sender,
                           "disposable-recovery-sender",
@@ -1405,16 +1419,15 @@ TEST(DirectoryLocalMoveTest, RecoveryRestoresFileRemovedBeforeAppliedCheckpoint)
                 throw std::runtime_error("simulated process interruption");
             }
         });
-    EXPECT_THROW(
-        (void)kasumi::application::sync::mutation::apply_operation(
-            staged->record.plan.operations.front(),
-            0,
-            receiver.local,
-            receiver.context.storage,
-            receiver.key,
-            staged->workspace,
-            staged->record.progress.front()),
-        std::runtime_error);
+    EXPECT_THROW((void)kasumi::application::sync::mutation::apply_operation(
+                     staged->record.plan.operations.front(),
+                     0,
+                     receiver.local,
+                     receiver.context.storage,
+                     receiver.key,
+                     staged->workspace,
+                     staged->record.progress.front()),
+                 std::runtime_error);
     kasumi::application::sync::mutation_fault_test::clear_hook();
     ASSERT_TRUE(interrupted);
     EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache.bak"));
@@ -1430,8 +1443,9 @@ TEST(DirectoryLocalMoveTest, RecoveryRestoresFileRemovedBeforeAppliedCheckpoint)
         kasumi::application::sync::coordinator::recover_if_needed(
             receiver.runtime, receiver.context.storage, receiver.key);
     ASSERT_TRUE(recovery.has_value()) << recovery.error().detail;
-    EXPECT_EQ(*recovery,
-              kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    EXPECT_EQ(
+        *recovery,
+        kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
     EXPECT_EQ(read_local_file(receiver, "Projects/main.cpp"), "managed source");
     EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"),
               "recover this cache");
@@ -1440,9 +1454,7 @@ TEST(DirectoryLocalMoveTest, RecoveryRestoresFileRemovedBeforeAppliedCheckpoint)
     EXPECT_FALSE(local_entry_exists(receiver, "Projects"));
 }
 
-
-TEST(DirectoryLocalMoveTest,
-     DisposableRecoveryFailsClosedOnCorruptedBackup) {
+TEST(DirectoryLocalMoveTest, DisposableRecoveryFailsClosedOnCorruptedBackup) {
     SyncNode sender, receiver;
     ASSERT_TRUE(init_pair(sender,
                           "disposable-corrupt-backup-sender",
@@ -1464,19 +1476,19 @@ TEST(DirectoryLocalMoveTest,
         [&](std::string_view point, const std::filesystem::path&) {
             if (point == "after_delete_ignored_local_file" && !interrupted) {
                 interrupted = true;
-                throw std::runtime_error("simulated interruption before applied");
+                throw std::runtime_error(
+                    "simulated interruption before applied");
             }
         });
-    EXPECT_THROW(
-        (void)kasumi::application::sync::mutation::apply_operation(
-            staged->record.plan.operations.front(),
-            0,
-            receiver.local,
-            receiver.context.storage,
-            receiver.key,
-            staged->workspace,
-            staged->record.progress.front()),
-        std::runtime_error);
+    EXPECT_THROW((void)kasumi::application::sync::mutation::apply_operation(
+                     staged->record.plan.operations.front(),
+                     0,
+                     receiver.local,
+                     receiver.context.storage,
+                     receiver.key,
+                     staged->workspace,
+                     staged->record.progress.front()),
+                 std::runtime_error);
     kasumi::application::sync::mutation_fault_test::clear_hook();
     ASSERT_TRUE(interrupted);
 
@@ -1513,23 +1525,24 @@ TEST(DirectoryLocalMoveTest,
         [&](std::string_view point, const std::filesystem::path&) {
             if (point == "after_delete_ignored_local_file" && !interrupted) {
                 interrupted = true;
-                throw std::runtime_error("simulated interruption before applied");
+                throw std::runtime_error(
+                    "simulated interruption before applied");
             }
         });
-    EXPECT_THROW(
-        (void)kasumi::application::sync::mutation::apply_operation(
-            staged->record.plan.operations.front(),
-            0,
-            receiver.local,
-            receiver.context.storage,
-            receiver.key,
-            staged->workspace,
-            staged->record.progress.front()),
-        std::runtime_error);
+    EXPECT_THROW((void)kasumi::application::sync::mutation::apply_operation(
+                     staged->record.plan.operations.front(),
+                     0,
+                     receiver.local,
+                     receiver.context.storage,
+                     receiver.key,
+                     staged->workspace,
+                     staged->record.progress.front()),
+                 std::runtime_error);
     kasumi::application::sync::mutation_fault_test::clear_hook();
     ASSERT_TRUE(interrupted);
 
-    write_local_file(receiver, "Projects/cache.bak", "intruder content created externally");
+    write_local_file(
+        receiver, "Projects/cache.bak", "intruder content created externally");
 
     const auto recovery =
         kasumi::application::sync::coordinator::recover_if_needed(
@@ -1564,16 +1577,15 @@ TEST(DirectoryLocalMoveTest, PartialDisposableRemovalRollsBackWholeSubtree) {
                 throw std::runtime_error("simulated partial subtree failure");
             }
         });
-    EXPECT_THROW(
-        (void)kasumi::application::sync::mutation::apply_operation(
-            staged->record.plan.operations.front(),
-            0,
-            receiver.local,
-            receiver.context.storage,
-            receiver.key,
-            staged->workspace,
-            staged->record.progress.front()),
-        std::runtime_error);
+    EXPECT_THROW((void)kasumi::application::sync::mutation::apply_operation(
+                     staged->record.plan.operations.front(),
+                     0,
+                     receiver.local,
+                     receiver.context.storage,
+                     receiver.key,
+                     staged->workspace,
+                     staged->record.progress.front()),
+                 std::runtime_error);
     kasumi::application::sync::mutation_fault_test::clear_hook();
     ASSERT_EQ(removed, 1U);
 
@@ -1581,8 +1593,9 @@ TEST(DirectoryLocalMoveTest, PartialDisposableRemovalRollsBackWholeSubtree) {
         kasumi::application::sync::coordinator::recover_if_needed(
             receiver.runtime, receiver.context.storage, receiver.key);
     ASSERT_TRUE(recovery.has_value()) << recovery.error().detail;
-    EXPECT_EQ(*recovery,
-              kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    EXPECT_EQ(
+        *recovery,
+        kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
     EXPECT_EQ(read_local_file(receiver, "Projects/main.cpp"), "managed source");
     EXPECT_EQ(read_local_file(receiver, "Projects/a.bak"), "first cache");
     EXPECT_EQ(read_local_file(receiver, "Projects/b.bak"), "second cache");
@@ -1591,7 +1604,8 @@ TEST(DirectoryLocalMoveTest, PartialDisposableRemovalRollsBackWholeSubtree) {
     EXPECT_FALSE(local_entry_exists(receiver, "Projects"));
 }
 
-TEST(DirectoryLocalMoveTest, DisposablePreviewReportsDeletionWithoutApplyingIt) {
+TEST(DirectoryLocalMoveTest,
+     DisposablePreviewReportsDeletionWithoutApplyingIt) {
     SyncNode sender, receiver;
     ASSERT_TRUE(init_pair(sender,
                           "disposable-preview-sender",
@@ -1644,14 +1658,14 @@ TEST(DirectoryLocalMoveTest, BroadDisposableRuleNeverHidesKasumiIgnore) {
     write_local_file(sender, "tracked.txt", "managed source");
     ASSERT_TRUE(sync_ok(sender));
     ASSERT_TRUE(sync_ok(receiver));
-    EXPECT_EQ(read_local_file(receiver, ".kasumiignore"), "(?d)*\n!tracked.txt\n");
+    EXPECT_EQ(read_local_file(receiver, ".kasumiignore"),
+              "(?d)*\n!tracked.txt\n");
     EXPECT_EQ(read_local_file(receiver, "tracked.txt"), "managed source");
-    const auto remote =
-        kasumi::application::observation::collect_storage_state(
-            receiver.context.storage,
-            receiver.key,
-            kasumi::test::workspace_root(receiver.workspace),
-            false);
+    const auto remote = kasumi::application::observation::collect_storage_state(
+        receiver.context.storage,
+        receiver.key,
+        kasumi::test::workspace_root(receiver.workspace),
+        false);
     ASSERT_TRUE(remote.has_value()) << remote.error();
     EXPECT_NE(kasumi::find_row(remote->tree, ".kasumiignore"), nullptr);
 }
@@ -1688,9 +1702,8 @@ TEST(DirectoryLocalMoveTest,
         [&](std::string_view point, const std::filesystem::path& path) {
             if (point == "before_delete_local" && path == target && !inserted) {
                 inserted = true;
-                write_local_file(receiver,
-                                 "antigo/unexpected.txt",
-                                 "external data");
+                write_local_file(
+                    receiver, "antigo/unexpected.txt", "external data");
             }
         });
     const auto rejected = run_node_sync(receiver);
@@ -1766,16 +1779,13 @@ TEST(DirectoryLocalMoveTest,
     ASSERT_TRUE(sync_ok(sender));
 
     auto input = kasumi::application::observation::collect_reconciliation_input(
-        receiver.runtime,
-        receiver.context.storage,
-        receiver.key,
-        false);
+        receiver.runtime, receiver.context.storage, receiver.key, false);
     ASSERT_TRUE(input.has_value());
     auto reconciled = kasumi::reconciliation::reconcile(*input);
     ASSERT_TRUE(reconciled.has_value());
     auto legacy_operations = reconciled->plan.operations;
-    const auto move = std::ranges::find_if(
-        legacy_operations, [](const auto& operation) {
+    const auto move =
+        std::ranges::find_if(legacy_operations, [](const auto& operation) {
             return operation.action == kasumi::Action::MoveLocal &&
                    kasumi::platform::path::to_logical_utf8(operation.path) ==
                        "A/main.cpp";
@@ -1804,15 +1814,14 @@ TEST(DirectoryLocalMoveTest,
         record->pending_paths.push_back(row.path);
     }
 
-    const auto paths = kasumi::application::sync::journal::make_paths(
-        receiver.profile);
+    const auto paths =
+        kasumi::application::sync::journal::make_paths(receiver.profile);
     ASSERT_TRUE(paths.has_value());
     ASSERT_TRUE(kasumi::application::sync::journal::save(
         *paths, *record, receiver.key));
-    auto workspace =
-        kasumi::application::sync::coordinator::detail::
-            create_transaction_workspace(
-                receiver.profile, record->operation_id, receiver.key);
+    auto workspace = kasumi::application::sync::coordinator::detail::
+        create_transaction_workspace(
+            receiver.profile, record->operation_id, receiver.key);
     ASSERT_TRUE(workspace.has_value());
     const auto workspace_root = workspace->root;
     const auto operation_id = record->operation_id;
@@ -1829,7 +1838,8 @@ TEST(DirectoryLocalMoveTest,
             record->plan.operations);
         ASSERT_TRUE(prepared.has_value()) << prepared.error().detail;
         record->progress[index] = *prepared;
-        if (record->plan.operations[index].action == kasumi::Action::MoveLocal) {
+        if (record->plan.operations[index].action ==
+            kasumi::Action::MoveLocal) {
             move_index = index;
         }
     }
@@ -1843,14 +1853,15 @@ TEST(DirectoryLocalMoveTest,
         if (!kasumi::is_local_mutation(operation.action)) {
             continue;
         }
-        const auto applied = kasumi::application::sync::mutation::apply_operation(
-            operation,
-            index,
-            receiver.local,
-            receiver.context.storage,
-            receiver.key,
-            *workspace,
-            record->progress[index]);
+        const auto applied =
+            kasumi::application::sync::mutation::apply_operation(
+                operation,
+                index,
+                receiver.local,
+                receiver.context.storage,
+                receiver.key,
+                *workspace,
+                record->progress[index]);
         ASSERT_TRUE(applied.has_value()) << applied.error().detail;
         if (index == move_index) {
             break; // Model v0.9.2 stopping after the filesystem effect.
@@ -1882,8 +1893,9 @@ TEST(DirectoryLocalMoveTest,
         kasumi::application::sync::coordinator::recover_if_needed(
             receiver.runtime, receiver.context.storage, receiver.key);
     ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
-    EXPECT_EQ(*recovered,
-              kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    EXPECT_EQ(
+        *recovered,
+        kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
     const auto cleared =
         kasumi::application::sync::journal::load(*paths, receiver.key);
     ASSERT_TRUE(cleared.has_value());
@@ -2205,55 +2217,21 @@ TEST(DirectoryLocalMoveTest,
     EXPECT_TRUE(trees_equal(sender, receiver));
 }
 
-
-struct ControlledMetrics {
-    std::size_t n = 0;
-    std::uint64_t total_bytes = 0;
-    double total_sync_s = 0.0;
-    double prep_wall_s = 0.0;
-    double backup_copy_wall_s = 0.0;
-    double backup_durable_wall_s = 0.0;
-    double source_hash_wall_s = 0.0;
-    double backup_hash_wall_s = 0.0;
-    double apply_wall_s = 0.0;
-    double native_rename_wall_s = 0.0;
-    double dest_verif_wall_s = 0.0;
-    double prep_val_wall_s = 0.0;
-    double journal_save_wall_s = 0.0;
-    double journal_delta_calc_s = 0.0;
-    double journal_sem_val_s = 0.0;
-    double journal_encode_s = 0.0;
-    double journal_durable_write_s = 0.0;
-    double final_val_wall_s = 0.0;
-    std::uint64_t move_planned = 0;
-    std::uint64_t move_applied = 0;
-    std::uint64_t backup_files_created = 0;
-    std::uint64_t backup_bytes_copied = 0;
-    std::uint64_t backup_hash_calls = 0;
-    std::uint64_t source_hash_calls = 0;
-    std::uint64_t journal_save_calls = 0;
-    std::uint64_t journal_delta_count = 0;
-    std::uint64_t journal_bytes_written = 0;
-    std::uint64_t native_rename_calls = 0;
-    std::size_t content_gets = 0;
-    std::size_t content_puts = 0;
-    std::size_t content_presences = 0;
-};
-
-ControlledMetrics run_controlled_reproduction(std::size_t count, std::size_t file_payload_size = 1024) {
-    kasumi::platform::perf_trace::force_enable(true);
+void run_controlled_reproduction(std::size_t count,
+                                 std::size_t file_payload_size = 1024) {
     SyncNode sender;
     SyncNode receiver;
-    EXPECT_TRUE(init_sync_node(sender, "move-diag-sender-" + std::to_string(count)));
-    EXPECT_TRUE(init_sync_node(receiver, "move-diag-receiver-" + std::to_string(count), sender.storage_root));
-
-    ControlledMetrics m;
-    m.n = count;
+    EXPECT_TRUE(
+        init_sync_node(sender, "move-diag-sender-" + std::to_string(count)));
+    EXPECT_TRUE(init_sync_node(receiver,
+                               "move-diag-receiver-" + std::to_string(count),
+                               sender.storage_root));
 
     for (std::size_t i = 0; i < count; ++i) {
-        std::string payload = "content-" + std::to_string(i) + "-" + std::string(file_payload_size, 'A');
-        m.total_bytes += payload.size();
-        write_local_file(sender, "source_dir/file_" + std::to_string(i) + ".bin", payload);
+        std::string payload = "content-" + std::to_string(i) + "-" +
+                              std::string(file_payload_size, 'A');
+        write_local_file(
+            sender, "source_dir/file_" + std::to_string(i) + ".bin", payload);
     }
 
     auto s1 = run_node_sync(sender);
@@ -2266,128 +2244,32 @@ ControlledMetrics run_controlled_reproduction(std::size_t count, std::size_t fil
     EXPECT_TRUE(s2.has_value()) << (s2 ? "" : s2.error().detail);
 
     reset_content_counts(receiver);
-    kasumi::platform::perf_trace::reset();
 
-    const auto start = std::chrono::steady_clock::now();
     auto r2 = run_node_sync(receiver);
-    const auto elapsed = std::chrono::steady_clock::now() - start;
     EXPECT_TRUE(r2.has_value()) << (r2 ? "" : r2.error().detail);
 
     EXPECT_TRUE(trees_equal(sender, receiver));
     EXPECT_TRUE(has_zero_content_io(receiver));
-
-    m.total_sync_s = std::chrono::duration<double>(elapsed).count();
-    m.prep_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move preparation wall")) / 1e6;
-    m.backup_copy_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move backup copy wall")) / 1e6;
-    m.backup_durable_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move backup durable wall")) / 1e6;
-    m.source_hash_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move source hash wall")) / 1e6;
-    m.backup_hash_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move backup hash wall")) / 1e6;
-    m.apply_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move apply wall")) / 1e6;
-    m.native_rename_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move native rename wall")) / 1e6;
-    m.dest_verif_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move destination verification wall")) / 1e6;
-    m.prep_val_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move prepared validation wall")) / 1e6;
-    m.journal_save_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("journal save wall")) / 1e6;
-    m.journal_delta_calc_s = static_cast<double>(kasumi::platform::perf_trace::get_time("journal delta calculation wall")) / 1e6;
-    m.journal_sem_val_s = static_cast<double>(kasumi::platform::perf_trace::get_time("journal semantic validation wall")) / 1e6;
-    m.journal_encode_s = static_cast<double>(kasumi::platform::perf_trace::get_time("journal encode wall")) / 1e6;
-    m.journal_durable_write_s = static_cast<double>(kasumi::platform::perf_trace::get_time("journal durable write wall")) / 1e6;
-    m.final_val_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("final local validation wall")) / 1e6;
-
-    m.move_planned = kasumi::platform::perf_trace::get_count("move planned count");
-    m.move_applied = kasumi::platform::perf_trace::get_count("move applied count");
-    m.backup_files_created = kasumi::platform::perf_trace::get_count("backup files created");
-    m.backup_bytes_copied = kasumi::platform::perf_trace::get_count("backup bytes copied");
-    m.backup_hash_calls = kasumi::platform::perf_trace::get_count("backup hash calls");
-    m.source_hash_calls = kasumi::platform::perf_trace::get_count("source hash calls");
-    m.journal_save_calls = kasumi::platform::perf_trace::get_count("journal save calls");
-    m.journal_delta_count = kasumi::platform::perf_trace::get_count("journal delta count");
-    m.journal_bytes_written = kasumi::platform::perf_trace::get_count("journal bytes written");
-    m.native_rename_calls = kasumi::platform::perf_trace::get_count("native rename calls");
-
-    m.content_gets = receiver.counters.content_gets;
-    m.content_puts = receiver.counters.content_puts;
-    m.content_presences = receiver.counters.content_presences;
-
-    std::cout << "\n=======================================================\n";
-    std::cout << "DIAGNOSTIC METRICS REPORT FOR N = " << count << "\n";
-    std::cout << "=======================================================\n";
-    std::cout << std::fixed << std::setprecision(6);
-    std::cout << "Total sync duration:          " << m.total_sync_s << " s\n";
-    std::cout << "Move planned count:           " << m.move_planned << "\n";
-    std::cout << "Move applied count:           " << m.move_applied << "\n";
-    std::cout << "Native rename calls:          " << m.native_rename_calls << "\n";
-    std::cout << "Native rename wall:           " << m.native_rename_wall_s << " s\n";
-    std::cout << "Move preparation wall:        " << m.prep_wall_s << " s\n";
-    std::cout << "Backup files created:         " << m.backup_files_created << "\n";
-    std::cout << "Backup bytes copied:          " << m.backup_bytes_copied << " bytes\n";
-    std::cout << "Backup copy wall:             " << m.backup_copy_wall_s << " s\n";
-    std::cout << "Backup durable wall:          " << m.backup_durable_wall_s << " s\n";
-    std::cout << "Source hash calls:            " << m.source_hash_calls << "\n";
-    std::cout << "Source hash wall:             " << m.source_hash_wall_s << " s\n";
-    std::cout << "Backup hash calls:            " << m.backup_hash_calls << "\n";
-    std::cout << "Backup hash wall:             " << m.backup_hash_wall_s << " s\n";
-    std::cout << "Move apply wall:              " << m.apply_wall_s << " s\n";
-    std::cout << "Move prepared validation wall:" << m.prep_val_wall_s << " s\n";
-    std::cout << "Move dest verification wall:  " << m.dest_verif_wall_s << " s\n";
-    std::cout << "Journal save calls:           " << m.journal_save_calls << "\n";
-    std::cout << "Journal save wall:            " << m.journal_save_wall_s << " s\n";
-    std::cout << "Apply ACL calls:              " << kasumi::platform::perf_trace::get_count("apply_acl calls") << "\n";
-    std::cout << "Apply ACL wall:               " << static_cast<double>(kasumi::platform::perf_trace::get_time("apply_acl wall")) / 1e6 << " s\n";
-    std::cout << "Journal delta count:          " << m.journal_delta_count << "\n";
-    std::cout << "Journal bytes written:        " << m.journal_bytes_written << " bytes\n";
-    std::cout << "Journal delta calc wall:      " << m.journal_delta_calc_s << " s\n";
-    std::cout << "Journal sem validation wall:  " << m.journal_sem_val_s << " s\n";
-    std::cout << "Journal encode wall:          " << m.journal_encode_s << " s\n";
-    std::cout << "Journal durable write wall:   " << m.journal_durable_write_s << " s\n";
-    std::cout << "Final local validation wall:  " << m.final_val_wall_s << " s\n";
-    std::cout << "Content GET / PUT / PRESENCE: " << m.content_gets << " / " << m.content_puts << " / " << m.content_presences << "\n";
-    std::cout << "=======================================================\n\n";
-
-    kasumi::platform::perf_trace::force_enable(false);
-    return m;
-}
-
-TEST(DirectoryLocalMoveTest, MoveLocalAvoidsRedundantWorkInvariants) {
-    const auto m = run_controlled_reproduction(16);
-    EXPECT_EQ(m.move_planned, 16U);
-    EXPECT_EQ(m.move_applied, 16U);
-    EXPECT_EQ(m.content_gets, 0U);
-
-    // Cost invariants:
-    // Journal saves must be batched, not 1 flush per file (reduced from 23 down to 7)
-    EXPECT_LE(m.journal_save_calls, 7U);
-    // Source hash calls bounded (reduced from 64 with validate_prepared_rename down to 48)
-    EXPECT_LE(m.source_hash_calls, 48U);
-    // Backup hash calls bounded (reduced from 48 down to 32)
-    EXPECT_LE(m.backup_hash_calls, 48U);
-
 }
 
 TEST(DirectoryLocalMoveTest, DiagnosticReproduction16) {
-    const auto m = run_controlled_reproduction(16);
-    EXPECT_EQ(m.move_planned, 16U);
-    EXPECT_EQ(m.move_applied, 16U);
-    EXPECT_EQ(m.content_gets, 0U);
+    run_controlled_reproduction(16);
 }
 
 TEST(DirectoryLocalMoveTest, DiagnosticReproduction128) {
-    const auto m = run_controlled_reproduction(128);
-    EXPECT_EQ(m.move_planned, 128U);
-    EXPECT_EQ(m.move_applied, 128U);
-    EXPECT_EQ(m.content_gets, 0U);
+    run_controlled_reproduction(128);
 }
 
 TEST(DirectoryLocalMoveTest, DiagnosticReproduction512) {
-    const auto m = run_controlled_reproduction(512);
-    EXPECT_EQ(m.move_planned, 512U);
-    EXPECT_EQ(m.move_applied, 512U);
-    EXPECT_EQ(m.content_gets, 0U);
+    run_controlled_reproduction(512);
 }
 
-
-TEST(DirectoryLocalMoveTest, BackupCorruptedSameSizeRejectedByPreparedValidation) {
-    auto workspace_dir = kasumi::test::make_temp_workspace("backup-corrupted-same-size");
-    const auto local_root = kasumi::test::workspace_path(workspace_dir, "local");
+TEST(DirectoryLocalMoveTest,
+     BackupCorruptedSameSizeRejectedByPreparedValidation) {
+    auto workspace_dir =
+        kasumi::test::make_temp_workspace("backup-corrupted-same-size");
+    const auto local_root =
+        kasumi::test::workspace_path(workspace_dir, "local");
     std::filesystem::create_directories(local_root);
     const auto tx_dir = kasumi::test::workspace_path(workspace_dir, "tx");
     std::filesystem::create_directories(tx_dir);
@@ -2395,7 +2277,8 @@ TEST(DirectoryLocalMoveTest, BackupCorruptedSameSizeRejectedByPreparedValidation
 
     const auto source = local_root / "source.bin";
     const auto destination = local_root / "destination.bin";
-    const std::string content = "original-content-for-testing-123456"; // 35 bytes
+    const std::string content =
+        "original-content-for-testing-123456"; // 35 bytes
     kasumi::test::write_text(source, content);
 
     auto hash_result = kasumi::crypto::content::hash_file(source);
@@ -2417,7 +2300,8 @@ TEST(DirectoryLocalMoveTest, BackupCorruptedSameSizeRejectedByPreparedValidation
     ASSERT_TRUE(prep_res.has_value()) << prep_res.error().detail;
     progress = *prep_res;
 
-    const auto backup = kasumi::platform::workspace_file(workspace, progress.backup_slot, ".backup");
+    const auto backup = kasumi::platform::workspace_file(
+        workspace, progress.backup_slot, ".backup");
     ASSERT_TRUE(std::filesystem::exists(backup));
     EXPECT_EQ(std::filesystem::file_size(backup), content.size());
 
@@ -2426,19 +2310,24 @@ TEST(DirectoryLocalMoveTest, BackupCorruptedSameSizeRejectedByPreparedValidation
     ASSERT_EQ(corrupted.size(), content.size());
     kasumi::test::write_text(backup, corrupted);
 
-    auto val_res = kasumi::application::sync::mutation::detail::validate_prepared_rename(
-        op, 0, source, destination, workspace, progress);
+    auto val_res =
+        kasumi::application::sync::mutation::detail::validate_prepared_rename(
+            op, 0, source, destination, workspace, progress);
 
     EXPECT_FALSE(val_res.has_value());
     if (!val_res.has_value()) {
         EXPECT_EQ(val_res.error().code,
-                  kasumi::application::sync::mutation::MutationErrorCode::IntegrityMismatch);
+                  kasumi::application::sync::mutation::MutationErrorCode::
+                      IntegrityMismatch);
     }
 }
 
-TEST(DirectoryLocalMoveTest, SourceModifiedAfterPreparationRejectedByPreparedValidation) {
-    auto workspace_dir = kasumi::test::make_temp_workspace("source-modified-after-prep");
-    const auto local_root = kasumi::test::workspace_path(workspace_dir, "local");
+TEST(DirectoryLocalMoveTest,
+     SourceModifiedAfterPreparationRejectedByPreparedValidation) {
+    auto workspace_dir =
+        kasumi::test::make_temp_workspace("source-modified-after-prep");
+    const auto local_root =
+        kasumi::test::workspace_path(workspace_dir, "local");
     std::filesystem::create_directories(local_root);
     const auto tx_dir = kasumi::test::workspace_path(workspace_dir, "tx");
     std::filesystem::create_directories(tx_dir);
@@ -2446,7 +2335,8 @@ TEST(DirectoryLocalMoveTest, SourceModifiedAfterPreparationRejectedByPreparedVal
 
     const auto source = local_root / "source.bin";
     const auto destination = local_root / "destination.bin";
-    const std::string content = "original-content-for-testing-123456"; // 35 bytes
+    const std::string content =
+        "original-content-for-testing-123456"; // 35 bytes
     kasumi::test::write_text(source, content);
 
     auto hash_result = kasumi::crypto::content::hash_file(source);
@@ -2473,57 +2363,43 @@ TEST(DirectoryLocalMoveTest, SourceModifiedAfterPreparationRejectedByPreparedVal
     ASSERT_EQ(modified.size(), content.size());
     kasumi::test::write_text(source, modified);
 
-    auto val_res = kasumi::application::sync::mutation::detail::validate_prepared_rename(
-        op, 0, source, destination, workspace, progress);
+    auto val_res =
+        kasumi::application::sync::mutation::detail::validate_prepared_rename(
+            op, 0, source, destination, workspace, progress);
 
     EXPECT_FALSE(val_res.has_value());
     if (!val_res.has_value()) {
         EXPECT_EQ(val_res.error().code,
-                  kasumi::application::sync::mutation::MutationErrorCode::DestinationConflict);
+                  kasumi::application::sync::mutation::MutationErrorCode::
+                      DestinationConflict);
     }
 }
 
-TEST(DirectoryLocalMoveTest, DownloadMetricsDoNotContaminateMoveMetrics) {
-    SyncNode sender, receiver;
-    ASSERT_TRUE(init_pair(sender,
-                          "download-metrics-sender",
-                          receiver,
-                          "download-metrics-receiver"));
-
-    write_local_file(sender, "new_file.txt", "download-content-sample");
-    ASSERT_TRUE(sync_ok(sender));
-
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
-
-    ASSERT_TRUE(sync_ok(receiver));
-
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("move planned count"), 0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("move applied count"), 0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("native rename calls"), 0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_time("move destination verification wall"), 0);
-
-    kasumi::platform::perf_trace::force_enable(false);
-}
-
-void run_eight_file_move_recovery_scenario(std::size_t interrupt_after_k_moves,
-                                          bool interrupt_after_applied_checkpoint = false,
-                                          bool tamper_destination_after_move = false,
-                                          bool tamper_backup_after_move = false) {
+void run_eight_file_move_recovery_scenario(
+    std::size_t interrupt_after_k_moves,
+    bool interrupt_after_applied_checkpoint = false,
+    bool tamper_destination_after_move = false,
+    bool tamper_backup_after_move = false) {
     SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "eight-move-sender-" + std::to_string(interrupt_after_k_moves) +
-                                       (interrupt_after_applied_checkpoint ? "-ckpt" : "") +
-                                       (tamper_destination_after_move ? "-tdest" : "") +
-                                       (tamper_backup_after_move ? "-tbkp" : "")));
+    ASSERT_TRUE(init_sync_node(
+        sender,
+        "eight-move-sender-" + std::to_string(interrupt_after_k_moves) +
+            (interrupt_after_applied_checkpoint ? "-ckpt" : "") +
+            (tamper_destination_after_move ? "-tdest" : "") +
+            (tamper_backup_after_move ? "-tbkp" : "")));
     SyncNode receiver;
     ASSERT_TRUE(init_sync_node(
-        receiver, "eight-move-receiver-" + std::to_string(interrupt_after_k_moves) +
-                  (interrupt_after_applied_checkpoint ? "-ckpt" : "") +
-                  (tamper_destination_after_move ? "-tdest" : "") +
-                  (tamper_backup_after_move ? "-tbkp" : ""), sender.storage_root));
+        receiver,
+        "eight-move-receiver-" + std::to_string(interrupt_after_k_moves) +
+            (interrupt_after_applied_checkpoint ? "-ckpt" : "") +
+            (tamper_destination_after_move ? "-tdest" : "") +
+            (tamper_backup_after_move ? "-tbkp" : ""),
+        sender.storage_root));
 
     for (std::size_t i = 1; i <= 8; ++i) {
-        write_local_file(sender, "A/file" + std::to_string(i) + ".bin", "payload-" + std::to_string(i));
+        write_local_file(sender,
+                         "A/file" + std::to_string(i) + ".bin",
+                         "payload-" + std::to_string(i));
     }
 
     ASSERT_TRUE(sync_pair(sender, receiver));
@@ -2538,7 +2414,8 @@ void run_eight_file_move_recovery_scenario(std::size_t interrupt_after_k_moves,
         [&](std::string_view point, const std::filesystem::path&) {
             if (point == "after_rename_move") {
                 ++moves_completed;
-                if (!interrupt_after_applied_checkpoint && moves_completed == interrupt_after_k_moves) {
+                if (!interrupt_after_applied_checkpoint &&
+                    moves_completed == interrupt_after_k_moves) {
                     throw SimulatedInterruption{};
                 }
             } else if (point == "after-MoveLocal-consolidated-checkpoint") {
@@ -2548,24 +2425,30 @@ void run_eight_file_move_recovery_scenario(std::size_t interrupt_after_k_moves,
             }
         });
 
-    EXPECT_THROW(static_cast<void>(run_node_sync(receiver)), SimulatedInterruption);
+    EXPECT_THROW(static_cast<void>(run_node_sync(receiver)),
+                 SimulatedInterruption);
     kasumi::application::sync::mutation_fault_test::clear_hook();
 
     // Verify durable state on disk directly produced by the real coordinator
     {
-        const auto paths = kasumi::application::sync::journal::make_paths(receiver.profile);
+        const auto paths =
+            kasumi::application::sync::journal::make_paths(receiver.profile);
         ASSERT_TRUE(paths.has_value());
-        auto loaded = kasumi::application::sync::journal::load(*paths, receiver.key, nullptr);
+        auto loaded = kasumi::application::sync::journal::load(
+            *paths, receiver.key, nullptr);
         ASSERT_TRUE(loaded.has_value());
         ASSERT_TRUE(*loaded);
         const auto& record = **loaded;
         if (interrupt_after_applied_checkpoint) {
-            EXPECT_EQ(record.phase, kasumi::transaction::Phase::LocalChangesApplied);
+            EXPECT_EQ(record.phase,
+                      kasumi::transaction::Phase::LocalChangesApplied);
             std::size_t move_count = 0;
             for (std::size_t i = 0; i < record.plan.operations.size(); ++i) {
-                if (record.plan.operations[i].action == kasumi::Action::MoveLocal) {
+                if (record.plan.operations[i].action ==
+                    kasumi::Action::MoveLocal) {
                     ++move_count;
-                    EXPECT_EQ(record.progress[i].state, kasumi::transaction::OperationState::Applied);
+                    EXPECT_EQ(record.progress[i].state,
+                              kasumi::transaction::OperationState::Applied);
                 }
             }
             EXPECT_EQ(move_count, 8U);
@@ -2573,19 +2456,23 @@ void run_eight_file_move_recovery_scenario(std::size_t interrupt_after_k_moves,
     }
 
     if (tamper_destination_after_move) {
-        write_local_file(receiver, "B/file4.bin", "external-conflicting-content");
+        write_local_file(
+            receiver, "B/file4.bin", "external-conflicting-content");
         reset_content_counts(receiver);
         const auto recovery_sync = run_node_sync(receiver);
         EXPECT_FALSE(recovery_sync.has_value());
-        EXPECT_EQ(read_local_file(receiver, "B/file4.bin"), "external-conflicting-content");
+        EXPECT_EQ(read_local_file(receiver, "B/file4.bin"),
+                  "external-conflicting-content");
         return;
     }
 
     if (tamper_backup_after_move) {
         const auto tx_root = receiver.profile / ".transactions";
         if (std::filesystem::exists(tx_root)) {
-            for (const auto& entry : std::filesystem::recursive_directory_iterator(tx_root)) {
-                if (entry.is_regular_file() && entry.path().extension() == ".backup") {
+            for (const auto& entry :
+                 std::filesystem::recursive_directory_iterator(tx_root)) {
+                if (entry.is_regular_file() &&
+                    entry.path().extension() == ".backup") {
                     auto sz = std::filesystem::file_size(entry.path());
                     std::string bad(sz, 'X');
                     kasumi::test::write_text(entry.path(), bad);
@@ -2604,8 +2491,9 @@ void run_eight_file_move_recovery_scenario(std::size_t interrupt_after_k_moves,
 
     EXPECT_FALSE(local_entry_exists(receiver, "A"));
     for (std::size_t i = 1; i <= 8; ++i) {
-        EXPECT_EQ(read_local_file(receiver, "B/file" + std::to_string(i) + ".bin"),
-                  "payload-" + std::to_string(i));
+        EXPECT_EQ(
+            read_local_file(receiver, "B/file" + std::to_string(i) + ".bin"),
+            "payload-" + std::to_string(i));
     }
     EXPECT_TRUE(trees_equal(sender, receiver));
 
@@ -2631,24 +2519,36 @@ TEST(DirectoryLocalMoveTest, BatchMoveRecoveryInterruptedAtK8BeforeCheckpoint) {
     run_eight_file_move_recovery_scenario(8);
 }
 
-TEST(DirectoryLocalMoveTest, BatchMoveRecoveryInterruptedAfterConsolidatedCheckpoint) {
+TEST(DirectoryLocalMoveTest,
+     BatchMoveRecoveryInterruptedAfterConsolidatedCheckpoint) {
     run_eight_file_move_recovery_scenario(8, true);
 }
 
-TEST(DirectoryLocalMoveTest, BatchMoveRecoveryFailsClosedOnExternalDestinationConflict) {
+TEST(DirectoryLocalMoveTest,
+     BatchMoveRecoveryFailsClosedOnExternalDestinationConflict) {
     run_eight_file_move_recovery_scenario(4, false, true, false);
 }
 
-TEST(DirectoryLocalMoveTest, BatchMoveRecoveryFailsClosedOnCorruptedBackupSameSize) {
+TEST(DirectoryLocalMoveTest,
+     BatchMoveRecoveryFailsClosedOnCorruptedBackupSameSize) {
     run_eight_file_move_recovery_scenario(4, false, false, true);
 }
-
 
 #if defined(_WIN32)
 void add_unauthorized_dacl_ace(const std::filesystem::path& path) {
     PSID everyone_sid = nullptr;
     SID_IDENTIFIER_AUTHORITY world_auth = SECURITY_WORLD_SID_AUTHORITY;
-    ASSERT_TRUE(AllocateAndInitializeSid(&world_auth, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &everyone_sid));
+    ASSERT_TRUE(AllocateAndInitializeSid(&world_auth,
+                                         1,
+                                         SECURITY_WORLD_RID,
+                                         0,
+                                         0,
+                                         0,
+                                         0,
+                                         0,
+                                         0,
+                                         0,
+                                         &everyone_sid));
 
     EXPLICIT_ACCESSW ea{};
     ea.grfAccessPermissions = GENERIC_READ;
@@ -2671,7 +2571,8 @@ void add_unauthorized_dacl_ace(const std::filesystem::path& path) {
               ERROR_SUCCESS);
 
     PACL new_dacl = nullptr;
-    ASSERT_EQ(SetEntriesInAclW(1, &ea, existing_dacl, &new_dacl), ERROR_SUCCESS);
+    ASSERT_EQ(SetEntriesInAclW(1, &ea, existing_dacl, &new_dacl),
+              ERROR_SUCCESS);
     ASSERT_EQ(SetNamedSecurityInfoW(const_cast<wchar_t*>(path.c_str()),
                                     SE_FILE_OBJECT,
                                     DACL_SECURITY_INFORMATION,
@@ -2707,7 +2608,8 @@ void expect_private_dacl_hardening(const std::filesystem::path& path) {
     EXPECT_NE(control & SE_DACL_PROTECTED, 0);
 
     ACL_SIZE_INFORMATION information{};
-    ASSERT_TRUE(GetAclInformation(dacl, &information, sizeof(information), AclSizeInformation));
+    ASSERT_TRUE(GetAclInformation(
+        dacl, &information, sizeof(information), AclSizeInformation));
     // Hardened private storage has exactly 2 ACEs (user + SYSTEM)
     EXPECT_EQ(information.AceCount, 2U);
     LocalFree(descriptor);
@@ -2716,13 +2618,15 @@ void expect_private_dacl_hardening(const std::filesystem::path& path) {
 
 TEST(DirectoryLocalMoveTest, PrivateStoragePermissionsHardenedOnValidation) {
 #if defined(_WIN32)
-    auto workspace_dir = kasumi::test::make_temp_workspace("private-hardening-test");
+    auto workspace_dir =
+        kasumi::test::make_temp_workspace("private-hardening-test");
     const auto tx_dir = kasumi::test::workspace_path(workspace_dir, "tx");
     std::filesystem::create_directories(tx_dir);
     kasumi::platform::Workspace workspace{tx_dir};
 
     // 1. Workspace directory hardening
-    ASSERT_TRUE(kasumi::platform::private_storage::protect_directory(workspace.root));
+    ASSERT_TRUE(
+        kasumi::platform::private_storage::protect_directory(workspace.root));
     add_unauthorized_dacl_ace(workspace.root);
 
     // Call validate_workspace (via prepare_operation)
@@ -2742,33 +2646,45 @@ TEST(DirectoryLocalMoveTest, PrivateStoragePermissionsHardenedOnValidation) {
     progress.backup_slot = 0;
 
     auto prep = kasumi::application::sync::mutation::prepare_operation(
-        op, 0, kasumi::test::workspace_root(workspace_dir), workspace, progress, plan_ops);
+        op,
+        0,
+        kasumi::test::workspace_root(workspace_dir),
+        workspace,
+        progress,
+        plan_ops);
     ASSERT_TRUE(prep.has_value());
 
     // Verify workspace.root was hardened back to 2 ACEs
     expect_private_dacl_hardening(workspace.root);
 
     // 2. Backup file hardening
-    const auto bkp = kasumi::platform::workspace_file(workspace, prep->backup_slot, ".backup");
+    const auto bkp = kasumi::platform::workspace_file(
+        workspace, prep->backup_slot, ".backup");
     ASSERT_TRUE(std::filesystem::exists(bkp));
     add_unauthorized_dacl_ace(bkp);
 
     // validate_prepared_rename calls validate_backup which calls protect_file
-    auto vres = kasumi::application::sync::mutation::detail::validate_prepared_rename(
-        op, 0, source, kasumi::test::workspace_path(workspace_dir, "d.bin"), workspace, *prep);
+    auto vres =
+        kasumi::application::sync::mutation::detail::validate_prepared_rename(
+            op,
+            0,
+            source,
+            kasumi::test::workspace_path(workspace_dir, "d.bin"),
+            workspace,
+            *prep);
     ASSERT_TRUE(vres.has_value());
     expect_private_dacl_hardening(bkp);
 #endif
 }
 
-
-
 TEST(DirectoryLocalMoveTest, WorkspaceReplacedBetweenOperationsFailsClosed) {
-    auto workspace_dir = kasumi::test::make_temp_workspace("replace-workspace-test");
+    auto workspace_dir =
+        kasumi::test::make_temp_workspace("replace-workspace-test");
     const auto tx_dir = kasumi::test::workspace_path(workspace_dir, "tx");
     std::filesystem::create_directories(tx_dir);
     kasumi::platform::Workspace workspace{tx_dir};
-    ASSERT_TRUE(kasumi::platform::private_storage::protect_directory(workspace.root));
+    ASSERT_TRUE(
+        kasumi::platform::private_storage::protect_directory(workspace.root));
 
     const auto s0 = kasumi::test::workspace_path(workspace_dir, "s0.bin");
     const auto s1 = kasumi::test::workspace_path(workspace_dir, "s1.bin");
@@ -2778,13 +2694,26 @@ TEST(DirectoryLocalMoveTest, WorkspaceReplacedBetweenOperationsFailsClosed) {
     auto h1 = kasumi::crypto::content::hash_file(s1);
     ASSERT_TRUE(h0.has_value() && h1.has_value());
 
-    kasumi::Operation op0{.action = kasumi::Action::MoveLocal, .path = "s0.bin", .hash = kasumi::hash_hex(*h0), .alt_path = "d0.bin", .size = 9};
-    kasumi::Operation op1{.action = kasumi::Action::MoveLocal, .path = "s1.bin", .hash = kasumi::hash_hex(*h1), .alt_path = "d1.bin", .size = 9};
+    kasumi::Operation op0{.action = kasumi::Action::MoveLocal,
+                          .path = "s0.bin",
+                          .hash = kasumi::hash_hex(*h0),
+                          .alt_path = "d0.bin",
+                          .size = 9};
+    kasumi::Operation op1{.action = kasumi::Action::MoveLocal,
+                          .path = "s1.bin",
+                          .hash = kasumi::hash_hex(*h1),
+                          .alt_path = "d1.bin",
+                          .size = 9};
     std::vector<kasumi::Operation> plan{op0, op1};
 
     kasumi::transaction::OperationProgress p0{.backup_slot = 0};
     auto prep0 = kasumi::application::sync::mutation::prepare_operation(
-        op0, 0, kasumi::test::workspace_root(workspace_dir), workspace, p0, plan);
+        op0,
+        0,
+        kasumi::test::workspace_root(workspace_dir),
+        workspace,
+        p0,
+        plan);
     ASSERT_TRUE(prep0.has_value()) << prep0.error().detail;
 
     // Replace workspace.root with a regular file
@@ -2793,22 +2722,29 @@ TEST(DirectoryLocalMoveTest, WorkspaceReplacedBetweenOperationsFailsClosed) {
 
     kasumi::transaction::OperationProgress p1{.backup_slot = 1};
     auto prep1 = kasumi::application::sync::mutation::prepare_operation(
-        op1, 1, kasumi::test::workspace_root(workspace_dir), workspace, p1, plan);
+        op1,
+        1,
+        kasumi::test::workspace_root(workspace_dir),
+        workspace,
+        p1,
+        plan);
     EXPECT_FALSE(prep1.has_value());
     if (!prep1.has_value()) {
-        EXPECT_EQ(prep1.error().code, kasumi::application::sync::mutation::MutationErrorCode::UnsafePath);
+        EXPECT_EQ(
+            prep1.error().code,
+            kasumi::application::sync::mutation::MutationErrorCode::UnsafePath);
     }
 }
 
-TEST(DirectoryLocalMoveTest, WorkspaceAlteredPermissionsBetweenOperationsRepaired) {
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
-
-    auto workspace_dir = kasumi::test::make_temp_workspace("altered-perms-workspace-test");
+TEST(DirectoryLocalMoveTest,
+     WorkspaceAlteredPermissionsBetweenOperationsRepaired) {
+    auto workspace_dir =
+        kasumi::test::make_temp_workspace("altered-perms-workspace-test");
     const auto tx_dir = kasumi::test::workspace_path(workspace_dir, "tx");
     std::filesystem::create_directories(tx_dir);
     kasumi::platform::Workspace workspace{tx_dir};
-    ASSERT_TRUE(kasumi::platform::private_storage::protect_directory(workspace.root));
+    ASSERT_TRUE(
+        kasumi::platform::private_storage::protect_directory(workspace.root));
 
     const auto s0 = kasumi::test::workspace_path(workspace_dir, "s0.bin");
     const auto s1 = kasumi::test::workspace_path(workspace_dir, "s1.bin");
@@ -2818,13 +2754,26 @@ TEST(DirectoryLocalMoveTest, WorkspaceAlteredPermissionsBetweenOperationsRepaire
     auto h1 = kasumi::crypto::content::hash_file(s1);
     ASSERT_TRUE(h0.has_value() && h1.has_value());
 
-    kasumi::Operation op0{.action = kasumi::Action::MoveLocal, .path = "s0.bin", .hash = kasumi::hash_hex(*h0), .alt_path = "d0.bin", .size = 9};
-    kasumi::Operation op1{.action = kasumi::Action::MoveLocal, .path = "s1.bin", .hash = kasumi::hash_hex(*h1), .alt_path = "d1.bin", .size = 9};
+    kasumi::Operation op0{.action = kasumi::Action::MoveLocal,
+                          .path = "s0.bin",
+                          .hash = kasumi::hash_hex(*h0),
+                          .alt_path = "d0.bin",
+                          .size = 9};
+    kasumi::Operation op1{.action = kasumi::Action::MoveLocal,
+                          .path = "s1.bin",
+                          .hash = kasumi::hash_hex(*h1),
+                          .alt_path = "d1.bin",
+                          .size = 9};
     std::vector<kasumi::Operation> plan{op0, op1};
 
     kasumi::transaction::OperationProgress p0{.backup_slot = 0};
     auto prep0 = kasumi::application::sync::mutation::prepare_operation(
-        op0, 0, kasumi::test::workspace_root(workspace_dir), workspace, p0, plan);
+        op0,
+        0,
+        kasumi::test::workspace_root(workspace_dir),
+        workspace,
+        p0,
+        plan);
     ASSERT_TRUE(prep0.has_value());
 
 #if defined(_WIN32)
@@ -2833,11 +2782,14 @@ TEST(DirectoryLocalMoveTest, WorkspaceAlteredPermissionsBetweenOperationsRepaire
     ::chmod(workspace.root.c_str(), 0777);
 #endif
 
-    kasumi::platform::perf_trace::reset();
-
     kasumi::transaction::OperationProgress p1{.backup_slot = 1};
     auto prep1 = kasumi::application::sync::mutation::prepare_operation(
-        op1, 1, kasumi::test::workspace_root(workspace_dir), workspace, p1, plan);
+        op1,
+        1,
+        kasumi::test::workspace_root(workspace_dir),
+        workspace,
+        p1,
+        plan);
     ASSERT_TRUE(prep1.has_value());
 
 #if defined(_WIN32)
@@ -2847,11 +2799,12 @@ TEST(DirectoryLocalMoveTest, WorkspaceAlteredPermissionsBetweenOperationsRepaire
     ASSERT_EQ(::stat(workspace.root.c_str(), &st), 0);
     EXPECT_EQ(st.st_mode & 0777, 0700);
 #endif
-    EXPECT_GT(kasumi::platform::perf_trace::get_count("acl.repair_required"), 0U);
 }
 
-TEST(DirectoryLocalMoveTest, IsolatedPreparationWithNonZeroIndexValidatesWorkspace) {
-    auto workspace_dir = kasumi::test::make_temp_workspace("isolated-nonzero-index-test");
+TEST(DirectoryLocalMoveTest,
+     IsolatedPreparationWithNonZeroIndexValidatesWorkspace) {
+    auto workspace_dir =
+        kasumi::test::make_temp_workspace("isolated-nonzero-index-test");
     kasumi::platform::Workspace non_existent_workspace{
         kasumi::test::workspace_path(workspace_dir, "missing_ws")};
 
@@ -2860,27 +2813,44 @@ TEST(DirectoryLocalMoveTest, IsolatedPreparationWithNonZeroIndexValidatesWorkspa
     auto h1 = kasumi::crypto::content::hash_file(s1);
     ASSERT_TRUE(h1.has_value());
 
-    kasumi::Operation op0{.action = kasumi::Action::MoveLocal, .path = "s0.bin", .hash = "abcd", .alt_path = "d0.bin", .size = 9};
-    kasumi::Operation op1{.action = kasumi::Action::MoveLocal, .path = "s1.bin", .hash = kasumi::hash_hex(*h1), .alt_path = "d1.bin", .size = 9};
+    kasumi::Operation op0{.action = kasumi::Action::MoveLocal,
+                          .path = "s0.bin",
+                          .hash = "abcd",
+                          .alt_path = "d0.bin",
+                          .size = 9};
+    kasumi::Operation op1{.action = kasumi::Action::MoveLocal,
+                          .path = "s1.bin",
+                          .hash = kasumi::hash_hex(*h1),
+                          .alt_path = "d1.bin",
+                          .size = 9};
     std::vector<kasumi::Operation> plan{op0, op1};
 
     kasumi::transaction::OperationProgress p1{.backup_slot = 1};
     auto prep1 = kasumi::application::sync::mutation::prepare_operation(
-        op1, 1, kasumi::test::workspace_root(workspace_dir), non_existent_workspace, p1, plan);
+        op1,
+        1,
+        kasumi::test::workspace_root(workspace_dir),
+        non_existent_workspace,
+        p1,
+        plan);
 
     EXPECT_FALSE(prep1.has_value());
     if (!prep1.has_value()) {
-        EXPECT_EQ(prep1.error().code, kasumi::application::sync::mutation::MutationErrorCode::LocalIo);
+        EXPECT_EQ(
+            prep1.error().code,
+            kasumi::application::sync::mutation::MutationErrorCode::LocalIo);
         EXPECT_NE(prep1.error().detail.find("workspace"), std::string::npos);
     }
 }
 
 TEST(DirectoryLocalMoveTest, ValidatePreparedRenameRejectsInvalidWorkspace) {
-    auto workspace_dir = kasumi::test::make_temp_workspace("prepared-rename-ws-test");
+    auto workspace_dir =
+        kasumi::test::make_temp_workspace("prepared-rename-ws-test");
     const auto tx_dir = kasumi::test::workspace_path(workspace_dir, "tx");
     std::filesystem::create_directories(tx_dir);
     kasumi::platform::Workspace workspace{tx_dir};
-    ASSERT_TRUE(kasumi::platform::private_storage::protect_directory(workspace.root));
+    ASSERT_TRUE(
+        kasumi::platform::private_storage::protect_directory(workspace.root));
 
     const auto s0 = kasumi::test::workspace_path(workspace_dir, "s0.bin");
     const auto d0 = kasumi::test::workspace_path(workspace_dir, "d0.bin");
@@ -2888,33 +2858,46 @@ TEST(DirectoryLocalMoveTest, ValidatePreparedRenameRejectsInvalidWorkspace) {
     auto h0 = kasumi::crypto::content::hash_file(s0);
     ASSERT_TRUE(h0.has_value());
 
-    kasumi::Operation op0{.action = kasumi::Action::MoveLocal, .path = "s0.bin", .hash = kasumi::hash_hex(*h0), .alt_path = "d0.bin", .size = 9};
+    kasumi::Operation op0{.action = kasumi::Action::MoveLocal,
+                          .path = "s0.bin",
+                          .hash = kasumi::hash_hex(*h0),
+                          .alt_path = "d0.bin",
+                          .size = 9};
     std::vector<kasumi::Operation> plan{op0};
 
     kasumi::transaction::OperationProgress p0{.backup_slot = 0};
     auto prep0 = kasumi::application::sync::mutation::prepare_operation(
-        op0, 0, kasumi::test::workspace_root(workspace_dir), workspace, p0, plan);
+        op0,
+        0,
+        kasumi::test::workspace_root(workspace_dir),
+        workspace,
+        p0,
+        plan);
     ASSERT_TRUE(prep0.has_value());
 
     // Replace workspace.root before validate_prepared_rename
     std::filesystem::remove_all(workspace.root);
     kasumi::test::write_text(workspace.root, "corrupted-file");
 
-    auto vres = kasumi::application::sync::mutation::detail::validate_prepared_rename(
-        op0, 0, s0, d0, workspace, *prep0);
+    auto vres =
+        kasumi::application::sync::mutation::detail::validate_prepared_rename(
+            op0, 0, s0, d0, workspace, *prep0);
     EXPECT_FALSE(vres.has_value());
     if (!vres.has_value()) {
-        EXPECT_EQ(vres.error().code, kasumi::application::sync::mutation::MutationErrorCode::UnsafePath);
+        EXPECT_EQ(
+            vres.error().code,
+            kasumi::application::sync::mutation::MutationErrorCode::UnsafePath);
     }
 }
 
-
 TEST(DirectoryLocalMoveTest, BackupHardenedImmediatelyUponCreation) {
-    auto workspace_dir = kasumi::test::make_temp_workspace("backup-hardening-immediate-test");
+    auto workspace_dir =
+        kasumi::test::make_temp_workspace("backup-hardening-immediate-test");
     const auto tx_dir = kasumi::test::workspace_path(workspace_dir, "tx");
     std::filesystem::create_directories(tx_dir);
     kasumi::platform::Workspace workspace{tx_dir};
-    ASSERT_TRUE(kasumi::platform::private_storage::protect_directory(workspace.root));
+    ASSERT_TRUE(
+        kasumi::platform::private_storage::protect_directory(workspace.root));
 
     const auto s0 = kasumi::test::workspace_path(workspace_dir, "s0.bin");
     kasumi::test::write_text(s0, "source-sensitive-data");
@@ -2935,10 +2918,16 @@ TEST(DirectoryLocalMoveTest, BackupHardenedImmediatelyUponCreation) {
 
     kasumi::transaction::OperationProgress p0{.backup_slot = 0};
     auto prep0 = kasumi::application::sync::mutation::prepare_operation(
-        op0, 0, kasumi::test::workspace_root(workspace_dir), workspace, p0, plan);
+        op0,
+        0,
+        kasumi::test::workspace_root(workspace_dir),
+        workspace,
+        p0,
+        plan);
     ASSERT_TRUE(prep0.has_value());
 
-    const auto bkp = kasumi::platform::workspace_file(workspace, prep0->backup_slot, ".backup");
+    const auto bkp = kasumi::platform::workspace_file(
+        workspace, prep0->backup_slot, ".backup");
     ASSERT_TRUE(std::filesystem::exists(bkp));
 #if defined(_WIN32)
     expect_private_dacl_hardening(bkp);
@@ -2947,22 +2936,66 @@ TEST(DirectoryLocalMoveTest, BackupHardenedImmediatelyUponCreation) {
 
 TEST(DirectoryLocalMoveTest, ContentCounterConcurrentCallbacksAreThreadSafe) {
     kasumi::transport::Transport dummy_transport{
-        .state = kasumi::transport::TransportStateHandle{nullptr, [](void*) noexcept {}},
+        .state = kasumi::transport::TransportStateHandle{nullptr,
+                                                         [](void*) noexcept {
+                                                         }},
         .storage = kasumi::transport::StorageOperations{
-            .initialize = [](void*) -> kasumi::transport::Result { return {}; },
-            .put = [](void*, const std::filesystem::path&, std::string_view) -> kasumi::transport::Result { return {}; },
-            .put_batch = [](void*, const kasumi::transport::PutBatch&) -> kasumi::transport::Result { return {}; },
-            .put_files_batch = [](void*, const kasumi::transport::PutFilesBatch&) -> kasumi::transport::Result { return {}; },
-            .get = [](void*, std::string_view, const std::filesystem::path&) -> kasumi::transport::Result { return {}; },
-            .get_batch = [](void*, const kasumi::transport::GetBatch&) -> kasumi::transport::Result { return {}; },
-            .copy = [](void*, std::string_view, std::string_view) -> kasumi::transport::Result { return {}; },
-            .copy_batch = [](void*, const kasumi::transport::CopyBatch&) -> kasumi::transport::Result { return {}; },
-            .presence = [](void*, std::string_view) -> kasumi::transport::PresenceResult { return kasumi::transport::Presence::Present; },
-            .list = [](void*) -> kasumi::transport::ListingResult { return kasumi::transport::ListingResult{}; },
-            .list_prefix = [](void*, std::string_view) -> kasumi::transport::ListingResult { return kasumi::transport::ListingResult{}; },
-            .control_read_batch = [](void*, const kasumi::transport::ControlReadBatchRequest&) -> kasumi::transport::ControlReadBatchResponse { return kasumi::transport::ControlReadBatchResponse{}; },
-            .remove = [](void*, std::string_view) -> kasumi::transport::RemovalResult { return {}; },
-            .remove_batch = [](void*, const kasumi::transport::RemoveBatch&) -> kasumi::transport::RemoveBatchResult { return kasumi::transport::RemoveBatchResult{}; },
+            .initialize = [](void*) -> kasumi::transport::Result {
+                return {};
+            },
+            .put = [](void*, const std::filesystem::path&, std::string_view)
+                -> kasumi::transport::Result {
+                return {};
+            },
+            .put_batch = [](void*, const kasumi::transport::PutBatch&)
+                -> kasumi::transport::Result {
+                return {};
+            },
+            .put_files_batch = [](void*,
+                                  const kasumi::transport::PutFilesBatch&)
+                -> kasumi::transport::Result {
+                return {};
+            },
+            .get = [](void*, std::string_view, const std::filesystem::path&)
+                -> kasumi::transport::Result {
+                return {};
+            },
+            .get_batch = [](void*, const kasumi::transport::GetBatch&)
+                -> kasumi::transport::Result {
+                return {};
+            },
+            .copy = [](void*, std::string_view, std::string_view)
+                -> kasumi::transport::Result {
+                return {};
+            },
+            .copy_batch = [](void*, const kasumi::transport::CopyBatch&)
+                -> kasumi::transport::Result {
+                return {};
+            },
+            .presence = [](void*, std::string_view)
+                -> kasumi::transport::PresenceResult {
+                return kasumi::transport::Presence::Present;
+            },
+            .list = [](void*) -> kasumi::transport::ListingResult {
+                return kasumi::transport::ListingResult{};
+            },
+            .list_prefix = [](void*, std::string_view)
+                -> kasumi::transport::ListingResult {
+                return kasumi::transport::ListingResult{};
+            },
+            .control_read_batch =
+                [](void*, const kasumi::transport::ControlReadBatchRequest&)
+                -> kasumi::transport::ControlReadBatchResponse {
+                return kasumi::transport::ControlReadBatchResponse{};
+            },
+            .remove = [](void*,
+                         std::string_view) -> kasumi::transport::RemovalResult {
+                return {};
+            },
+            .remove_batch = [](void*, const kasumi::transport::RemoveBatch&)
+                -> kasumi::transport::RemoveBatchResult {
+                return kasumi::transport::RemoveBatchResult{};
+            },
         },
     };
 
@@ -2981,7 +3014,8 @@ TEST(DirectoryLocalMoveTest, ContentCounterConcurrentCallbacksAreThreadSafe) {
                 std::this_thread::yield();
             }
             for (std::size_t i = 0; i < ops_per_thread; ++i) {
-                const auto id = "content_thread_" + std::to_string(t) + "_op_" + std::to_string(i);
+                const auto id = "content_thread_" + std::to_string(t) + "_op_" +
+                                std::to_string(i);
                 static_cast<void>(kasumi::test::counter_get(
                     &state, id, std::filesystem::path{}));
                 static_cast<void>(kasumi::test::counter_put(
@@ -3004,11 +3038,6 @@ TEST(DirectoryLocalMoveTest, ContentCounterConcurrentCallbacksAreThreadSafe) {
     EXPECT_EQ(state.put_identifiers.size(), expected_ops);
     EXPECT_EQ(state.presence_identifiers.size(), expected_ops);
 }
-
-
-
-
-
 
 TEST(DirectoryLocalMoveTest, DisposableCoordinatorInterruptionRecovery) {
     SyncNode sender, receiver;
@@ -3050,9 +3079,11 @@ TEST(DirectoryLocalMoveTest, DisposableCoordinatorInterruptionRecovery) {
     std::filesystem::path interrupted_path;
     kasumi::application::sync::mutation_fault_test::set_hook(
         [&](std::string_view point, const std::filesystem::path& path) {
-            if (point == "after_delete_ignored_local_file" && ++hook_hits == 1) {
+            if (point == "after_delete_ignored_local_file" &&
+                ++hook_hits == 1) {
                 interrupted_path = path;
-                throw std::runtime_error("simulated crash after physical disposal");
+                throw std::runtime_error(
+                    "simulated crash after physical disposal");
             }
         });
 
@@ -3060,7 +3091,8 @@ TEST(DirectoryLocalMoveTest, DisposableCoordinatorInterruptionRecovery) {
     kasumi::application::sync::mutation_fault_test::clear_hook();
 
     ASSERT_FALSE(interrupted_sync.has_value());
-    EXPECT_NE(interrupted_sync.error().detail.find("simulated crash after physical disposal"),
+    EXPECT_NE(interrupted_sync.error().detail.find(
+                  "simulated crash after physical disposal"),
               std::string::npos);
 
     ASSERT_EQ(hook_hits, 1U);
@@ -3068,18 +3100,20 @@ TEST(DirectoryLocalMoveTest, DisposableCoordinatorInterruptionRecovery) {
 
     EXPECT_FALSE(std::filesystem::exists(interrupted_path));
 
-    const auto paths = kasumi::application::sync::journal::make_paths(receiver.profile);
+    const auto paths =
+        kasumi::application::sync::journal::make_paths(receiver.profile);
     ASSERT_TRUE(paths.has_value());
     ASSERT_TRUE(std::filesystem::exists(paths->final_path));
 
-    auto loaded = kasumi::application::sync::journal::load(*paths, receiver.key);
+    auto loaded =
+        kasumi::application::sync::journal::load(*paths, receiver.key);
     ASSERT_TRUE(loaded.has_value());
     ASSERT_TRUE(loaded->has_value());
     const auto& record = **loaded;
     EXPECT_EQ(record.phase, kasumi::transaction::Phase::FilesStaged);
 
-    auto opened_ws =
-        kasumi::application::sync::coordinator::detail::open_transaction_workspace(
+    auto opened_ws = kasumi::application::sync::coordinator::detail::
+        open_transaction_workspace(
             receiver.profile, record.operation_id, receiver.key);
     ASSERT_TRUE(opened_ws.has_value());
     ASSERT_TRUE(opened_ws->has_value());
@@ -3110,7 +3144,8 @@ TEST(DirectoryLocalMoveTest, DisposableCoordinatorInterruptionRecovery) {
     restarted.storage_root = receiver.storage_root;
     restarted.database = receiver.database;
     restarted.key = receiver.key;
-    auto opened = kasumi::transport::open_transport(restarted.storage_root.string());
+    auto opened =
+        kasumi::transport::open_transport(restarted.storage_root.string());
     ASSERT_TRUE(opened.has_value());
     restarted.base_storage = std::move(*opened);
     restarted.counters.base = &restarted.base_storage;
@@ -3134,12 +3169,14 @@ TEST(DirectoryLocalMoveTest, DisposableCoordinatorInterruptionRecovery) {
         kasumi::application::sync::coordinator::recover_if_needed(
             restarted.runtime, restarted.context.storage, restarted.key);
     ASSERT_TRUE(recovery.has_value()) << recovery.error().detail;
-    EXPECT_EQ(*recovery,
-              kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
+    EXPECT_EQ(
+        *recovery,
+        kasumi::application::sync::coordinator::RecoveryResult::RolledBack);
 
     EXPECT_EQ(read_local_file(restarted, "Projects/a.bak"), "content-a");
     EXPECT_EQ(read_local_file(restarted, "Projects/b.bak"), "content-b");
-    EXPECT_EQ(read_local_file(restarted, "Projects/main.cpp"), "int main() { return 0; }\n");
+    EXPECT_EQ(read_local_file(restarted, "Projects/main.cpp"),
+              "int main() { return 0; }\n");
 
     ASSERT_TRUE(sync_ok(restarted));
     EXPECT_FALSE(local_entry_exists(restarted, "Projects"));
@@ -3152,8 +3189,8 @@ TEST(DirectoryLocalMoveTest, DisposableCoordinatorInterruptionRecovery) {
     EXPECT_EQ(summary->total, 0U);
 }
 
-
-TEST(DirectoryLocalMoveTest, DisposableRemovalFailsClosedWhenSourceDisappearsBeforeApply) {
+TEST(DirectoryLocalMoveTest,
+     DisposableRemovalFailsClosedWhenSourceDisappearsBeforeApply) {
     SyncNode sender, receiver;
     ASSERT_TRUE(init_pair(sender,
                           "disposable-missing-sender",
@@ -3174,7 +3211,8 @@ TEST(DirectoryLocalMoveTest, DisposableRemovalFailsClosedWhenSourceDisappearsBef
     std::size_t hook_hits = 0;
     kasumi::application::sync::mutation_fault_test::set_hook(
         [&](std::string_view point, const std::filesystem::path& path) {
-            if (point == "before_delete_ignored_local_file" && path.filename() == "a.bak") {
+            if (point == "before_delete_ignored_local_file" &&
+                path.filename() == "a.bak") {
                 ++hook_hits;
                 std::error_code ec;
                 std::filesystem::remove(path, ec);
@@ -3189,7 +3227,6 @@ TEST(DirectoryLocalMoveTest, DisposableRemovalFailsClosedWhenSourceDisappearsBef
     EXPECT_NE(sync_result.error().detail.find("disposable source is missing"),
               std::string::npos);
 }
-
 
 TEST(DirectoryLocalMoveTest,
      DisposableRemovalRejectsAlreadyAbsentAfterFinalVerification) {

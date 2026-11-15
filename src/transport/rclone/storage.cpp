@@ -1,7 +1,6 @@
 #include "../detail.hpp"
 #include "detail.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -226,9 +225,7 @@ run_job_batch(State& state,
               std::size_t concurrency,
               std::size_t response_limit,
               std::chrono::milliseconds timeout,
-              bool read_only,
-              std::string_view unsupported_metric = {},
-              std::string_view transport_error_metric = {}) {
+              bool read_only) {
     nlohmann::json request{
         {"inputs", inputs},
         {"concurrency", concurrency},
@@ -240,16 +237,10 @@ run_job_batch(State& state,
                         state, "job/batch", request, response_limit, timeout);
     if (!response) {
         if (unsupported_endpoint(response.error(), "job/batch")) {
-            if (!unsupported_metric.empty()) {
-                platform::perf_trace::count(unsupported_metric, 1);
-            }
             return std::unexpected(
                 make_error(ErrorCode::Unsupported,
                            "rclone does not support job/batch",
                            response.error().native_code));
-        }
-        if (!transport_error_metric.empty()) {
-            platform::perf_trace::count(transport_error_metric, 1);
         }
         return std::unexpected(response.error());
     }
@@ -292,7 +283,6 @@ Result parse_copy_batch_response(const nlohmann::json& response,
                        "invalid or incomplete copy job/batch response"));
     }
 
-    std::size_t successes = 0;
     bool failed = false;
     for (std::size_t index = 0; index < inputs.size(); ++index) {
         const auto& result = response.at("results").at(index);
@@ -341,21 +331,14 @@ Result parse_copy_batch_response(const nlohmann::json& response,
         }
         if (item_failed) {
             failed = true;
-        } else {
-            ++successes;
         }
     }
 
     if (failed) {
-        platform::perf_trace::count("rclone.copy_batch_reported_successes",
-                                    successes);
-        platform::perf_trace::count("rclone.copy_batch_partial_responses", 1);
         return std::unexpected(
             make_error(ErrorCode::ProtocolFailure,
                        "one or more copy job/batch subcommands failed"));
     }
-    platform::perf_trace::count("rclone.copy_batch_reported_successes",
-                                successes);
     return {};
 }
 
@@ -458,9 +441,7 @@ Result copyfile_object(State& state,
                        std::string_view src_remote,
                        std::string_view dst_fs,
                        std::string_view dst_remote,
-                       std::string_view trace_name,
                        std::string_view not_found_message = {}) {
-    const auto copy_trace = platform::perf_trace::begin();
     const auto copied = request_json(state,
                                      "operations/copyfile",
                                      nlohmann::json{
@@ -471,7 +452,6 @@ Result copyfile_object(State& state,
                                      },
                                      maximum_response_size,
                                      transfer_timeout);
-    platform::perf_trace::finish(trace_name, copy_trace);
     if (!copied) {
         if (!not_found_message.empty() && not_found(copied.error())) {
             return std::unexpected(make_error(ErrorCode::ObjectNotFound,
@@ -526,8 +506,7 @@ Result rclone_put(void* context,
                            local->parent,
                            local->name,
                            rooted_remote_fs(*state),
-                           identifier,
-                           "rclone copyfile upload");
+                           identifier);
 }
 
 Result rclone_put_batch(void* context, const PutBatch& batch) {
@@ -601,32 +580,20 @@ Result rclone_put_files_batch(void* context, const PutFilesBatch& batch) {
         });
     }
 
-    platform::perf_trace::count("rclone.put_files_batch_inputs_submitted",
-                                batch.items.size());
-    platform::perf_trace::count("rclone.put_files_batch_concurrency_submitted",
-                                batch.concurrency);
-    const auto trace = platform::perf_trace::begin();
-    const auto response =
-        run_job_batch(*state,
-                      inputs,
-                      batch.concurrency,
-                      maximum_response_size,
-                      transfer_timeout,
-                      false,
-                      "rclone.put_files_batch_unsupported_before_submission",
-                      "rclone.put_files_batch_transport_errors");
-    platform::perf_trace::finish("rclone metadata put batch", trace);
+    const auto response = run_job_batch(*state,
+                                        inputs,
+                                        batch.concurrency,
+                                        maximum_response_size,
+                                        transfer_timeout,
+                                        false);
     if (!response) {
         return std::unexpected(response.error());
     }
 
     const auto validated = parse_copy_batch_response(*response, inputs);
     if (!validated) {
-        platform::perf_trace::count("rclone.put_files_batch_failures", 1);
         return validated;
     }
-    platform::perf_trace::count("rclone.put_files_batch_reported_successes",
-                                batch.items.size());
     return {};
 }
 
@@ -655,7 +622,6 @@ Result rclone_get(void* context,
                                             identifier,
                                             local->parent,
                                             local->name,
-                                            "rclone copyfile download",
                                             "remote object does not exist");
         !copied) {
         return copied;
@@ -691,7 +657,6 @@ Result rclone_copy(void* context,
                            source_identifier,
                            rooted_remote_fs(*state),
                            destination_identifier,
-                           "rclone copyfile remote copy",
                            "remote source does not exist");
 }
 
@@ -725,10 +690,6 @@ Result rclone_copy_batch(void* context, const CopyBatch& batch) {
         });
     }
 
-    platform::perf_trace::count("rclone.copy_batch_inputs_submitted",
-                                batch.items.size());
-    platform::perf_trace::count("rclone.copy_batch_concurrency_submitted",
-                                batch.concurrency);
     const auto response = run_job_batch(*state,
                                         inputs,
                                         batch.concurrency,
@@ -787,10 +748,8 @@ Result rclone_get_batch(void* context, const GetBatch& batch) {
         };
     }
 
-    const auto copy_trace = platform::perf_trace::begin();
     const auto copied = request_read_json(
         *state, "sync/copy", payload, maximum_response_size, transfer_timeout);
-    platform::perf_trace::finish("rclone batch download", copy_trace);
     if (!copied) {
         return std::unexpected(copied.error());
     }
@@ -845,9 +804,7 @@ PresenceResult rclone_presence(void* context, std::string_view identifier) {
         return std::unexpected(invalid_identifier_error());
     }
 
-    const auto presence_trace = platform::perf_trace::begin();
     const auto response = stat_remote(*state, identifier);
-    platform::perf_trace::finish("rc/presence", presence_trace);
     if (!response) {
         if (not_found(response.error())) {
             return Presence::Absent;
@@ -863,10 +820,7 @@ PresenceResult rclone_presence(void* context, std::string_view identifier) {
                                "remote object is a directory");
 }
 
-ListingResult list_remote_objects(State& state,
-                                  std::string_view prefix,
-                                  std::string_view trace_name) {
-    const auto list_trace = platform::perf_trace::begin();
+ListingResult list_remote_objects(State& state, std::string_view prefix) {
     const auto response =
         request_read_json(state,
                           "operations/list",
@@ -877,7 +831,6 @@ ListingResult list_remote_objects(State& state,
                           },
                           maximum_list_response_size,
                           control_read_deadline);
-    platform::perf_trace::finish(trace_name, list_trace);
     if (!response) {
         if (not_found(response.error())) {
             return std::unexpected(
@@ -894,7 +847,7 @@ ListingResult rclone_list(void* context) {
     if (state == nullptr) {
         return std::unexpected(invalid_context_error());
     }
-    return list_remote_objects(*state, {}, "rc/list");
+    return list_remote_objects(*state, {});
 }
 
 ListingResult rclone_list_prefix(void* context, std::string_view prefix) {
@@ -905,7 +858,7 @@ ListingResult rclone_list_prefix(void* context, std::string_view prefix) {
     if (!valid_identifier(prefix)) {
         return std::unexpected(invalid_identifier_error());
     }
-    return list_remote_objects(*state, prefix, "rc/list_prefix");
+    return list_remote_objects(*state, prefix);
 }
 
 std::expected<std::string, Error> rclone_physical_hash(
@@ -1161,8 +1114,6 @@ rclone_physical_hash_batch(void* context,
         return std::unexpected(report.error());
     }
 
-    platform::perf_trace::count("content batch verify objects",
-                                request.objects.size());
     return report;
 }
 
@@ -1331,14 +1282,7 @@ rclone_control_read_batch(void* context,
     // Admission depends on the ordering LIST writers -> STAT barrier;
     // rclone executes inputs sequentially when concurrency <= 1.
     if (!request.list_prefixes.empty()) {
-        auto result = execute_single_control_read_batch(*state, request, 1);
-        if (result) {
-            platform::perf_trace::count(
-                "control batch operations",
-                request.list_prefixes.size() +
-                    request.presence_identifiers.size());
-        }
-        return result;
+        return execute_single_control_read_batch(*state, request, 1);
     }
 
     if (request.presence_identifiers.empty()) {
@@ -1370,8 +1314,6 @@ rclone_control_read_batch(void* context,
                                     chunk_res->presences.end());
     }
 
-    platform::perf_trace::count("control batch operations",
-                                request.presence_identifiers.size());
     return aggregated;
 }
 
@@ -1429,21 +1371,12 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
         });
     }
 
-    platform::perf_trace::count("rclone.remove_batch_inputs_submitted",
-                                batch.items.size());
-    platform::perf_trace::count("rclone.remove_batch_concurrency_submitted",
-                                batch.concurrency);
-    const auto trace = platform::perf_trace::begin();
-    const auto response =
-        run_job_batch(*state,
-                      inputs,
-                      batch.concurrency,
-                      maximum_response_size,
-                      transfer_timeout,
-                      false,
-                      "rclone.remove_batch_unsupported_before_submission",
-                      "rclone.remove_batch_transport_errors");
-    platform::perf_trace::finish("rclone remove batch", trace);
+    const auto response = run_job_batch(*state,
+                                        inputs,
+                                        batch.concurrency,
+                                        maximum_response_size,
+                                        transfer_timeout,
+                                        false);
     if (!response) {
         return std::unexpected(response.error());
     }
@@ -1548,22 +1481,6 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
         }
     }
 
-    std::size_t removed_count = 0;
-    std::size_t failed_count = 0;
-    for (const auto& item : report.items) {
-        if (item.result.has_value()) {
-            if (*item.result == Removal::Removed) {
-                ++removed_count;
-            }
-        } else {
-            ++failed_count;
-        }
-    }
-    if (failed_count > 0) {
-        platform::perf_trace::count("rclone.remove_batch_failures", 1);
-    }
-    platform::perf_trace::count("rclone.remove_batch_reported_successes",
-                                removed_count);
     return report;
 }
 

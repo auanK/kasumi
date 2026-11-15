@@ -5,7 +5,6 @@
 #include "platform/durability.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
 
@@ -135,7 +134,6 @@ resolve_non_symlink_pair(const std::filesystem::path& local_root,
 std::expected<void, MutationError>
 validate_workspace(const platform::Workspace& workspace,
                    std::size_t operation_index) {
-    platform::perf_trace::count("workspace.validation_calls");
     if (workspace.root.empty()) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
                                           "empty workspace",
@@ -190,8 +188,7 @@ verify_source_size_and_hash(const std::filesystem::path& source,
                             std::size_t operation_index,
                             bool check_size,
                             std::string_view size_message,
-                            std::string_view hash_message,
-                            std::string_view hash_wall_label) {
+                            std::string_view hash_message) {
     if (check_size) {
         std::error_code size_error;
         const auto actual_size = std::filesystem::file_size(source, size_error);
@@ -204,10 +201,7 @@ verify_source_size_and_hash(const std::filesystem::path& source,
                 operation_index));
         }
     }
-    platform::perf_trace::count("source hash calls");
-    const auto source_hash_trace = platform::perf_trace::begin();
     auto actual = file_hash(source, operation_index);
-    platform::perf_trace::finish(hash_wall_label, source_hash_trace);
     if (!actual) {
         return std::unexpected(actual.error());
     }
@@ -242,11 +236,7 @@ validate_backup(const std::filesystem::path& backup,
                                           backup,
                                           operation_index));
     }
-    platform::perf_trace::count("mutation backup hash calls");
-    platform::perf_trace::count("backup hash calls");
-    const auto backup_hash_trace = platform::perf_trace::begin();
     auto actual = file_hash(backup, operation_index);
-    platform::perf_trace::finish("move backup hash wall", backup_hash_trace);
     if (!actual) {
         return std::unexpected(actual.error());
     }
@@ -262,9 +252,7 @@ validate_backup(const std::filesystem::path& backup,
 std::expected<void, MutationError>
 make_backup_durable(const std::filesystem::path& backup,
                     std::size_t operation_index) {
-    const auto durable_trace = platform::perf_trace::begin();
     auto synced = platform::durability::sync_file(backup);
-    platform::perf_trace::finish("move backup durable wall", durable_trace);
     if (!synced) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
                                           synced.error(),
@@ -303,11 +291,9 @@ create_backup(const std::filesystem::path& source,
                        source,
                        operation_index));
     }
-    const auto copy_trace = platform::perf_trace::begin();
     std::error_code error;
     const bool copied = std::filesystem::copy_file(
         source, backup, std::filesystem::copy_options::none, error);
-    platform::perf_trace::finish("move backup copy wall", copy_trace);
     if (!copied || error) {
         if (error == std::errc::file_exists) {
             auto validated =
@@ -323,13 +309,6 @@ create_backup(const std::filesystem::path& source,
                        backup,
                        operation_index));
     }
-    platform::perf_trace::count("backup files created");
-    std::error_code size_error;
-    const auto backup_size = std::filesystem::file_size(backup, size_error);
-    if (!size_error) {
-        platform::perf_trace::count("backup bytes copied", backup_size);
-    }
-
     auto secured = platform::private_storage::protect_file(backup);
     if (!secured) {
         remove_temporary_file(backup);
@@ -560,7 +539,6 @@ current_file_hash(const std::filesystem::path& path,
                        path,
                        operation_index));
     }
-    platform::perf_trace::count("mutation destination hash calls");
     return file_hash(path, operation_index);
 }
 
@@ -1126,16 +1104,6 @@ prepare_operation_impl(const Operation& operation,
 
     if (operation.action == Action::RenameLocal ||
         operation.action == Action::MoveLocal) {
-        struct MovePrepGuard {
-            platform::perf_trace::Token token;
-            bool is_move;
-            ~MovePrepGuard() {
-                if (is_move) {
-                    platform::perf_trace::finish("move preparation wall", token);
-                }
-            }
-        } move_prep_guard{platform::perf_trace::begin(),
-                          operation.action == Action::MoveLocal};
         auto pair = resolve_non_symlink_pair(local_root,
                                              operation,
                                              operation_index,
@@ -1164,8 +1132,7 @@ prepare_operation_impl(const Operation& operation,
                 operation_index,
                 operation.action == Action::MoveLocal,
                 "move source does not match expected size",
-                "rename source does not match expected hash",
-                "move source hash wall");
+                "rename source does not match expected hash");
             if (!actual) {
                 return std::unexpected(actual.error());
             }
@@ -1206,12 +1173,6 @@ prepare_operation_impl(const Operation& operation,
     }
 
     if (operation.action == Action::CopyLocal) {
-        struct CopyPrepGuard {
-            platform::perf_trace::Token token;
-            ~CopyPrepGuard() {
-                platform::perf_trace::finish("copy preparation wall", token);
-            }
-        } copy_prep_guard{platform::perf_trace::begin()};
         auto pair = resolve_non_symlink_pair(local_root,
                                              operation,
                                              operation_index,
@@ -1264,8 +1225,7 @@ prepare_operation_impl(const Operation& operation,
             operation_index,
             true,
             "copy source does not match expected size",
-            "copy source does not match expected hash",
-            "copy source hash wall");
+            "copy source does not match expected hash");
         if (!actual) {
             return std::unexpected(actual.error());
         }
@@ -1325,11 +1285,11 @@ prepare_operation_impl(const Operation& operation,
         }
         if (missing(*status) || std::filesystem::is_symlink(*status) ||
             !std::filesystem::is_regular_file(*status)) {
-            return std::unexpected(make_error(
-                MutationErrorCode::DestinationConflict,
-                "disposable source is missing or not a regular file",
-                *path,
-                operation_index));
+            return std::unexpected(
+                make_error(MutationErrorCode::DestinationConflict,
+                           "disposable source is missing or not a regular file",
+                           *path,
+                           operation_index));
         }
         const auto identity_matches = [&](const auto& identity) {
             return identity.valid &&
@@ -1372,8 +1332,8 @@ prepare_operation_impl(const Operation& operation,
         if (!backup) {
             return std::unexpected(backup.error());
         }
-        auto created = create_backup(*path, *backup, operation.hash,
-                                     operation_index);
+        auto created =
+            create_backup(*path, *backup, operation.hash, operation_index);
         if (!created) {
             return std::unexpected(created.error());
         }
@@ -1388,11 +1348,11 @@ prepare_operation_impl(const Operation& operation,
         }
         if (!identity_matches(
                 platform::private_storage::query_file_identity(*path))) {
-            return std::unexpected(make_error(
-                MutationErrorCode::DestinationConflict,
-                "disposable source identity changed during backup",
-                *path,
-                operation_index));
+            return std::unexpected(
+                make_error(MutationErrorCode::DestinationConflict,
+                           "disposable source identity changed during backup",
+                           *path,
+                           operation_index));
         }
         progress.had_original = true;
         progress.previous_hash = operation.hash;
@@ -1432,17 +1392,18 @@ rollback_operation_impl(const Operation& operation,
         return std::unexpected(workspace_valid.error());
 
     if (operation.action == Action::DeleteIgnoredLocalFile) {
-        auto path = resolve_local_path(local_root, operation.path, operation_index);
+        auto path =
+            resolve_local_path(local_root, operation.path, operation_index);
         if (!path) {
             return std::unexpected(path.error());
         }
         if (!progress.had_original ||
             progress.previous_hash != operation.hash) {
-            return std::unexpected(make_error(
-                MutationErrorCode::InvalidOperation,
-                "disposable rollback lacks its verified backup",
-                *path,
-                operation_index));
+            return std::unexpected(
+                make_error(MutationErrorCode::InvalidOperation,
+                           "disposable rollback lacks its verified backup",
+                           *path,
+                           operation_index));
         }
         auto backup = backup_path(workspace, progress, *path, operation_index);
         if (!backup) {
@@ -1467,29 +1428,29 @@ rollback_operation_impl(const Operation& operation,
         }
         if (std::filesystem::is_symlink(*status) ||
             !std::filesystem::is_regular_file(*status)) {
-            return std::unexpected(make_error(
-                MutationErrorCode::DestinationConflict,
-                "unexpected object blocks disposable rollback",
-                *path,
-                operation_index));
+            return std::unexpected(
+                make_error(MutationErrorCode::DestinationConflict,
+                           "unexpected object blocks disposable rollback",
+                           *path,
+                           operation_index));
         }
         if (!identity_matches(*path, operation.expected_source_identity)) {
-            return std::unexpected(make_error(
-                MutationErrorCode::DestinationConflict,
-                "external file blocks disposable rollback",
-                *path,
-                operation_index));
+            return std::unexpected(
+                make_error(MutationErrorCode::DestinationConflict,
+                           "external file blocks disposable rollback",
+                           *path,
+                           operation_index));
         }
         auto actual = file_hash(*path, operation_index);
         if (!actual) {
             return std::unexpected(actual.error());
         }
         if (*actual != operation.hash) {
-            return std::unexpected(make_error(
-                MutationErrorCode::DestinationConflict,
-                "changed file blocks disposable rollback",
-                *path,
-                operation_index));
+            return std::unexpected(
+                make_error(MutationErrorCode::DestinationConflict,
+                           "changed file blocks disposable rollback",
+                           *path,
+                           operation_index));
         }
         return {};
     }
@@ -1722,12 +1683,9 @@ detail::destination_dependencies(std::span<const Operation> operations) {
             const auto found = renamed.find(operation.path);
             if (found != renamed.end()) {
                 result[index] = found->second;
-                platform::perf_trace::count("destination dependency links");
             }
         }
     }
-    platform::perf_trace::count("destination dependency entries",
-                                operations.size());
     return result;
 }
 
@@ -1797,16 +1755,6 @@ MutationResult detail::validate_prepared_rename(
     const std::filesystem::path& destination,
     const platform::Workspace& workspace,
     const transaction::OperationProgress& progress) {
-    struct MoveValGuard {
-        platform::perf_trace::Token token;
-        bool is_move;
-        ~MoveValGuard() {
-            if (is_move) {
-                platform::perf_trace::finish("move prepared validation wall", token);
-            }
-        }
-    } move_val_guard{platform::perf_trace::begin(),
-                     operation.action == Action::MoveLocal};
     // An unprepared pending operation has no authority over a following path.
     if (operation.action == Action::RenameLocal &&
         progress.state == transaction::OperationState::Pending &&

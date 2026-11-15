@@ -2,7 +2,6 @@
 
 #include "core/history.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "sqlite/sqlite.hpp"
 #include "state_storage/database_connection.hpp"
@@ -346,10 +345,7 @@ void write_tree_delta(sqlite3* database,
             bind_node(insert, row);
             require(sqlite::run(insert));
             require(sqlite::reset(insert));
-            platform::perf_trace::count("state db node inserts");
-        } else if (*found->second == row) {
-            platform::perf_trace::count("state db node unchanged");
-        } else {
+        } else if (*found->second != row) {
             require(sqlite::bind(update, 1, hash_hex(row.hash)));
             require(
                 sqlite::bind(update, 2, static_cast<std::int64_t>(row.size)));
@@ -358,7 +354,6 @@ void write_tree_delta(sqlite3* database,
             require(sqlite::bind(update, 5, row.path));
             require(sqlite::run(update));
             require(sqlite::reset(update));
-            platform::perf_trace::count("state db node updates");
         }
         old.erase(row.path);
     }
@@ -366,7 +361,6 @@ void write_tree_delta(sqlite3* database,
         require(sqlite::bind(remove, 1, path));
         require(sqlite::run(remove));
         require(sqlite::reset(remove));
-        platform::perf_trace::count("state db node deletes");
     }
 }
 
@@ -502,14 +496,8 @@ void write_cache_delta(sqlite3* database,
         old.emplace(row.path, &row);
     for (const auto& row : current) {
         const auto found = old.find(row.path);
-        if (found == old.end()) {
+        if (found == old.end() || !same_cache_row(*found->second, row)) {
             upsert_row(row);
-            platform::perf_trace::count("state db cache inserts");
-        } else if (same_cache_row(*found->second, row)) {
-            platform::perf_trace::count("state db cache unchanged");
-        } else {
-            upsert_row(row);
-            platform::perf_trace::count("state db cache updates");
         }
         old.erase(row.path);
     }
@@ -517,7 +505,6 @@ void write_cache_delta(sqlite3* database,
         require(sqlite::bind(remove, 1, path));
         require(sqlite::run(remove));
         require(sqlite::reset(remove));
-        platform::perf_trace::count("state db cache deletes");
     }
 }
 
@@ -610,8 +597,6 @@ bool validate(const std::filesystem::path& database_path) {
 
 std::expected<std::optional<StoredState>, std::string>
 load_state(const std::filesystem::path& database_path) {
-    const auto state_trace = platform::perf_trace::begin();
-    platform::perf_trace::count("state db load calls");
     try {
         std::error_code filesystem_error;
         if (!std::filesystem::exists(database_path, filesystem_error)) {
@@ -733,7 +718,6 @@ load_state(const std::filesystem::path& database_path) {
                           .epoch_id = std::move(epoch_id),
                           .epoch_sequence = parsed_epoch_sequence,
                           .pending_materializations = std::move(pending)};
-        platform::perf_trace::finish("state db load wall", state_trace);
         return state;
     } catch (const std::exception& exception) {
         return std::unexpected(std::string{"could not load state.db: "} +
@@ -743,8 +727,6 @@ load_state(const std::filesystem::path& database_path) {
 
 bool save_state(const std::filesystem::path& database_path,
                 const StoredState& state) {
-    const auto state_trace = platform::perf_trace::begin();
-    platform::perf_trace::count("state db save calls");
     if (!valid_snapshot(state.tree, false) ||
         !valid_pending_materializations(state.tree,
                                         state.pending_materializations) ||
@@ -772,14 +754,9 @@ bool save_state(const std::filesystem::path& database_path,
         if (!previous_tree) {
             return false;
         }
-        platform::perf_trace::count("state db existing node rows",
-                                    previous_tree->rows.size());
-        const auto node_diff_trace = platform::perf_trace::begin();
         write_tree_delta(opened->get(), *previous_tree, state.tree);
         write_pending_materializations(opened->get(),
                                        state.pending_materializations);
-        platform::perf_trace::finish("state db node diff wall",
-                                     node_diff_trace);
         require(sqlite::execute(opened->get(),
                                 "DELETE FROM metadata WHERE key NOT IN "
                                 "('epoch_id', 'epoch_sequence')"));
@@ -803,11 +780,7 @@ bool save_state(const std::filesystem::path& database_path,
             put_meta("epoch_id", state.epoch_id);
             put_meta("epoch_sequence", std::to_string(state.epoch_sequence));
         }
-        const auto transaction_trace = platform::perf_trace::begin();
         require(sqlite::commit(*transaction));
-        platform::perf_trace::finish("state db transaction wall",
-                                     transaction_trace);
-        platform::perf_trace::finish("state db save wall", state_trace);
         return true;
     } catch (const std::exception&) {
         return false;
@@ -816,8 +789,6 @@ bool save_state(const std::filesystem::path& database_path,
 
 std::expected<std::vector<FileCacheRow>, std::string>
 load_file_cache(const std::filesystem::path& database_path) {
-    const auto cache_trace = platform::perf_trace::begin();
-    platform::perf_trace::count("file cache load calls");
     try {
         std::error_code error;
         if (!std::filesystem::exists(database_path, error)) {
@@ -831,10 +802,7 @@ load_file_cache(const std::filesystem::path& database_path) {
         if (read_schema_version(opened->get()) != schema_version ||
             !has_expected_schema(opened->get()))
             return std::vector<FileCacheRow>{};
-        auto result = read_cache_rows(opened->get());
-        platform::perf_trace::finish("file cache load wall", cache_trace);
-        platform::perf_trace::count("file cache rows loaded", result.size());
-        return result;
+        return read_cache_rows(opened->get());
     } catch (const std::exception& exception) {
         return std::unexpected(std::string{"could not load file cache: "} +
                                exception.what());
@@ -843,8 +811,6 @@ load_file_cache(const std::filesystem::path& database_path) {
 
 bool save_file_cache_delta(const std::filesystem::path& database_path,
                            std::span<const FileCacheRow> rows) {
-    const auto cache_trace = platform::perf_trace::begin();
-    platform::perf_trace::count("file cache save calls");
     try {
         auto opened = detail::open_state_database_readwrite(database_path);
         if (!opened)
@@ -855,14 +821,8 @@ bool save_file_cache_delta(const std::filesystem::path& database_path,
             !has_expected_schema(opened->get()))
             return false;
         const auto previous = read_cache_rows(opened->get());
-        const auto diff_trace = platform::perf_trace::begin();
         write_cache_delta(opened->get(), previous, rows);
-        platform::perf_trace::finish("state db cache diff wall", diff_trace);
-        const auto transaction_trace = platform::perf_trace::begin();
         require(sqlite::commit(*transaction));
-        platform::perf_trace::finish("state db transaction wall",
-                                     transaction_trace);
-        platform::perf_trace::finish("file cache save wall", cache_trace);
         return true;
     } catch (const std::exception&) {
         return false;

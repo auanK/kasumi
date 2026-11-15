@@ -30,7 +30,6 @@
 #include "platform/durability.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/workspace.hpp"
 #include "platform/workspace_fault_test.hpp"
 #include "runtime/resolver.hpp"
@@ -8893,20 +8892,10 @@ void check_download_hash_counts(bool had_original, bool already_remote) {
     ASSERT_TRUE(storage.has_value());
     ASSERT_TRUE(kasumi::transport::initialize(*storage));
     add_storage_object(*storage, root / "source", hash);
-    const bool tracing = kasumi::platform::perf_trace::enabled();
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
     const auto applied = mutation::apply_operation(
         operation, 0, local, *storage, key, transaction, *prepared);
-    const auto backups =
-        kasumi::platform::perf_trace::get_count("mutation backup hash calls");
-    const auto destinations = kasumi::platform::perf_trace::get_count(
-        "mutation destination hash calls");
-    kasumi::platform::perf_trace::force_enable(tracing);
     ASSERT_TRUE(applied.has_value()) << applied.error().detail;
-    EXPECT_EQ(backups, had_original ? 1U : 0U);
-    EXPECT_EQ(destinations, had_original ? 1U : 0U);
     EXPECT_EQ(kasumi::test::read_text(local / "file.txt"), "REMOTE");
 }
 

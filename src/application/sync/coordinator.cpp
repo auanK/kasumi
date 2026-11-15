@@ -22,7 +22,6 @@
 #include "platform/durability.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
 #include "state_storage/database.hpp"
@@ -48,21 +47,6 @@
 
 namespace kasumi::application::sync::coordinator {
 namespace detail {
-
-inline constexpr std::array<std::string_view, ActionCount> action_metrics{
-    "action/RenameLocal",
-    "action/Upload",
-    "action/CreateLocalDirectory",
-    "action/CreateRemoteDirectory",
-    "action/MoveLocal",
-    "action/Download",
-    "action/DeleteLocal",
-    "action/DeleteLocalDirectory",
-    "action/DeleteRemote",
-    "action/DeleteRemoteDirectory",
-    "action/CopyLocal",
-    "action/DeleteIgnoredLocalFile",
-};
 
 Error make_error(ErrorCode code,
                  std::string detail,
@@ -722,7 +706,6 @@ finish_transaction_cleanup(const journal::Paths& paths,
             if (!cleared) {
                 return std::unexpected(journal_error(cleared.error()));
             }
-            platform::perf_trace::count("workspace cleanup failures", 1);
             return std::unexpected(workspace_error(
                 "transaction completed with workspace preserved",
                 workspace->root,
@@ -807,7 +790,6 @@ cleanup_orphan_workspaces(const std::filesystem::path& profile,
             return std::unexpected(workspace.error());
         }
         if (!*workspace || !(**workspace).identity.valid) {
-            platform::perf_trace::count("workspace cleanup failures", 1);
             continue;
         }
         auto removed = remove_transaction_workspace(**workspace, key);
@@ -837,38 +819,7 @@ save_record(const journal::Paths& paths,
             std::span<const std::uint8_t, crypto::KEY_SIZE> key,
             journal::SaveMode mode,
             journal::Session* session) {
-    const auto trace = platform::perf_trace::begin();
     auto saved = journal::save(paths, record, key, mode, session);
-    if (trace.active) {
-        const auto elapsed =
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - trace.started)
-                .count();
-        platform::perf_trace::maximum(
-            "journal save maximum us",
-            static_cast<std::uint64_t>(std::max<std::int64_t>(elapsed, 0)));
-    }
-    platform::perf_trace::finish("journal save", trace);
-    const char* phase_metric = nullptr;
-    switch (record.phase) {
-        case transaction::Phase::CommitUploaded:
-            phase_metric = "journal CommitUploaded save";
-            break;
-        case transaction::Phase::CommitVerified:
-            phase_metric = "journal CommitVerified save";
-            break;
-        case transaction::Phase::HeadPublished:
-            phase_metric = "journal HeadPublished save";
-            break;
-        case transaction::Phase::HeadVerified:
-            phase_metric = "journal HeadVerified save";
-            break;
-        default:
-            break;
-    }
-    if (phase_metric != nullptr) {
-        platform::perf_trace::finish(phase_metric, trace);
-    }
     if (!saved) {
         return std::unexpected(journal_error(saved.error()));
     }
@@ -1340,8 +1291,6 @@ struct ContentWindowState {
     std::condition_variable_any changed;
     std::vector<std::optional<ContentWorkItem>> tasks;
     std::vector<std::optional<ContentWorkResult>> completions;
-    std::size_t in_flight = 0;
-    std::size_t peak_in_flight = 0;
 };
 
 void run_content_worker(std::stop_token stop,
@@ -1363,9 +1312,6 @@ void run_content_worker(std::stop_token stop,
             }
             task = std::move(*state.tasks[slot]);
             state.tasks[slot].reset();
-            ++state.in_flight;
-            state.peak_in_flight =
-                std::max(state.peak_in_flight, state.in_flight);
         }
 
         const auto index = task.index;
@@ -1401,7 +1347,6 @@ void run_content_worker(std::stop_token stop,
 
         {
             std::lock_guard lock(state.mutex);
-            --state.in_flight;
             state.completions[slot] = std::move(result);
         }
         state.changed.notify_all();
@@ -1491,7 +1436,6 @@ run_content_window(
             completed->reset();
         }
         --outstanding;
-        platform::perf_trace::count("content completion count");
 
         if (result.error) {
             if (!failure) {
@@ -1512,8 +1456,6 @@ run_content_window(
         }
     }
 
-    platform::perf_trace::maximum("content peak in-flight",
-                                  state.peak_in_flight);
     if (checkpoint_failure) {
         return std::unexpected(std::move(*checkpoint_failure));
     }
@@ -1901,20 +1843,6 @@ execute(const runtime::RuntimeData& runtime_data,
     };
     const auto content_upload_required = required_content_uploads(
         observed_input, reconciliation_result, record->plan);
-    for (const auto& operation : record->plan.operations) {
-        platform::perf_trace::count(
-            detail::action_metrics[action_index(operation.action)]);
-        if (operation.action == Action::MoveLocal) {
-            platform::perf_trace::count("move planned count");
-        }
-        if (operation.action == Action::CopyLocal) {
-            platform::perf_trace::count("copy planned count");
-        }
-    }
-    const auto preparation_saves_before =
-        platform::perf_trace::get_count("journal durable saves");
-    const auto preparation_bytes_before =
-        platform::perf_trace::get_count("journal written bytes total");
     auto saved = save_active_record();
     if (!saved) {
         return std::unexpected(saved.error());
@@ -1970,15 +1898,6 @@ execute(const runtime::RuntimeData& runtime_data,
     if (!saved)
         return std::unexpected(saved.error());
 
-    platform::perf_trace::count(
-        "journal preparation durable saves",
-        platform::perf_trace::get_count("journal durable saves") -
-            preparation_saves_before);
-    platform::perf_trace::count(
-        "journal preparation written bytes",
-        platform::perf_trace::get_count("journal written bytes total") -
-            preparation_bytes_before);
-
     std::optional<publication::PreparedCommit> prepared_commit;
     std::optional<CommitTimeDecision> commit_time;
     // Destroyed first: waits for the task before destroying prepared_commit.
@@ -2020,15 +1939,10 @@ execute(const runtime::RuntimeData& runtime_data,
                  layout = history_storage::derive_remote_layout(key),
                  publication_workspace,
                  prepared = &*prepared_commit]() {
-                    const auto commit_put_trace = platform::perf_trace::begin();
                     auto published = publication::publish_commit_object(
                         storage, layout, key, *prepared, publication_workspace);
-                    platform::perf_trace::finish("commit PUT",
-                                                 commit_put_trace);
                     if (!published)
                         return published;
-                    const auto commit_verification_trace =
-                        platform::perf_trace::begin();
                     auto verified = publication::verify_commit_object(
                         storage,
                         layout,
@@ -2037,8 +1951,6 @@ execute(const runtime::RuntimeData& runtime_data,
                         published->head,
                         publication_workspace,
                         published->physical_hash);
-                    platform::perf_trace::finish("commit verification",
-                                                 commit_verification_trace);
                     if (!verified) {
                         return publication::PublishObjectResult{
                             std::unexpected(verified.error())};
@@ -2051,7 +1963,6 @@ execute(const runtime::RuntimeData& runtime_data,
                 std::string{"failed to start commit upload: "} +
                     exception.what()));
         }
-        platform::perf_trace::count("speculative commit uploads");
     }
 
     std::vector<std::size_t> apply_order;
@@ -2077,7 +1988,6 @@ execute(const runtime::RuntimeData& runtime_data,
                 transaction::OperationState::Applied) {
             record->progress[index].state =
                 transaction::OperationState::Applied;
-            platform::perf_trace::count("content uploads elided");
             continue;
         }
         if (std::ranges::find(apply_order, index) == apply_order.end()) {
@@ -2098,15 +2008,9 @@ execute(const runtime::RuntimeData& runtime_data,
     const auto mark_applied =
         [&](std::size_t index) -> std::expected<void, Error> {
         record->progress[index].state = transaction::OperationState::Applied;
-        if (record->plan.operations[index].action == Action::MoveLocal) {
-            platform::perf_trace::count("move applied count");
-            return {};
-        }
-        if (record->plan.operations[index].action == Action::CopyLocal) {
-            platform::perf_trace::count("copy applied count");
-            return {};
-        }
-        if (is_logical_mutation(record->plan.operations[index].action)) {
+        if (record->plan.operations[index].action == Action::MoveLocal ||
+            record->plan.operations[index].action == Action::CopyLocal ||
+            is_logical_mutation(record->plan.operations[index].action)) {
             return {};
         }
         return save_active_record();
@@ -2205,8 +2109,6 @@ execute(const runtime::RuntimeData& runtime_data,
         destinations[index] = std::move(*condition);
         return {};
     };
-    platform::perf_trace::maximum("configured content concurrency",
-                                  parallelism);
     std::unordered_map<std::string, std::size_t> download_counts;
     for (const auto index : apply_order) {
         const auto& operation = record->plan.operations[index];
@@ -2216,7 +2118,6 @@ execute(const runtime::RuntimeData& runtime_data,
         }
     }
     std::unordered_set<std::string> populated_downloads;
-    const auto content_transfer_trace = platform::perf_trace::begin();
     for (std::size_t position = 0; position < apply_order.size();) {
         const auto first = apply_order[position];
         const auto& first_operation = record->plan.operations[first];
@@ -2255,13 +2156,9 @@ execute(const runtime::RuntimeData& runtime_data,
                         destinations,
                         &journal_session);
                     if (!failure) {
-                        platform::perf_trace::finish("content transfer wall",
-                                                     content_transfer_trace);
                         return std::unexpected(failure.error());
                     }
                     if (*failure) {
-                        platform::perf_trace::finish("content transfer wall",
-                                                     content_transfer_trace);
                         return fail_mutation((*failure)->first,
                                              (*failure)->second);
                     }
@@ -2294,14 +2191,10 @@ execute(const runtime::RuntimeData& runtime_data,
                 download_cache,
                 destinations[first] ? &*destinations[first] : nullptr);
             if (!applied) {
-                platform::perf_trace::finish("content transfer wall",
-                                             content_transfer_trace);
                 return fail_mutation(first, applied.error());
             }
             auto marked = mark_applied(first);
             if (!marked) {
-                platform::perf_trace::finish("content transfer wall",
-                                             content_transfer_trace);
                 return std::unexpected(marked.error());
             }
             ++position;
@@ -2340,43 +2233,30 @@ execute(const runtime::RuntimeData& runtime_data,
             }
             chunk_start += chunk.size();
 
-            const auto stage_trace = platform::perf_trace::begin();
             auto staged_batch = mutation::stage_upload_batch(
                 chunk, *record, runtime_data.local_dir, key, *workspace);
-            platform::perf_trace::finish("content stage", stage_trace);
 
             if (!staged_batch) {
-                platform::perf_trace::finish("content transfer wall",
-                                             content_transfer_trace);
                 return fail_mutation(staged_batch.error().operation_index,
                                      staged_batch.error());
             }
 
-            const auto transfer_trace = platform::perf_trace::begin();
             auto transferred = mutation::transfer_upload_batch(
                 *staged_batch, storage, parallelism);
-            platform::perf_trace::finish("content transfer", transfer_trace);
 
             const bool transfer_unknown =
                 !transferred &&
                 transferred.error().code ==
                     mutation::MutationErrorCode::RemoteResultUnknown;
             if (!transferred && !transfer_unknown) {
-                platform::perf_trace::finish("content transfer wall",
-                                             content_transfer_trace);
                 return fail_mutation(transferred.error().operation_index,
                                      transferred.error());
             }
 
-            const auto verification_trace = platform::perf_trace::begin();
             auto verified = mutation::verify_upload_batch(
                 *staged_batch, storage, key, *workspace, parallelism);
-            platform::perf_trace::finish("content verification wall",
-                                         verification_trace);
 
             if (!verified) {
-                platform::perf_trace::finish("content transfer wall",
-                                             content_transfer_trace);
                 if (transfer_unknown &&
                     verified.error().code ==
                         mutation::MutationErrorCode::TransportFailure) {
@@ -2386,30 +2266,22 @@ execute(const runtime::RuntimeData& runtime_data,
                                      verified.error());
             }
 
-            const auto checkpoint_trace = platform::perf_trace::begin();
             auto checkpointed = detail::checkpoint_upload_batch(
                 *paths, *record, *staged_batch, key, &journal_session);
-            platform::perf_trace::finish("batch checkpoint", checkpoint_trace);
 
             if (!checkpointed) {
-                platform::perf_trace::finish("content transfer wall",
-                                             content_transfer_trace);
                 return std::unexpected(checkpointed.error());
             }
 
             auto cleaned = mutation::cleanup_upload_batch(*staged_batch);
 
             if (!cleaned) {
-                platform::perf_trace::finish("content transfer wall",
-                                             content_transfer_trace);
                 return std::unexpected(mutation_error(cleaned.error()));
             }
         }
 
         position = end;
     }
-    platform::perf_trace::finish("content transfer wall",
-                                 content_transfer_trace);
     if (record->phase < transaction::Phase::LocalChangesApplied) {
         record->phase = transaction::Phase::LocalChangesApplied;
     }
@@ -2434,12 +2306,8 @@ execute(const runtime::RuntimeData& runtime_data,
         return std::unexpected(timestamps.error());
     }
 
-    const auto final_scan_trace = platform::perf_trace::begin();
     auto scanned = observation::collect_local_observation(
         runtime_data.local_dir, session, observed_input.ignore_list);
-    platform::perf_trace::finish("final local validation", final_scan_trace);
-    platform::perf_trace::finish("final local validation wall",
-                                 final_scan_trace);
     if (!scanned) {
         auto rolled = rollback_terminal();
         if (!rolled)
@@ -2759,13 +2627,11 @@ execute(const runtime::RuntimeData& runtime_data,
     }
 
     const auto layout = history_storage::derive_remote_layout(key);
-    const auto head_put_trace = platform::perf_trace::begin();
     auto marker_published = publication::publish_head_marker(
         storage,
         layout,
         published->head,
         runtime_data.database_path.parent_path());
-    platform::perf_trace::finish("head PUT", head_put_trace);
     if (!marker_published) {
         auto inspected = publication::inspect_head_marker(
             storage,
@@ -2785,7 +2651,6 @@ execute(const runtime::RuntimeData& runtime_data,
         return std::unexpected(saved_phase.error());
     }
 
-    const auto head_verification_trace = platform::perf_trace::begin();
     auto head_verified = publication::verify_head_marker(
         storage,
         layout,
@@ -2793,7 +2658,6 @@ execute(const runtime::RuntimeData& runtime_data,
         runtime_data.database_path.parent_path(),
         marker_published ? marker_published->physical_hash
                          : std::string_view{});
-    platform::perf_trace::finish("head verification", head_verification_trace);
     if (!head_verified) {
         if (head_verified.error().code ==
             publication::ErrorCode::VerificationFailure) {
@@ -2926,7 +2790,6 @@ execute(const runtime::RuntimeData& runtime_data,
     if (!epoch_reference) {
         return std::unexpected(epoch_reference.error());
     }
-    const auto database_trace = platform::perf_trace::begin();
     const bool database_saved =
         state_storage::initialize(runtime_data.database_path) &&
         state_storage::save_state(
@@ -2942,7 +2805,6 @@ execute(const runtime::RuntimeData& runtime_data,
                     *epoch_reference ? (**epoch_reference).sequence : 0,
                 .pending_materializations =
                     reconciliation_result.pending_materializations});
-    platform::perf_trace::finish("local DB commit", database_trace);
     if (!database_saved) {
         return std::unexpected(detail::make_error(ErrorCode::DatabaseFailure,
                                                   "failed to save state.db"));
@@ -2957,13 +2819,11 @@ execute(const runtime::RuntimeData& runtime_data,
         observed_cleanup_ids.end(),
         observed_input.storage.ancestral_marked_heads.begin(),
         observed_input.storage.ancestral_marked_heads.end());
-    const auto cleanup_trace = platform::perf_trace::begin();
     auto post_prune = publication::prune_observed_parent_markers(
         storage,
         layout,
         observed_cleanup_ids,
         observed_input.storage.marked_head_identifiers);
-    platform::perf_trace::finish("marker cleanup", cleanup_trace);
     if (!post_prune) {
         return std::unexpected(detail::indeterminate_publication(
             post_prune.error(), "marker pruning"));

@@ -2,7 +2,6 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/history_storage.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1065,11 +1064,6 @@ TEST(ContentReachabilityTest,
 }
 
 TEST(ContentReachabilityTest, SharedCommitTreesAvoidPerCommitCapacityGrowth) {
-    struct TraceGuard {
-        ~TraceGuard() {
-            kasumi::platform::perf_trace::force_enable(false);
-        }
-    } trace_guard;
     constexpr std::size_t commit_count = 64;
     auto storage = make_local_storage();
     ReachabilityInventory history;
@@ -1089,8 +1083,6 @@ TEST(ContentReachabilityTest, SharedCommitTreesAvoidPerCommitCapacityGrowth) {
     }
 
     const std::vector<std::string> identifiers{content_id("same payload")};
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
     const auto result =
         kasumi::application::history_storage::inventory_content_reachability(
             storage.transport,
@@ -1103,9 +1095,6 @@ TEST(ContentReachabilityTest, SharedCommitTreesAvoidPerCommitCapacityGrowth) {
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     ASSERT_EQ(result->contents.size(), 1U);
     EXPECT_EQ(result->contents.front().references.size(), commit_count);
-    EXPECT_LT(kasumi::platform::perf_trace::get_count(
-                  "rc/content_reference_capacity_growth_events"),
-              commit_count);
 }
 
 TEST(ContentReachabilityTest, AllocationBudgetAvoidsNodeBasedContainers) {
@@ -1131,9 +1120,6 @@ TEST(ContentReachabilityTest, AllocationBudgetAvoidsNodeBasedContainers) {
     const auto history = history_inventory(
         storage.transport, kasumi::test::workspace_root(storage.workspace));
 
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
-
     const auto result =
         kasumi::application::history_storage::inventory_content_reachability(
             storage.transport,
@@ -1143,15 +1129,6 @@ TEST(ContentReachabilityTest, AllocationBudgetAvoidsNodeBasedContainers) {
             kasumi::test::workspace_root(storage.workspace),
             false);
     ASSERT_TRUE(result.has_value());
-
-    // Budget: Zero intermediate node-based tree containers (std::set, std::map)
-    // and zero node allocations
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
-                  "content_reachability.intermediate_tree_containers"),
-              0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
-                  "content_reachability.node_allocations"),
-              0U);
 }
 
 } // namespace

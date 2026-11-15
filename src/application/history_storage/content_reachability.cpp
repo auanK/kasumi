@@ -3,7 +3,6 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <map>
@@ -46,12 +45,7 @@ audit_object(transport::Transport& storage,
     };
     cleanup();
 
-    platform::perf_trace::count("reachability.audit_objects");
-    platform::perf_trace::count("reachability.audit_get_calls");
-    const auto get_token = platform::perf_trace::begin();
     const auto downloaded = transport::get(storage, content_id, encrypted);
-    platform::perf_trace::finish("reachability.audit_get_duration_us",
-                                 get_token);
     if (!downloaded) {
         cleanup();
         if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
@@ -60,29 +54,11 @@ audit_object(transport::Transport& storage,
         return std::unexpected(detail::transport_error(downloaded.error()));
     }
 
-    std::error_code enc_size_error;
-    const auto enc_size = std::filesystem::file_size(encrypted, enc_size_error);
-    if (!enc_size_error) {
-        platform::perf_trace::count("reachability.encrypted_bytes_downloaded",
-                                    enc_size);
-    }
-
     ContentObjectState state = ContentObjectState::Corrupt;
-    platform::perf_trace::count("reachability.audit_decrypt_calls");
-    const auto decrypt_token = platform::perf_trace::begin();
-    const bool decrypted = crypto::decrypt_file(encrypted, plaintext, key);
-    platform::perf_trace::finish("reachability.audit_decrypt_duration_us",
-                                 decrypt_token);
-    if (decrypted) {
+    if (crypto::decrypt_file(encrypted, plaintext, key)) {
         std::error_code plain_size_error;
         const auto plain_size =
             std::filesystem::file_size(plaintext, plain_size_error);
-        if (!plain_size_error) {
-            platform::perf_trace::count("reachability.plaintext_bytes_verified",
-                                        plain_size);
-        }
-        platform::perf_trace::count("reachability.audit_verify_calls");
-        const auto verify_token = platform::perf_trace::begin();
         const auto actual_hash = crypto::content::hash_file(plaintext);
         if (actual_hash && !plain_size_error &&
             (!expected_size || plain_size == *expected_size) &&
@@ -91,8 +67,6 @@ audit_object(transport::Transport& storage,
             crypto::content_identifier(key, *actual_hash) == content_id) {
             state = ContentObjectState::Present;
         }
-        platform::perf_trace::finish("reachability.audit_verify_duration_us",
-                                     verify_token);
     }
     cleanup();
     return state;
@@ -122,7 +96,6 @@ inventory_impl(transport::Transport& storage,
         }
 
         std::vector<RawReference> raw_references;
-        const bool measure_capacity_growth = platform::perf_trace::enabled();
         std::size_t reference_count = 0;
         for (const auto& commit : history_inventory.commits) {
             if (!commit.valid || !commit.reachable) {
@@ -146,8 +119,6 @@ inventory_impl(transport::Transport& storage,
                         detail::error(ErrorCode::LimitExceeded,
                                       "too many content references"));
                 }
-                const auto capacity_before_push =
-                    measure_capacity_growth ? raw_references.capacity() : 0;
                 raw_references.push_back(RawReference{
                     .remote_id = remote_id,
                     .plaintext_hash = plaintext_hash,
@@ -158,11 +129,6 @@ inventory_impl(transport::Transport& storage,
                             .size = row.size,
                         },
                 });
-                if (measure_capacity_growth &&
-                    raw_references.capacity() != capacity_before_push) {
-                    platform::perf_trace::count(
-                        "rc/content_reference_capacity_growth_events");
-                }
             }
         }
 

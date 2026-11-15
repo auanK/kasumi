@@ -1,7 +1,6 @@
 #include "platform/durability.hpp"
 
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <cerrno>
 #include <cstddef>
@@ -396,7 +395,6 @@ std::expected<void, std::string> sync_file(const std::filesystem::path& path) {
         return synced;
     }
 #endif
-    platform::perf_trace::count("platform durable file sync completions");
     return {};
 }
 
@@ -435,7 +433,6 @@ sync_parent_directory(const std::filesystem::path& path) {
         !synced) {
         return synced;
     }
-    platform::perf_trace::count("platform durable directory sync completions");
     return {};
 #endif
 }

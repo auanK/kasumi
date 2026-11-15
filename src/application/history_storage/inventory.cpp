@@ -1,6 +1,5 @@
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <utility>

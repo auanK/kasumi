@@ -41,8 +41,7 @@ changed files, or insufficient identity require content hashing. An effective
 ignore projection that differs from local rules uses full hashing. Preview and
 Status never save cache deltas; Sync saves them on successful finalization and
 independently verifies destructive local targets by content. These checks do not
-provide an atomic filesystem snapshot. Diagnose slow runs with
-[performance tracing](troubleshooting.md#slow-synchronization-or-preview).
+provide an atomic filesystem snapshot.
 
 ## Backups
 

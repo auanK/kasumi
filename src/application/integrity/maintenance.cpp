@@ -11,7 +11,6 @@
 #include "platform/cancellation.hpp"
 #include "platform/clock.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/workspace.hpp"
 
 #include <algorithm>
@@ -35,21 +34,6 @@ namespace kasumi::application::integrity {
 namespace {
 
 using KeySpan = std::span<const std::uint8_t, crypto::KEY_SIZE>;
-
-struct TraceGuard {
-    std::string_view name;
-    platform::perf_trace::Token token;
-    bool active = true;
-    void stop() noexcept {
-        if (active) {
-            platform::perf_trace::finish(name, token);
-            active = false;
-        }
-    }
-    ~TraceGuard() noexcept {
-        stop();
-    }
-};
 
 enum class AuditState {
     Healthy,
@@ -239,7 +223,6 @@ audit_object(transport::Transport& storage,
              const kasumi::maintenance::ObjectReference& reference,
              const platform::Workspace& workspace,
              std::size_t index) {
-    platform::perf_trace::count("fsck.audit_objects");
     const auto plaintext_hash = hash_from_hex(reference.identifier);
     if (!plaintext_hash) {
         return std::unexpected(make_error(ErrorCode::IntegrityFailure,
@@ -258,10 +241,7 @@ audit_object(transport::Transport& storage,
     if (!prepared)
         return std::unexpected(prepared.error());
 
-    platform::perf_trace::count("fsck.audit_get_calls");
-    const auto get_token = platform::perf_trace::begin();
     auto downloaded = transport::get(storage, remote_identifier, encrypted);
-    platform::perf_trace::finish("fsck.audit_get_duration_us", get_token);
     if (!downloaded) {
         auto removed = remove_temporary_file(encrypted);
         if (!removed)
@@ -281,35 +261,15 @@ audit_object(transport::Transport& storage,
     if (!regular)
         return std::unexpected(regular.error());
 
-    std::error_code enc_size_error;
-    if (const auto enc_size =
-            std::filesystem::file_size(encrypted, enc_size_error);
-        !enc_size_error) {
-        platform::perf_trace::count("fsck.encrypted_bytes_downloaded",
-                                    enc_size);
-    }
-
     AuditState result = AuditState::Healthy;
-    platform::perf_trace::count("fsck.audit_decrypt_calls");
-    const auto decrypt_token = platform::perf_trace::begin();
-    const bool decrypted = crypto::decrypt_file(encrypted, plaintext, key);
-    platform::perf_trace::finish("fsck.audit_decrypt_duration_us",
-                                 decrypt_token);
-    if (!decrypted) {
+    if (!crypto::decrypt_file(encrypted, plaintext, key)) {
         result = AuditState::Corrupt;
     } else {
-        platform::perf_trace::count("fsck.audit_verify_calls");
-        const auto verify_token = platform::perf_trace::begin();
         auto verified = verify_content(plaintext,
                                        reference.identifier,
                                        reference.size,
                                        ErrorCode::WorkspaceFailure);
-        platform::perf_trace::finish("fsck.audit_verify_duration_us",
-                                     verify_token);
-        if (verified) {
-            platform::perf_trace::count("fsck.plaintext_bytes_verified",
-                                        reference.size);
-        } else {
+        if (!verified) {
             if (verified.error().code != ErrorCode::IntegrityFailure) {
                 return std::unexpected(verified.error());
             }
@@ -345,8 +305,6 @@ struct AuditWindowState {
     std::condition_variable_any changed;
     std::vector<std::optional<std::size_t>> tasks;
     std::vector<std::optional<AuditWorkResult>> completions;
-    std::size_t in_flight = 0;
-    std::size_t peak_in_flight = 0;
     bool stop_requested = false;
 };
 
@@ -372,9 +330,6 @@ void run_audit_worker(
             }
             index = *state.tasks[slot];
             state.tasks[slot].reset();
-            ++state.in_flight;
-            state.peak_in_flight =
-                std::max(state.peak_in_flight, state.in_flight);
         }
 
         AuditWorkResult result{.index = index};
@@ -422,7 +377,6 @@ void run_audit_worker(
 
         {
             std::lock_guard lock(state.mutex);
-            --state.in_flight;
             state.completions[slot] = std::move(result);
         }
         state.changed.notify_all();
@@ -500,20 +454,14 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
             // Progress is observational and must not alter the audit result.
         }
     };
-    TraceGuard total_guard{"fsck.total_duration_us",
-                           platform::perf_trace::begin()};
     if (runtime_data.local_dir.empty() || !transport::valid(storage)) {
         return std::unexpected(
             make_error(ErrorCode::InvalidInput, "invalid fsck context"));
     }
     report_progress(application::FsckStage::Observing);
     const auto history_workspace = maintenance_workspace_root(runtime_data);
-    auto observation = [&]() {
-        TraceGuard guard{"fsck.collect_storage_state_duration_us",
-                         platform::perf_trace::begin()};
-        return observation::collect_storage_observation(
-            storage, key, history_workspace, true);
-    }();
+    auto observation = observation::collect_storage_observation(
+        storage, key, history_workspace, true);
     if (!observation) {
         return std::unexpected(
             make_error(ErrorCode::StateFailure, observation.error()));
@@ -540,21 +488,13 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                        list_detail("unknown physical identifiers: ",
                                    unknown_storage_identifiers)));
     }
-    auto local_tree = [&]() {
-        TraceGuard guard{"fsck.local_tree_duration_us",
-                         platform::perf_trace::begin()};
-        return observation::collect_local_tree(runtime_data.local_dir);
-    }();
+    auto local_tree = observation::collect_local_tree(runtime_data.local_dir);
     if (!local_tree) {
         return std::unexpected(
             make_error(ErrorCode::StateFailure, local_tree.error()));
     }
-    auto inventory = [&]() {
-        TraceGuard guard{"fsck.inventory_analysis_duration_us",
-                         platform::perf_trace::begin()};
-        return analyze_inventory(
-            storage_state.tree, *local_tree, storage_state);
-    }();
+    auto inventory =
+        analyze_inventory(storage_state.tree, *local_tree, storage_state);
     if (!inventory)
         return std::unexpected(inventory.error());
     if (!inventory->unknown_identifiers.empty()) {
@@ -577,16 +517,12 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
         }
     }
 
-    const auto ws_token = platform::perf_trace::begin();
     auto workspace = platform::create_workspace("fsck");
-    platform::perf_trace::finish("fsck.workspace_duration_us", ws_token);
     if (!workspace) {
         return std::unexpected(
             make_error(ErrorCode::WorkspaceFailure, workspace.error()));
     }
     auto result = [&]() -> std::expected<FsckResult, Error> {
-        TraceGuard referenced_guard{"fsck.referenced_audit_duration_us",
-                                    platform::perf_trace::begin()};
         try {
             const auto total_objects = inventory->referenced_objects.size();
             if (on_progress) {
@@ -601,13 +537,7 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
             const auto worker_count =
                 std::min<std::size_t>(effective_concurrency, total_objects);
 
-            platform::perf_trace::count("fsck.audit_configured_concurrency",
-                                        effective_concurrency);
-            platform::perf_trace::count("fsck.audit_worker_count",
-                                        worker_count);
-
             if (total_objects == 0) {
-                platform::perf_trace::count("fsck.audit_peak_in_flight", 0);
                 report_progress(application::FsckStage::Finalizing);
                 return fsck_result;
             }
@@ -692,7 +622,6 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                     it->reset();
                 }
                 --outstanding;
-                platform::perf_trace::count("fsck.audit_completion_count");
                 bool object_classified = false;
                 std::uint64_t classified_size = 0;
 
@@ -754,9 +683,6 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
             workers.clear();
             report_progress(application::FsckStage::Finalizing);
 
-            platform::perf_trace::count("fsck.audit_peak_in_flight",
-                                        state.peak_in_flight);
-
             if (lowest_hard_failure) {
                 return std::unexpected(std::move(lowest_hard_failure->second));
             }
@@ -780,10 +706,7 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                 make_error(ErrorCode::StateFailure, exception.what()));
         }
     }();
-    const auto ws_cleanup_token = platform::perf_trace::begin();
     platform::cleanup_workspace(*workspace);
-    platform::perf_trace::finish("fsck.workspace_duration_us",
-                                 ws_cleanup_token);
     return result;
 }
 

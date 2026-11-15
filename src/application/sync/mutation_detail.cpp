@@ -5,7 +5,6 @@
 #include "mutation_fault_test.hpp"
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -272,7 +271,6 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
                        operation_index));
     }
 
-    const auto encryption_trace = platform::perf_trace::begin();
     std::string encryption_error;
     auto encrypted_file =
         crypto::encrypt_file_with_hashes(source,
@@ -280,7 +278,6 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
                                          key,
                                          crypto::FilePurpose::Content,
                                          &encryption_error);
-    platform::perf_trace::finish("content encryption", encryption_trace);
     if (!encrypted_file) {
         return std::unexpected(make_error(
             MutationErrorCode::CryptoFailure,

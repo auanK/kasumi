@@ -1,6 +1,5 @@
 #include "detail.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/random.hpp"
 
 #if defined(_WIN32)
@@ -430,7 +429,6 @@ bool reset_failed_attempt(State& state) noexcept {
 }
 
 std::expected<int, Error> start_process(State& state) {
-    const auto trace = platform::perf_trace::begin();
     auto environment = make_child_environment(state);
     if (!environment) {
         return std::unexpected(environment.error());
@@ -444,7 +442,6 @@ std::expected<int, Error> start_process(State& state) {
     const std::vector<std::string> arguments{
         platform::path::to_utf8(state.configuration.executable), "rcd"};
     const auto result = state.process.start(arguments, options);
-    platform::perf_trace::finish("rclone process startup", trace);
     if (result) {
         return std::unexpected(make_error(
             ErrorCode::ProcessFailure,
@@ -492,9 +489,7 @@ std::expected<void, Error> prepare_attempt(State& state) {
     if (!started) {
         return std::unexpected(started.error());
     }
-    const auto readiness_trace = platform::perf_trace::begin();
     const auto connected = establish_rc_connection(state, *started);
-    platform::perf_trace::finish("RC readiness", readiness_trace);
     if (!connected) {
         return std::unexpected(connected.error());
     }
@@ -705,28 +700,19 @@ void destroy_state(void* context) noexcept {
     if (state == nullptr) {
         return;
     }
-    const auto trace = platform::perf_trace::begin();
-    const auto drain_trace = platform::perf_trace::begin();
     state->stop_drain.store(true);
     wait_for_drain(*state);
-    platform::perf_trace::finish("rclone output drain", drain_trace);
-    const auto stop_trace = platform::perf_trace::begin();
     if (request_core_quit_best_effort(*state)) {
-        const auto kill_trace = platform::perf_trace::begin();
         try {
             std::lock_guard process_lock(state->process_mutex);
             (void)state->process.kill();
         } catch (...) {
         }
-        platform::perf_trace::finish("rclone acknowledged quit kill",
-                                     kill_trace);
     }
     (void)stop_process(*state);
-    platform::perf_trace::finish("rclone process stop", stop_trace);
     clear_secrets(*state);
     state->base_url.clear();
     delete state;
-    platform::perf_trace::finish("rclone shutdown", trace);
 }
 
 } // namespace kasumi::transport::rclone_detail

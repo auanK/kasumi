@@ -2,7 +2,6 @@
 
 #include "detail.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -524,15 +523,11 @@ bool valid(const Transport& transport) noexcept {
 }
 
 Result initialize(Transport& transport) {
-    const auto trace = platform::perf_trace::begin();
     auto* state = state_pointer(transport);
     if (state == nullptr || transport.storage.initialize == nullptr) {
-        platform::perf_trace::finish("transport initialize", trace);
         return std::unexpected(invalid_transport_error());
     }
-    auto result = transport.storage.initialize(state);
-    platform::perf_trace::finish("transport initialize", trace);
-    return result;
+    return transport.storage.initialize(state);
 }
 
 Result put(Transport& transport,
@@ -543,7 +538,6 @@ Result put(Transport& transport,
         return std::unexpected(invalid_transport_error());
     }
 
-    platform::perf_trace::count("transport put");
     return transport.storage.put(state, source, identifier);
 }
 
@@ -608,7 +602,6 @@ Result get(Transport& transport,
         return std::unexpected(invalid_transport_error());
     }
 
-    platform::perf_trace::count("transport get");
     return transport.storage.get(state, identifier, destination);
 }
 
@@ -692,7 +685,6 @@ PresenceResult presence(Transport& transport, std::string_view identifier) {
         return std::unexpected(invalid_transport_error());
     }
 
-    platform::perf_trace::count("transport presence");
     return transport.storage.presence(state, identifier);
 }
 
@@ -702,7 +694,6 @@ ListingResult list(Transport& transport) {
         return std::unexpected(invalid_transport_error());
     }
 
-    platform::perf_trace::count("transport list");
     return transport.storage.list(state);
 }
 
@@ -716,7 +707,6 @@ ListingResult list(Transport& transport, std::string_view prefix) {
             make_error(ErrorCode::InvalidIdentifier, "invalid listing prefix"));
     }
 
-    platform::perf_trace::count("transport list prefix");
     return transport.storage.list_prefix(state, prefix);
 }
 
@@ -796,7 +786,6 @@ RemovalResult remove(Transport& transport, std::string_view identifier) {
     // before reporting an error. Do not probe and reinterpret it as success,
     // because callers must stop on uncertain mutation. Exactly one REMOVE
     // attempt is made and the original error (including native_code) is kept.
-    platform::perf_trace::count("transport remove");
     return transport.storage.remove(state, identifier);
 }
 

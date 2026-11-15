@@ -5,7 +5,6 @@
 #include "mutation_fault_test.hpp"
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 
 #include <fstream>
@@ -125,14 +124,11 @@ std::expected<void, MutationError>
 move_local_without_replace(const std::filesystem::path& source,
                            const std::filesystem::path& destination,
                            std::size_t operation_index) {
-    platform::perf_trace::count("native rename calls");
-    const auto rename_trace = platform::perf_trace::begin();
 #if defined(_WIN32)
     const bool moved = MoveFileExW(source.wstring().c_str(),
                                    destination.wstring().c_str(),
                                    MOVEFILE_WRITE_THROUGH) != 0;
     const DWORD native_error = moved ? ERROR_SUCCESS : GetLastError();
-    platform::perf_trace::finish("move native rename wall", rename_trace);
     if (!moved) {
         const auto code = native_error == ERROR_ALREADY_EXISTS ||
                                   native_error == ERROR_FILE_EXISTS
@@ -160,13 +156,12 @@ move_local_without_replace(const std::filesystem::path& source,
     }
 
     const auto linux_rename_result = ::syscall(SYS_renameat2,
-                                              AT_FDCWD,
-                                              source.c_str(),
-                                              AT_FDCWD,
-                                              destination.c_str(),
-                                              RENAME_NOREPLACE);
+                                               AT_FDCWD,
+                                               source.c_str(),
+                                               AT_FDCWD,
+                                               destination.c_str(),
+                                               RENAME_NOREPLACE);
     const int linux_error = (linux_rename_result != 0) ? errno : 0;
-    platform::perf_trace::finish("move native rename wall", rename_trace);
     if (linux_rename_result != 0) {
         const int err = linux_error;
         const auto code = (err == EEXIST)
@@ -239,12 +234,8 @@ std::expected<void, MutationError> verify_uploaded_content_object(
     std::string_view local_physical_hash) {
     constexpr std::string_view physical_hash_algorithm = "sha256";
 
-    platform::perf_trace::count("content individual hash calls");
-    const auto remote_hash_trace = platform::perf_trace::begin();
     auto remote_hash =
         transport::physical_hash(storage, identifier, physical_hash_algorithm);
-    platform::perf_trace::finish("content remote hash verification",
-                                 remote_hash_trace);
     if (remote_hash) {
         if (*remote_hash == local_physical_hash) {
             return {};
@@ -296,9 +287,7 @@ std::expected<void, MutationError> verify_uploaded_content_object(
                                           operation_index));
     }
 
-    const auto get_trace = platform::perf_trace::begin();
     auto downloaded = transport::get(storage, identifier, encrypted);
-    platform::perf_trace::finish("rc/get_content", get_trace);
     if (!downloaded) {
         cleanup();
         if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
@@ -426,10 +415,7 @@ apply_upload(const Operation& operation,
         return std::unexpected(prepared.error());
     }
 
-    const auto put_trace = platform::perf_trace::begin();
     auto uploaded = transport::put(storage, encrypted, remote_identifier);
-    platform::perf_trace::finish("content PUT", put_trace);
-    platform::perf_trace::finish("rc/put_content", put_trace);
     if (!uploaded &&
         !transport::mutation_result_is_ambiguous(uploaded.error())) {
         remove_temporary_file(encrypted);
@@ -439,7 +425,6 @@ apply_upload(const Operation& operation,
                                           operation_index));
     }
 
-    const auto verification_trace = platform::perf_trace::begin();
     auto uploaded_verification =
         detail::verify_uploaded_content_object(storage,
                                                key,
@@ -449,7 +434,6 @@ apply_upload(const Operation& operation,
                                                workspace,
                                                operation_index,
                                                prepared->ciphertext_sha256);
-    platform::perf_trace::finish("content verification", verification_trace);
     std::error_code encrypted_remove_error;
     std::filesystem::remove(encrypted, encrypted_remove_error);
     if (!uploaded_verification) {
@@ -586,15 +570,12 @@ apply_download(const Operation& operation,
         }
         if (download_cache == DownloadCacheMode::Reuse &&
             std::filesystem::is_regular_file(*plaintext_status)) {
-            const auto copy_trace = platform::perf_trace::begin();
             std::error_code copy_error;
             std::filesystem::copy_file(plaintext, candidate, copy_error);
-            platform::perf_trace::finish("download plaintext copy", copy_trace);
             if (!copy_error) {
                 auto verified =
                     verify_local_file(candidate, operation, operation_index);
                 if (verified) {
-                    platform::perf_trace::count("content plaintext reused");
                     candidate_ready = true;
                 }
             }
@@ -635,13 +616,9 @@ apply_download(const Operation& operation,
         const bool reuse_cached =
             download_cache == DownloadCacheMode::Reuse &&
             std::filesystem::is_regular_file(*encrypted_status);
-        if (reuse_cached) {
-            platform::perf_trace::count("content downloads reused");
-        } else {
-            const auto get_trace = platform::perf_trace::begin();
+        if (!reuse_cached) {
             auto downloaded =
                 transport::get(storage, remote_identifier, encrypted);
-            platform::perf_trace::finish("rc/get_content", get_trace);
             if (!downloaded) {
                 std::error_code cleanup_error;
                 std::filesystem::remove(encrypted, cleanup_error);
@@ -678,9 +655,7 @@ apply_download(const Operation& operation,
                            operation_index));
         }
 
-        const auto decrypt_trace = platform::perf_trace::begin();
         const bool decrypted = crypto::decrypt_file(encrypted, candidate, key);
-        platform::perf_trace::finish("download decryption", decrypt_trace);
         if (!decrypted) {
             std::error_code encrypted_cleanup_error;
             std::filesystem::remove(encrypted, encrypted_cleanup_error);
@@ -707,10 +682,8 @@ apply_download(const Operation& operation,
         }
 
         if (cache_plaintext) {
-            const auto copy_trace = platform::perf_trace::begin();
             std::error_code copy_error;
             std::filesystem::copy_file(candidate, plaintext, copy_error);
-            platform::perf_trace::finish("download plaintext copy", copy_trace);
             if (!copy_error) {
                 auto cache_verified =
                     verify_local_file(plaintext, operation, operation_index);
@@ -840,12 +813,6 @@ apply_move_local(const Operation& operation,
                  const std::filesystem::path& destination,
                  const platform::Workspace& workspace,
                  const transaction::OperationProgress& progress) {
-    struct MoveApplyGuard {
-        platform::perf_trace::Token token;
-        ~MoveApplyGuard() {
-            platform::perf_trace::finish("move apply wall", token);
-        }
-    } move_apply_guard{platform::perf_trace::begin()};
     if (auto parent_ok =
             validate_parent_directory(destination, operation_index);
         !parent_ok) {
@@ -887,7 +854,6 @@ apply_move_local(const Operation& operation,
                            source,
                            operation_index));
         }
-        platform::perf_trace::count("source hash calls");
         auto verified_source =
             verify_local_file(source, operation, operation_index);
         if (!verified_source) {
@@ -916,10 +882,8 @@ apply_move_local(const Operation& operation,
         }
         mutation_fault_test::hit("after_rename_move", destination);
     } else if (source_missing && !destination_missing) {
-        const auto dest_verif_trace = platform::perf_trace::begin();
         auto verified_dest =
             verify_local_file(destination, operation, operation_index);
-        platform::perf_trace::finish("move destination verification wall", dest_verif_trace);
         if (!verified_dest) {
             return std::unexpected(
                 make_error(MutationErrorCode::DestinationConflict,
@@ -944,12 +908,6 @@ apply_copy_local(const Operation& operation,
                  const platform::Workspace& workspace,
                  const transaction::OperationProgress& progress) {
     (void)progress;
-    struct CopyApplyGuard {
-        platform::perf_trace::Token token;
-        ~CopyApplyGuard() {
-            platform::perf_trace::finish("copy apply wall", token);
-        }
-    } copy_apply_guard{platform::perf_trace::begin()};
 
     if (destination.empty()) {
         return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
@@ -968,11 +926,10 @@ apply_copy_local(const Operation& operation,
         return std::unexpected(source_status.error());
     }
     if (std::filesystem::is_symlink(*source_status)) {
-        return std::unexpected(make_error(
-            MutationErrorCode::UnsafePath,
-            "copy does not accept symlink",
-            source,
-            operation_index));
+        return std::unexpected(make_error(MutationErrorCode::UnsafePath,
+                                          "copy does not accept symlink",
+                                          source,
+                                          operation_index));
     }
     if (missing(*source_status)) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
@@ -989,17 +946,19 @@ apply_copy_local(const Operation& operation,
     }
 
     std::error_code size_error;
-    const auto actual_source_size = std::filesystem::file_size(source, size_error);
+    const auto actual_source_size =
+        std::filesystem::file_size(source, size_error);
     if (size_error || actual_source_size != operation.size) {
-        return std::unexpected(make_error(
-            size_error ? MutationErrorCode::LocalIo : MutationErrorCode::IntegrityMismatch,
-            size_error ? size_error.message() : "copy source does not match expected size",
-            source,
-            operation_index));
+        return std::unexpected(
+            make_error(size_error ? MutationErrorCode::LocalIo
+                                  : MutationErrorCode::IntegrityMismatch,
+                       size_error ? size_error.message()
+                                  : "copy source does not match expected size",
+                       source,
+                       operation_index));
     }
-    const auto src_verif_trace = platform::perf_trace::begin();
-    auto verified_source = verify_local_file(source, operation, operation_index);
-    platform::perf_trace::finish("copy source verification wall", src_verif_trace);
+    auto verified_source =
+        verify_local_file(source, operation, operation_index);
     if (!verified_source) {
         return std::unexpected(verified_source.error());
     }
@@ -1009,11 +968,10 @@ apply_copy_local(const Operation& operation,
         return std::unexpected(destination_status.error());
     }
     if (std::filesystem::is_symlink(*destination_status)) {
-        return std::unexpected(make_error(
-            MutationErrorCode::UnsafePath,
-            "destination is a symlink",
-            destination,
-            operation_index));
+        return std::unexpected(make_error(MutationErrorCode::UnsafePath,
+                                          "destination is a symlink",
+                                          destination,
+                                          operation_index));
     }
     if (!missing(*destination_status)) {
         const auto recorded_identity_res =
@@ -1025,12 +983,10 @@ apply_copy_local(const Operation& operation,
         if (recorded_identity.has_value()) {
             const auto current_identity =
                 platform::private_storage::query_file_identity(destination);
-            if (current_identity.valid && current_identity == *recorded_identity) {
-                const auto dest_verif_trace = platform::perf_trace::begin();
+            if (current_identity.valid &&
+                current_identity == *recorded_identity) {
                 auto verified_dest =
                     verify_local_file(destination, operation, operation_index);
-                platform::perf_trace::finish(
-                    "copy destination verification wall", dest_verif_trace);
                 if (verified_dest) {
                     return {};
                 }
@@ -1045,8 +1001,8 @@ apply_copy_local(const Operation& operation,
 
     mutation_fault_test::hit("before_copy_local_staging", source);
 
-    const auto candidate = detail::copy_candidate_path(
-        destination, workspace, operation_index);
+    const auto candidate =
+        detail::copy_candidate_path(destination, workspace, operation_index);
     auto candidate_status = read_status(candidate, operation_index);
     if (!candidate_status) {
         return std::unexpected(candidate_status.error());
@@ -1061,7 +1017,8 @@ apply_copy_local(const Operation& operation,
 
     mutation_fault_test::hit("during_copy_local_staging_race", candidate);
 
-    auto staged_file = platform::private_storage::create_private_file(candidate);
+    auto staged_file =
+        platform::private_storage::create_private_file(candidate);
     if (!staged_file) {
         return std::unexpected(
             make_error(staged_file.error().is_collision
@@ -1082,7 +1039,6 @@ apply_copy_local(const Operation& operation,
         }
     } staging_guard{&staged_file.value()};
 
-    const auto staging_trace = platform::perf_trace::begin();
     std::ifstream in(source, std::ios::binary);
     if (!in) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
@@ -1092,21 +1048,22 @@ apply_copy_local(const Operation& operation,
     }
 
     std::array<char, 64 * 1024> buffer;
-    std::uint64_t total_copied = 0;
     while (in) {
         in.read(buffer.data(), buffer.size());
         const auto bytes_read = in.gcount();
         if (bytes_read > 0) {
             mutation_fault_test::hit("during_copy_local_write", candidate);
             auto written = platform::private_storage::write_private_file(
-                *staging_guard.file, buffer.data(), static_cast<std::size_t>(bytes_read));
+                *staging_guard.file,
+                buffer.data(),
+                static_cast<std::size_t>(bytes_read));
             if (!written) {
-                return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                                  "failed to write staging bytes: " + written.error(),
-                                                  candidate,
-                                                  operation_index));
+                return std::unexpected(make_error(
+                    MutationErrorCode::LocalIo,
+                    "failed to write staging bytes: " + written.error(),
+                    candidate,
+                    operation_index));
             }
-            total_copied += static_cast<std::uint64_t>(bytes_read);
         }
     }
     if (in.bad()) {
@@ -1117,37 +1074,37 @@ apply_copy_local(const Operation& operation,
     }
     in.close();
 
-    auto flushed = platform::private_storage::flush_and_close_private_file(*staging_guard.file);
+    auto flushed = platform::private_storage::flush_and_close_private_file(
+        *staging_guard.file);
     if (!flushed) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "failed closing staging file: " + flushed.error(),
-                                          candidate,
-                                          operation_index));
+        return std::unexpected(
+            make_error(MutationErrorCode::LocalIo,
+                       "failed closing staging file: " + flushed.error(),
+                       candidate,
+                       operation_index));
     }
-    platform::perf_trace::finish("copy staging wall", staging_trace);
-    platform::perf_trace::count("copy bytes copied", total_copied);
 
     std::error_code candidate_size_error;
-    const auto candidate_size = std::filesystem::file_size(candidate, candidate_size_error);
+    const auto candidate_size =
+        std::filesystem::file_size(candidate, candidate_size_error);
     if (candidate_size_error || candidate_size != operation.size) {
         return std::unexpected(make_error(
-            candidate_size_error ? MutationErrorCode::LocalIo : MutationErrorCode::IntegrityMismatch,
-            candidate_size_error ? candidate_size_error.message() : "staging file size mismatch",
+            candidate_size_error ? MutationErrorCode::LocalIo
+                                 : MutationErrorCode::IntegrityMismatch,
+            candidate_size_error ? candidate_size_error.message()
+                                 : "staging file size mismatch",
             candidate,
             operation_index));
     }
 
-    const auto dest_verif_trace = platform::perf_trace::begin();
-    auto verified_staging = verify_local_file(candidate, operation, operation_index);
-    platform::perf_trace::finish("copy destination verification wall", dest_verif_trace);
+    auto verified_staging =
+        verify_local_file(candidate, operation, operation_index);
     if (!verified_staging) {
         return std::unexpected(verified_staging.error());
     }
 
     mutation_fault_test::hit("before_copy_local_durability", candidate);
-    const auto durability_trace = platform::perf_trace::begin();
     auto synced = sync_file_checked(candidate, operation_index);
-    platform::perf_trace::finish("copy durability wall", durability_trace);
     if (!synced) {
         return synced;
     }
@@ -1159,22 +1116,22 @@ apply_copy_local(const Operation& operation,
     }
 
     mutation_fault_test::hit("before_copy_local_install", destination);
-    const auto install_trace = platform::perf_trace::begin();
     auto installed = install_without_overwrite_checked(
         candidate, destination, operation_index);
-    platform::perf_trace::finish("copy install wall", install_trace);
     if (!installed) {
         return installed;
     }
     staging_guard.keep = true;
     mutation_fault_test::hit("after_copy_local_install", destination);
 
-    const auto dest_id = platform::private_storage::query_file_identity(destination);
+    const auto dest_id =
+        platform::private_storage::query_file_identity(destination);
     if (!dest_id.valid || !(dest_id == staging_guard.file->identity)) {
-        return std::unexpected(make_error(MutationErrorCode::DestinationConflict,
-                                          "installed destination identity mismatch / externally replaced",
-                                          destination,
-                                          operation_index));
+        return std::unexpected(make_error(
+            MutationErrorCode::DestinationConflict,
+            "installed destination identity mismatch / externally replaced",
+            destination,
+            operation_index));
     }
 
     auto dir_synced = platform::durability::sync_parent_directory(destination);
@@ -1397,11 +1354,11 @@ apply_operation(const Operation& operation,
             }
             if (std::filesystem::is_symlink(*status) ||
                 !std::filesystem::is_regular_file(*status)) {
-                return std::unexpected(make_error(
-                    MutationErrorCode::DestinationConflict,
-                    "disposable source is no longer a regular file",
-                    *path,
-                    operation_index));
+                return std::unexpected(
+                    make_error(MutationErrorCode::DestinationConflict,
+                               "disposable source is no longer a regular file",
+                               *path,
+                               operation_index));
             }
             const auto identity =
                 platform::private_storage::query_file_identity(*path);
@@ -1428,20 +1385,24 @@ apply_operation(const Operation& operation,
             if (*actual != operation.hash ||
                 !identity_matches(after_identity,
                                   operation.expected_source_identity)) {
-                return std::unexpected(make_error(
-                    MutationErrorCode::DestinationConflict,
-                    "disposable source changed before removal",
-                    *path,
-                    operation_index));
+                return std::unexpected(
+                    make_error(MutationErrorCode::DestinationConflict,
+                               "disposable source changed before removal",
+                               *path,
+                               operation_index));
             }
             platform::private_storage::PrivateOutputFile source{
                 .path = *path,
-                .identity = {
-                    .volume_or_dev = operation.expected_source_identity.volume_or_dev,
-                    .file_id_low = operation.expected_source_identity.file_id_low,
-                    .file_id_high = operation.expected_source_identity.file_id_high,
-                    .valid = true,
-                },
+                .identity =
+                    {
+                        .volume_or_dev =
+                            operation.expected_source_identity.volume_or_dev,
+                        .file_id_low =
+                            operation.expected_source_identity.file_id_low,
+                        .file_id_high =
+                            operation.expected_source_identity.file_id_high,
+                        .valid = true,
+                    },
             };
             mutation_fault_test::hit("before_disposable_owned_remove", *path);
             const auto removed =
@@ -1454,10 +1415,11 @@ apply_operation(const Operation& operation,
                         ? MutationErrorCode::DestinationConflict
                         : MutationErrorCode::LocalIo,
                     removed == CleanupResult::AlreadyAbsent
-                        ? "disposable source disappeared before verified removal"
-                        : removed == CleanupResult::IdentityMismatch
-                            ? "disposable source identity changed during removal"
-                            : "failed to remove disposable source",
+                        ? "disposable source disappeared before verified "
+                          "removal"
+                    : removed == CleanupResult::IdentityMismatch
+                        ? "disposable source identity changed during removal"
+                        : "failed to remove disposable source",
                     *path,
                     operation_index));
             }
@@ -1551,20 +1513,17 @@ apply_operation(const Operation& operation,
                     std::error_code inspection_error;
                     const bool empty =
                         std::filesystem::is_empty(*path, inspection_error);
-                    directory_not_empty =
-                        !inspection_error && !empty;
+                    directory_not_empty = !inspection_error && !empty;
                 }
-                return std::unexpected(
-                    make_error(directory_not_empty
-                                   ? MutationErrorCode::DestinationConflict
-                                   : MutationErrorCode::LocalIo,
-                               directory_not_empty
-                                   ? "directory contains entries not observed "
-                                     "as ignored or managed"
-                                   : "failed to remove directory: " +
-                                         error.message(),
-                               *path,
-                               operation_index));
+                return std::unexpected(make_error(
+                    directory_not_empty ? MutationErrorCode::DestinationConflict
+                                        : MutationErrorCode::LocalIo,
+                    directory_not_empty
+                        ? "directory contains entries not observed "
+                          "as ignored or managed"
+                        : "failed to remove directory: " + error.message(),
+                    *path,
+                    operation_index));
             }
             return {};
         }

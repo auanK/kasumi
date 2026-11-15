@@ -10,7 +10,6 @@
 #include "application/sync/publication.hpp"
 #include "coordinator_detail.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "state_storage/database.hpp"
 
 #include <algorithm>
@@ -537,10 +536,8 @@ std::expected<void, Error> resume_pending_storage_repairs(
         }
         chunk_start += chunk.size();
 
-        const auto stage_trace = platform::perf_trace::begin();
         auto staged_batch = mutation::stage_upload_batch(
             chunk, record, runtime_data.local_dir, key, *workspace);
-        platform::perf_trace::finish("content stage", stage_trace);
 
         if (!staged_batch) {
             return std::unexpected(
@@ -550,9 +547,7 @@ std::expected<void, Error> resume_pending_storage_repairs(
         }
 
         mutation::StagedUploadBatch missing_batch{.root = staged_batch->root};
-        const auto listing_trace = platform::perf_trace::begin();
         auto listing = transport::list(storage);
-        platform::perf_trace::finish("repair availability LIST", listing_trace);
         if (!listing) {
             return std::unexpected(detail::make_error(
                 ErrorCode::ObservationFailure,
@@ -603,10 +598,8 @@ std::expected<void, Error> resume_pending_storage_repairs(
         }
 
         if (!missing_batch.objects.empty()) {
-            const auto transfer_trace = platform::perf_trace::begin();
             auto transferred = mutation::transfer_upload_batch(
                 missing_batch, storage, parallelism);
-            platform::perf_trace::finish("content transfer", transfer_trace);
 
             const bool transfer_unknown =
                 !transferred &&
@@ -619,11 +612,8 @@ std::expected<void, Error> resume_pending_storage_repairs(
                     transferred.error().operation_index));
             }
 
-            const auto verification_trace = platform::perf_trace::begin();
             auto verified = mutation::verify_upload_batch(
                 missing_batch, storage, key, *workspace, parallelism);
-            platform::perf_trace::finish("content verification wall",
-                                         verification_trace);
 
             if (!verified) {
                 return std::unexpected(
@@ -633,10 +623,8 @@ std::expected<void, Error> resume_pending_storage_repairs(
             }
         }
 
-        const auto checkpoint_trace = platform::perf_trace::begin();
         auto checkpointed =
             detail::checkpoint_upload_batch(paths, record, *staged_batch, key);
-        platform::perf_trace::finish("batch checkpoint", checkpoint_trace);
 
         if (!checkpointed) {
             return std::unexpected(checkpointed.error());

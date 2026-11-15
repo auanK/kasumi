@@ -10,7 +10,6 @@
 #include "crypto/file_crypto.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/profile_lock.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
@@ -345,7 +344,6 @@ TEST(ApplicationExecuteTest,
     const auto corrupt_before = kasumi::test::read_binary(remote / corrupt_id);
     ASSERT_TRUE(std::filesystem::remove(database));
 
-    kasumi::platform::perf_trace::force_enable(true);
     // Execute with --initial AND --trust-existing-content
     const auto initial =
         kasumi::application::execute({Request{.operation = Operation::Sync,
@@ -359,8 +357,6 @@ TEST(ApplicationExecuteTest,
         std::get_if<kasumi::application::SyncCompleted>(&initial->data);
     ASSERT_NE(sync_summary, nullptr);
     EXPECT_EQ(sync_summary->trusted_content_reused, 2U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("content uploads elided"),
-              2U);
 
     // Corrupt remote object MUST NOT have been overwritten (zero PUTs to
     // existing content)
@@ -403,7 +399,6 @@ TEST(ApplicationExecuteTest,
     ASSERT_FALSE(std::filesystem::exists(remote / missing_id));
     ASSERT_TRUE(std::filesystem::remove(database));
 
-    kasumi::platform::perf_trace::force_enable(true);
     const auto initial =
         kasumi::application::execute({Request{.operation = Operation::Sync,
                                               .profile_name = "demo",
@@ -416,8 +411,6 @@ TEST(ApplicationExecuteTest,
         std::get_if<kasumi::application::SyncCompleted>(&initial->data);
     ASSERT_NE(sync_summary, nullptr);
     EXPECT_EQ(sync_summary->trusted_content_reused, 1U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("content uploads elided"),
-              1U);
 
     // Existing object untouched; missing object successfully uploaded
     EXPECT_EQ(kasumi::test::read_binary(remote / existing_id), existing_before);

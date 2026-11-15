@@ -3,7 +3,6 @@
 #include "crypto/physical_hash.hpp"
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
 
@@ -70,7 +69,6 @@ make_chunk_ad(const std::array<std::uint8_t, header_ad_size>& header,
 }
 
 struct CryptoBufferCleanup {
-    const char* wipe_metric;
     std::array<std::uint8_t, NONCE_SIZE>& base_nonce;
     std::array<std::uint8_t, NONCE_SIZE>& chunk_nonce;
     std::array<std::uint8_t, MAC_SIZE>& header_mac;
@@ -79,8 +77,6 @@ struct CryptoBufferCleanup {
     std::vector<std::uint8_t>& buffer_b;
 
     ~CryptoBufferCleanup() noexcept {
-        platform::perf_trace::count(wipe_metric,
-                                    buffer_a.size() + buffer_b.size());
         crypto_wipe(base_nonce.data(), base_nonce.size());
         crypto_wipe(chunk_nonce.data(), chunk_nonce.size());
         crypto_wipe(header_mac.data(), header_mac.size());
@@ -95,21 +91,13 @@ struct CryptoBufferCleanup {
 };
 
 struct TemporaryOutputGuard {
-    const char* failure_metric;
     platform::private_storage::PrivateOutputFile file;
     bool published{false};
 
     ~TemporaryOutputGuard() noexcept {
         if (!published && !file.published && !file.path.empty()) {
-            const auto res =
-                platform::private_storage::remove_private_file_if_owned(file);
-            if (res == platform::private_storage::CleanupResult::AccessDenied ||
-                res ==
-                    platform::private_storage::CleanupResult::FilesystemError ||
-                res == platform::private_storage::CleanupResult::
-                           IdentityMismatch) {
-                platform::perf_trace::count(failure_metric);
-            }
+            static_cast<void>(
+                platform::private_storage::remove_private_file_if_owned(file));
         } else {
             platform::private_storage::close_private_file(file);
         }
@@ -369,15 +357,10 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
     std::array<std::uint8_t, MAC_SIZE> mac{};
     std::vector<std::uint8_t> plain_buffer;
     std::vector<std::uint8_t> cipher_buffer;
-    CryptoBufferCleanup cleanup{"file encryption wipe bytes",
-                                base_nonce,
-                                chunk_nonce,
-                                header_mac,
-                                mac,
-                                plain_buffer,
-                                cipher_buffer};
+    CryptoBufferCleanup cleanup{
+        base_nonce, chunk_nonce, header_mac, mac, plain_buffer, cipher_buffer};
 
-    TemporaryOutputGuard temp_guard{"encryption.cleanup_failure"};
+    TemporaryOutputGuard temp_guard;
 
     try {
         std::ifstream input(input_path, std::ios::binary | std::ios::ate);
@@ -421,8 +404,6 @@ encrypt_file_with_key(const std::filesystem::path& input_path,
             std::min<std::uint64_t>(CHUNK_SIZE, plaintext_size));
         plain_buffer.resize(buffer_size);
         cipher_buffer.resize(buffer_size);
-        platform::perf_trace::count("file encryption scratch bytes",
-                                    plain_buffer.size() + cipher_buffer.size());
 
         if (!reserve_temp_output(target_path, temp_guard.file, error_detail)) {
             return std::nullopt;
@@ -569,15 +550,10 @@ bool decrypt_file_with_key(const std::filesystem::path& input_path,
     std::array<std::uint8_t, MAC_SIZE> mac{};
     std::vector<std::uint8_t> cipher_buffer;
     std::vector<std::uint8_t> plain_buffer;
-    CryptoBufferCleanup cleanup{"file decryption wipe bytes",
-                                base_nonce,
-                                chunk_nonce,
-                                header_mac,
-                                mac,
-                                cipher_buffer,
-                                plain_buffer};
+    CryptoBufferCleanup cleanup{
+        base_nonce, chunk_nonce, header_mac, mac, cipher_buffer, plain_buffer};
 
-    TemporaryOutputGuard temp_guard{"decryption.cleanup_failure"};
+    TemporaryOutputGuard temp_guard;
 
     try {
         std::ifstream input(input_path, std::ios::binary | std::ios::ate);
@@ -625,8 +601,6 @@ bool decrypt_file_with_key(const std::filesystem::path& input_path,
             std::min<std::uint64_t>(CHUNK_SIZE, expected_size));
         cipher_buffer.resize(buffer_size);
         plain_buffer.resize(buffer_size);
-        platform::perf_trace::count("file decryption scratch bytes",
-                                    cipher_buffer.size() + plain_buffer.size());
 
         if (!reserve_temp_output(target_path, temp_guard.file, nullptr)) {
             return false;

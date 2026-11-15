@@ -2,7 +2,6 @@
 
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/random.hpp"
 
 #include <array>
@@ -14,12 +13,12 @@
 #include <utility>
 #include <vector>
 
+// clang-format off
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-
 #include <aclapi.h>
 #include <sddl.h>
 #else
@@ -27,6 +26,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
+// clang-format on
 
 namespace kasumi::platform::private_storage {
 namespace {
@@ -233,14 +233,10 @@ bool is_dacl_compliant(const std::filesystem::path& path,
 
 std::expected<void, std::string> apply_acl(const std::filesystem::path& path,
                                            bool directory) {
-    platform::perf_trace::count("apply_acl calls");
-
     if (is_dacl_compliant(path, directory)) {
-        platform::perf_trace::count("acl.already_compliant");
         return {};
     }
 
-    platform::perf_trace::count("acl.repair_required");
     auto descriptor = security_descriptor(directory);
     if (!descriptor) {
         return std::unexpected(descriptor.error());
@@ -255,7 +251,6 @@ std::expected<void, std::string> apply_acl(const std::filesystem::path& path,
         LocalFree(*descriptor);
         return std::unexpected(error);
     }
-    const auto acl_trace = platform::perf_trace::begin();
     auto writable = path.wstring();
     const auto result = SetNamedSecurityInfoW(
         writable.data(),
@@ -265,13 +260,11 @@ std::expected<void, std::string> apply_acl(const std::filesystem::path& path,
         nullptr,
         dacl,
         nullptr);
-    platform::perf_trace::finish("apply_acl wall", acl_trace);
     LocalFree(*descriptor);
     if (result != ERROR_SUCCESS) {
         return std::unexpected(
             windows_error("SetNamedSecurityInfoW failed", result));
     }
-    platform::perf_trace::count("acl.writes_applied");
     return {};
 }
 
@@ -365,19 +358,15 @@ protect_entry(const std::filesystem::path& path,
         return std::unexpected(std::string{mismatch_msg} + "'" +
                                platform::path::to_utf8(path) + "'");
     }
-    platform::perf_trace::count("apply_acl calls");
     const mode_t mode = directory ? 0700 : 0600;
     if ((status->st_mode & 0777) == mode) {
-        platform::perf_trace::count("acl.already_compliant");
         return {};
     }
-    platform::perf_trace::count("acl.repair_required");
     if (::chmod(path.c_str(), mode) != 0) {
         return std::unexpected(
             system_error(directory ? "chmod 0700 failed" : "chmod 0600 failed",
                          std::error_code{errno, std::generic_category()}));
     }
-    platform::perf_trace::count("acl.writes_applied");
     return {};
 #endif
 }
@@ -489,13 +478,11 @@ create_directory(const std::filesystem::path& path) {
         return std::unexpected(error);
     }
     LocalFree(*descriptor);
-    platform::perf_trace::count("acl.writes_applied");
 #else
     if (::mkdir(path.c_str(), 0700) != 0) {
         return std::unexpected(system_error(
             "mkdir failed", std::error_code{errno, std::generic_category()}));
     }
-    platform::perf_trace::count("acl.writes_applied");
 #endif
     return {};
 }
@@ -642,7 +629,6 @@ create_private_file(const std::filesystem::path& path) {
             windows_error("Failed to query file identity", code), false});
     }
     const auto identity = to_file_identity(id);
-    platform::perf_trace::count("acl.writes_applied");
     return PrivateOutputFile{
         .handle = reinterpret_cast<std::intptr_t>(file),
         .path = path,

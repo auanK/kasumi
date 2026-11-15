@@ -54,13 +54,6 @@ enum class RcMethod {
     CoreQuit,
 };
 
-void record_endpoint_request(std::string_view path_suffix) noexcept {
-    if (platform::perf_trace::enabled()) {
-        platform::perf_trace::count(
-            "rc.http_requests_by_endpoint." + std::string{path_suffix}, 1);
-    }
-}
-
 std::expected<std::string, Error>
 post_rc_impl(State& state,
              std::string_view endpoint,
@@ -166,31 +159,26 @@ post_rc_impl(State& state,
                                     std::chrono::milliseconds{50});
         }
     });
-    platform::perf_trace::count("rc.http_requests_attempted", 1);
-    record_endpoint_request(path_suffix);
-    platform::perf_trace::count("rc.bytes_sent_control_json",
-                                request_body.size());
-
+    const auto trace = platform::perf_trace::begin();
     const auto response =
         client.Post(path, std::string{request_body}, "application/json");
     watcher.request_stop();
+    if (trace.active) {
+        platform::perf_trace::finish(
+            std::string{"rc/"} + std::string{path_suffix}, trace);
+    }
     if (platform::cancellation::requested()) {
-        platform::perf_trace::count("rc.http_requests_failed", 1);
         return std::unexpected(
             make_error(ErrorCode::Cancelled, "operation cancelled by user"));
     }
     if (!response) {
-        platform::perf_trace::count("rc.http_requests_failed", 1);
         return std::unexpected(
             make_error(ErrorCode::Io,
                        std::string{"RC HTTP failure: "} +
                            httplib::to_string(response.error()),
                        static_cast<int>(response.error())));
     }
-    platform::perf_trace::count("rc.bytes_received_control_json",
-                                response->body.size());
     if (response->body.size() > response_limit) {
-        platform::perf_trace::count("rc.http_requests_failed", 1);
         return std::unexpected(make_error(
             ErrorCode::ProtocolFailure,
             "RC response exceeds limit",
@@ -199,13 +187,11 @@ post_rc_impl(State& state,
                 static_cast<std::size_t>((std::numeric_limits<int>::max)())))));
     }
     if (response->status == 401 || response->status == 403) {
-        platform::perf_trace::count("rc.http_requests_failed", 1);
         return std::unexpected(make_error(ErrorCode::PermissionDenied,
                                           "RC authentication rejected",
                                           response->status));
     }
     if (response->status < 200 || response->status >= 300) {
-        platform::perf_trace::count("rc.http_requests_failed", 1);
         std::string detail = "unexpected RC HTTP status; body omitted";
         try {
             const auto json = nlohmann::json::parse(response->body);
@@ -217,7 +203,6 @@ post_rc_impl(State& state,
         return std::unexpected(
             make_error(ErrorCode::ProtocolFailure, detail, response->status));
     }
-    platform::perf_trace::count("rc.http_requests_completed", 1);
     return response->body;
 }
 
@@ -272,23 +257,14 @@ std::expected<void, Error> validate_rc_handshake(State& state, int child_pid) {
 std::expected<void, Error> wait_for_rc_readiness(State& state, int child_pid) {
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds{5};
-    const auto first_attempt = platform::perf_trace::begin();
-    bool first_attempt_finished = false;
     while (std::chrono::steady_clock::now() < deadline) {
         if (drain_finished(state)) {
             return std::unexpected(
                 make_error(ErrorCode::ProcessFailure,
                            "rclone process drain finished during startup"));
         }
-        platform::perf_trace::count("RC readiness attempts");
         const auto handshake = validate_rc_handshake(state, child_pid);
-        if (!first_attempt_finished) {
-            platform::perf_trace::finish("RC readiness first attempt",
-                                         first_attempt);
-            first_attempt_finished = true;
-        }
         if (handshake) {
-            platform::perf_trace::count("RC readiness successful attempts");
             return {};
         }
         if (handshake.error().code == ErrorCode::PermissionDenied ||
@@ -296,7 +272,6 @@ std::expected<void, Error> wait_for_rc_readiness(State& state, int child_pid) {
             handshake.error().code == ErrorCode::Cancelled) {
             return std::unexpected(handshake.error());
         }
-        platform::perf_trace::count("RC readiness retries");
         std::this_thread::sleep_for(std::chrono::milliseconds(75));
     }
     return std::unexpected(make_error(
@@ -311,14 +286,9 @@ post_rc(State& state,
         std::string_view request_body,
         std::size_t response_limit,
         std::chrono::milliseconds read_timeout) {
-    const auto trace = platform::perf_trace::begin();
     const auto started = std::chrono::steady_clock::now();
     auto result = post_rc_impl(
         state, endpoint, request_body, response_limit, read_timeout, 1, 1);
-    if (trace.active) {
-        platform::perf_trace::finish(std::string{"rc/"} + std::string{endpoint},
-                                     trace);
-    }
     if (!result) {
         return std::unexpected(with_request_context(
             state, std::move(result.error()), endpoint, started, 1, 1));
@@ -332,19 +302,11 @@ post_rc_read_only(State& state,
                   std::string_view request_body,
                   std::size_t response_limit,
                   std::chrono::milliseconds deadline) {
-    const auto trace = platform::perf_trace::begin();
     const auto started = std::chrono::steady_clock::now();
-    const auto finish = [&] {
-        if (trace.active) {
-            platform::perf_trace::finish(
-                std::string{"rc/"} + std::string{endpoint}, trace);
-        }
-    };
     const auto expires_at = std::chrono::steady_clock::now() + deadline;
     Error last_error;
     for (int attempt = 0; attempt < maximum_read_attempts; ++attempt) {
         if (platform::cancellation::requested()) {
-            finish();
             return std::unexpected(with_request_context(
                 state,
                 make_error(ErrorCode::Cancelled, "operation cancelled by user"),
@@ -355,7 +317,6 @@ post_rc_read_only(State& state,
         }
         const auto now = std::chrono::steady_clock::now();
         if (now >= expires_at) {
-            finish();
             return std::unexpected(with_request_context(
                 state,
                 make_error(ErrorCode::Timeout, "RC read deadline exceeded"),
@@ -385,7 +346,6 @@ post_rc_read_only(State& state,
                                                      maximum_read_attempts));
         }
         if (result || !transient_read_failure(result.error())) {
-            finish();
             return result;
         }
         last_error = std::move(result.error());
@@ -394,7 +354,6 @@ post_rc_read_only(State& state,
         }
         const auto retry_at = std::chrono::steady_clock::now();
         if (retry_at + read_retry_delay >= expires_at) {
-            finish();
             return std::unexpected(with_request_context(
                 state,
                 make_error(ErrorCode::Timeout, "RC read deadline exceeded"),
@@ -403,10 +362,8 @@ post_rc_read_only(State& state,
                 attempt + 1,
                 maximum_read_attempts));
         }
-        platform::perf_trace::count("RC idempotent read retries");
         std::this_thread::sleep_for(read_retry_delay);
     }
-    finish();
     return std::unexpected(std::move(last_error));
 }
 

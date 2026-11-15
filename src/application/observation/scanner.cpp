@@ -31,9 +31,9 @@
 namespace kasumi::application::observation::scanner {
 namespace {
 
-using kasumi::ignore::IgnoreList;
-using kasumi::ignore::IgnoreDisposition;
 using kasumi::ignore::classify_ignore;
+using kasumi::ignore::IgnoreDisposition;
+using kasumi::ignore::IgnoreList;
 using kasumi::ignore::is_ignored;
 using kasumi::ignore::load_ignore_list;
 
@@ -70,28 +70,26 @@ struct PhysicalEntryType {
     bool linklike = false;
 };
 
-std::expected<PhysicalEntryType, std::error_code> classify_entry(
-    const std::filesystem::path& path,
-    const std::filesystem::file_status& status) {
+std::expected<PhysicalEntryType, std::error_code>
+classify_entry(const std::filesystem::path& path,
+               const std::filesystem::file_status& status) {
 #if defined(_WIN32)
     const auto attributes = GetFileAttributesW(path.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
-        return std::unexpected(std::error_code(
-            static_cast<int>(GetLastError()), std::system_category()));
+        return std::unexpected(std::error_code(static_cast<int>(GetLastError()),
+                                               std::system_category()));
     }
     const bool directory = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     if (std::filesystem::is_symlink(status) ||
         (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return PhysicalEntryType{.directory = directory,
-                                 .regular_file = false,
-                                 .linklike = true};
+        return PhysicalEntryType{
+            .directory = directory, .regular_file = false, .linklike = true};
     }
 #else
     static_cast<void>(path);
     if (std::filesystem::is_symlink(status)) {
-        return PhysicalEntryType{.directory = false,
-                                 .regular_file = false,
-                                 .linklike = true};
+        return PhysicalEntryType{
+            .directory = false, .regular_file = false, .linklike = true};
     }
 #endif
     if (status.type() == std::filesystem::file_type::none ||
@@ -99,10 +97,10 @@ std::expected<PhysicalEntryType, std::error_code> classify_entry(
         status.type() == std::filesystem::file_type::unknown) {
         return std::unexpected(std::make_error_code(std::errc::io_error));
     }
-    return PhysicalEntryType{
-        .directory = std::filesystem::is_directory(status),
-        .regular_file = std::filesystem::is_regular_file(status),
-        .linklike = false};
+    return PhysicalEntryType{.directory = std::filesystem::is_directory(status),
+                             .regular_file =
+                                 std::filesystem::is_regular_file(status),
+                             .linklike = false};
 }
 
 std::expected<NodeRow, ScanError>
@@ -110,14 +108,7 @@ process_file(const std::filesystem::path& file_path,
              std::string relative,
              ScanContext& context) {
     NodeRow row{.path = std::move(relative)};
-    const auto query_metadata = [&](const std::filesystem::path& path) {
-        const auto trace = platform::perf_trace::begin();
-        auto result = context.metadata_query(path, row.path);
-        platform::perf_trace::finish("local metadata query wall", trace);
-        platform::perf_trace::count("local metadata query calls");
-        return result;
-    };
-    const auto meta_result = query_metadata(file_path);
+    const auto meta_result = context.metadata_query(file_path, row.path);
     if (!meta_result) {
         const auto& err = meta_result.error();
         return std::unexpected(ScanError{
@@ -140,17 +131,11 @@ process_file(const std::filesystem::path& file_path,
     auto current_meta = **meta_result;
     row.size = current_meta.size;
     row.mtime = current_meta.mtime_nanoseconds;
-    platform::perf_trace::count("local regular files observed");
 
-    const bool identity_supported = current_meta.identity.has_value();
-    if (!identity_supported) {
-        platform::perf_trace::count("local hash cache unsupported");
-    }
-
-    const auto cached =
-        context.policy == ScanPolicy::ReuseStrongFingerprint && identity_supported
-            ? context.previous.find(row.path)
-            : context.previous.end();
+    const auto cached = context.policy == ScanPolicy::ReuseStrongFingerprint &&
+                                current_meta.identity.has_value()
+                            ? context.previous.find(row.path)
+                            : context.previous.end();
 
     bool reused = false;
     if (cached != context.previous.end()) {
@@ -160,10 +145,9 @@ process_file(const std::filesystem::path& file_path,
             .kind = cache::EntryKind::RegularFile,
             .size = cached_row.size,
             .mtime_nanoseconds = cached_row.mtime_nanoseconds,
-            .identity = cache::FileIdentity{
-                .volume = cached_row.volume,
-                .file_low = cached_row.file_low,
-                .file_high = cached_row.file_high},
+            .identity = cache::FileIdentity{.volume = cached_row.volume,
+                                            .file_low = cached_row.file_low,
+                                            .file_high = cached_row.file_high},
             .is_valid = true};
 
         const auto decision =
@@ -182,24 +166,22 @@ process_file(const std::filesystem::path& file_path,
         bool stable = false;
         for (int attempt = 0; attempt < 2; ++attempt) {
             const auto before_meta = current_meta;
-            const auto hash_trace = platform::perf_trace::begin();
             hash = crypto::content::hash_file(file_path);
-            platform::perf_trace::finish("local content hashing wall",
-                                         hash_trace);
             platform::perf_trace::count("local hash file calls");
             platform::perf_trace::count("local hash bytes", before_meta.size);
             if (!hash)
                 break;
 
-            const auto after_result = query_metadata(file_path);
+            const auto after_result =
+                context.metadata_query(file_path, row.path);
             if (!after_result) {
                 const auto& err = after_result.error();
                 return std::unexpected(ScanError{
-                    .code = err.code ==
-                                    cache::FileMetadataErrorCode::
-                                        PermissionDenied
-                                ? ScanErrorCode::PermissionDenied
-                                : ScanErrorCode::Metadata,
+                    .code =
+                        err.code ==
+                                cache::FileMetadataErrorCode::PermissionDenied
+                            ? ScanErrorCode::PermissionDenied
+                            : ScanErrorCode::Metadata,
                     .path = file_path,
                     .operation = "read metadata after hashing",
                     .detail = err.message});
@@ -229,7 +211,6 @@ process_file(const std::filesystem::path& file_path,
                 break;
             }
 
-            platform::perf_trace::count("files changed during hash");
             if (!before_meta.identity.has_value() ||
                 !after_meta.identity.has_value()) {
                 break;
@@ -249,15 +230,14 @@ process_file(const std::filesystem::path& file_path,
                                              "file changed while being read"});
         row.hash = *hash;
         if (current_meta.is_valid && current_meta.identity.has_value()) {
-            context.cache.push_back(
-                state_storage::FileCacheRow{
-                    .path = row.path,
-                    .hash = row.hash,
-                    .size = current_meta.size,
-                    .mtime_nanoseconds = current_meta.mtime_nanoseconds,
-                    .volume = current_meta.identity->volume,
-                    .file_low = current_meta.identity->file_low,
-                    .file_high = current_meta.identity->file_high});
+            context.cache.push_back(state_storage::FileCacheRow{
+                .path = row.path,
+                .hash = row.hash,
+                .size = current_meta.size,
+                .mtime_nanoseconds = current_meta.mtime_nanoseconds,
+                .volume = current_meta.identity->volume,
+                .file_low = current_meta.identity->file_low,
+                .file_high = current_meta.identity->file_high});
         }
     }
     return row;
@@ -290,14 +270,14 @@ scan_result(const std::filesystem::path& local_root,
         return std::unexpected(ScanError{
             .code = ScanErrorCode::Io,
             .path = local_root / ".kasumiignore",
-            .operation = ignore_list.parse_error->line == 0
-                             ? "read ignore file"
-                             : "parse ignore rule at line " +
-                                   std::to_string(ignore_list.parse_error->line),
+            .operation =
+                ignore_list.parse_error->line == 0
+                    ? "read ignore file"
+                    : "parse ignore rule at line " +
+                          std::to_string(ignore_list.parse_error->line),
             .detail = ignore_list.parse_error->detail,
         });
     }
-    const auto scan_trace = platform::perf_trace::begin();
     ScanContext context{.policy = policy,
                         .metadata_query = metadata_query,
                         .previous = {},
@@ -320,10 +300,11 @@ scan_result(const std::filesystem::path& local_root,
     }
     if (root_type->linklike ||
         (!root_type->directory && !root_type->regular_file)) {
-        return std::unexpected(ScanError{ScanErrorCode::Metadata,
-                                         local_root,
-                                         "classify entry",
-                                         "root is not a regular file or directory"});
+        return std::unexpected(
+            ScanError{ScanErrorCode::Metadata,
+                      local_root,
+                      "classify entry",
+                      "root is not a regular file or directory"});
     }
     if (root_type->regular_file &&
         is_ignored(platform::path::to_logical_utf8(local_root.filename()),
@@ -338,10 +319,8 @@ scan_result(const std::filesystem::path& local_root,
                          context);
         if (!row)
             return std::unexpected(row.error());
-        ScanResult result{.snapshot = Snapshot{{std::move(*row)}},
+        return ScanResult{.snapshot = Snapshot{{std::move(*row)}},
                           .cache = std::move(context.cache)};
-        platform::perf_trace::finish("local filesystem scan wall", scan_trace);
-        return result;
     }
 
     Snapshot snapshot;
@@ -349,9 +328,9 @@ scan_result(const std::filesystem::path& local_root,
     const auto modified = platform::metadata::last_write_time(local_root);
     if (!modified)
         return std::unexpected(ScanError{ScanErrorCode::Metadata,
-                                          local_root,
-                                          "read modification time",
-                                          modified.error()});
+                                         local_root,
+                                         "read modification time",
+                                         modified.error()});
     const auto root_mtime = platform::metadata::unix_nanoseconds(*modified);
     if (!root_mtime) {
         return std::unexpected(ScanError{ScanErrorCode::Metadata,
@@ -380,8 +359,8 @@ scan_result(const std::filesystem::path& local_root,
             const auto completed_index = frame.evidence_index;
             stack.pop_back();
             if (!stack.empty()) {
-                auto& parent = physical_evidence.directories[
-                    stack.back().evidence_index];
+                auto& parent =
+                    physical_evidence.directories[stack.back().evidence_index];
                 const auto& completed =
                     physical_evidence.directories[completed_index];
                 parent.has_ignored_descendants |=
@@ -445,11 +424,12 @@ scan_result(const std::filesystem::path& local_root,
             continue;
         }
         if (ignored) {
-            const auto kind = entry_type->directory
-                                  ? reconciliation::PhysicalEntryKind::Directory
-                                  : (entry_type->regular_file
-                                         ? reconciliation::PhysicalEntryKind::RegularFile
-                                         : reconciliation::PhysicalEntryKind::Unsupported);
+            const auto kind =
+                entry_type->directory
+                    ? reconciliation::PhysicalEntryKind::Directory
+                    : (entry_type->regular_file
+                           ? reconciliation::PhysicalEntryKind::RegularFile
+                           : reconciliation::PhysicalEntryKind::Unsupported);
             auto effective_disposition = disposition;
             std::uint64_t ignored_size = 0;
             PhysicalFileIdentity identity{};
@@ -461,7 +441,8 @@ scan_result(const std::filesystem::path& local_root,
                 if (!metadata) {
                     return std::unexpected(ScanError{
                         .code = metadata.error().code ==
-                                        cache::FileMetadataErrorCode::PermissionDenied
+                                        cache::FileMetadataErrorCode::
+                                            PermissionDenied
                                     ? ScanErrorCode::PermissionDenied
                                     : ScanErrorCode::Metadata,
                         .path = entry.path(),
@@ -530,9 +511,9 @@ scan_result(const std::filesystem::path& local_root,
         const auto mtime = platform::metadata::last_write_time(entry.path());
         if (!mtime)
             return std::unexpected(ScanError{ScanErrorCode::Metadata,
-                                              entry.path(),
-                                              "read modification time",
-                                              mtime.error()});
+                                             entry.path(),
+                                             "read modification time",
+                                             mtime.error()});
         const auto mtime_ns = platform::metadata::unix_nanoseconds(*mtime);
         if (!mtime_ns) {
             return std::unexpected(ScanError{ScanErrorCode::Metadata,
@@ -559,7 +540,8 @@ scan_result(const std::filesystem::path& local_root,
             }
             const auto found = evidence_indices.find(row.path);
             if (found == evidence_indices.end() ||
-                !physical_evidence.directories[found->second].physically_empty) {
+                !physical_evidence.directories[found->second]
+                     .physically_empty) {
                 continue;
             }
         }
@@ -594,7 +576,6 @@ scan_result(const std::filesystem::path& local_root,
     std::ranges::sort(physical_evidence.ignored_entries,
                       path_less,
                       &reconciliation::IgnoredEntryEvidence::path);
-    platform::perf_trace::finish("local filesystem scan wall", scan_trace);
     return ScanResult{.snapshot = std::move(snapshot),
                       .cache = std::move(context.cache),
                       .physical_evidence = std::move(physical_evidence)};
@@ -611,10 +592,11 @@ hash_disposable_candidates(
         return std::unexpected(ScanError{
             .code = ScanErrorCode::Io,
             .path = local_root / ".kasumiignore",
-            .operation = ignore_list.parse_error->line == 0
-                             ? "read ignore file"
-                             : "parse ignore rule at line " +
-                                   std::to_string(ignore_list.parse_error->line),
+            .operation =
+                ignore_list.parse_error->line == 0
+                    ? "read ignore file"
+                    : "parse ignore rule at line " +
+                          std::to_string(ignore_list.parse_error->line),
             .detail = ignore_list.parse_error->detail,
         });
     }
@@ -654,7 +636,8 @@ hash_disposable_candidates(
             relative,
             path_less,
             &reconciliation::IgnoredEntryEvidence::path);
-        if (found == evidence.ignored_entries.end() || found->path != relative ||
+        if (found == evidence.ignored_entries.end() ||
+            found->path != relative ||
             found->kind != reconciliation::PhysicalEntryKind::RegularFile ||
             found->disposition != IgnoreDisposition::IgnoredDisposable ||
             !found->identity.valid ||
@@ -695,9 +678,12 @@ hash_disposable_candidates(
                     .code = ScanErrorCode::Metadata,
                     .path = current,
                     .operation = "validate disposable candidate",
-                    .detail = error ? error.message()
-                                    : (final ? "candidate is not a regular file"
-                                             : "candidate path contains a non-directory"),
+                    .detail =
+                        error
+                            ? error.message()
+                            : (final
+                                   ? "candidate is not a regular file"
+                                   : "candidate path contains a non-directory"),
                 });
             }
             if (final) {

@@ -165,15 +165,6 @@ Specific test labels include:
 
 The `kasumi_architecture_dag` test validates internal architectural dependency rules enforced by the dependency DAG checker script.
 
-## Operational Performance Trace
-
-Use [performance tracing](troubleshooting.md#slow-synchronization-or-preview)
-for PowerShell, CMD, and POSIX command examples and interpretation of scanner,
-hash-cache, and remote-observation metrics. `KASUMI_PERF_TRACE=1` writes counters
-and accumulated wall-clock microseconds for instrumented operations to `stderr`.
-Audit-style inspection commands may fetch and validate content objects rather
-than relying only on structural metadata.
-
 ## Rclone System Tests
 
 System tests exercise integration with an active rclone installation:

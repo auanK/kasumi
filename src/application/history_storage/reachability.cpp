@@ -2,7 +2,6 @@
 
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/remote_layout.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <map>
@@ -85,51 +84,13 @@ ReachabilityMarkerState marker_state(detail::VariantState state) {
     return ReachabilityMarkerState::InvalidCommit;
 }
 
-struct TraceGuard {
-    std::string_view name;
-    platform::perf_trace::Token token;
-    bool active = true;
-    void stop() noexcept {
-        if (active) {
-            platform::perf_trace::finish(name, token);
-            active = false;
-        }
-    }
-    ~TraceGuard() noexcept {
-        stop();
-    }
-};
-
 ReachabilityResult inventory_impl(
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const std::filesystem::path& workspace_root,
     std::optional<std::span<const std::string>> identifiers = std::nullopt,
     std::optional<std::span<const epoch::VerifiedEpoch>> verified_epochs =
-        std::nullopt,
-    std::string_view trace_scope = {}) {
-    std::string scoped_build_inventory_name;
-    std::string scoped_load_commits_name;
-    std::string scoped_inspect_history_name;
-    std::string scoped_dag_traversal_name;
-    const auto metric_name = [trace_scope](std::string_view name,
-                                           std::string& scoped_name) {
-        if (trace_scope.empty()) {
-            return name;
-        }
-        scoped_name.assign(trace_scope);
-        scoped_name.append("/");
-        scoped_name.append(name);
-        return std::string_view{scoped_name};
-    };
-    const auto build_inventory_name =
-        metric_name("rc/build_history_inventory", scoped_build_inventory_name);
-    const auto load_commits_name =
-        metric_name("rc/load_and_auth_commits", scoped_load_commits_name);
-    const auto inspect_history_name =
-        metric_name("rc/inspect_markers_epochs", scoped_inspect_history_name);
-    const auto dag_traversal_name =
-        metric_name("rc/dag_traversal", scoped_dag_traversal_name);
+        std::nullopt) {
     if (!transport::valid(storage)) {
         return std::unexpected(
             detail::error(ErrorCode::InvalidInput, "invalid transport"));
@@ -141,11 +102,9 @@ ReachabilityResult inventory_impl(
     const auto layout = derive_remote_layout(key);
     // The listing freezes the observation; new markers are deferred to the next
     // run.
-    const auto inventory_trace = platform::perf_trace::begin();
     auto listed = identifiers
                       ? detail::build_history_inventory(*identifiers, layout)
                       : detail::build_history_inventory(storage, layout);
-    platform::perf_trace::finish(build_inventory_name, inventory_trace);
     if (!listed) {
         return std::unexpected(listed.error());
     }
@@ -172,8 +131,6 @@ ReachabilityResult inventory_impl(
         }
     }
 
-    TraceGuard load_commits_guard{load_commits_name,
-                                  platform::perf_trace::begin()};
     CommitList commits;
     commits.reserve(listed->commit_variants.size() +
                     listed->marker_variants.size());
@@ -203,10 +160,7 @@ ReachabilityResult inventory_impl(
             }
         }
     }
-    load_commits_guard.stop();
 
-    TraceGuard inspect_guard{inspect_history_name,
-                             platform::perf_trace::begin()};
     ReachabilityInventory result;
     std::vector<std::pair<std::string, epoch::VerifiedEpoch>> loaded_epochs;
     if (verified_epochs) {
@@ -251,9 +205,7 @@ ReachabilityResult inventory_impl(
             }
             const auto path = (*temporary)->workspace.root /
                               ("epoch-" + std::to_string(sequence++));
-            const auto get_trace = platform::perf_trace::begin();
             auto downloaded = detail::download(storage, identifier, path);
-            platform::perf_trace::finish("rc/get_epoch", get_trace);
             if (!downloaded) {
                 return std::unexpected(downloaded.error());
             }
@@ -364,9 +316,7 @@ ReachabilityResult inventory_impl(
             }
         }
     }
-    inspect_guard.stop();
 
-    TraceGuard dag_guard{dag_traversal_name, platform::perf_trace::begin()};
     std::vector<std::pair<std::string, std::size_t>> pending;
     for (const auto& root : result.logical_heads) {
         pending.emplace_back(root, 0);
@@ -390,7 +340,6 @@ ReachabilityResult inventory_impl(
             pending.emplace_back(parent, depth + 1);
         }
     }
-    dag_guard.stop();
 
     for (const auto& [anchor_id, height] : epoch_anchors) {
         const auto* anchor = find_commit(commits, anchor_id);
@@ -434,15 +383,10 @@ ReachabilityResult
 inventory_reachability(transport::Transport& storage,
                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                        std::span<const std::string> identifiers,
-                       const std::filesystem::path& workspace_root,
-                       std::string_view trace_scope) {
+                       const std::filesystem::path& workspace_root) {
     return detail::guard_alloc([&] {
-        return inventory_impl(storage,
-                              key,
-                              workspace_root,
-                              identifiers,
-                              std::nullopt,
-                              trace_scope);
+        return inventory_impl(
+            storage, key, workspace_root, identifiers, std::nullopt);
     });
 }
 

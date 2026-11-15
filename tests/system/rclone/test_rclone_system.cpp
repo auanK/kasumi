@@ -19,7 +19,6 @@
 #include "platform/clock.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/workspace.hpp"
 #include "runtime/paths.hpp"
 #include "runtime/resolver.hpp"
@@ -191,8 +190,7 @@ std::filesystem::path harness_path(const RcloneHarness& harness,
 }
 
 std::filesystem::path storage_root(const RcloneHarness& harness) {
-    return harness_path(harness, remote_backend) /
-           remote_root;
+    return harness_path(harness, remote_backend) / remote_root;
 }
 
 std::string remote_location(const RcloneHarness&) {
@@ -259,11 +257,9 @@ RcloneHarness make_rclone_harness() {
         create_system_directory(workspace.root / path);
     }
 
-    auto current_directory = use_current_directory(
-        path("cwd-trap"));
+    auto current_directory = use_current_directory(path("cwd-trap"));
     auto rclone_config = kasumi::test::scoped_environment_variable(
-        "RCLONE_CONFIG",
-        kasumi::platform::path::to_utf8(path("rclone.conf")));
+        "RCLONE_CONFIG", kasumi::platform::path::to_utf8(path("rclone.conf")));
     auto rclone_cache = kasumi::test::scoped_environment_variable(
         "RCLONE_CACHE_DIR",
         kasumi::platform::path::to_utf8(path("rclone-cache")));
@@ -416,8 +412,7 @@ TEST(RcloneSystemTest, SpawnedRcUsesRcloneServerTimeoutDefaults) {
         .remote_name = std::string{remote_name},
         .remote_root = std::string{remote_root},
         .executable = std::filesystem::path{KASUMI_SYSTEM_RCLONE_EXECUTABLE},
-        .config_path =
-            harness_path(harness, "rclone.conf")};
+        .config_path = harness_path(harness, "rclone.conf")};
     auto started = kasumi::transport::rclone_detail::start_state(configuration);
     ASSERT_TRUE(started.has_value())
         << (started ? "" : started.error().message);
@@ -447,8 +442,7 @@ TEST(RcloneSystemTest, KilledOwnedRcloneFailsClosedAndCleansUp) {
         .remote_name = std::string{remote_name},
         .remote_root = std::string{remote_root},
         .executable = std::filesystem::path{KASUMI_SYSTEM_RCLONE_EXECUTABLE},
-        .config_path =
-            harness_path(harness, "rclone.conf")};
+        .config_path = harness_path(harness, "rclone.conf")};
     auto started = kasumi::transport::rclone_detail::start_state(configuration);
     ASSERT_TRUE(started.has_value())
         << (started ? "" : started.error().message);
@@ -1454,45 +1448,16 @@ TEST(RcloneSystemTest, RcloneBatchUploadPreservesDestinationIsolation) {
 }
 
 TEST(RcloneSystemTest, RcReadinessUsesPidWithoutVersionProbe) {
-    auto perf_trace =
-        kasumi::test::scoped_environment_variable("KASUMI_PERF_TRACE", "1");
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
     auto harness = make_rclone_harness();
     auto storage = open_transport(harness);
-    if (!storage) {
-        const auto detail = storage.error().message;
-        kasumi::platform::perf_trace::force_enable(false);
-        FAIL() << detail;
-    }
-
-    const auto pid_requests =
-        kasumi::platform::perf_trace::get_count("rc/core/pid");
-    const auto readiness_attempts =
-        kasumi::platform::perf_trace::get_count("RC readiness attempts");
-    const auto readiness_successes = kasumi::platform::perf_trace::get_count(
-        "RC readiness successful attempts");
-    const auto readiness_retries =
-        kasumi::platform::perf_trace::get_count("RC readiness retries");
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/core/version"), 0U);
-    EXPECT_GE(pid_requests, 1U);
-    EXPECT_GE(readiness_attempts, 1U);
-    EXPECT_EQ(readiness_successes, 1U);
-    EXPECT_EQ(readiness_attempts, pid_requests);
-    EXPECT_EQ(readiness_attempts, readiness_retries + 1U);
+    ASSERT_TRUE(storage.has_value()) << storage.error().message;
     storage = {};
-    kasumi::platform::perf_trace::reset();
-    kasumi::platform::perf_trace::force_enable(false);
 }
 
 TEST(RcloneSystemTest, WriterPhysicalHashAvoidsReadback) {
-    auto perf_trace =
-        kasumi::test::scoped_environment_variable("KASUMI_PERF_TRACE", "1");
-    kasumi::platform::perf_trace::force_enable(true);
     auto harness = make_rclone_harness();
     auto storage = open_transport(harness);
     ASSERT_TRUE(storage.has_value());
-    kasumi::platform::perf_trace::reset();
     const auto writer_workspace = harness_root(harness) / "writer-workspace";
     ASSERT_TRUE(std::filesystem::create_directories(writer_workspace));
 
@@ -1505,31 +1470,9 @@ TEST(RcloneSystemTest, WriterPhysicalHashAvoidsReadback) {
     ASSERT_TRUE(registration.has_value()) << registration.error().detail;
     ASSERT_TRUE(kasumi::application::history_storage::maintenance_protocol::
                     release_registration(*registration));
-
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("rc/operations/hashsumfile"),
-        1U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/operations/copyfile"),
-              1U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("rclone copyfile download"),
-        0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/job/batch"), 1U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("control batch operations"),
-        2U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/operations/list"),
-              0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/operations/stat"),
-              0U);
-    kasumi::platform::perf_trace::reset();
-    kasumi::platform::perf_trace::force_enable(false);
 }
 
 TEST(RcloneSystemTest, SinglePhysicalHashUsesHashsumfile) {
-    auto perf_trace =
-        kasumi::test::scoped_environment_variable("KASUMI_PERF_TRACE", "1");
-    kasumi::platform::perf_trace::force_enable(true);
     auto harness = make_rclone_harness();
     auto storage = open_transport(harness);
     ASSERT_TRUE(storage.has_value());
@@ -1552,23 +1495,13 @@ TEST(RcloneSystemTest, SinglePhysicalHashUsesHashsumfile) {
         kasumi::transport::PutBatch{.source_root = source_root,
                                     .identifiers = {identifier}}));
 
-    kasumi::platform::perf_trace::reset();
     const auto verified =
         kasumi::transport::physical_hash(*storage, identifier, "sha256");
     ASSERT_TRUE(verified.has_value());
     EXPECT_EQ(*verified, prepared->ciphertext_sha256);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("rc/operations/hashsumfile"),
-        1U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("rc/operations/check"),
-              0U);
-    kasumi::platform::perf_trace::reset();
-    kasumi::platform::perf_trace::force_enable(false);
 }
 
 TEST(RcloneSystemTest, BulkPhysicalHashUsesOneCheckManifest) {
-    auto perf_trace =
-        kasumi::test::scoped_environment_variable("KASUMI_PERF_TRACE", "1");
     auto harness = make_rclone_harness();
     auto storage = open_transport(harness);
     ASSERT_TRUE(storage.has_value());

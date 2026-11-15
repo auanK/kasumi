@@ -167,16 +167,12 @@ InspectionObservationHints
 make_observation_hints(const runtime::RuntimeData& runtime_data,
                        InspectionOperation operation,
                        std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
-    const auto state_trace = platform::perf_trace::begin();
     InspectionObservationHints hints;
     auto persisted = state_storage::load_state(runtime_data.database_path);
     if (!persisted || !*persisted) {
-        platform::perf_trace::count("inspection frontier unavailable");
-        platform::perf_trace::finish("inspection state load", state_trace);
         return hints;
     }
 
-    platform::perf_trace::count("inspection persisted state available");
     auto& state = **persisted;
     if (operation == InspectionOperation::RemoteHeads ||
         operation == InspectionOperation::RemoteTree ||
@@ -194,9 +190,6 @@ make_observation_hints(const runtime::RuntimeData& runtime_data,
                 .epoch_id = state.epoch_id,
             };
         }
-        platform::perf_trace::count("inspection frontier used");
-    } else {
-        platform::perf_trace::count("inspection frontier unavailable");
     }
 
     if (!state.ciphertext_id.empty()) {
@@ -208,10 +201,8 @@ make_observation_hints(const runtime::RuntimeData& runtime_data,
             const auto layout = history_storage::derive_remote_layout(key);
             hints.trusted_marker_identifiers.push_back(
                 history_storage::marker_object(layout, reference));
-            platform::perf_trace::count("inspection trusted marker used");
         }
     }
-    platform::perf_trace::finish("inspection state load", state_trace);
     return hints;
 }
 
@@ -231,9 +222,6 @@ std::expected<ObservedCommitIndex, InspectionError> index_observed_commits(
                       "remote history contains duplicate commit"));
         }
     }
-    platform::perf_trace::count("inspection commit index builds");
-    platform::perf_trace::count("inspection commit index entries",
-                                result.size());
     return result;
 }
 
@@ -430,12 +418,6 @@ make_commits_report(const observation::history::StorageView& observed,
     const std::unordered_set<std::string_view> ancestral_marked_head_ids(
         observed.ancestral_marked_heads.begin(),
         observed.ancestral_marked_heads.end());
-    platform::perf_trace::count(
-        "inspection commit classification index builds");
-    platform::perf_trace::count(
-        "inspection commit classification index entries",
-        logical_head_ids.size() + marked_head_ids.size() +
-            ancestral_marked_head_ids.size());
 
     report.commits.reserve(observed.reachable_commits.size());
     std::vector<std::pair<std::uint64_t, std::string>> logical_heads;
@@ -1536,23 +1518,18 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
                                      "unknown inspection operation"));
     }
 
-    const auto runtime_trace = platform::perf_trace::begin();
     auto runtime_data = runtime::resolve(input.environment.app_data_dir,
                                          input.request.profile_name,
                                          runtime::AccessMode::ReadOnly,
                                          false);
-    platform::perf_trace::finish("inspection runtime resolve", runtime_trace);
     if (!runtime_data) {
         return std::unexpected(
             map_runtime_error(operation, runtime_data.error()));
     }
     context.runtime = *runtime_data;
 
-    const auto credential_trace = platform::perf_trace::begin();
     auto key =
         resolve_key(input.credentials, context.runtime, context.key, operation);
-    platform::perf_trace::finish("inspection credential resolve",
-                                 credential_trace);
     if (!key) {
         return std::unexpected(key.error());
     }
@@ -1560,17 +1537,9 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
 
     context.hints =
         make_observation_hints(context.runtime, operation, context.key);
-    if (!context.hints.frontier) {
-        platform::perf_trace::count("inspection cold observation");
-    }
-    if (requires_complete_history(operation)) {
-        platform::perf_trace::count("inspection full history observation");
-    }
 
-    const auto transport_trace = platform::perf_trace::begin();
     auto opened = transport::open_transport(context.runtime.storage_location,
                                             context.runtime.local_dir);
-    platform::perf_trace::finish("inspection transport open", transport_trace);
     if (!opened) {
         return std::unexpected(error(operation,
                                      InspectionErrorCode::RuntimeFailure,
@@ -1578,9 +1547,7 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     }
     context.storage = std::move(*opened);
 
-    const auto workspace_trace = platform::perf_trace::begin();
     auto workspace = platform::create_workspace("remote-inspection");
-    platform::perf_trace::finish("inspection workspace", workspace_trace);
     if (!workspace) {
         return std::unexpected(
             error(operation,
@@ -1616,10 +1583,8 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
             context.hints.trusted_marker_identifiers,
             requires_complete_history(operation));
     };
-    const auto remote_trace = platform::perf_trace::begin();
     auto observed = observe_remote(
         context.hints.frontier ? &*context.hints.frontier : nullptr);
-    platform::perf_trace::finish("inspection remote observation", remote_trace);
     if (!observed) {
         return std::unexpected(
             error(operation,
@@ -1657,11 +1622,8 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     }
 
     if (operation == InspectionOperation::RemoteHeads) {
-        const auto report_trace = platform::perf_trace::begin();
         auto heads = make_head_infos(*observed, operation);
         if (!heads) {
-            platform::perf_trace::finish("inspection report build",
-                                         report_trace);
             return std::unexpected(heads.error());
         }
         RemoteHeadsReport report{
@@ -1671,38 +1633,28 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
             .ancestral_marker_count = observed->ancestral_marked_heads.size(),
             .heads = std::move(*heads),
         };
-        platform::perf_trace::finish("inspection report build", report_trace);
         return InspectionResponse{.operation = operation,
                                   .payload = std::move(report)};
     }
 
     if (operation == InspectionOperation::RemoteTree) {
-        const auto report_trace = platform::perf_trace::begin();
         auto heads = make_head_infos(*observed, operation);
         if (!heads) {
-            platform::perf_trace::finish("inspection report build",
-                                         report_trace);
             return std::unexpected(heads.error());
         }
         auto tree =
             make_tree_report(input.request, *observed, *heads, operation);
         if (!tree) {
-            platform::perf_trace::finish("inspection report build",
-                                         report_trace);
             return std::unexpected(tree.error());
         }
-        platform::perf_trace::finish("inspection report build", report_trace);
         return InspectionResponse{.operation = operation,
                                   .payload = std::move(*tree)};
     }
 
     if (operation == InspectionOperation::RemoteSummary) {
-        const auto report_trace = platform::perf_trace::begin();
         auto writers = history_storage::maintenance_protocol::active_writers(
             context.storage, context.layout);
         if (!writers) {
-            platform::perf_trace::finish("inspection report build",
-                                         report_trace);
             return std::unexpected(
                 error(operation,
                       InspectionErrorCode::RemoteObservationFailure,
@@ -1718,15 +1670,12 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
             .orphan_content_count = observed->orphan_content_count,
             .active_writer_count = writers->size(),
         };
-        platform::perf_trace::finish("inspection report build", report_trace);
         return InspectionResponse{.operation = operation,
                                   .payload = std::move(report)};
     }
 
     if (operation == InspectionOperation::RemoteStat) {
-        const auto report_trace = platform::perf_trace::begin();
         auto stat = make_stat_report(input.request, *observed, operation);
-        platform::perf_trace::finish("inspection report build", report_trace);
         if (!stat) {
             return std::unexpected(stat.error());
         }
@@ -1735,10 +1684,8 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     }
 
     if (operation == InspectionOperation::RemoteCommit) {
-        const auto report_trace = platform::perf_trace::begin();
         auto commit =
             make_commit_report(input.request, *observed, context, operation);
-        platform::perf_trace::finish("inspection report build", report_trace);
         if (!commit) {
             return std::unexpected(commit.error());
         }
@@ -1747,10 +1694,8 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     }
 
     if (operation == InspectionOperation::RemoteGet) {
-        const auto report_trace = platform::perf_trace::begin();
         auto file =
             download_remote_file(input.request, *observed, context, operation);
-        platform::perf_trace::finish("inspection remote file", report_trace);
         if (!file) {
             return std::unexpected(file.error());
         }
@@ -1758,13 +1703,10 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
                                   .payload = std::move(*file)};
     }
 
-    const auto report_trace = platform::perf_trace::begin();
     auto commits = make_commits_report(*observed, operation);
     if (!commits) {
-        platform::perf_trace::finish("inspection report build", report_trace);
         return std::unexpected(commits.error());
     }
-    platform::perf_trace::finish("inspection report build", report_trace);
     return InspectionResponse{.operation = operation,
                               .payload = std::move(*commits)};
 }
@@ -1774,10 +1716,7 @@ void finish_inspection(InspectionInput& input, InspectionContext& context) {
         platform::cleanup_workspace(*context.workspace);
         context.workspace.reset();
     }
-    const auto shutdown_trace = platform::perf_trace::begin();
     context.storage = {};
-    platform::perf_trace::finish("inspection transport shutdown",
-                                 shutdown_trace);
     crypto::secure_memory::wipe(context.key.data(), context.key.size());
     wipe_credentials(input.credentials);
 }

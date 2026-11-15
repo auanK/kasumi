@@ -10,7 +10,6 @@
 #include "platform/cancellation.hpp"
 #include "platform/clock.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -473,9 +472,6 @@ TEST(IntegrityMaintenanceTest, WriterAdmissionBatchFailureDoesNotRetryReads) {
 
 TEST(IntegrityMaintenanceTest,
      FsckProfilingRecordsCountersAndPreservesIntegrityFailures) {
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
-
     auto storage = make_local_storage();
     auto runtime = runtime_data(storage.workspace);
 
@@ -490,54 +486,6 @@ TEST(IntegrityMaintenanceTest,
     ASSERT_TRUE(checked.has_value()) << checked.error().detail;
     EXPECT_EQ(checked->checked_objects, 1U);
 
-    EXPECT_GT(kasumi::platform::perf_trace::get_time("fsck.total_duration_us"),
-              0U);
-    EXPECT_GT(kasumi::platform::perf_trace::get_time(
-                  "fsck.collect_storage_state_duration_us"),
-              0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_time(
-                  "fsck.physical_listing_duration_us"),
-              0U);
-    EXPECT_GT(
-        kasumi::platform::perf_trace::get_time("fsck.local_tree_duration_us"),
-        0U);
-    EXPECT_GT(kasumi::platform::perf_trace::get_time(
-                  "fsck.inventory_analysis_duration_us"),
-              0U);
-    EXPECT_GT(kasumi::platform::perf_trace::get_time(
-                  "fsck.referenced_audit_duration_us"),
-              0U);
-
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_objects"),
-              1U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_get_calls"),
-              1U);
-    EXPECT_GT(
-        kasumi::platform::perf_trace::get_time("fsck.audit_get_duration_us"),
-        0U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("fsck.audit_decrypt_calls"),
-        1U);
-    EXPECT_GT(kasumi::platform::perf_trace::get_time(
-                  "fsck.audit_decrypt_duration_us"),
-              0U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("fsck.audit_verify_calls"), 1U);
-    EXPECT_GT(
-        kasumi::platform::perf_trace::get_time("fsck.audit_verify_duration_us"),
-        0U);
-    EXPECT_GT(kasumi::platform::perf_trace::get_count(
-                  "fsck.encrypted_bytes_downloaded"),
-              0U);
-    EXPECT_GT(kasumi::platform::perf_trace::get_count(
-                  "fsck.plaintext_bytes_verified"),
-              0U);
-
-    // Reachability audit does not audit payloads in fsck
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("reachability.audit_objects"),
-        0U);
-
     // Corrupt the content payload and ensure fsck fails closed
     const auto content_file =
         kasumi::test::workspace_path(storage.workspace, "storage") /
@@ -550,9 +498,6 @@ TEST(IntegrityMaintenanceTest,
     ASSERT_FALSE(corrupt_checked.has_value());
     EXPECT_EQ(corrupt_checked.error().code,
               kasumi::application::integrity::ErrorCode::Unrecoverable);
-
-    kasumi::platform::perf_trace::reset();
-    kasumi::platform::perf_trace::force_enable(false);
 }
 
 struct AuditProbeState {
@@ -875,8 +820,6 @@ TEST(IntegrityMaintenanceTest,
 
 TEST(IntegrityMaintenanceTest,
      FsckProgressCallbackPreservesRequestsAndConcurrency) {
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
     auto storage = make_local_storage();
     auto runtime = runtime_data(storage.workspace);
     (void)setup_multi_file_dataset(storage,
@@ -895,16 +838,7 @@ TEST(IntegrityMaintenanceTest,
     const auto plain = kasumi::application::integrity::fsck(
         runtime, plain_transport, test_key(), 4);
     ASSERT_TRUE(plain.has_value());
-    const auto plain_gets =
-        kasumi::platform::perf_trace::get_count("fsck.audit_get_calls");
-    const auto plain_decrypts =
-        kasumi::platform::perf_trace::get_count("fsck.audit_decrypt_calls");
-    const auto plain_verifies =
-        kasumi::platform::perf_trace::get_count("fsck.audit_verify_calls");
-    const auto plain_lists =
-        kasumi::platform::perf_trace::get_count("history.full_list_calls");
 
-    kasumi::platform::perf_trace::reset();
     AuditProbeState progress_probe;
     progress_probe.barrier_target = 4;
     AuditProbeTransportState progress_state;
@@ -924,21 +858,7 @@ TEST(IntegrityMaintenanceTest,
     EXPECT_EQ(progress_probe.list_count, 1U);
     EXPECT_EQ(plain_probe.peak_active, 4U);
     EXPECT_EQ(progress_probe.peak_active, 4U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_get_calls"),
-              plain_gets);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("fsck.audit_decrypt_calls"),
-        plain_decrypts);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("fsck.audit_verify_calls"),
-        plain_verifies);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("history.full_list_calls"),
-        plain_lists);
     EXPECT_GT(event_count, 0U);
-
-    kasumi::platform::perf_trace::reset();
-    kasumi::platform::perf_trace::force_enable(false);
 }
 
 TEST(IntegrityMaintenanceTest,
@@ -956,7 +876,6 @@ TEST(IntegrityMaintenanceTest,
 }
 
 TEST(IntegrityMaintenanceTest, FsckProgressDoesNotRequirePerfTracing) {
-    kasumi::platform::perf_trace::force_enable(false);
     auto storage = make_local_storage();
     auto runtime = runtime_data(storage.workspace);
     (void)setup_multi_file_dataset(storage, {{"file.txt", "payload"}});
@@ -971,9 +890,6 @@ TEST(IntegrityMaintenanceTest, FsckProgressDoesNotRequirePerfTracing) {
     EXPECT_EQ(events.back().stage, kasumi::application::FsckStage::Finalizing);
     EXPECT_EQ(events.back().completed_objects, 1U);
     EXPECT_EQ(events.back().total_objects, 1U);
-
-    kasumi::platform::perf_trace::reset();
-    kasumi::platform::perf_trace::force_enable(false);
 }
 
 TEST(IntegrityMaintenanceTest,
@@ -1042,9 +958,6 @@ TEST(IntegrityMaintenanceTest, FsckHardFailureDoesNotFakeCompleteProgress) {
 }
 
 TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckAuditsWithPeakInFlight) {
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
-
     auto storage = make_local_storage();
     auto runtime = runtime_data(storage.workspace);
 
@@ -1069,20 +982,10 @@ TEST(IntegrityMaintenanceTest, BoundedConcurrentFsckAuditsWithPeakInFlight) {
     EXPECT_EQ(probe.peak_active, 4U);
     EXPECT_LE(probe.peak_active, 4U);
     EXPECT_EQ(probe.get_count, 4U);
-
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("fsck.audit_peak_in_flight"),
-        4U);
-
-    kasumi::platform::perf_trace::reset();
-    kasumi::platform::perf_trace::force_enable(false);
 }
 
 TEST(IntegrityMaintenanceTest,
      BoundedConcurrentFsckLimitsInFlightWhenConcurrencyLessThanF) {
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
-
     auto storage = make_local_storage();
     auto runtime = runtime_data(storage.workspace);
 
@@ -1109,29 +1012,10 @@ TEST(IntegrityMaintenanceTest,
     EXPECT_EQ(probe.peak_active, 2U);
     EXPECT_LE(probe.peak_active, 2U);
     EXPECT_EQ(probe.get_count, 6U);
-
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_objects"),
-              6U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count("fsck.audit_get_calls"),
-              6U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("fsck.audit_decrypt_calls"),
-        6U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("fsck.audit_verify_calls"), 6U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("fsck.audit_completion_count"),
-        6U);
-
-    kasumi::platform::perf_trace::reset();
-    kasumi::platform::perf_trace::force_enable(false);
 }
 
 TEST(IntegrityMaintenanceTest,
      BoundedConcurrentFsckLimitsWorkersWhenFLessThanConcurrency) {
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
-
     auto storage = make_local_storage();
     auto runtime = runtime_data(storage.workspace);
 
@@ -1155,12 +1039,6 @@ TEST(IntegrityMaintenanceTest,
     EXPECT_EQ(probe.peak_active, 3U);
     EXPECT_LE(probe.peak_active, 3U);
     EXPECT_EQ(probe.get_count, 3U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("fsck.audit_completion_count"),
-        3U);
-
-    kasumi::platform::perf_trace::reset();
-    kasumi::platform::perf_trace::force_enable(false);
 }
 
 TEST(IntegrityMaintenanceTest,
@@ -1765,43 +1643,17 @@ TEST(IntegrityMaintenanceTest,
     publish_remote(storage.transport, storage.workspace, beta);
     put_content(storage.transport, storage.workspace, "beta", "beta");
 
-    kasumi::platform::perf_trace::force_enable(false);
-    kasumi::platform::perf_trace::reset();
-    const auto checked_disabled = kasumi::application::integrity::fsck(
+    const auto checked_first = kasumi::application::integrity::fsck(
         runtime, storage.transport, test_key());
-    ASSERT_TRUE(checked_disabled.has_value())
-        << checked_disabled.error().detail;
+    ASSERT_TRUE(checked_first.has_value()) << checked_first.error().detail;
 
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
-    const auto checked_enabled = kasumi::application::integrity::fsck(
+    const auto checked_second = kasumi::application::integrity::fsck(
         runtime, storage.transport, test_key());
-    ASSERT_TRUE(checked_enabled.has_value()) << checked_enabled.error().detail;
+    ASSERT_TRUE(checked_second.has_value()) << checked_second.error().detail;
 
-    EXPECT_EQ(checked_disabled->checked_objects,
-              checked_enabled->checked_objects);
-    EXPECT_EQ(checked_disabled->repaired_objects,
-              checked_enabled->repaired_objects);
-
-    EXPECT_GE(
-        kasumi::platform::perf_trace::get_count("history.full_list_calls"), 1U);
-    EXPECT_GE(
-        kasumi::platform::perf_trace::get_count("marker.variants_observed"),
-        1U);
-    EXPECT_GE(
-        kasumi::platform::perf_trace::get_count("commit.variants_observed"),
-        2U);
-    EXPECT_GE(
-        kasumi::platform::perf_trace::get_count("history.reachable_commits"),
-        2U);
-    EXPECT_GE(
-        kasumi::platform::perf_trace::get_count("content.physical_objects"),
-        2U);
-    EXPECT_GE(kasumi::platform::perf_trace::get_count("content.referenced_ids"),
-              2U);
-
-    kasumi::platform::perf_trace::force_enable(false);
-    kasumi::platform::perf_trace::reset();
+    EXPECT_EQ(checked_first->checked_objects, checked_second->checked_objects);
+    EXPECT_EQ(checked_first->repaired_objects,
+              checked_second->repaired_objects);
 }
 
 } // namespace

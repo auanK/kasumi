@@ -1,16 +1,11 @@
 #include "platform/perf_trace.hpp"
 
-#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <mutex>
 #include <string>
-
-#ifndef _WIN32
-#include <sys/resource.h>
-#endif
 
 namespace kasumi::platform::perf_trace {
 namespace {
@@ -23,14 +18,6 @@ struct Metric {
 std::mutex metrics_mutex;
 std::map<std::string, Metric> metrics;
 bool forced_enable_state = false;
-
-bool live_progress_enabled() noexcept {
-    static const bool value = [] {
-        const char* setting = std::getenv("KASUMI_PERF_TRACE_LIVE");
-        return setting != nullptr && std::string_view{setting} == "1";
-    }();
-    return value;
-}
 
 } // namespace
 
@@ -47,8 +34,9 @@ void force_enable(bool state) noexcept {
 }
 
 void reset() noexcept {
-    if (!enabled())
+    if (!enabled()) {
         return;
+    }
     try {
         std::lock_guard lock(metrics_mutex);
         metrics.clear();
@@ -63,8 +51,9 @@ Token begin() noexcept {
 }
 
 void finish(std::string_view name, Token token) noexcept {
-    if (!token.active || name.empty())
+    if (!token.active || name.empty()) {
         return;
+    }
     const auto elapsed = std::chrono::steady_clock::now() - token.started;
     try {
         std::lock_guard lock(metrics_mutex);
@@ -76,32 +65,20 @@ void finish(std::string_view name, Token token) noexcept {
 }
 
 void count(std::string_view name, std::uint64_t amount) noexcept {
-    if (!enabled() || name.empty())
-        return;
-    const bool live_progress = name == "fsck.audit_completion_count" ||
-                               name == "fsck.checkpoint_durable_writes";
-    std::uint64_t calls = 0;
-    try {
-        std::lock_guard lock(metrics_mutex);
-        auto& metric = metrics[std::string{name}];
-        metric.calls += amount;
-        calls = metric.calls;
-    } catch (...) {
+    if (!enabled() || name.empty()) {
         return;
     }
-    if (live_progress && live_progress_enabled()) {
-        std::fprintf(stderr,
-                     "KASUMI_PERF_LIVE name=%.*s calls=%llu\n",
-                     static_cast<int>(name.size()),
-                     name.data(),
-                     static_cast<unsigned long long>(calls));
-        std::fflush(stderr);
+    try {
+        std::lock_guard lock(metrics_mutex);
+        metrics[std::string{name}].calls += amount;
+    } catch (...) {
     }
 }
 
 std::uint64_t get_count(std::string_view name) noexcept {
-    if (!enabled() || name.empty())
+    if (!enabled() || name.empty()) {
         return 0;
+    }
     try {
         std::lock_guard lock(metrics_mutex);
         const auto it = metrics.find(std::string{name});
@@ -111,66 +88,11 @@ std::uint64_t get_count(std::string_view name) noexcept {
     }
 }
 
-std::uint64_t get_time(std::string_view name) noexcept {
-    if (!enabled() || name.empty())
-        return 0;
-    try {
-        std::lock_guard lock(metrics_mutex);
-        const auto it = metrics.find(std::string{name});
-        return it != metrics.end()
-                   ? static_cast<std::uint64_t>(
-                         std::chrono::duration_cast<std::chrono::microseconds>(
-                             it->second.elapsed)
-                             .count())
-                   : 0;
-    } catch (...) {
-        return 0;
-    }
-}
-
-void maximum(std::string_view name, std::uint64_t value) noexcept {
-    if (!enabled() || name.empty())
-        return;
-    try {
-        std::lock_guard lock(metrics_mutex);
-        auto& metric = metrics[std::string{name}];
-        metric.calls = std::max(metric.calls, value);
-    } catch (...) {
-    }
-}
-
 void report(std::string_view outcome) noexcept {
-    if (!enabled())
+    if (!enabled()) {
         return;
+    }
     try {
-#ifndef _WIN32
-        // Self counters exclude the rclone child; collected before process
-        // exit.
-        struct rusage usage{};
-        if (::getrusage(RUSAGE_SELF, &usage) == 0) {
-            const auto user_us =
-                static_cast<std::uint64_t>(usage.ru_utime.tv_sec) *
-                    1'000'000ULL +
-                static_cast<std::uint64_t>(usage.ru_utime.tv_usec);
-            const auto system_us =
-                static_cast<std::uint64_t>(usage.ru_stime.tv_sec) *
-                    1'000'000ULL +
-                static_cast<std::uint64_t>(usage.ru_stime.tv_usec);
-            std::fprintf(stderr,
-                         "KASUMI_PROCESS_SELF user_us=%llu system_us=%llu "
-                         "max_rss_kib=%llu source=getrusage\n",
-                         static_cast<unsigned long long>(user_us),
-                         static_cast<unsigned long long>(system_us),
-                         static_cast<unsigned long long>(usage.ru_maxrss));
-            std::fprintf(stderr,
-                         "KASUMI_PROCESS_IO input_blocks=%llu "
-                         "output_blocks=%llu source=getrusage\n",
-                         static_cast<unsigned long long>(usage.ru_inblock),
-                         static_cast<unsigned long long>(usage.ru_oublock));
-        } else {
-            std::fprintf(stderr, "KASUMI_PROCESS_SELF error=getrusage\n");
-        }
-#endif
         std::lock_guard lock(metrics_mutex);
         for (const auto& [name, metric] : metrics) {
             const auto microseconds =

@@ -7,7 +7,6 @@
 #include "application/use_cases/error_mapping.hpp"
 #include "core/history.hpp"
 #include "crypto/secure_memory.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/profile_lock.hpp"
 #include "runtime/resolver.hpp"
 #include "state_storage/database.hpp"
@@ -66,11 +65,9 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         (operation == Operation::Sync || operation == Operation::ResolveMissing)
             ? runtime::AccessMode::ReadWrite
             : runtime::AccessMode::ReadOnly;
-    const auto resolve_trace = platform::perf_trace::begin();
     auto runtime_data = runtime::resolve(input.environment.app_data_dir,
                                          input.request.profile_name,
                                          access_mode);
-    platform::perf_trace::finish("runtime/profile resolve", resolve_trace);
     if (!runtime_data) {
         return std::unexpected(Error{
             .operation = operation,
@@ -95,13 +92,10 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
             .runtime = output.summary,
         });
     }
-    const auto preparation_trace = platform::perf_trace::begin();
     auto profile_lock = platform::acquire_profile_lock(
         input.environment.app_data_dir /
         ("profile-" + input.request.profile_name + ".lock"));
     if (!profile_lock) {
-        platform::perf_trace::finish("operation preparation",
-                                     preparation_trace);
         return std::unexpected(Error{
             .operation = operation,
             .code = ErrorCode::RuntimeFailure,
@@ -114,8 +108,6 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     if (input.request.initial) {
         const auto reject_initial =
             [&](std::string detail) -> std::expected<void, Error> {
-            platform::perf_trace::finish("operation preparation",
-                                         preparation_trace);
             wipe_operation(output);
             return std::unexpected(Error{
                 .operation = operation,
@@ -234,8 +226,6 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         }
     } else if (operation != Operation::RemoveBarrier &&
                !state_storage::validate(runtime_data->database_path)) {
-        platform::perf_trace::finish("operation preparation",
-                                     preparation_trace);
         wipe_operation(output);
         return std::unexpected(Error{
             .operation = operation,
@@ -252,17 +242,12 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
                                 output.summary,
                                 output.key);
     if (!key) {
-        platform::perf_trace::finish("operation preparation",
-                                     preparation_trace);
         wipe_operation(output);
         return std::unexpected(key.error());
     }
-    platform::perf_trace::finish("operation preparation", preparation_trace);
 
-    const auto transport_trace = platform::perf_trace::begin();
     auto opened_storage = transport::open_transport(
         runtime_data->storage_location, runtime_data->local_dir);
-    platform::perf_trace::finish("transport open", transport_trace);
     if (!opened_storage) {
         wipe_operation(output);
         return std::unexpected(Error{

@@ -4,7 +4,6 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "crypto/physical_hash.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/random.hpp"
 
 #include <algorithm>
@@ -144,17 +143,12 @@ put_verified(transport::Transport& storage,
         return std::unexpected(
             error(ErrorCode::WorkspaceFailure, local_hash.error()));
     }
-    const auto put_trace = platform::perf_trace::begin();
     auto sent = transport::put(storage, source, identifier);
-    platform::perf_trace::finish("writer PUT", put_trace);
     if (!sent) {
         return std::unexpected(transport_error(sent.error()));
     }
-    const auto verification_trace = platform::perf_trace::begin();
-    platform::perf_trace::count("writer physical hash calls");
     auto remote_hash = transport::physical_hash(storage, identifier, "sha256");
     if (remote_hash) {
-        platform::perf_trace::finish("writer verification", verification_trace);
         if (*remote_hash != *local_hash) {
             return std::unexpected(
                 error(ErrorCode::VerificationFailure,
@@ -163,27 +157,21 @@ put_verified(transport::Transport& storage,
         return *local_hash;
     }
     if (remote_hash.error().code != transport::ErrorCode::Unsupported) {
-        platform::perf_trace::finish("writer verification", verification_trace);
         return std::unexpected(transport_error(remote_hash.error()));
     }
-    platform::perf_trace::count("writer readback fallback");
     if (auto downloaded = detail::download(storage, identifier, copy);
         !downloaded) {
-        platform::perf_trace::finish("writer verification", verification_trace);
         return std::unexpected(history_error(downloaded.error()));
     }
     auto observed = detail::read_file(copy, maximum_marker_size);
     if (!observed) {
-        platform::perf_trace::finish("writer verification", verification_trace);
         return std::unexpected(history_error(observed.error()));
     }
     if (!std::ranges::equal(*observed, bytes)) {
-        platform::perf_trace::finish("writer verification", verification_trace);
         return std::unexpected(
             error(ErrorCode::VerificationFailure,
                   "remote marker does not match published marker"));
     }
-    platform::perf_trace::finish("writer verification", verification_trace);
     return *local_hash;
 }
 
@@ -223,58 +211,30 @@ bool valid_sha256(std::string_view value) noexcept {
 std::expected<bool, Error>
 registration_matches(transport::Transport& storage,
                      const RegistrationState& registration) {
-    const auto ownership_trace = platform::perf_trace::begin();
-    const auto result = [&]() -> std::expected<bool, Error> {
-        platform::perf_trace::count("gc.barrier_ownership_verifications");
-        platform::perf_trace::count("gc.barrier_physical_hash_attempts");
-        const auto hash_trace = platform::perf_trace::begin();
-        auto remote_hash = transport::physical_hash(
-            storage, registration.identifier, "sha256");
-        platform::perf_trace::finish("gc barrier physical hash verification",
-                                     hash_trace);
-        if (remote_hash) {
-            if (!valid_sha256(*remote_hash)) {
-                platform::perf_trace::count(
-                    "gc.barrier_physical_hash_malformed");
-                return std::unexpected(error(ErrorCode::VerificationFailure,
-                                             "invalid remote barrier SHA-256"));
-            }
-            platform::perf_trace::count("gc.barrier_physical_hash_successes");
-            if (!valid_sha256(registration.expected_physical_sha256)) {
-                return std::unexpected(
-                    error(ErrorCode::VerificationFailure,
-                          "invalid expected barrier SHA-256"));
-            }
-            if (*remote_hash != registration.expected_physical_sha256) {
-                platform::perf_trace::count(
-                    "gc.barrier_physical_hash_mismatches");
-                return false;
-            }
-            return true;
+    auto remote_hash =
+        transport::physical_hash(storage, registration.identifier, "sha256");
+    if (remote_hash) {
+        if (!valid_sha256(*remote_hash)) {
+            return std::unexpected(error(ErrorCode::VerificationFailure,
+                                         "invalid remote barrier SHA-256"));
         }
-        if (remote_hash.error().code == transport::ErrorCode::ObjectNotFound) {
-            platform::perf_trace::count("gc.barrier_physical_hash_not_found");
-            return false;
+        if (!valid_sha256(registration.expected_physical_sha256)) {
+            return std::unexpected(error(ErrorCode::VerificationFailure,
+                                         "invalid expected barrier SHA-256"));
         }
-        if (remote_hash.error().code != transport::ErrorCode::Unsupported) {
-            platform::perf_trace::count("gc.barrier_physical_hash_errors");
-            return std::unexpected(transport_error(remote_hash.error()));
-        }
+        return *remote_hash == registration.expected_physical_sha256;
+    }
+    if (remote_hash.error().code == transport::ErrorCode::ObjectNotFound) {
+        return false;
+    }
+    if (remote_hash.error().code != transport::ErrorCode::Unsupported) {
+        return std::unexpected(transport_error(remote_hash.error()));
+    }
 
-        platform::perf_trace::count("gc.barrier_physical_hash_unsupported");
-        platform::perf_trace::count("gc.barrier_get_fallbacks");
-        const auto fallback_trace = platform::perf_trace::begin();
-        auto matches = marker_matches(storage,
-                                      registration.identifier,
-                                      registration.payload,
-                                      registration.workspace_root);
-        platform::perf_trace::finish("gc barrier GET fallback verification",
-                                     fallback_trace);
-        return matches;
-    }();
-    platform::perf_trace::finish("gc barrier ownership verification",
-                                 ownership_trace);
-    return result;
+    return marker_matches(storage,
+                          registration.identifier,
+                          registration.payload,
+                          registration.workspace_root);
 }
 
 } // namespace
@@ -380,13 +340,11 @@ register_writer(transport::Transport& storage,
         layout.writers_prefix.ends_with('/')
             ? layout.writers_prefix.substr(0, layout.writers_prefix.size() - 1)
             : layout.writers_prefix;
-    const auto batch_trace = platform::perf_trace::begin();
     auto control_reads = transport::control_read_batch(
         storage,
         transport::ControlReadBatchRequest{
             .list_prefixes = {std::string{writers_dir}},
             .presence_identifiers = {layout.barrier_identifier}});
-    platform::perf_trace::finish("writer admission batch", batch_trace);
     if (control_reads) {
         if (control_reads->listings.size() != 1 ||
             control_reads->presences.size() != 1) {
@@ -399,19 +357,15 @@ register_writer(transport::Transport& storage,
         barrier = control_reads->presences.front();
     } else if (control_reads.error().code ==
                transport::ErrorCode::Unsupported) {
-        const auto list_trace = platform::perf_trace::begin();
         auto sequential_list = list_children(storage, writers_dir);
-        platform::perf_trace::finish("writer admission LIST", list_trace);
         if (!sequential_list) {
             auto failure = sequential_list.error();
             static_cast<void>(release_registration(registration));
             return std::unexpected(std::move(failure));
         }
         listed = std::move(*sequential_list);
-        const auto barrier_trace = platform::perf_trace::begin();
         auto sequential_barrier =
             transport::presence(storage, layout.barrier_identifier);
-        platform::perf_trace::finish("writer admission barrier", barrier_trace);
         if (!sequential_barrier) {
             auto failure = transport_error(sequential_barrier.error());
             static_cast<void>(release_registration(registration));

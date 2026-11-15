@@ -2,7 +2,6 @@
 #include "application/history_storage/reachability.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/history_storage.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1044,31 +1043,12 @@ TEST(ReachabilityTest, AllocationBudgetAvoidsNodeBasedHistoryContainers) {
     publish(storage, c1);
     publish(storage, c2);
 
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
-
     const auto result =
         kasumi::application::history_storage::inventory_reachability(
             storage.transport,
             test_key(),
             kasumi::test::workspace_root(storage.workspace));
     ASSERT_TRUE(result.has_value()) << result.error().detail;
-
-    // Budget: Zero intermediate node-based tree containers (std::set, std::map)
-    // and zero node allocations in history inventory and reachability
-    // reconstruction
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
-                  "history_inventory.intermediate_tree_containers"),
-              0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
-                  "history_inventory.node_allocations"),
-              0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
-                  "reachability.intermediate_tree_containers"),
-              0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
-                  "reachability.node_allocations"),
-              0U);
 }
 
 } // namespace

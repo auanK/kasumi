@@ -212,8 +212,7 @@ success, failure, pending results and cancellation. Sync has one duration line;
 internal operational metrics are separate. Help, version and invalid invocations
 have no operation duration.
 
-Operation messages and errors use stdout; invocation diagnostics and optional
-performance traces use stderr. Interpret the [exit code](#exit-codes) with the
+Operation messages and errors use stdout; invocation diagnostics use stderr. Interpret the [exit code](#exit-codes) with the
 output; partial results are not full success.
 
 ## Language Selection (i18n)
@@ -233,8 +232,6 @@ To switch to **Portuguese**:
 | `KASUMI_PASSWORD` | Provides the Password to the profile creation credential flow (minimum 12 characters) |
 | `KASUMI_PASSWORD2` | Provides the Password Salt to the profile creation credential flow (minimum 16 characters) |
 | `KASUMI_CONTENT_CONCURRENCY` | Sets content-transfer concurrency. Default: 8. Positive values above 16 are capped at 16; invalid or zero values use the default |
-| `KASUMI_PERF_TRACE=1` | Writes operational trace metrics to `stderr` |
-| `KASUMI_PERF_TRACE_LIVE=1` | With tracing enabled, emits live fsck audit-completion and checkpoint-write counters to `stderr` |
 
 > [!NOTE]
 > Once a profile is created, the derived 32-byte master key is persisted locally in `profiles/<profile>/key.bin` using a reversible XOR mask and operating system filesystem permissions. For existing profiles, routine operations use the persisted `key.bin` when no explicit `KASUMI_MASTER_KEY` credential is supplied. `KASUMI_PASSWORD` and `KASUMI_PASSWORD2` are used by the profile-creation credential flow and are not re-verified during routine synchronization operations. For details on the security boundaries and key storage, see [Security Specification](security.md).
