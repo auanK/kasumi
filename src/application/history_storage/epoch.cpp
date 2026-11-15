@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstring>
 #include <exception>
 #include <limits>
 #include <monocypher.h>
@@ -102,13 +103,7 @@ std::expected<Hash, Error> id_bytes(std::string_view identifier) {
 
 std::array<std::uint8_t, nonce_size> nonce_from_id(const Hash& identifier) {
     std::array<std::uint8_t, nonce_size> nonce{};
-    std::transform(identifier.begin(),
-                   identifier.begin() +
-                       static_cast<std::ptrdiff_t>(nonce.size()),
-                   nonce.begin(),
-                   [](std::byte value) {
-                       return std::to_integer<std::uint8_t>(value);
-                   });
+    std::memcpy(nonce.data(), identifier.data(), nonce.size());
     return nonce;
 }
 

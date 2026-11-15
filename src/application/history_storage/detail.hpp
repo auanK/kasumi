@@ -90,8 +90,16 @@ template <typename Fn> auto guard_alloc(Fn&& fn) -> decltype(fn()) {
 
 // Lists remote identifiers (or children under a prefix), returning empty on
 // StorageNotFound.
+transport::ListingResult
+list_transport_identifiers(transport::Transport& storage,
+                           std::string_view prefix);
 std::expected<std::vector<std::string>, Error>
 list_identifiers(transport::Transport& storage, std::string_view prefix = {});
+
+// Enforces inventory budgets and canonicalizes variants; identifiers are
+// unique.
+std::expected<void, Error>
+finalize_history_inventory(HistoryInventory& inventory);
 
 // Builds an inventory of all remote history objects.
 std::expected<HistoryInventory, Error>

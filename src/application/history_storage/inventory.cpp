@@ -35,18 +35,69 @@ void sort_unique(std::vector<std::string>& values) {
     values.erase(std::ranges::unique(values).begin(), values.end());
 }
 
-std::expected<std::vector<std::string>, Error>
-list_identifiers(transport::Transport& storage, std::string_view prefix) {
+transport::ListingResult
+list_transport_identifiers(transport::Transport& storage,
+                           std::string_view prefix) {
     const auto trimmed = trim_trailing_slash(prefix);
-    auto listed = trimmed.empty() ? transport::list(storage)
-                                  : transport::list(storage, trimmed);
+    const bool fallback =
+        !trimmed.empty() && storage.storage.list_prefix == nullptr;
+    auto listed = trimmed.empty() || fallback
+                      ? transport::list(storage)
+                      : transport::list(storage, trimmed);
     if (!listed) {
         if (listed.error().code == transport::ErrorCode::StorageNotFound) {
             return std::vector<std::string>{};
         }
+        return std::unexpected(listed.error());
+    }
+    if (fallback) {
+        const auto full_prefix = std::string{trimmed} + '/';
+        std::vector<std::string> children;
+        for (const auto& identifier : *listed) {
+            if (!identifier.starts_with(full_prefix)) {
+                continue;
+            }
+            const auto name = identifier.substr(full_prefix.size());
+            if (name.find('/') == std::string::npos) {
+                children.push_back(name);
+            }
+        }
+        std::ranges::sort(children);
+        return children;
+    }
+    return std::move(*listed);
+}
+
+std::expected<std::vector<std::string>, Error>
+list_identifiers(transport::Transport& storage, std::string_view prefix) {
+    auto listed = list_transport_identifiers(storage, prefix);
+    if (!listed) {
         return std::unexpected(transport_error(listed.error()));
     }
     return std::move(*listed);
+}
+
+std::expected<void, Error>
+finalize_history_inventory(HistoryInventory& inventory) {
+    if (inventory.identifiers.size() > maximum_history_object_count) {
+        return std::unexpected(
+            error(ErrorCode::LimitExceeded, "too many storage objects"));
+    }
+    for (auto* objects :
+         {&inventory.commit_variants, &inventory.marker_variants}) {
+        for (auto& entry : *objects) {
+            sort_unique(entry.second);
+            if (entry.second.size() > maximum_ciphertext_variants_per_commit) {
+                return std::unexpected(error(ErrorCode::LimitExceeded,
+                                             "too many ciphertext variants"));
+            }
+        }
+    }
+    if (inventory.marker_variants.size() > history::maximum_marked_head_count) {
+        return std::unexpected(
+            error(ErrorCode::LimitExceeded, "too many logical heads"));
+    }
+    return {};
 }
 
 std::expected<HistoryInventory, Error>
@@ -73,12 +124,10 @@ build_history_inventory(std::span<const std::string> identifiers,
         }
     }
     sort_unique(inventory.identifiers);
-
     if (inventory.identifiers.size() > maximum_history_object_count) {
         return std::unexpected(
             error(ErrorCode::LimitExceeded, "too many storage objects"));
     }
-
     for (const auto& identifier : inventory.identifiers) {
         if (auto commit_reference = parse_commit_object(layout, identifier)) {
             inventory.commit_variants[commit_reference->commit_id].push_back(
@@ -89,19 +138,8 @@ build_history_inventory(std::span<const std::string> identifiers,
                 std::move(*marker_reference));
         }
     }
-    for (auto* objects :
-         {&inventory.commit_variants, &inventory.marker_variants}) {
-        for (auto& entry : *objects) {
-            sort_unique(entry.second);
-            if (entry.second.size() > maximum_ciphertext_variants_per_commit) {
-                return std::unexpected(error(ErrorCode::LimitExceeded,
-                                             "too many ciphertext variants"));
-            }
-        }
-    }
-    if (inventory.marker_variants.size() > history::maximum_marked_head_count) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "too many logical heads"));
+    if (auto finalized = finalize_history_inventory(inventory); !finalized) {
+        return std::unexpected(finalized.error());
     }
     return inventory;
 }

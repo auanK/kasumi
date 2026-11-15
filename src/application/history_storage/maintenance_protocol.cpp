@@ -80,39 +80,48 @@ std::vector<std::uint8_t> payload(std::string_view kind,
 
 std::expected<std::vector<std::string>, Error>
 list_children(transport::Transport& storage, std::string_view prefix) {
-    if (storage.storage.list_prefix != nullptr) {
-        auto listed = transport::list(storage, prefix);
-        if (!listed &&
-            listed.error().code == transport::ErrorCode::StorageNotFound) {
-            return std::vector<std::string>{};
-        }
-        if (!listed) {
-            return std::unexpected(transport_error(listed.error()));
-        }
-        return std::move(*listed);
-    }
-
-    auto listed = transport::list(storage);
-    if (!listed &&
-        listed.error().code == transport::ErrorCode::StorageNotFound) {
-        return std::vector<std::string>{};
-    }
+    auto listed = detail::list_transport_identifiers(storage, prefix);
     if (!listed) {
         return std::unexpected(transport_error(listed.error()));
     }
-    const auto full_prefix = std::string{prefix} + '/';
-    std::vector<std::string> result;
-    for (const auto& identifier : *listed) {
-        if (!identifier.starts_with(full_prefix)) {
-            continue;
+    return std::move(*listed);
+}
+
+std::expected<bool, Error>
+verify_remote_payload(transport::Transport& storage,
+                      std::string_view identifier,
+                      std::span<const std::uint8_t> expected,
+                      const std::filesystem::path& workspace_root,
+                      std::string_view expected_hash) {
+    auto remote_hash = transport::physical_hash(storage, identifier, "sha256");
+    if (remote_hash) {
+        if (!history::valid_commit_id(*remote_hash)) {
+            return std::unexpected(error(ErrorCode::VerificationFailure,
+                                         "invalid remote barrier SHA-256"));
         }
-        const auto name = identifier.substr(full_prefix.size());
-        if (name.find('/') == std::string::npos) {
-            result.push_back(name);
+        if (!history::valid_commit_id(expected_hash)) {
+            return std::unexpected(error(ErrorCode::VerificationFailure,
+                                         "invalid expected barrier SHA-256"));
         }
+        return *remote_hash == expected_hash;
     }
-    std::ranges::sort(result);
-    return result;
+    if (remote_hash.error().code != transport::ErrorCode::Unsupported) {
+        return std::unexpected(transport_error(remote_hash.error()));
+    }
+    auto temporary = detail::make_workspace(workspace_root);
+    if (!temporary) {
+        return std::unexpected(history_error(temporary.error()));
+    }
+    const auto copy = (*temporary)->workspace.root / "marker.copy";
+    auto downloaded = transport::get(storage, identifier, copy);
+    if (!downloaded) {
+        return std::unexpected(transport_error(downloaded.error()));
+    }
+    auto observed = detail::read_file(copy, maximum_marker_size);
+    if (!observed) {
+        return std::unexpected(history_error(observed.error()));
+    }
+    return std::ranges::equal(*observed, expected);
 }
 
 std::expected<std::string, Error>
@@ -125,7 +134,7 @@ put_verified(transport::Transport& storage,
         return std::unexpected(history_error(temporary.error()));
     }
     const auto source = (*temporary)->workspace.root / "marker.source";
-    const auto copy = (*temporary)->workspace.root / "marker.copy";
+
     if (auto written = detail::write_file(source, bytes); !written) {
         return std::unexpected(history_error(written.error()));
     }
@@ -138,56 +147,17 @@ put_verified(transport::Transport& storage,
     if (!sent) {
         return std::unexpected(transport_error(sent.error()));
     }
-    auto remote_hash = transport::physical_hash(storage, identifier, "sha256");
-    if (remote_hash) {
-        if (*remote_hash != *local_hash) {
-            return std::unexpected(
-                error(ErrorCode::VerificationFailure,
-                      "remote physical hash does not match published marker"));
-        }
-        return *local_hash;
+    auto matches = verify_remote_payload(
+        storage, identifier, bytes, workspace_root, *local_hash);
+    if (!matches) {
+        return std::unexpected(matches.error());
     }
-    if (remote_hash.error().code != transport::ErrorCode::Unsupported) {
-        return std::unexpected(transport_error(remote_hash.error()));
-    }
-    if (auto downloaded = detail::download(storage, identifier, copy);
-        !downloaded) {
-        return std::unexpected(history_error(downloaded.error()));
-    }
-    auto observed = detail::read_file(copy, maximum_marker_size);
-    if (!observed) {
-        return std::unexpected(history_error(observed.error()));
-    }
-    if (!std::ranges::equal(*observed, bytes)) {
+    if (!*matches) {
         return std::unexpected(
             error(ErrorCode::VerificationFailure,
                   "remote marker does not match published marker"));
     }
     return *local_hash;
-}
-
-std::expected<bool, Error>
-marker_matches(transport::Transport& storage,
-               std::string_view identifier,
-               std::span<const std::uint8_t> expected,
-               const std::filesystem::path& workspace_root) {
-    auto temporary = detail::make_workspace(workspace_root);
-    if (!temporary) {
-        return std::unexpected(history_error(temporary.error()));
-    }
-    const auto copy = (*temporary)->workspace.root / "marker.copy";
-    auto downloaded = transport::get(storage, identifier, copy);
-    if (!downloaded) {
-        if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
-            return false;
-        }
-        return std::unexpected(transport_error(downloaded.error()));
-    }
-    auto observed = detail::read_file(copy, maximum_marker_size);
-    if (!observed) {
-        return std::unexpected(history_error(observed.error()));
-    }
-    return std::ranges::equal(*observed, expected);
 }
 
 bool contains_name(const std::vector<std::string>& names,
@@ -198,30 +168,17 @@ bool contains_name(const std::vector<std::string>& names,
 std::expected<bool, Error>
 registration_matches(transport::Transport& storage,
                      const RegistrationState& registration) {
-    auto remote_hash =
-        transport::physical_hash(storage, registration.identifier, "sha256");
-    if (remote_hash) {
-        if (!history::valid_commit_id(*remote_hash)) {
-            return std::unexpected(error(ErrorCode::VerificationFailure,
-                                         "invalid remote barrier SHA-256"));
-        }
-        if (!history::valid_commit_id(registration.expected_physical_sha256)) {
-            return std::unexpected(error(ErrorCode::VerificationFailure,
-                                         "invalid expected barrier SHA-256"));
-        }
-        return *remote_hash == registration.expected_physical_sha256;
-    }
-    if (remote_hash.error().code == transport::ErrorCode::ObjectNotFound) {
+    auto result = verify_remote_payload(storage,
+                                        registration.identifier,
+                                        registration.payload,
+                                        registration.workspace_root,
+                                        registration.expected_physical_sha256);
+    if (!result && result.error().transport_failure &&
+        result.error().transport_failure->code ==
+            transport::ErrorCode::ObjectNotFound) {
         return false;
     }
-    if (remote_hash.error().code != transport::ErrorCode::Unsupported) {
-        return std::unexpected(transport_error(remote_hash.error()));
-    }
-
-    return marker_matches(storage,
-                          registration.identifier,
-                          registration.payload,
-                          registration.workspace_root);
+    return result;
 }
 
 } // namespace
@@ -320,6 +277,10 @@ register_writer(transport::Transport& storage,
                                    .expected_physical_sha256 =
                                        std::move(*published),
                                    .verify_owner = false};
+    const auto fail_releasing = [&](Error failure) {
+        static_cast<void>(release_registration(registration));
+        return std::unexpected(std::move(failure));
+    };
     std::vector<std::string> listed;
     transport::Presence barrier = transport::Presence::Absent;
     const auto writers_dir = detail::trim_trailing_slash(layout.writers_prefix);
@@ -331,10 +292,8 @@ register_writer(transport::Transport& storage,
     if (control_reads) {
         if (control_reads->listings.size() != 1 ||
             control_reads->presences.size() != 1) {
-            auto failure = error(ErrorCode::InvalidControlObject,
-                                 "incomplete admission batch response");
-            static_cast<void>(release_registration(registration));
-            return std::unexpected(std::move(failure));
+            return fail_releasing(error(ErrorCode::InvalidControlObject,
+                                        "incomplete admission batch response"));
         }
         listed = std::move(control_reads->listings.front());
         barrier = control_reads->presences.front();
@@ -342,34 +301,26 @@ register_writer(transport::Transport& storage,
                transport::ErrorCode::Unsupported) {
         auto sequential_list = list_children(storage, writers_dir);
         if (!sequential_list) {
-            auto failure = sequential_list.error();
-            static_cast<void>(release_registration(registration));
-            return std::unexpected(std::move(failure));
+            return fail_releasing(sequential_list.error());
         }
         listed = std::move(*sequential_list);
         auto sequential_barrier =
             transport::presence(storage, layout.barrier_identifier);
         if (!sequential_barrier) {
-            auto failure = transport_error(sequential_barrier.error());
-            static_cast<void>(release_registration(registration));
-            return std::unexpected(std::move(failure));
+            return fail_releasing(transport_error(sequential_barrier.error()));
         }
         barrier = *sequential_barrier;
     } else {
-        auto failure = transport_error(control_reads.error());
-        static_cast<void>(release_registration(registration));
-        return std::unexpected(std::move(failure));
+        return fail_releasing(transport_error(control_reads.error()));
     }
     if (!contains_name(listed, name)) {
-        auto failure = error(ErrorCode::BackendUnsafe,
-                             "backend did not make writer visible in listing");
-        static_cast<void>(release_registration(registration));
-        return std::unexpected(std::move(failure));
+        return fail_releasing(
+            error(ErrorCode::BackendUnsafe,
+                  "backend did not make writer visible in listing"));
     }
     if (barrier == transport::Presence::Present) {
-        auto failure = error(ErrorCode::Blocked, "GC active on destination");
-        static_cast<void>(release_registration(registration));
-        return std::unexpected(std::move(failure));
+        return fail_releasing(
+            error(ErrorCode::Blocked, "GC active on destination"));
     }
     return registration;
 }
@@ -593,40 +544,26 @@ remove_barrier(transport::Transport& storage,
                     local_hash.error());
     }
 
-    auto remote_hash =
-        transport::physical_hash(storage, layout.barrier_identifier, "sha256");
-    if (remote_hash) {
-        if (!history::valid_commit_id(*remote_hash)) {
+    auto matches = verify_remote_payload(storage,
+                                         layout.barrier_identifier,
+                                         *observed,
+                                         workspace_root,
+                                         *local_hash);
+    if (!matches) {
+        if (matches.error().transport_failure &&
+            matches.error().transport_failure->code ==
+                transport::ErrorCode::ObjectNotFound) {
             return fail(BarrierRemovalStage::VerifyingPhysicalIdentity,
                         ErrorCode::VerificationFailure,
-                        "invalid remote barrier SHA-256");
+                        "maintenance barrier disappeared before removal");
         }
-        if (*remote_hash != *local_hash) {
-            return fail(BarrierRemovalStage::VerifyingPhysicalIdentity,
-                        ErrorCode::VerificationFailure,
-                        "maintenance barrier was replaced before removal");
-        }
-    } else if (remote_hash.error().code ==
-               transport::ErrorCode::ObjectNotFound) {
+        return with_context(BarrierRemovalStage::VerifyingPhysicalIdentity,
+                            matches.error());
+    }
+    if (!*matches) {
         return fail(BarrierRemovalStage::VerifyingPhysicalIdentity,
                     ErrorCode::VerificationFailure,
-                    "maintenance barrier disappeared before removal");
-    } else if (remote_hash.error().code != transport::ErrorCode::Unsupported) {
-        return fail_tx(BarrierRemovalStage::VerifyingPhysicalIdentity,
-                       remote_hash.error(),
-                       "could not compute remote barrier SHA-256");
-    } else {
-        auto matches = marker_matches(
-            storage, layout.barrier_identifier, *observed, workspace_root);
-        if (!matches) {
-            return with_context(BarrierRemovalStage::VerifyingPhysicalIdentity,
-                                matches.error());
-        }
-        if (!*matches) {
-            return fail(BarrierRemovalStage::VerifyingPhysicalIdentity,
-                        ErrorCode::VerificationFailure,
-                        "maintenance barrier was replaced before removal");
-        }
+                    "maintenance barrier was replaced before removal");
     }
 
     auto removed = transport::remove(storage, layout.barrier_identifier);

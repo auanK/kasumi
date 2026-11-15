@@ -477,21 +477,8 @@ build_scoped_history_inventory(transport::Transport& storage,
             std::move(*reference));
     }
     sort_unique(inventory.identifiers);
-    if (inventory.identifiers.size() > maximum_history_object_count) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "too many storage objects"));
-    }
-    for (auto& [unused, variants] : inventory.marker_variants) {
-        static_cast<void>(unused);
-        sort_unique(variants);
-        if (variants.size() > maximum_ciphertext_variants_per_commit) {
-            return std::unexpected(error(ErrorCode::LimitExceeded,
-                                         "too many ciphertext variants"));
-        }
-    }
-    if (inventory.marker_variants.size() > history::maximum_marked_head_count) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "too many logical heads"));
+    if (auto finalized = finalize_history_inventory(inventory); !finalized) {
+        return std::unexpected(finalized.error());
     }
     return inventory;
 }
