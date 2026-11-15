@@ -152,39 +152,9 @@ std::expected<Record, std::string> make_record(std::string transaction_id,
                                                SyncPlan plan,
                                                bool publication_required,
                                                std::string observed_head_id) {
-    if (!valid_transaction_id(transaction_id)) {
-        return std::unexpected("invalid transaction identifier");
-    }
     if (!valid_sync_plan(plan)) {
         return std::unexpected("invalid transaction plan");
     }
-    for (const auto& operation : plan.operations) {
-        if (!has_safe_paths(operation)) {
-            return std::unexpected("transaction plan contains unsafe path");
-        }
-    }
-    if (local_generation > storage_generation) {
-        return std::unexpected("local generation exceeds storage generation");
-    }
-    if (storage_generation == std::numeric_limits<std::uint64_t>::max()) {
-        return std::unexpected("storage generation cannot reach maximum");
-    }
-    if (publication_required &&
-        (storage_generation != 0 || plan.target_generation != 0) &&
-        plan.target_generation != storage_generation + 1) {
-        return std::unexpected("target generation incompatible with storage");
-    }
-    if (!publication_required && plan.target_generation != storage_generation) {
-        return std::unexpected("local generation cannot publish state");
-    }
-    if (!observed_head_id.empty() &&
-        !history::valid_commit_id(observed_head_id)) {
-        return std::unexpected("invalid observed head identity");
-    }
-    if (!publication_required && observed_head_id.empty()) {
-        return std::unexpected("missing observed logical head");
-    }
-
     Record record{
         .operation_id = std::move(transaction_id),
         .phase = Phase::Started,

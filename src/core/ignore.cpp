@@ -6,7 +6,6 @@
 #include <array>
 #include <cstddef>
 #include <fstream>
-#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -101,97 +100,58 @@ bool generated_internal_name(std::string_view name) noexcept {
     });
 }
 
-struct PathSlice {
-    std::string_view text;
-    bool is_directory = false;
-};
-
-inline bool slice_matches(const IgnoreRule& rule, const PathSlice& slice) {
-    if (rule.directory_only && !slice.is_directory) {
+bool slice_matches(const IgnoreRule& rule,
+                   std::string_view text,
+                   bool is_directory) {
+    if (rule.directory_only && !is_directory) {
         return false;
     }
     if (rule.pattern.find('/') == std::string::npos &&
         rule.pattern.find("**") == std::string::npos &&
-        slice.text.find('/') != std::string_view::npos) {
+        text.find('/') != std::string_view::npos) {
         return false;
     }
     const auto first_star = rule.pattern.find('*');
     const auto first_qmark = rule.pattern.find('?');
-    // Fast path: literal pattern without wildcards
     if (first_star == std::string::npos && first_qmark == std::string::npos) {
-        return slice.text == rule.pattern;
+        return text == rule.pattern;
     }
-    // Fast path: *.extension pattern (starts with '*', no other wildcards)
     if (first_star == 0 && first_qmark == std::string::npos &&
         rule.pattern.find('*', 1) == std::string::npos) {
         const std::string_view suffix =
             std::string_view(rule.pattern).substr(1);
-        return slice.text.size() >= suffix.size() &&
-               slice.text.ends_with(suffix);
+        return text.size() >= suffix.size() && text.ends_with(suffix);
     }
-    return glob_matches(rule.pattern, slice.text);
-}
-
-// Fallback algorithm for patterns with unanchored '**' and no '/'
-bool fallback_rule_matches(const IgnoreRule& rule,
-                           std::string_view path,
-                           bool is_directory) {
-    for (std::size_t start = 0; start <= path.size();) {
-        if (start == 0 ||
-            (!rule.anchored && rule.pattern.find('/') == std::string::npos)) {
-            for (std::size_t end = start;; ++end) {
-                const auto slash = path.find('/', end);
-                end = slash == std::string_view::npos ? path.size() : slash;
-                const bool directory = end < path.size() || is_directory;
-                if ((!rule.directory_only || directory) &&
-                    glob_matches(rule.pattern,
-                                 path.substr(start, end - start))) {
-                    return true;
-                }
-                if (slash == std::string_view::npos)
-                    break;
-            }
-        }
-        const auto slash = path.find('/', start);
-        if (slash == std::string_view::npos)
-            break;
-        start = slash + 1;
-    }
-    return false;
+    return glob_matches(rule.pattern, text);
 }
 
 bool rule_matches(const IgnoreRule& rule,
                   std::string_view path,
-                  bool is_directory,
-                  std::span<const PathSlice> prefixes,
-                  std::span<const PathSlice> components) {
-    const bool has_slash = rule.pattern.find('/') != std::string::npos;
-
-    // Case 1: Anchored rule OR pattern contains '/'
-    // Only prefixes (start == 0) can ever match.
-    if (rule.anchored || has_slash) {
-        for (const auto& prefix : prefixes) {
-            if (slice_matches(rule, prefix)) {
+                  bool is_directory) {
+    const bool prefix_only =
+        rule.anchored || rule.pattern.find('/') != std::string_view::npos;
+    const bool component_only =
+        !prefix_only && rule.pattern.find("**") == std::string::npos;
+    for (std::size_t start = 0; start <= path.size();) {
+        const auto first_slash = path.find('/', start);
+        for (std::size_t end = start;; ++end) {
+            const auto slash = path.find('/', end);
+            end = slash == std::string_view::npos ? path.size() : slash;
+            if (slice_matches(rule,
+                              path.substr(start, end - start),
+                              end < path.size() || is_directory)) {
                 return true;
             }
-        }
-        return false;
-    }
-
-    // Case 2: Not anchored, pattern has no '/'
-    // If pattern has no '**', it can never match any string containing '/'!
-    // Therefore only single components can match.
-    if (rule.pattern.find("**") == std::string::npos) {
-        for (const auto& comp : components) {
-            if (slice_matches(rule, comp)) {
-                return true;
+            if (component_only || slash == std::string_view::npos) {
+                break;
             }
         }
-        return false;
+        if (prefix_only || first_slash == std::string_view::npos) {
+            break;
+        }
+        start = first_slash + 1;
     }
-
-    // Case 3: Not anchored, no '/', but contains '**'
-    return fallback_rule_matches(rule, path, is_directory);
+    return false;
 }
 
 void parse_rule_line(std::string line,
@@ -290,57 +250,10 @@ void parse_rule_line(std::string line,
 const IgnoreRule* last_matching_rule(const IgnoreList& list,
                                      std::string_view path,
                                      bool is_directory) {
-    // Stack-allocated buffers for zero heap allocation for paths with depth <=
-    // 32
-    std::array<PathSlice, 32> stack_prefixes{};
-    std::array<PathSlice, 32> stack_components{};
-    std::vector<PathSlice> heap_prefixes;
-    std::vector<PathSlice> heap_components;
-
-    std::span<const PathSlice> prefixes;
-    std::span<const PathSlice> components;
-
-    std::size_t count = 0;
-    for (std::size_t start = 0; start <= path.size();) {
-        const auto slash = path.find('/', start);
-        const auto end =
-            (slash == std::string_view::npos) ? path.size() : slash;
-        const bool comp_is_dir = (end < path.size()) || is_directory;
-        const PathSlice comp{path.substr(start, end - start), comp_is_dir};
-        const PathSlice pref{path.substr(0, end), comp_is_dir};
-
-        if (count < stack_prefixes.size()) {
-            stack_components[count] = comp;
-            stack_prefixes[count] = pref;
-        } else {
-            if (count == stack_prefixes.size()) {
-                heap_components.assign(stack_components.begin(),
-                                       stack_components.end());
-                heap_prefixes.assign(stack_prefixes.begin(),
-                                     stack_prefixes.end());
-            }
-            heap_components.push_back(comp);
-            heap_prefixes.push_back(pref);
-        }
-        ++count;
-
-        if (slash == std::string_view::npos)
-            break;
-        start = slash + 1;
-    }
-
-    if (count > stack_prefixes.size()) {
-        prefixes = heap_prefixes;
-        components = heap_components;
-    } else {
-        prefixes = std::span<const PathSlice>(stack_prefixes.data(), count);
-        components = std::span<const PathSlice>(stack_components.data(), count);
-    }
-
     // Evaluating rules in reverse order: the first matching rule is the
     // last applicable rule in forward order and dictates the final result.
     for (auto it = list.rules.rbegin(); it != list.rules.rend(); ++it) {
-        if (rule_matches(*it, path, is_directory, prefixes, components)) {
+        if (rule_matches(*it, path, is_directory)) {
             return &*it;
         }
     }
