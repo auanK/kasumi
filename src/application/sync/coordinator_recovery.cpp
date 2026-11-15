@@ -1,3 +1,4 @@
+#include "application/concurrency.hpp"
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/history_storage.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
@@ -477,7 +478,7 @@ std::expected<void, Error> resume_pending_storage_repairs(
         return {};
     }
 
-    const auto parallelism = detail::content_concurrency();
+    const auto parallelism = application::content_concurrency();
 
     for (std::size_t chunk_start = 0; chunk_start < pending_uploads.size();) {
         const auto chunk = detail::next_upload_batch_chunk(

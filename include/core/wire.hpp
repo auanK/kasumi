@@ -113,6 +113,17 @@ inline std::expected<E, Error> read_enum(Reader& reader) {
 std::expected<std::string, Error> read_string(Reader& reader,
                                               std::size_t max_length = 4096);
 
+// Encodes a uint32 count followed by each string.
+void write_strings(Writer& writer, std::span<const std::string> values);
+
+// Replaces out with a list written by write_strings. Fails when the count
+// exceeds max_count or the remaining input (setting *overflow), or when an item
+// is truncated or longer than 4096 bytes.
+bool read_strings(Reader& reader,
+                  std::vector<std::string>& out,
+                  std::size_t max_count,
+                  bool* overflow = nullptr);
+
 // Consumes an array of N bytes.
 template <std::size_t N>
 inline std::expected<std::array<std::byte, N>, Error>

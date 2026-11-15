@@ -129,6 +129,7 @@ private:
     clear(const Paths&,
           std::span<const std::uint8_t, crypto::KEY_SIZE>,
           Session*);
+    friend struct SessionAccess;
 };
 
 // Confirms an authenticated snapshot or incremental delta.

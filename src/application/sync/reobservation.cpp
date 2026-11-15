@@ -693,16 +693,20 @@ stabilize(const runtime::RuntimeData& runtime_data,
         }
 
         std::optional<platform::Workspace> workspace;
+        const auto fail_with_cleanup =
+            [&](Error err) -> std::expected<StableExecution, Error> {
+            if (auto removed =
+                    detail::remove_transaction_workspace(workspace, key);
+                !removed) {
+                return std::unexpected(removed.error());
+            }
+            return std::unexpected(std::move(err));
+        };
         if (!result.plan.operations.empty()) {
             auto staged = stage_attempt(
                 runtime_data, input, result, *profile, key, workspace);
             if (!staged) {
-                auto removed =
-                    detail::remove_transaction_workspace(workspace, key);
-                if (!removed) {
-                    return std::unexpected(removed.error());
-                }
-                return std::unexpected(staged.error());
+                return fail_with_cleanup(staged.error());
             }
         }
 
@@ -714,14 +718,15 @@ stabilize(const runtime::RuntimeData& runtime_data,
             input.storage.marked_head_identifiers,
             session);
         if (!observed) {
-            auto removed = detail::remove_transaction_workspace(workspace, key);
-            if (!removed) {
-                return std::unexpected(removed.error());
-            }
             if (observed.error().code ==
                     reconciliation::ErrorCode::InvalidLocalTree &&
                 observed.error().detail.ends_with(
                     "file changed while being read")) {
+                if (auto removed =
+                        detail::remove_transaction_workspace(workspace, key);
+                    !removed) {
+                    return std::unexpected(removed.error());
+                }
                 if (attempt + 1 == maximum_observation_attempts) {
                     return std::unexpected(detail::make_error(
                         ErrorCode::ConcurrentModification,
@@ -729,21 +734,15 @@ stabilize(const runtime::RuntimeData& runtime_data,
                 }
                 continue;
             }
-            return std::unexpected(detail::make_error(
+            return fail_with_cleanup(detail::make_error(
                 ErrorCode::ObservationFailure, observed.error().detail));
         }
         if (trust_existing_content && observed->storage.history_present) {
-            auto removed = detail::remove_transaction_workspace(workspace, key);
-            if (!removed) {
-                return std::unexpected(removed.error());
-            }
-            return std::unexpected(
-                detail::make_error(ErrorCode::ConcurrentModification,
-                                   "remote history was published concurrently "
-                                   "during initial sync with "
-                                   "--trust-existing-content; operation was "
-                                   "rejected to prevent unverified "
-                                   "content reuse"));
+            return fail_with_cleanup(detail::make_error(
+                ErrorCode::ConcurrentModification,
+                "remote history was published concurrently during initial sync "
+                "with --trust-existing-content; operation was rejected to "
+                "prevent unverified content reuse"));
         }
         observed->pending_deletion_authority = input.pending_deletion_authority;
         mutation_fault_test::hit("before_final_local_observation",
@@ -751,11 +750,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
         auto local_after_storage = observation::collect_local_observation(
             runtime_data.local_dir, session, observed->ignore_list);
         if (!local_after_storage) {
-            auto removed = detail::remove_transaction_workspace(workspace, key);
-            if (!removed) {
-                return std::unexpected(removed.error());
-            }
-            return std::unexpected(detail::make_error(
+            return fail_with_cleanup(detail::make_error(
                 ErrorCode::ObservationFailure, local_after_storage.error()));
         }
         if (!same_snapshot(observed->local_tree,
@@ -768,11 +763,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
         }
         auto recalculated = reconciliation::reconcile(*observed);
         if (!recalculated) {
-            auto removed = detail::remove_transaction_workspace(workspace, key);
-            if (!removed) {
-                return std::unexpected(removed.error());
-            }
-            return std::unexpected(detail::make_error(
+            return fail_with_cleanup(detail::make_error(
                 ErrorCode::ObservationFailure, recalculated.error().detail));
         }
         const bool current_allow_unreferenced_reuse =
@@ -788,24 +779,21 @@ stabilize(const runtime::RuntimeData& runtime_data,
                                          trust_existing_content,
                                          initial_content_identifiers);
         if (!refreshed) {
-            auto removed = detail::remove_transaction_workspace(workspace, key);
-            if (!removed) {
-                return std::unexpected(removed.error());
-            }
-            return std::unexpected(refreshed.error());
+            return fail_with_cleanup(refreshed.error());
         }
         recalculated = std::move(*refreshed);
         if (same_observation(input, *observed)) {
-            auto removed = detail::remove_transaction_workspace(workspace, key);
-            if (!removed) {
+            if (auto removed =
+                    detail::remove_transaction_workspace(workspace, key);
+                !removed) {
                 return std::unexpected(removed.error());
             }
             return StableExecution{.input = std::move(*observed),
                                    .result = std::move(*recalculated)};
         }
 
-        auto removed = detail::remove_transaction_workspace(workspace, key);
-        if (!removed) {
+        if (auto removed = detail::remove_transaction_workspace(workspace, key);
+            !removed) {
             return std::unexpected(removed.error());
         }
         if (attempt + 1 == maximum_observation_attempts) {

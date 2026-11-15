@@ -158,9 +158,6 @@ rollback_local_mutations(transaction::Record& record,
                          const std::optional<platform::Workspace>& workspace,
                          const std::filesystem::path& local_root);
 
-// Resolves the configured concurrency level for batch uploads.
-std::size_t content_concurrency() noexcept;
-
 } // namespace kasumi::application::sync::coordinator::detail
 
 #endif

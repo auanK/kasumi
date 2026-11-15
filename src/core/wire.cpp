@@ -52,4 +52,38 @@ std::expected<std::string, Error> read_string(Reader& reader,
     return result;
 }
 
+void write_strings(Writer& writer, std::span<const std::string> values) {
+    write(writer, static_cast<std::uint32_t>(values.size()));
+    for (const auto& value : values) {
+        write_string(writer, value);
+    }
+}
+
+bool read_strings(Reader& reader,
+                  std::vector<std::string>& out,
+                  std::size_t max_count,
+                  bool* overflow) {
+    auto count = read<std::uint32_t>(reader);
+    if (!count) {
+        return false;
+    }
+    if (*count > max_count ||
+        *count > reader.data.size() / sizeof(std::uint32_t)) {
+        if (overflow != nullptr) {
+            *overflow = true;
+        }
+        return false;
+    }
+    out.clear();
+    out.reserve(*count);
+    for (std::uint32_t index = 0; index < *count; ++index) {
+        auto item = read_string(reader);
+        if (!item) {
+            return false;
+        }
+        out.push_back(std::move(*item));
+    }
+    return true;
+}
+
 } // namespace wire

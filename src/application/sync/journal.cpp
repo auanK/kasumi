@@ -2,8 +2,10 @@
 
 #include "application/history_storage/publication.hpp"
 #include "core/hasher.hpp"
+#include "core/history.hpp"
 #include "core/transaction/codec.hpp"
 #include "core/wire.hpp"
+#include "crypto/secure_memory.hpp"
 #include "journal_fault_test.hpp"
 #include "platform/durability.hpp"
 #include "platform/file_fingerprint.hpp"
@@ -86,6 +88,7 @@ struct PassiveInspectionScope {
     bool previous;
 };
 inline constexpr std::uint64_t maximum_delta_count = 1'000'000;
+inline constexpr std::size_t maximum_pending_path_count = 1'000'000;
 
 bool path_not_found(const std::error_code& error) noexcept {
     return error == std::errc::no_such_file_or_directory;
@@ -215,26 +218,21 @@ validate_file_or_absent(const std::filesystem::path& path,
 }
 
 std::expected<void, std::string> validate_save_paths(const Paths& paths) {
-    auto structural = validate_paths(paths);
-    if (!structural) {
+    if (auto structural = validate_paths(paths); !structural) {
         return structural;
     }
-    auto parent = validate_parent_directory(paths.final_path, false);
-    if (!parent) {
+    if (auto parent = validate_parent_directory(paths.final_path, false);
+        !parent) {
         return parent;
     }
-    auto final = validate_file_or_absent(paths.final_path, "final journal");
-    if (!final) {
-        return final;
-    }
-    auto temporary =
-        validate_file_or_absent(paths.temporary_path, "temporary journal");
-    if (!temporary) {
-        return temporary;
-    }
-    auto log = validate_file_or_absent(paths.log_path, "journal log");
-    if (!log) {
-        return log;
+    for (const auto& [path, label] :
+         std::array<std::pair<const std::filesystem::path&, std::string_view>,
+                    3>{{{paths.final_path, "final journal"},
+                        {paths.temporary_path, "temporary journal"},
+                        {paths.log_path, "journal log"}}}) {
+        if (auto ok = validate_file_or_absent(path, label); !ok) {
+            return ok;
+        }
     }
     return {};
 }
@@ -406,11 +404,7 @@ std::vector<std::byte> encode_delta(const Delta& delta) {
         wire::write_string(writer, delta.commit_id);
         wire::write_string(writer, delta.ciphertext_id);
         wire::write_string(writer, delta.marker_id);
-        wire::write<std::uint32_t>(
-            writer, static_cast<std::uint32_t>(delta.parent_ids.size()));
-        for (const auto& pid : delta.parent_ids) {
-            wire::write_string(writer, pid);
-        }
+        wire::write_strings(writer, delta.parent_ids);
     }
     if (delta.flags & HasEpoch) {
         wire::write_string(writer, delta.epoch_vault_id);
@@ -420,17 +414,8 @@ std::vector<std::byte> encode_delta(const Delta& delta) {
         wire::write<std::uint32_t>(writer, delta.epoch_min_history_age_hours);
     }
     if (delta.flags & HasPendingPaths) {
-        wire::write<std::uint32_t>(
-            writer,
-            static_cast<std::uint32_t>(delta.observed_pending_paths.size()));
-        for (const auto& p : delta.observed_pending_paths) {
-            wire::write_string(writer, p);
-        }
-        wire::write<std::uint32_t>(
-            writer, static_cast<std::uint32_t>(delta.pending_paths.size()));
-        for (const auto& p : delta.pending_paths) {
-            wire::write_string(writer, p);
-        }
+        wire::write_strings(writer, delta.observed_pending_paths);
+        wire::write_strings(writer, delta.pending_paths);
     }
     return std::move(writer.buffer);
 }
@@ -526,22 +511,14 @@ std::expected<void, std::string> apply_delta(transaction::Record& record,
         auto commit_id = wire::read_string(reader, 4096);
         auto ciphertext_id = wire::read_string(reader, 4096);
         auto marker_id = wire::read_string(reader, 4096);
-        auto parent_count = wire::read<std::uint32_t>(reader);
-        if (!commit_id || !ciphertext_id || !marker_id || !parent_count ||
-            *parent_count > 32 || *parent_count > reader.data.size() / 4) {
+        if (!commit_id || !ciphertext_id || !marker_id ||
+            !wire::read_strings(
+                reader, prepared.parent_ids, history::maximum_parent_count)) {
             return std::unexpected("truncated publication fields in delta");
         }
         prepared.commit_id = std::move(*commit_id);
         prepared.ciphertext_id = std::move(*ciphertext_id);
         prepared.marker_id = std::move(*marker_id);
-        prepared.parent_ids.clear();
-        prepared.parent_ids.reserve(*parent_count);
-        for (std::uint32_t i = 0; i < *parent_count; ++i) {
-            auto pid = wire::read_string(reader, 4096);
-            if (!pid)
-                return std::unexpected("truncated parent id in delta");
-            prepared.parent_ids.push_back(std::move(*pid));
-        }
     }
     if (flags & HasEpoch) {
         auto vault_id = wire::read_string(reader, 4096);
@@ -559,30 +536,14 @@ std::expected<void, std::string> apply_delta(transaction::Record& record,
         prepared.epoch_min_history_age_hours = *age;
     }
     if (flags & HasPendingPaths) {
-        auto obs_count = wire::read<std::uint32_t>(reader);
-        if (!obs_count || *obs_count > 1'000'000 ||
-            *obs_count > reader.data.size() / 4)
+        if (!wire::read_strings(reader,
+                                prepared.observed_pending_paths,
+                                maximum_pending_path_count)) {
             return std::unexpected("truncated observed_pending_paths count");
-        prepared.observed_pending_paths.clear();
-        prepared.observed_pending_paths.reserve(*obs_count);
-        for (std::uint32_t i = 0; i < *obs_count; ++i) {
-            auto p = wire::read_string(reader, 4096);
-            if (!p)
-                return std::unexpected(
-                    "truncated observed_pending_path item in delta");
-            prepared.observed_pending_paths.push_back(std::move(*p));
         }
-        auto pend_count = wire::read<std::uint32_t>(reader);
-        if (!pend_count || *pend_count > 1'000'000 ||
-            *pend_count > reader.data.size() / 4)
+        if (!wire::read_strings(
+                reader, prepared.pending_paths, maximum_pending_path_count)) {
             return std::unexpected("invalid pending_paths count");
-        prepared.pending_paths.clear();
-        prepared.pending_paths.reserve(*pend_count);
-        for (std::uint32_t i = 0; i < *pend_count; ++i) {
-            auto p = wire::read_string(reader, 4096);
-            if (!p)
-                return std::unexpected("truncated pending_path item in delta");
-            prepared.pending_paths.push_back(std::move(*p));
         }
     }
     if (!reader.data.empty()) {
@@ -963,6 +924,34 @@ bool same_identity(const transaction::Record& a, const transaction::Record& b) {
     return true;
 }
 
+// Validates every entry header up to byte_limit and matches tip count/hash.
+template <typename OnEntry>
+std::expected<void, std::string>
+walk_log_chain(std::span<const std::uint8_t> log,
+               std::size_t byte_limit,
+               const Tip& expected_tip,
+               std::string_view mismatch_msg,
+               OnEntry&& on_entry) {
+    auto chain = expected_tip.snapshot;
+    std::uint64_t count = 0;
+    std::size_t offset = 0;
+    while (offset < byte_limit) {
+        const auto size =
+            validate_log_entry_header(log, offset, byte_limit, count, chain);
+        if (!size)
+            return std::unexpected(size.error());
+        if (auto ok = on_entry(count, chain, offset, *size); !ok)
+            return std::unexpected(ok.error());
+        chain =
+            hasher::hash_bytes(log.data() + offset, log_header_size + *size);
+        offset += log_header_size + *size;
+        ++count;
+    }
+    if (count != expected_tip.count || chain != expected_tip.chain)
+        return std::unexpected(std::string{mismatch_msg});
+    return {};
+}
+
 std::expected<Replay, std::string> replay(const Paths& paths,
                                           const crypto::Key& key) {
     auto tip = read_tip(paths, key);
@@ -1012,42 +1001,42 @@ std::expected<Replay, std::string> replay(const Paths& paths,
     if (log.size() < tip->bytes)
         return std::unexpected("confirmed journal suffix missing or truncated");
     KeyGuard log_key{derive_log_key(key)};
-    std::uint64_t count = 0;
-    auto chain = tip->snapshot;
-    std::size_t offset = 0;
-    while (offset < tip->bytes) {
-        const auto payload_size =
-            validate_log_entry_header(log, offset, tip->bytes, count, chain);
-        if (!payload_size)
-            return std::unexpected(payload_size.error());
-        const auto* ptr = log.data() + offset;
-        const auto aad =
-            make_delta_aad(count, chain, *payload_size, record->operation_id);
-        SensitiveBytes delta(*payload_size);
-        if (crypto_aead_unlock(delta.data(),
-                               ptr + 48 + nonce_size,
-                               log_key.value.data(),
-                               ptr + 48,
-                               aad.data(),
-                               aad.size(),
-                               ptr + log_header_size,
-                               *payload_size) != 0)
-            return std::unexpected("journal delta authentication failed");
-        auto applied = apply_delta(*record, std::as_bytes(std::span{delta}));
-        if (!applied)
-            return std::unexpected(applied.error());
-        auto semantic = validate_record_semantics(
-            metadata_record(*record, (delta.front() & HasPendingPaths) != 0));
-        if (!semantic)
-            return std::unexpected(
-                "journal delta semantic validation failed: " +
-                semantic.error());
-        chain = hasher::hash_bytes(ptr, log_header_size + *payload_size);
-        offset += log_header_size + *payload_size;
-        ++count;
-    }
-    if (count != tip->count || chain != tip->chain)
-        return std::unexpected("confirmed journal prefix mismatch");
+    auto walked = walk_log_chain(
+        log,
+        tip->bytes,
+        *tip,
+        "confirmed journal prefix mismatch",
+        [&](std::uint64_t count,
+            const kasumi::Hash& chain,
+            std::size_t offset,
+            std::uint32_t payload_size) -> std::expected<void, std::string> {
+            const auto* ptr = log.data() + offset;
+            const auto aad = make_delta_aad(
+                count, chain, payload_size, record->operation_id);
+            SensitiveBytes delta(payload_size);
+            if (crypto_aead_unlock(delta.data(),
+                                   ptr + 48 + nonce_size,
+                                   log_key.value.data(),
+                                   ptr + 48,
+                                   aad.data(),
+                                   aad.size(),
+                                   ptr + log_header_size,
+                                   payload_size) != 0)
+                return std::unexpected("journal delta authentication failed");
+            if (auto applied =
+                    apply_delta(*record, std::as_bytes(std::span{delta}));
+                !applied)
+                return applied;
+            if (auto semantic = validate_record_semantics(metadata_record(
+                    *record, (delta.front() & HasPendingPaths) != 0));
+                !semantic)
+                return std::unexpected(
+                    "journal delta semantic validation failed: " +
+                    semantic.error());
+            return {};
+        });
+    if (!walked)
+        return std::unexpected(walked.error());
     valid_record = validate_record_semantics(*record);
     if (!valid_record)
         return std::unexpected(valid_record.error());
@@ -1330,21 +1319,19 @@ std::expected<void, std::string> validate_retirement(const Paths& paths,
                 return std::unexpected(bytes.error());
             if (bytes->size() != proof.bytes)
                 return std::unexpected("retired log length mismatch");
-            auto chain = proof.snapshot;
-            std::uint64_t count = 0;
-            std::size_t offset = 0;
-            while (offset < bytes->size()) {
-                const auto size = validate_log_entry_header(
-                    *bytes, offset, bytes->size(), count, chain);
-                if (!size)
-                    return std::unexpected(size.error());
-                chain = hasher::hash_bytes(bytes->data() + offset,
-                                           log_header_size + *size);
-                offset += log_header_size + *size;
-                ++count;
-            }
-            if (count != proof.count || chain != proof.chain)
-                return std::unexpected("retired log confirmation mismatch");
+            if (auto ok = walk_log_chain(
+                    *bytes,
+                    bytes->size(),
+                    proof,
+                    "retired log confirmation mismatch",
+                    [](std::uint64_t,
+                       const kasumi::Hash&,
+                       std::size_t,
+                       std::uint32_t) -> std::expected<void, std::string> {
+                        return {};
+                    });
+                !ok)
+                return std::unexpected(ok.error());
         }
     }
     return {};
@@ -1478,6 +1465,41 @@ std::expected<void, std::string> clear_locked(const Paths& paths,
 
 } // namespace
 
+struct SessionAccess {
+    static std::expected<void, std::string>
+    refresh(Session& session, const Paths& paths, const Tip& tip) {
+        auto snapshot = artifact_state(paths.final_path);
+        auto log = artifact_state(paths.log_path);
+        if (!snapshot || !log)
+            return std::unexpected(!snapshot ? snapshot.error() : log.error());
+        session.tip_snapshot = tip.snapshot;
+        session.tip_bytes = tip.bytes;
+        session.tip_count = tip.count;
+        session.tip_chain = tip.chain;
+        session.snapshot_fingerprint = snapshot->fingerprint;
+        session.snapshot_bytes = snapshot->bytes;
+        session.log_fingerprint = log->fingerprint;
+        return {};
+    }
+
+    static std::expected<void, std::string> bind(Session* session,
+                                                 const Paths& paths,
+                                                 const kasumi::Hash& key_id,
+                                                 transaction::Record&& record,
+                                                 const Tip& tip) {
+        if (!session)
+            return {};
+        if (auto ok = refresh(*session, paths, tip); !ok)
+            return ok;
+        session->paths = paths;
+        session->operation_id = record.operation_id;
+        session->key_identity = key_id;
+        session->confirmed_record.emplace(std::move(record));
+        session->state = SessionState::Confirmed;
+        return {};
+    }
+};
+
 std::expected<void, std::string>
 save(const Paths& paths,
      const transaction::Record& record,
@@ -1539,30 +1561,9 @@ save(const Paths& paths,
             return std::unexpected(
                 "journal retirement must finish before saving");
         }
-        const auto bind =
-            [&](transaction::Record&& confirmed,
-                const Tip& tip) -> std::expected<void, std::string> {
-            if (!session)
-                return {};
-            auto snapshot = artifact_state(paths.final_path);
-            if (!snapshot)
-                return std::unexpected(snapshot.error());
-            auto log = artifact_state(paths.log_path);
-            if (!log)
-                return std::unexpected(log.error());
-            session->paths = paths;
-            session->operation_id = confirmed.operation_id;
-            session->key_identity = key_id;
-            session->tip_snapshot = tip.snapshot;
-            session->tip_bytes = tip.bytes;
-            session->tip_count = tip.count;
-            session->tip_chain = tip.chain;
-            session->snapshot_fingerprint = snapshot->fingerprint;
-            session->snapshot_bytes = snapshot->bytes;
-            session->log_fingerprint = log->fingerprint;
-            session->confirmed_record.emplace(std::move(confirmed));
-            session->state = SessionState::Confirmed;
-            return {};
+        const auto bind = [&](transaction::Record&& confirmed, const Tip& tip) {
+            return SessionAccess::bind(
+                session, paths, key_id, std::move(confirmed), tip);
         };
         if (session && session->is_valid()) {
             // Check before private-storage validation updates ACL/ctime itself.
@@ -1611,23 +1612,14 @@ save(const Paths& paths,
                     throw std::bad_alloc{};
                 journal_fault_test::hit(
                     "before-session-update", &record, saved->tip.count);
-                auto next_snapshot = artifact_state(paths.final_path);
-                auto next_log = artifact_state(paths.log_path);
-                if (!next_snapshot || !next_log) {
+                if (auto refreshed =
+                        SessionAccess::refresh(*session, paths, saved->tip);
+                    !refreshed) {
                     invalidate();
-                    return std::unexpected(!next_snapshot
-                                               ? next_snapshot.error()
-                                               : next_log.error());
+                    return refreshed;
                 }
                 apply_prepared_delta(*session->confirmed_record,
                                      saved->changes);
-                session->tip_snapshot = saved->tip.snapshot;
-                session->tip_bytes = saved->tip.bytes;
-                session->tip_count = saved->tip.count;
-                session->tip_chain = saved->tip.chain;
-                session->snapshot_fingerprint = next_snapshot->fingerprint;
-                session->snapshot_bytes = next_snapshot->bytes;
-                session->log_fingerprint = next_log->fingerprint;
                 return {};
             }
             invalidate();
@@ -1778,24 +1770,14 @@ load(const Paths& paths,
         if (!loaded)
             return fail(loaded.error());
         journal_fault_test::hit("loaded", &loaded->record);
-        if (session) {
-            auto snapshot = artifact_state(paths.final_path);
-            auto log = artifact_state(paths.log_path);
-            if (!snapshot || !log) {
-                return fail(!snapshot ? snapshot.error() : log.error());
-            }
-            session->snapshot_fingerprint = snapshot->fingerprint;
-            session->snapshot_bytes = snapshot->bytes;
-            session->log_fingerprint = log->fingerprint;
-            session->paths = paths;
-            session->operation_id = loaded->record.operation_id;
-            session->key_identity = key_id;
-            session->tip_snapshot = loaded->tip.snapshot;
-            session->tip_bytes = loaded->tip.bytes;
-            session->tip_count = loaded->tip.count;
-            session->tip_chain = loaded->tip.chain;
-            session->confirmed_record = loaded->record;
-            session->state = SessionState::Confirmed;
+        if (auto bound =
+                SessionAccess::bind(session,
+                                    paths,
+                                    key_id,
+                                    transaction::Record{loaded->record},
+                                    loaded->tip);
+            !bound) {
+            return fail(bound.error());
         }
         return std::optional<transaction::Record>{std::move(loaded->record)};
     } catch (const std::exception& error) {

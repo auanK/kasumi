@@ -62,40 +62,6 @@ action_from_persisted_id(std::uint8_t id) noexcept {
                : std::nullopt;
 }
 
-void write_strings(wire::Writer& writer, std::span<const std::string> values) {
-    wire::write<std::uint32_t>(writer,
-                               static_cast<std::uint32_t>(values.size()));
-    for (const auto& value : values) {
-        wire::write_string(writer, value);
-    }
-}
-
-bool read_strings(wire::Reader& reader,
-                  std::vector<std::string>& out,
-                  std::size_t max_count,
-                  bool* overflow = nullptr) {
-    auto count = wire::read<std::uint32_t>(reader);
-    if (!count) {
-        return false;
-    }
-    if (*count > max_count ||
-        *count > reader.data.size() / sizeof(std::uint32_t)) {
-        if (overflow != nullptr) {
-            *overflow = true;
-        }
-        return false;
-    }
-    out.reserve(*count);
-    for (std::uint32_t index = 0; index < *count; ++index) {
-        auto item = wire::read_string(reader, maximum_string_size);
-        if (!item) {
-            return false;
-        }
-        out.push_back(std::move(*item));
-    }
-    return true;
-}
-
 } // namespace
 
 std::expected<void, std::string> validate(const Record& record) {
@@ -147,8 +113,8 @@ EncodeResult encode(const Record& record) {
         wire::write_string(writer, record.observed_base_id);
         wire::write<std::uint64_t>(writer, record.local_generation);
         wire::write<std::uint64_t>(writer, record.storage_generation);
-        write_strings(writer, record.observed_pending_paths);
-        write_strings(writer, record.pending_paths);
+        wire::write_strings(writer, record.observed_pending_paths);
+        wire::write_strings(writer, record.pending_paths);
         wire::write<std::uint64_t>(writer, record.plan.target_generation);
         wire::write_string(writer, record.commit_id);
         wire::write_string(writer, record.ciphertext_id);
@@ -158,7 +124,7 @@ EncodeResult encode(const Record& record) {
         wire::write<std::int64_t>(writer, record.epoch_issued_at);
         wire::write<std::uint32_t>(writer, record.epoch_min_history_depth);
         wire::write<std::uint32_t>(writer, record.epoch_min_history_age_hours);
-        write_strings(writer, record.parent_ids);
+        wire::write_strings(writer, record.parent_ids);
 
         wire::write<std::uint32_t>(
             writer, static_cast<std::uint32_t>(sync_plan_size(record.plan)));
@@ -225,9 +191,10 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
         std::vector<std::string> observed_pending_paths;
         std::vector<std::string> pending_paths;
         const bool pending_fields_present =
-            read_strings(
+            wire::read_strings(
                 reader, observed_pending_paths, maximum_pending_path_count) &&
-            read_strings(reader, pending_paths, maximum_pending_path_count);
+            wire::read_strings(
+                reader, pending_paths, maximum_pending_path_count);
         auto target = wire::read<std::uint64_t>(reader);
         auto commit_id = wire::read_string(reader, maximum_string_size);
         auto ciphertext_id = wire::read_string(reader, maximum_string_size);
@@ -247,10 +214,10 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
         }
         bool parents_overflow = false;
         std::vector<std::string> parent_ids;
-        if (!read_strings(reader,
-                          parent_ids,
-                          history::maximum_parent_count,
-                          &parents_overflow)) {
+        if (!wire::read_strings(reader,
+                                parent_ids,
+                                history::maximum_parent_count,
+                                &parents_overflow)) {
             return std::unexpected(parents_overflow
                                        ? "parent count exceeds limit"
                                        : "missing parent ID");
