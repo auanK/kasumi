@@ -72,6 +72,14 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 std::tolower(static_cast<unsigned char>(choice[0])));
         }
 
+        const auto prompt_pair = [&](i18n::Key first_key,
+                                     std::string& first,
+                                     std::string& second) {
+            return prompt_line(i18n::tr(first_key), first) &&
+                   prompt_line(i18n::tr(i18n::Key::WizardPromptNewProfileName),
+                               second);
+        };
+
         if (choice == "q") {
             break;
         } else if (choice == "n") {
@@ -121,13 +129,10 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 application::create_profile(environment, p, std::move(creds));
             application::wipe_credentials(creds);
             report_result(res, i18n::tr(i18n::Key::WizardProfileCreated));
-
         } else if (choice == "c") {
             std::string source, new_name;
-            if (!prompt_line(i18n::tr(i18n::Key::WizardPromptSourceProfile),
-                             source) ||
-                !prompt_line(i18n::tr(i18n::Key::WizardPromptNewProfileName),
-                             new_name)) {
+            if (!prompt_pair(
+                    i18n::Key::WizardPromptSourceProfile, source, new_name)) {
                 break;
             }
             report_result(
@@ -151,41 +156,40 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 break;
             }
 
-            auto it = std::ranges::find_if(profiles, [&](const auto& p) {
-                return p.name == target;
-            });
+            auto it =
+                std::ranges::find_if(profiles, [&](const auto& candidate) {
+                    return candidate.name == target;
+                });
             if (it != profiles.end()) {
-                std::string new_local, new_remote;
-                auto old_local = platform::path::to_utf8(it->local_dir);
-                auto old_remote = it->remote_dir;
-
-                if (!prompt_line(
-                        i18n::format(i18n::Key::WizardPromptNewLocalPath,
-                                     old_local),
-                        new_local)) {
+                const auto prompt_default = [&](i18n::Key key,
+                                                const std::string& fallback,
+                                                std::string& out) {
+                    if (!prompt_line(i18n::format(key, fallback), out)) {
+                        return false;
+                    }
+                    if (out.empty()) {
+                        out = fallback;
+                    }
+                    return true;
+                };
+                std::string edit_local, edit_remote;
+                if (!prompt_default(i18n::Key::WizardPromptNewLocalPath,
+                                    platform::path::to_utf8(it->local_dir),
+                                    edit_local) ||
+                    !prompt_default(i18n::Key::WizardPromptNewRemotePath,
+                                    it->remote_dir,
+                                    edit_remote)) {
                     break;
                 }
-                if (new_local.empty()) {
-                    new_local = old_local;
-                }
 
-                if (!prompt_line(
-                        i18n::format(i18n::Key::WizardPromptNewRemotePath,
-                                     old_remote),
-                        new_remote)) {
-                    break;
-                }
-                if (new_remote.empty()) {
-                    new_remote = old_remote;
-                }
-
-                application::Profile p{target,
-                                       platform::path::from_utf8(new_local),
-                                       new_remote,
-                                       it->min_history_depth,
-                                       it->min_history_age_hours};
+                application::Profile updated{
+                    target,
+                    platform::path::from_utf8(edit_local),
+                    edit_remote,
+                    it->min_history_depth,
+                    it->min_history_age_hours};
                 report_result(
-                    application::update_profile(environment, p),
+                    application::update_profile(environment, updated),
                     i18n::format(i18n::Key::WizardProfileEdited, target));
             } else {
                 print_error_line(i18n::tr(i18n::Key::WizardProfileNotFound));
@@ -193,10 +197,8 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
 
         } else if (choice == "r") {
             std::string target, new_name;
-            if (!prompt_line(i18n::tr(i18n::Key::WizardPromptProfileToRename),
-                             target) ||
-                !prompt_line(i18n::tr(i18n::Key::WizardPromptNewProfileName),
-                             new_name)) {
+            if (!prompt_pair(
+                    i18n::Key::WizardPromptProfileToRename, target, new_name)) {
                 break;
             }
             report_result(

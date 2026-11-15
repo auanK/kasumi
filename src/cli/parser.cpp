@@ -227,19 +227,26 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 .profile_name = argv[3],
                 .head_commit_id = std::string{argv[5]}};
         }
+        const auto return_stat = [&](const char* logical) {
+            return application::InspectionRequest{
+                .operation = application::InspectionOperation::RemoteStat,
+                .profile_name = argv[3],
+                .logical_path = std::string{logical}};
+        };
+        const auto return_get = [&](const char* logical, const char* dst) {
+            return application::InspectionRequest{
+                .operation = application::InspectionOperation::RemoteGet,
+                .profile_name = argv[3],
+                .logical_path = std::string{logical},
+                .destination_path = std::string{dst}};
+        };
         if (inspection == "stat") {
             if (argc == 5 && operand(argv[4])) {
-                return application::InspectionRequest{
-                    .operation = application::InspectionOperation::RemoteStat,
-                    .profile_name = argv[3],
-                    .logical_path = std::string{argv[4]}};
+                return return_stat(argv[4]);
             }
             if (argc == 6 && std::string_view{argv[4]} == "--" &&
                 literal_operand(argv[5])) {
-                return application::InspectionRequest{
-                    .operation = application::InspectionOperation::RemoteStat,
-                    .profile_name = argv[3],
-                    .logical_path = std::string{argv[5]}};
+                return return_stat(argv[5]);
             }
             return std::unexpected(ParseError{});
         }
@@ -252,30 +259,16 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         }
         if (inspection == "get") {
             if (argc == 6 && operand(argv[4]) && operand(argv[5])) {
-                return application::InspectionRequest{
-                    .operation = application::InspectionOperation::RemoteGet,
-                    .profile_name = argv[3],
-                    .logical_path = std::string{argv[4]},
-                    .destination_path = std::string{argv[5]}};
+                return return_get(argv[4], argv[5]);
             }
             if (argc == 7) {
                 if (std::string_view{argv[4]} == "--" &&
                     literal_operand(argv[5]) && literal_operand(argv[6])) {
-                    return application::InspectionRequest{
-                        .operation =
-                            application::InspectionOperation::RemoteGet,
-                        .profile_name = argv[3],
-                        .logical_path = std::string{argv[5]},
-                        .destination_path = std::string{argv[6]}};
+                    return return_get(argv[5], argv[6]);
                 }
                 if (operand(argv[4]) && std::string_view{argv[5]} == "--" &&
                     literal_operand(argv[6])) {
-                    return application::InspectionRequest{
-                        .operation =
-                            application::InspectionOperation::RemoteGet,
-                        .profile_name = argv[3],
-                        .logical_path = std::string{argv[4]},
-                        .destination_path = std::string{argv[6]}};
+                    return return_get(argv[4], argv[6]);
                 }
             }
             return std::unexpected(ParseError{});

@@ -12,7 +12,9 @@
 #include <print>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace kasumi::cli {
@@ -311,7 +313,10 @@ void render_indexed(const Range& items,
     }
 }
 
-int present_remote_heads(const application::RemoteHeadsReport& report) {
+template <typename Report>
+int present_remote_report(const Report& report) = delete;
+
+int present_remote_report(const application::RemoteHeadsReport& report) {
     if (report.heads.empty()) {
         std::println("{}", i18n::tr(i18n::Key::RemoteHeadsNone));
         return 0;
@@ -331,7 +336,7 @@ int present_remote_heads(const application::RemoteHeadsReport& report) {
     return 0;
 }
 
-int present_remote_tree(const application::RemoteTreeReport& report) {
+int present_remote_report(const application::RemoteTreeReport& report) {
     if (!report.history_present) {
         std::println("{}", i18n::tr(i18n::Key::RemoteTreeNone));
         return 0;
@@ -355,7 +360,7 @@ int present_remote_tree(const application::RemoteTreeReport& report) {
     return 0;
 }
 
-int present_remote_commits(const application::RemoteCommitsReport& report) {
+int present_remote_report(const application::RemoteCommitsReport& report) {
     if (!report.history_present) {
         std::println("{}", i18n::tr(i18n::Key::RemoteCommitsNone));
         return 0;
@@ -383,7 +388,11 @@ std::string_view yes_no(bool value) {
     return value ? i18n::tr(i18n::Key::LabelYes) : i18n::tr(i18n::Key::LabelNo);
 }
 
-int present_remote_summary(const application::RemoteSummaryReport& report) {
+std::string_view dash_or(std::string_view value) {
+    return value.empty() ? "-" : value;
+}
+
+int present_remote_report(const application::RemoteSummaryReport& report) {
     std::println("{}", i18n::tr(i18n::Key::RemoteSummaryHeader));
     i18n::println(i18n::Key::FieldHistory,
                   report.history_present
@@ -401,7 +410,7 @@ int present_remote_summary(const application::RemoteSummaryReport& report) {
     return 0;
 }
 
-int present_remote_stat(const application::RemoteStatReport& report) {
+int present_remote_report(const application::RemoteStatReport& report) {
     std::println("{}", i18n::tr(i18n::Key::RemoteStatHeader));
     std::println("{}", i18n::tr(i18n::Key::RemoteStatView));
     i18n::println(i18n::Key::FieldHeight, report.observed_height);
@@ -428,7 +437,7 @@ std::string_view variant_state(application::RemoteCommitVariantState state) {
     return enum_tr(state, kTable, i18n::Key::VariantInvalid);
 }
 
-int present_remote_commit(const application::RemoteCommitReport& report) {
+int present_remote_report(const application::RemoteCommitReport& report) {
     const auto& commit = report.commit;
     std::println("{}", i18n::tr(i18n::Key::RemoteCommitHeader));
     i18n::println(i18n::Key::FieldCommit, commit.commit_id);
@@ -458,7 +467,7 @@ int present_remote_commit(const application::RemoteCommitReport& report) {
     return 0;
 }
 
-int present_remote_file(const application::RemoteFileReport& report) {
+int present_remote_report(const application::RemoteFileReport& report) {
     std::println("{}", i18n::tr(i18n::Key::RemoteFileSavedHeader));
     i18n::println(i18n::Key::FieldPath, report.path);
     i18n::println(i18n::Key::FieldDestination, report.destination_path);
@@ -476,10 +485,8 @@ void present_epoch_info(const application::RemoteEpochInfo& epoch) {
                   epoch.min_history_depth,
                   epoch.min_history_age_hours);
     i18n::println(i18n::Key::FieldPreviousEpoch,
-                  epoch.previous_epoch_id.empty() ? "-"
-                                                  : epoch.previous_epoch_id);
-    i18n::println(i18n::Key::FieldNextEpoch,
-                  epoch.next_epoch_id.empty() ? "-" : epoch.next_epoch_id);
+                  dash_or(epoch.previous_epoch_id));
+    i18n::println(i18n::Key::FieldNextEpoch, dash_or(epoch.next_epoch_id));
     i18n::println(i18n::Key::FieldAnchors, epoch.anchors.size());
     for (const auto& anchor : epoch.anchors) {
         std::println("    {}",
@@ -489,13 +496,13 @@ void present_epoch_info(const application::RemoteEpochInfo& epoch) {
     }
 }
 
-int present_remote_epochs(const application::RemoteEpochsReport& report) {
+int present_remote_report(const application::RemoteEpochsReport& report) {
     i18n::println(i18n::Key::RemoteEpochsHeader, report.epochs.size());
     render_indexed(report.epochs, present_epoch_info);
     return 0;
 }
 
-int present_remote_epoch(const application::RemoteEpochReport& report) {
+int present_remote_report(const application::RemoteEpochReport& report) {
     std::println("{}", i18n::tr(i18n::Key::RemoteEpochDetailHeader));
     present_epoch_info(report.epoch);
     return 0;
@@ -520,8 +527,7 @@ void present_content_info(const application::RemoteContentInfo& content) {
     i18n::println(i18n::Key::FieldPhysicallyPresent,
                   yes_no(content.physically_present));
     i18n::println(i18n::Key::FieldCurrentTree, yes_no(content.current_tree));
-    i18n::println(i18n::Key::FieldLogicalHash,
-                  content.logical_hash.empty() ? "-" : content.logical_hash);
+    i18n::println(i18n::Key::FieldLogicalHash, dash_or(content.logical_hash));
     i18n::println(i18n::Key::FieldLogicalSize, content.size);
     i18n::println(i18n::Key::FieldPathsCount, content.paths.size());
     for (const auto& path : content.paths) {
@@ -529,7 +535,7 @@ void present_content_info(const application::RemoteContentInfo& content) {
     }
 }
 
-int present_remote_contents(const application::RemoteContentsReport& report) {
+int present_remote_report(const application::RemoteContentsReport& report) {
     std::println("{}",
                  i18n::format(i18n::Key::RemoteContentsHeader,
                               report.audited
@@ -547,7 +553,7 @@ int present_remote_contents(const application::RemoteContentsReport& report) {
     return 0;
 }
 
-int present_remote_content(const application::RemoteContentReport& report) {
+int present_remote_report(const application::RemoteContentReport& report) {
     std::println("{}", i18n::tr(i18n::Key::RemoteContentHeader));
     present_content_info(report.content);
     return 0;
@@ -568,18 +574,16 @@ std::string_view marker_state(application::RemoteMarkerState state) {
     return enum_tr(state, kTable, i18n::Key::MarkerStateInvalid);
 }
 
-int present_remote_markers(const application::RemoteMarkersReport& report) {
+int present_remote_report(const application::RemoteMarkersReport& report) {
     i18n::println(i18n::Key::RemoteMarkersHeader, report.markers.size());
     i18n::println(i18n::Key::FieldLogicalHeads, report.logical_count);
     i18n::println(i18n::Key::FieldAncestralsCount, report.ancestral_count);
     i18n::println(i18n::Key::FieldInvalidCount, report.invalid_count);
     render_indexed(report.markers, [](const auto& marker) {
         i18n::println(i18n::Key::FieldObject, marker.object_identifier);
-        i18n::println(i18n::Key::FieldCommit,
-                      marker.commit_id.empty() ? "-" : marker.commit_id);
+        i18n::println(i18n::Key::FieldCommit, dash_or(marker.commit_id));
         i18n::println(i18n::Key::FieldCiphertext,
-                      marker.ciphertext_id.empty() ? "-"
-                                                   : marker.ciphertext_id);
+                      dash_or(marker.ciphertext_id));
         i18n::println(i18n::Key::FieldState, marker_state(marker.state));
     });
     return 0;
@@ -599,7 +603,7 @@ std::string_view object_category(application::RemoteObjectCategory category) {
     return enum_tr(category, kTable, i18n::Key::ObjectCategoryUnknown);
 }
 
-int present_remote_objects(const application::RemoteObjectsReport& report) {
+int present_remote_report(const application::RemoteObjectsReport& report) {
     i18n::println(i18n::Key::RemoteObjectsHeader, report.objects.size());
     i18n::println(i18n::Key::FieldUnknownOrInvalid, report.unknown_count);
     render_indexed(report.objects, [](const auto& object) {
@@ -628,7 +632,7 @@ std::string_view orphan_kind(application::RemoteOrphanKind kind) {
     return enum_tr(kind, kTable, i18n::Key::OrphanKindUnknown);
 }
 
-int present_remote_orphans(const application::RemoteOrphansReport& report) {
+int present_remote_report(const application::RemoteOrphansReport& report) {
     i18n::println(i18n::Key::RemoteOrphansHeader, report.objects.size());
     std::println("{}", i18n::tr(i18n::Key::RemoteOrphansReadOnlyHint));
     render_indexed(report.objects, [](const auto& object) {
@@ -640,7 +644,7 @@ int present_remote_orphans(const application::RemoteOrphansReport& report) {
     return 0;
 }
 
-int present_remote_writers(const application::RemoteWritersReport& report) {
+int present_remote_report(const application::RemoteWritersReport& report) {
     i18n::println(i18n::Key::RemoteWritersHeader, report.writers.size());
     i18n::println(i18n::Key::FieldBarrier,
                   report.barrier_present ? i18n::tr(i18n::Key::FieldPresent)
@@ -671,7 +675,7 @@ std::string_view health_state(application::RemoteHealthState state) {
     return enum_tr(state, kTable, i18n::Key::HealthStateCritical);
 }
 
-int present_remote_health(const application::RemoteHealthReport& report) {
+int present_remote_report(const application::RemoteHealthReport& report) {
     i18n::println(i18n::Key::RemoteHealthHeader, health_state(report.state));
     i18n::println(i18n::Key::FieldMarkers, report.marker_count);
     i18n::println(i18n::Key::FieldReachableCommits,
@@ -688,6 +692,61 @@ int present_remote_health(const application::RemoteHealthReport& report) {
         std::println("    {}", reason);
     }
     return 0;
+}
+
+template <typename Report>
+bool inspection_op_matches(application::InspectionOperation op) noexcept {
+    using Op = application::InspectionOperation;
+    if constexpr (std::is_same_v<Report, application::RemoteHeadsReport>) {
+        return op == Op::RemoteHeads;
+    } else if constexpr (std::is_same_v<Report,
+                                        application::RemoteTreeReport>) {
+        return op == Op::RemoteTree;
+    } else if constexpr (std::is_same_v<Report,
+                                        application::RemoteCommitsReport>) {
+        return op == Op::RemoteCommits;
+    } else if constexpr (std::is_same_v<Report,
+                                        application::RemoteSummaryReport>) {
+        return op == Op::RemoteSummary;
+    } else if constexpr (std::is_same_v<Report,
+                                        application::RemoteStatReport>) {
+        return op == Op::RemoteStat;
+    } else if constexpr (std::is_same_v<Report,
+                                        application::RemoteCommitReport>) {
+        return op == Op::RemoteCommit;
+    } else if constexpr (std::is_same_v<Report,
+                                        application::RemoteFileReport>) {
+        return op == Op::RemoteGet;
+    } else if constexpr (std::is_same_v<Report,
+                                        application::RemoteEpochsReport>) {
+        return op == Op::RemoteEpochs;
+    } else if constexpr (std::is_same_v<Report,
+                                        application::RemoteEpochReport>) {
+        return op == Op::RemoteEpoch;
+    } else if constexpr (std::is_same_v<Report,
+                                        application::RemoteContentsReport>) {
+        return op == Op::RemoteContents || op == Op::RemoteContentsAudit;
+    } else if constexpr (std::is_same_v<Report,
+                                        application::RemoteContentReport>) {
+        return op == Op::RemoteContent;
+    } else if constexpr (std::is_same_v<Report,
+                                        application::RemoteMarkersReport>) {
+        return op == Op::RemoteMarkers;
+    } else if constexpr (std::is_same_v<Report,
+                                        application::RemoteObjectsReport>) {
+        return op == Op::RemoteObjects;
+    } else if constexpr (std::is_same_v<Report,
+                                        application::RemoteOrphansReport>) {
+        return op == Op::RemoteOrphans;
+    } else if constexpr (std::is_same_v<Report,
+                                        application::RemoteWritersReport>) {
+        return op == Op::RemoteWriters;
+    } else if constexpr (std::is_same_v<Report,
+                                        application::RemoteHealthReport>) {
+        return op == Op::RemoteHealth;
+    } else {
+        return false;
+    }
 }
 
 void render_sync_summary(const application::SyncCompleted& summary) {
@@ -774,41 +833,31 @@ void present(const application::SyncProgress& progress,
              application::Operation operation) {
     if (operation == application::Operation::Preview ||
         operation == application::Operation::Status) {
-        switch (progress.stage) {
-            case application::SyncStage::Observing:
-                std::println("{}", i18n::tr(i18n::Key::PlanStageObserving));
-                break;
-            case application::SyncStage::Calculating:
-                std::println("{}", i18n::tr(i18n::Key::PlanStageCalculating));
-                std::println();
-                break;
-            default:
-                break;
+        if (progress.stage == application::SyncStage::Observing) {
+            std::println("{}", i18n::tr(i18n::Key::PlanStageObserving));
+        } else if (progress.stage == application::SyncStage::Calculating) {
+            std::println("{}\n", i18n::tr(i18n::Key::PlanStageCalculating));
         }
         return;
     }
 
-    switch (progress.stage) {
-        case application::SyncStage::Observing:
-            std::println("{}", i18n::tr(i18n::Key::SyncStageObserving));
-            break;
-        case application::SyncStage::Calculating:
-            if (!progress.summary) {
-                std::println("{}", i18n::tr(i18n::Key::SyncStageCalculating));
-            } else {
-                render_sync_summary(*progress.summary);
-            }
-            break;
-        case application::SyncStage::Applying:
-            std::println("{}", i18n::tr(i18n::Key::SyncStageApplying));
-            break;
-        case application::SyncStage::Publishing:
-            std::println("{}", i18n::tr(i18n::Key::SyncStagePublishing));
-            break;
-        case application::SyncStage::Finalizing:
-            std::println("{}", i18n::tr(i18n::Key::SyncStageFinalizing));
-            std::println();
-            break;
+    if (progress.stage == application::SyncStage::Calculating &&
+        progress.summary) {
+        render_sync_summary(*progress.summary);
+        return;
+    }
+    using S = application::SyncStage;
+    static constexpr std::array<std::pair<S, i18n::Key>, 5> kStages{{
+        {S::Observing, i18n::Key::SyncStageObserving},
+        {S::Calculating, i18n::Key::SyncStageCalculating},
+        {S::Applying, i18n::Key::SyncStageApplying},
+        {S::Publishing, i18n::Key::SyncStagePublishing},
+        {S::Finalizing, i18n::Key::SyncStageFinalizing},
+    }};
+    std::println(
+        "{}", enum_tr(progress.stage, kStages, i18n::Key::SyncStageFinalizing));
+    if (progress.stage == S::Finalizing) {
+        std::println();
     }
 }
 
@@ -919,174 +968,150 @@ void present(const application::FsckProgress& progress,
 }
 
 int present(const application::Response& response, bool full) {
-    if (const auto* sync =
-            std::get_if<application::SyncCompleted>(&response.data);
-        sync && response.operation == application::Operation::Sync) {
-        int exit_code = 0;
-        if (sync->partial) {
-            render_pending_paths(sync->pending_paths, full);
-            exit_code = 2;
-        } else {
-            print_ok_line(i18n::tr(i18n::Key::SyncCompleted));
-        }
-        if (sync->trusted_content_reused > 0) {
-            std::println("{}",
-                         i18n::format(i18n::Key::SyncTrustedContentWarning,
-                                      sync->trusted_content_reused));
-        }
-        if (response.inventory_audit) {
-            exit_code = std::max(
-                exit_code, render_inventory_audit(*response.inventory_audit));
-        }
-        return exit_code;
-    }
-    if (const auto* ptr = std::get_if<application::PlanReport>(&response.data);
-        ptr && (response.operation == application::Operation::Preview ||
-                response.operation == application::Operation::Status)) {
-        render_plan_report(*ptr, full);
-        if (response.operation == application::Operation::Preview) {
-            std::println("{}", i18n::tr(i18n::Key::PreviewCompleted));
-        }
-        return ptr->pending_paths.empty() ? 0 : 2;
-    }
-    if (const auto* fsck =
-            std::get_if<application::FsckCompleted>(&response.data);
-        fsck && response.operation == application::Operation::Fsck) {
-        print_ok_line(i18n::tr(i18n::Key::ErrorFsckClean));
-        std::println("{}",
-                     format_plural(fsck->checked_objects,
-                                   i18n::Key::FsckSummarySingular,
-                                   i18n::Key::FsckSummaryPlural));
-        if (fsck->checked_plaintext_bytes.has_value()) {
-            std::println(
-                "{}",
-                i18n::format(i18n::Key::FsckSummaryBytes,
-                             format_size(*fsck->checked_plaintext_bytes)));
-        }
-        return 0;
-    }
-    if (response.operation == application::Operation::RemoveWriter) {
-        if (const auto* ptr =
-                std::get_if<application::ManualWriterRemovalCompleted>(
-                    &response.data)) {
-            print_ok_line(i18n::format(i18n::Key::ManualWriterRemovalCompleted,
-                                       ptr->identifier));
-            return 0;
-        }
-    }
-    if (response.operation == application::Operation::RemoveBarrier) {
-        if (const auto* ptr =
-                std::get_if<application::ManualBarrierRemovalCompleted>(
-                    &response.data)) {
-            print_ok_line(
-                ptr->outcome == application::BarrierRemovalOutcome::Removed
-                    ? i18n::format(i18n::Key::ManualBarrierRemovalCompleted,
-                                   ptr->identifier)
-                    : std::string{
-                          i18n::tr(i18n::Key::ManualBarrierRemovalAbsent)});
-            if (ptr->active_writers_count > 0) {
+    const auto op = response.operation;
+    return std::visit(
+        [&](const auto& data) -> int {
+            using T = std::decay_t<decltype(data)>;
+            using Op = application::Operation;
+            if constexpr (std::is_same_v<T, application::SyncCompleted>) {
+                if (op != Op::Sync) {
+                    return 1;
+                }
+                int exit_code = 0;
+                if (data.partial) {
+                    render_pending_paths(data.pending_paths, full);
+                    exit_code = 2;
+                } else {
+                    print_ok_line(i18n::tr(i18n::Key::SyncCompleted));
+                }
+                if (data.trusted_content_reused > 0) {
+                    std::println(
+                        "{}",
+                        i18n::format(i18n::Key::SyncTrustedContentWarning,
+                                     data.trusted_content_reused));
+                }
+                if (response.inventory_audit) {
+                    exit_code = std::max(
+                        exit_code,
+                        render_inventory_audit(*response.inventory_audit));
+                }
+                return exit_code;
+            } else if constexpr (std::is_same_v<T, application::PlanReport>) {
+                if (op != Op::Preview && op != Op::Status) {
+                    return 1;
+                }
+                render_plan_report(data, full);
+                if (op == Op::Preview) {
+                    std::println("{}", i18n::tr(i18n::Key::PreviewCompleted));
+                }
+                return data.pending_paths.empty() ? 0 : 2;
+            } else if constexpr (std::is_same_v<T,
+                                                application::FsckCompleted>) {
+                if (op != Op::Fsck) {
+                    return 1;
+                }
+                print_ok_line(i18n::tr(i18n::Key::ErrorFsckClean));
+                std::println("{}",
+                             format_plural(data.checked_objects,
+                                           i18n::Key::FsckSummarySingular,
+                                           i18n::Key::FsckSummaryPlural));
+                if (data.checked_plaintext_bytes.has_value()) {
+                    std::println(
+                        "{}",
+                        i18n::format(
+                            i18n::Key::FsckSummaryBytes,
+                            format_size(*data.checked_plaintext_bytes)));
+                }
+                return 0;
+            } else if constexpr (
+                std::is_same_v<T, application::ManualWriterRemovalCompleted>) {
+                if (op != Op::RemoveWriter) {
+                    return 1;
+                }
+                print_ok_line(i18n::format(
+                    i18n::Key::ManualWriterRemovalCompleted, data.identifier));
+                return 0;
+            } else if constexpr (
+                std::is_same_v<T, application::ManualBarrierRemovalCompleted>) {
+                if (op != Op::RemoveBarrier) {
+                    return 1;
+                }
+                print_ok_line(
+                    data.outcome == application::BarrierRemovalOutcome::Removed
+                        ? i18n::format(i18n::Key::ManualBarrierRemovalCompleted,
+                                       data.identifier)
+                        : std::string{
+                              i18n::tr(i18n::Key::ManualBarrierRemovalAbsent)});
+                if (data.active_writers_count > 0) {
+                    std::println(
+                        "{} {}",
+                        i18n::tr(i18n::Key::LabelWarning),
+                        i18n::format(
+                            i18n::Key::ManualBarrierRemovalWritersRemain,
+                            data.active_writers_count));
+                }
+                return 0;
+            } else if constexpr (std::is_same_v<
+                                     T,
+                                     application::GarbageCollectCompleted>) {
+                if (op != Op::GarbageCollect) {
+                    return 1;
+                }
+                if (data.analysis_only) {
+                    const auto header =
+                        format_plural(data.candidate_objects,
+                                      i18n::Key::GcWarningHeaderSingular,
+                                      i18n::Key::GcWarningHeaderPlural);
+                    const std::string indent(
+                        i18n::tr(i18n::Key::LabelWarning).size() + 1, ' ');
+                    print_status_line(
+                        style::yellow, i18n::Key::LabelWarning, header);
+                    std::println(
+                        "{}{}", indent, i18n::tr(i18n::Key::GcWarningDetail1));
+                    std::println(
+                        "{}{}", indent, i18n::tr(i18n::Key::GcWarningDetail2));
+                    return 0;
+                }
+                print_ok_line(i18n::tr(i18n::Key::GcCompleted));
                 std::println(
-                    "{} {}",
-                    i18n::tr(i18n::Key::LabelWarning),
-                    i18n::format(i18n::Key::ManualBarrierRemovalWritersRemain,
-                                 ptr->active_writers_count));
+                    "     {}",
+                    i18n::format(i18n::Key::GcSummary, data.candidate_objects));
+                return 0;
+            } else if constexpr (std::is_same_v<
+                                     T,
+                                     application::ResolveMissingCompleted>) {
+                if (op != Op::ResolveMissing) {
+                    return 1;
+                }
+                if (data.resolved_count > 0) {
+                    print_ok_line(
+                        format_plural(data.resolved_count,
+                                      i18n::Key::ResolveMissingSingular,
+                                      i18n::Key::ResolveMissingPlural));
+                } else {
+                    std::println("{}", i18n::tr(i18n::Key::ResolveMissingNone));
+                }
+                return 0;
+            } else {
+                return 1;
             }
-            return 0;
-        }
-    }
-    if (const auto* ptr =
-            std::get_if<application::GarbageCollectCompleted>(&response.data);
-        ptr && response.operation == application::Operation::GarbageCollect) {
-        if (ptr->analysis_only) {
-            const auto header =
-                format_plural(ptr->candidate_objects,
-                              i18n::Key::GcWarningHeaderSingular,
-                              i18n::Key::GcWarningHeaderPlural);
-            const auto label = i18n::tr(i18n::Key::LabelWarning);
-            const std::string indent(label.size() + 1, ' ');
-            print_status_line(style::yellow, i18n::Key::LabelWarning, header);
-            std::println("{}{}", indent, i18n::tr(i18n::Key::GcWarningDetail1));
-            std::println("{}{}", indent, i18n::tr(i18n::Key::GcWarningDetail2));
-            return 0;
-        }
-        print_ok_line(i18n::tr(i18n::Key::GcCompleted));
-        std::println(
-            "     {}",
-            i18n::format(i18n::Key::GcSummary, ptr->candidate_objects));
-        return 0;
-    }
-    if (const auto* ptr =
-            std::get_if<application::ResolveMissingCompleted>(&response.data);
-        ptr && response.operation == application::Operation::ResolveMissing) {
-        if (ptr->resolved_count > 0) {
-            print_ok_line(format_plural(ptr->resolved_count,
-                                        i18n::Key::ResolveMissingSingular,
-                                        i18n::Key::ResolveMissingPlural));
-        } else {
-            std::println("{}", i18n::tr(i18n::Key::ResolveMissingNone));
-        }
-        return 0;
-    }
-    return 1;
+        },
+        response.data);
 }
 
 int present(const application::InspectionResponse& response) {
-    const auto match = [&]<typename Report>(
-                           application::InspectionOperation expected,
-                           int (*render)(const Report&)) -> std::optional<int> {
-        if (response.operation != expected) {
-            return std::nullopt;
-        }
-        if (const auto* report = std::get_if<Report>(&response.payload)) {
-            return render(*report);
-        }
-        return std::nullopt;
-    };
-    const std::optional<int> rendered[] = {
-        match(application::InspectionOperation::RemoteHeads,
-              present_remote_heads),
-        match(application::InspectionOperation::RemoteTree,
-              present_remote_tree),
-        match(application::InspectionOperation::RemoteCommits,
-              present_remote_commits),
-        match(application::InspectionOperation::RemoteSummary,
-              present_remote_summary),
-        match(application::InspectionOperation::RemoteStat,
-              present_remote_stat),
-        match(application::InspectionOperation::RemoteCommit,
-              present_remote_commit),
-        match(application::InspectionOperation::RemoteGet, present_remote_file),
-        match(application::InspectionOperation::RemoteEpochs,
-              present_remote_epochs),
-        match(application::InspectionOperation::RemoteEpoch,
-              present_remote_epoch),
-        match(application::InspectionOperation::RemoteContents,
-              present_remote_contents),
-        match(application::InspectionOperation::RemoteContentsAudit,
-              present_remote_contents),
-        match(application::InspectionOperation::RemoteContent,
-              present_remote_content),
-        match(application::InspectionOperation::RemoteMarkers,
-              present_remote_markers),
-        match(application::InspectionOperation::RemoteObjects,
-              present_remote_objects),
-        match(application::InspectionOperation::RemoteOrphans,
-              present_remote_orphans),
-        match(application::InspectionOperation::RemoteWriters,
-              present_remote_writers),
-        match(application::InspectionOperation::RemoteHealth,
-              present_remote_health),
-    };
-    for (const auto& code : rendered) {
-        if (code.has_value()) {
-            return *code;
-        }
-    }
-
-    print_status_line(style::red,
-                      i18n::Key::LabelError,
-                      i18n::tr(i18n::Key::ErrorInconsistentInspection));
-    return 1;
+    return std::visit(
+        [&](const auto& report) -> int {
+            using R = std::decay_t<decltype(report)>;
+            if (inspection_op_matches<R>(response.operation)) {
+                return present_remote_report(report);
+            }
+            print_status_line(style::red,
+                              i18n::Key::LabelError,
+                              i18n::tr(i18n::Key::ErrorInconsistentInspection));
+            return 1;
+        },
+        response.payload);
 }
 
 namespace {
@@ -1144,105 +1169,78 @@ int present(const application::Error& error) {
         return 1;
     }
 
-    switch (error.code) {
-        case application::ErrorCode::InvalidProfile:
-        case application::ErrorCode::ProfileNotFound:
-        case application::ErrorCode::RuntimeFailure:
-        case application::ErrorCode::CredentialsRequired:
-        case application::ErrorCode::CredentialFailure:
-            print_error_line(error.detail);
-            break;
-        case application::ErrorCode::PlanFailure:
-            print_error_line(
-                i18n::format(i18n::Key::ErrorPlanCalculation, error.detail));
-            break;
-        case application::ErrorCode::FsckFailure:
-            std::println("{}", i18n::tr(i18n::Key::ErrorFsckAuditing));
-            print_error_line(
-                i18n::format(i18n::Key::ErrorFsckFailed, error.detail));
-            break;
-        case application::ErrorCode::GarbageCollectionFailure:
-            print_error_line(
-                i18n::format(i18n::Key::ErrorGcCancelled, error.detail));
-            break;
-        case application::ErrorCode::WriterRemovalFailure:
-            print_error_line(i18n::format(i18n::Key::ErrorWriterRemovalFailed,
-                                          error.detail));
-            break;
-        case application::ErrorCode::BarrierRemovalFailure:
-            print_error_line(i18n::format(i18n::Key::ErrorBarrierRemovalFailed,
-                                          error.detail));
-            if (error.barrier_removal) {
-                const auto& br = *error.barrier_removal;
-                using Stg = application::BarrierRemovalStage;
-                using Mst = application::BarrierRemovalMutationState;
-                static constexpr std::array<std::pair<Stg, i18n::Key>, 7>
-                    kBarrierStages{{
-                        {Stg::CheckingPresence,
-                         i18n::Key::BarrierRemovalStageCheckingPresence},
-                        {Stg::DownloadingPayload,
-                         i18n::Key::BarrierRemovalStageDownloadingPayload},
-                        {Stg::ValidatingPayload,
-                         i18n::Key::BarrierRemovalStageValidatingPayload},
-                        {Stg::CheckingWriters,
-                         i18n::Key::BarrierRemovalStageCheckingWriters},
-                        {Stg::VerifyingPhysicalIdentity,
-                         i18n::Key::
-                             BarrierRemovalStageVerifyingPhysicalIdentity},
-                        {Stg::Removing, i18n::Key::BarrierRemovalStageRemoving},
-                        {Stg::ConfirmingAbsence,
-                         i18n::Key::BarrierRemovalStageConfirmingAbsence},
-                    }};
-                static constexpr std::array<std::pair<Mst, i18n::Key>, 3>
-                    kMutationStates{{
-                        {Mst::NotAttempted,
-                         i18n::Key::BarrierRemovalMutationNotAttempted},
-                        {Mst::Confirmed,
-                         i18n::Key::BarrierRemovalMutationConfirmed},
-                        {Mst::Uncertain,
-                         i18n::Key::BarrierRemovalMutationUncertain},
-                    }};
-                std::println(
-                    "  {}: {}",
-                    i18n::tr(i18n::Key::LabelStage),
-                    enum_tr(br.stage,
-                            kBarrierStages,
-                            i18n::Key::BarrierRemovalStageCheckingPresence));
-                std::println(
-                    "  {}: {}",
-                    i18n::tr(i18n::Key::LabelMutationState),
-                    enum_tr(br.mutation_state,
-                            kMutationStates,
-                            i18n::Key::BarrierRemovalMutationNotAttempted));
-                if (br.transport_error) {
-                    std::println("  {}: {}",
-                                 i18n::tr(i18n::Key::LabelTransportError),
-                                 transport::describe(*br.transport_error));
-                }
-            }
-            break;
-        case application::ErrorCode::InventoryAuditFailure:
-            print_error_line(i18n::format(i18n::Key::ErrorInventoryAuditFailed,
-                                          error.detail));
-            if (error.sync_completed) {
-                std::println(
-                    "{}",
-                    i18n::tr(i18n::Key::ErrorInventoryAuditSyncCompleted));
-                if (error.sync_completed->partial) {
-                    render_pending_status(error.sync_completed->pending);
-                }
-                if (error.sync_completed->published) {
-                    std::println(
-                        "{}",
-                        i18n::tr(i18n::Key::ErrorInventoryAuditPublished));
-                }
-            }
-            break;
-        case application::ErrorCode::SynchronizationFailure:
-        case application::ErrorCode::RecoveryFailure:
-            print_error_line(
-                i18n::format(i18n::Key::ErrorSyncFailed, error.detail));
-            break;
+    using C = application::ErrorCode;
+    static constexpr std::array<std::pair<C, i18n::Key>, 8> kErrorFormats{{
+        {C::PlanFailure, i18n::Key::ErrorPlanCalculation},
+        {C::FsckFailure, i18n::Key::ErrorFsckFailed},
+        {C::GarbageCollectionFailure, i18n::Key::ErrorGcCancelled},
+        {C::WriterRemovalFailure, i18n::Key::ErrorWriterRemovalFailed},
+        {C::BarrierRemovalFailure, i18n::Key::ErrorBarrierRemovalFailed},
+        {C::InventoryAuditFailure, i18n::Key::ErrorInventoryAuditFailed},
+        {C::SynchronizationFailure, i18n::Key::ErrorSyncFailed},
+        {C::RecoveryFailure, i18n::Key::ErrorSyncFailed},
+    }};
+    if (error.code == C::FsckFailure) {
+        std::println("{}", i18n::tr(i18n::Key::ErrorFsckAuditing));
+    }
+    const auto found = std::ranges::find(
+        kErrorFormats, error.code, &std::pair<C, i18n::Key>::first);
+    print_error_line(found != kErrorFormats.end()
+                         ? i18n::format(found->second, error.detail)
+                         : error.detail);
+
+    if (error.code == C::BarrierRemovalFailure && error.barrier_removal) {
+        const auto& br = *error.barrier_removal;
+        using Stg = application::BarrierRemovalStage;
+        using Mst = application::BarrierRemovalMutationState;
+        static constexpr std::array<std::pair<Stg, i18n::Key>, 7>
+            kBarrierStages{{
+                {Stg::CheckingPresence,
+                 i18n::Key::BarrierRemovalStageCheckingPresence},
+                {Stg::DownloadingPayload,
+                 i18n::Key::BarrierRemovalStageDownloadingPayload},
+                {Stg::ValidatingPayload,
+                 i18n::Key::BarrierRemovalStageValidatingPayload},
+                {Stg::CheckingWriters,
+                 i18n::Key::BarrierRemovalStageCheckingWriters},
+                {Stg::VerifyingPhysicalIdentity,
+                 i18n::Key::BarrierRemovalStageVerifyingPhysicalIdentity},
+                {Stg::Removing, i18n::Key::BarrierRemovalStageRemoving},
+                {Stg::ConfirmingAbsence,
+                 i18n::Key::BarrierRemovalStageConfirmingAbsence},
+            }};
+        static constexpr std::array<std::pair<Mst, i18n::Key>, 3>
+            kMutationStates{{
+                {Mst::NotAttempted,
+                 i18n::Key::BarrierRemovalMutationNotAttempted},
+                {Mst::Confirmed, i18n::Key::BarrierRemovalMutationConfirmed},
+                {Mst::Uncertain, i18n::Key::BarrierRemovalMutationUncertain},
+            }};
+        std::println("  {}: {}",
+                     i18n::tr(i18n::Key::LabelStage),
+                     enum_tr(br.stage,
+                             kBarrierStages,
+                             i18n::Key::BarrierRemovalStageCheckingPresence));
+        std::println("  {}: {}",
+                     i18n::tr(i18n::Key::LabelMutationState),
+                     enum_tr(br.mutation_state,
+                             kMutationStates,
+                             i18n::Key::BarrierRemovalMutationNotAttempted));
+        if (br.transport_error) {
+            std::println("  {}: {}",
+                         i18n::tr(i18n::Key::LabelTransportError),
+                         transport::describe(*br.transport_error));
+        }
+    } else if (error.code == C::InventoryAuditFailure && error.sync_completed) {
+        std::println("{}",
+                     i18n::tr(i18n::Key::ErrorInventoryAuditSyncCompleted));
+        if (error.sync_completed->partial) {
+            render_pending_status(error.sync_completed->pending);
+        }
+        if (error.sync_completed->published) {
+            std::println("{}",
+                         i18n::tr(i18n::Key::ErrorInventoryAuditPublished));
+        }
     }
     return 1;
 }

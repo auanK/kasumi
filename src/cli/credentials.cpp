@@ -2,6 +2,7 @@
 
 #include "cli/i18n.hpp"
 #include "cli/style.hpp"
+#include "crypto/secure_memory.hpp"
 #include "platform/cancellation.hpp"
 
 #include <algorithm>
@@ -26,26 +27,14 @@ namespace {
 
 constexpr std::size_t maximum_secret_size = 4096;
 
-void wipe_bytes(char* data, std::size_t size) noexcept {
-    auto* bytes = reinterpret_cast<volatile char*>(data);
-    for (std::size_t index = 0; index < size; ++index) {
-        bytes[index] = '\0';
-    }
-}
-
-void wipe(std::string& value) noexcept {
-    value.resize(value.capacity(), '\0');
-    wipe_bytes(value.data(), value.size());
+template <typename String> void wipe(String& value) noexcept {
+    using Char = typename String::value_type;
+    value.resize(value.capacity(), Char{});
+    crypto::secure_memory::wipe(value.data(), value.size() * sizeof(Char));
     value.clear();
 }
 
 #if defined(_WIN32)
-
-void wipe_wstring(std::wstring& value) noexcept {
-    value.resize(value.capacity(), L'\0');
-    SecureZeroMemory(value.data(), value.size() * sizeof(wchar_t));
-    value.clear();
-}
 
 std::string utf8(std::wstring_view text) {
     if (text.empty()) {
@@ -84,10 +73,10 @@ std::string utf8(std::wstring_view text) {
 std::string read_console_secret() {
     std::wstring secret;
     secret.reserve(maximum_secret_size);
-    struct WStringWipeGuard {
+    struct SecretGuard {
         std::wstring& value;
-        ~WStringWipeGuard() noexcept {
-            wipe_wstring(value);
+        ~SecretGuard() noexcept {
+            wipe(value);
         }
     } secret_guard{secret};
     while (!platform::cancellation::requested()) {
@@ -169,13 +158,7 @@ std::string read_console_secret() {
                 break;
             }
             char buffer[512]{};
-            struct BufferWipeGuard {
-                char* data;
-                std::size_t size;
-                ~BufferWipeGuard() noexcept {
-                    wipe_bytes(data, size);
-                }
-            } buffer_guard{buffer, sizeof(buffer)};
+            crypto::secure_memory::WipeGuard buffer_guard{buffer};
             const auto count = ::read(STDIN_FILENO, buffer, sizeof(buffer));
             if (count <= 0) {
                 platform::cancellation::request();

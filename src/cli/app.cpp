@@ -11,11 +11,15 @@
 #include "cli/wizard.hpp"
 #include "platform/cancellation.hpp"
 
+#include <array>
 #include <chrono>
 #include <csignal>
 #include <print>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
+#include <variant>
 #include <vector>
 #ifndef _WIN32
 #include <signal.h>
@@ -160,58 +164,55 @@ int run(int argc, char* argv[]) {
     }
 
     auto request = std::get<application::Request>(*parse_result);
-    if (request.operation == application::Operation::RemoveWriter) {
-        std::println("{} {}",
-                     i18n::tr(i18n::Key::LabelWarning),
-                     i18n::tr(i18n::Key::ManualWriterRemovalWarning));
-    }
-    if (request.operation == application::Operation::RemoveBarrier) {
-        std::println("{} {}",
-                     i18n::tr(i18n::Key::LabelWarning),
-                     i18n::tr(i18n::Key::ManualBarrierRemovalWarning));
+    if (request.operation == application::Operation::RemoveWriter ||
+        request.operation == application::Operation::RemoveBarrier) {
+        std::println(
+            "{} {}",
+            i18n::tr(i18n::Key::LabelWarning),
+            i18n::tr(request.operation == application::Operation::RemoveWriter
+                         ? i18n::Key::ManualWriterRemovalWarning
+                         : i18n::Key::ManualBarrierRemovalWarning));
     }
 
     application::ProgressCallback on_progress{};
     FsckProgressDisplayState fsck_display_state;
     GarbageCollectProgressDisplayState gc_display_state;
-    if (request.operation == application::Operation::Sync ||
-        request.operation == application::Operation::Preview ||
-        request.operation == application::Operation::Status) {
-        const auto starting_key =
-            request.operation == application::Operation::Sync
-                ? i18n::Key::SyncStarting
-                : (request.operation == application::Operation::Preview
-                       ? i18n::Key::PreviewStarting
-                       : i18n::Key::StatusStarting);
-        std::println("{}", i18n::format(starting_key, request.profile_name));
-        on_progress = [operation = request.operation](
+    constexpr std::array<std::pair<application::Operation, i18n::Key>, 5>
+        starting_keys{{
+            {application::Operation::Sync, i18n::Key::SyncStarting},
+            {application::Operation::Preview, i18n::Key::PreviewStarting},
+            {application::Operation::Status, i18n::Key::StatusStarting},
+            {application::Operation::Fsck, i18n::Key::FsckStarting},
+            {application::Operation::GarbageCollect, i18n::Key::GcStarting},
+        }};
+    for (const auto& [op, key] : starting_keys) {
+        if (op != request.operation) {
+            continue;
+        }
+        std::println("{}", i18n::format(key, request.profile_name));
+        on_progress = [operation = request.operation,
+                       &fsck_display_state,
+                       &gc_display_state](
                           const application::ExecutionProgress& progress) {
-            if (const auto* sync =
-                    std::get_if<application::SyncProgress>(&progress)) {
-                present(*sync, operation);
-            }
+            std::visit(
+                [&](const auto& event) {
+                    using T = std::decay_t<decltype(event)>;
+                    if constexpr (std::is_same_v<T,
+                                                 application::SyncProgress>) {
+                        present(event, operation);
+                    } else if constexpr (std::is_same_v<
+                                             T,
+                                             application::FsckProgress>) {
+                        present(event, fsck_display_state);
+                    } else if constexpr (
+                        std::is_same_v<T,
+                                       application::GarbageCollectProgress>) {
+                        present(event, gc_display_state);
+                    }
+                },
+                progress);
         };
-    } else if (request.operation == application::Operation::Fsck) {
-        std::println(
-            "{}", i18n::format(i18n::Key::FsckStarting, request.profile_name));
-        on_progress = [&fsck_display_state](
-                          const application::ExecutionProgress& progress) {
-            if (const auto* fsck =
-                    std::get_if<application::FsckProgress>(&progress)) {
-                present(*fsck, fsck_display_state);
-            }
-        };
-    } else if (request.operation == application::Operation::GarbageCollect) {
-        std::println("{}",
-                     i18n::format(i18n::Key::GcStarting, request.profile_name));
-        on_progress = [&gc_display_state](
-                          const application::ExecutionProgress& progress) {
-            if (const auto* gc =
-                    std::get_if<application::GarbageCollectProgress>(
-                        &progress)) {
-                present(*gc, gc_display_state);
-            }
-        };
+        break;
     }
 
     auto result =
