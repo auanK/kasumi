@@ -147,20 +147,16 @@ ensure_state(const runtime::RuntimeData& runtime_data,
             ErrorCode::RecoveryConflict,
             "state.db does not match the pending publication transition"));
     }
-    if (!state_storage::save_state(
-            runtime_data.database_path,
-            state_storage::StoredState{.tree = commit.commit.tree,
-                                       .height = commit.commit.height,
-                                       .commit_id = commit.id,
-                                       .ciphertext_id = ciphertext_id,
-                                       .epoch_id = epoch_id,
-                                       .epoch_sequence = epoch_sequence,
-                                       .pending_materializations =
-                                           std::move(*target_pending)})) {
-        return std::unexpected(detail::make_error(ErrorCode::DatabaseFailure,
-                                                  "failed to save state.db"));
-    }
-    return {};
+    return detail::save_state_checked(
+        runtime_data.database_path,
+        state_storage::StoredState{.tree = commit.commit.tree,
+                                   .height = commit.commit.height,
+                                   .commit_id = commit.id,
+                                   .ciphertext_id = ciphertext_id,
+                                   .epoch_id = epoch_id,
+                                   .epoch_sequence = epoch_sequence,
+                                   .pending_materializations =
+                                       std::move(*target_pending)});
 }
 
 std::expected<history::LoadedCommit, Error>
@@ -548,28 +544,13 @@ std::expected<void, Error> resume_pending_storage_repairs(
         }
 
         if (!missing_batch.objects.empty()) {
-            auto transferred = mutation::transfer_upload_batch(
-                missing_batch, storage, parallelism);
-
-            const bool transfer_unknown =
-                !transferred &&
-                transferred.error().code ==
-                    mutation::MutationErrorCode::RemoteResultUnknown;
-            if (!transferred && !transfer_unknown) {
+            if (auto batch_ok = detail::transfer_and_verify_upload_batch(
+                    missing_batch, storage, key, *workspace, parallelism);
+                !batch_ok) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::MutationFailure,
-                    "failed to transfer pending repairs batch",
-                    transferred.error().operation_index));
-            }
-
-            auto verified = mutation::verify_upload_batch(
-                missing_batch, storage, key, *workspace, parallelism);
-
-            if (!verified) {
-                return std::unexpected(
-                    detail::make_error(ErrorCode::MutationFailure,
-                                       "failed to verify pending repairs batch",
-                                       verified.error().operation_index));
+                    "failed to repair pending repairs batch",
+                    batch_ok.error().mutation.operation_index));
             }
         }
 

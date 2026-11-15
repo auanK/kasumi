@@ -545,12 +545,12 @@ open_transaction_workspace(
         return std::unexpected(directory_status.error());
     }
     if (!missing(*directory_status)) {
-        if (std::filesystem::is_symlink(*directory_status) ||
-            !std::filesystem::is_directory(*directory_status)) {
-            return std::unexpected(
-                workspace_error("invalid transactions directory",
-                                *directory,
-                                "expected a physical directory"));
+        if (auto valid =
+                require_physical_directory(*directory_status,
+                                           *directory,
+                                           "invalid transactions directory");
+            !valid) {
+            return std::unexpected(valid.error());
         }
         if (auto visited = for_each_transaction_entry(
                 *directory,
@@ -565,12 +565,12 @@ open_transaction_workspace(
                     if (!candidate_status) {
                         return std::unexpected(candidate_status.error());
                     }
-                    if (std::filesystem::is_symlink(*candidate_status) ||
-                        !std::filesystem::is_directory(*candidate_status)) {
-                        return std::unexpected(workspace_error(
-                            "invalid quarantined transaction workspace",
+                    if (auto valid = require_physical_directory(
+                            *candidate_status,
                             candidate,
-                            "expected a physical directory"));
+                            "invalid quarantined transaction workspace");
+                        !valid) {
+                        return valid;
                     }
                     auto identity = read_workspace_owner(candidate, id, key);
                     if (!identity) {
@@ -988,8 +988,11 @@ std::expected<void, Error> publish_and_verify_epoch(
     ErrorCode verify_error_code,
     journal::Session* session) {
     auto verify_epoch = [&]() {
-        return history_storage::epoch::verify(
-            storage, expected_epoch, sealed_epoch.reference, key, workspace_dir);
+        return history_storage::epoch::verify(storage,
+                                              expected_epoch,
+                                              sealed_epoch.reference,
+                                              key,
+                                              workspace_dir);
     };
     const auto save_phase =
         [&](transaction::Phase phase) -> std::expected<void, Error> {
@@ -1006,15 +1009,16 @@ std::expected<void, Error> publish_and_verify_epoch(
                            "failed to publish " + std::string(epoch_kind) +
                                " Epoch: " + published.error().detail));
         }
-        if (auto saved = save_phase(transaction::Phase::EpochUploaded); !saved) {
+        if (auto saved = save_phase(transaction::Phase::EpochUploaded);
+            !saved) {
             return std::unexpected(saved.error());
         }
     }
     if (auto verified = verify_epoch(); !verified) {
-        return std::unexpected(make_error(verify_error_code,
-                                          "failed to verify " +
-                                              std::string(epoch_kind) +
-                                              " Epoch: " + verified.error().detail));
+        return std::unexpected(
+            make_error(verify_error_code,
+                       "failed to verify " + std::string(epoch_kind) +
+                           " Epoch: " + verified.error().detail));
     }
     return save_phase(transaction::Phase::EpochVerified);
 }
@@ -1269,6 +1273,48 @@ rollback_local_mutations(transaction::Record& record,
         return rolled;
     }
     record.phase = transaction::Phase::FilesStaged;
+    return {};
+}
+
+std::expected<void, UploadBatchError> transfer_and_verify_upload_batch(
+    const mutation::StagedUploadBatch& batch,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const platform::Workspace& workspace,
+    std::size_t parallelism) {
+    auto transferred =
+        mutation::transfer_upload_batch(batch, storage, parallelism);
+    const bool transfer_unknown =
+        !transferred && transferred.error().code ==
+                            mutation::MutationErrorCode::RemoteResultUnknown;
+    if (!transferred && !transfer_unknown) {
+        return std::unexpected(UploadBatchError{
+            .transport_after_unknown_transfer = false,
+            .mutation = std::move(transferred.error()),
+        });
+    }
+    auto verified = mutation::verify_upload_batch(
+        batch, storage, key, workspace, parallelism);
+    if (!verified) {
+        return std::unexpected(UploadBatchError{
+            .transport_after_unknown_transfer =
+                transfer_unknown &&
+                verified.error().code ==
+                    mutation::MutationErrorCode::TransportFailure,
+            .mutation = std::move(verified.error()),
+        });
+    }
+    return {};
+}
+
+std::expected<void, Error>
+save_state_checked(const std::filesystem::path& database_path,
+                   const state_storage::StoredState& state) {
+    if (!state_storage::initialize(database_path) ||
+        !state_storage::save_state(database_path, state)) {
+        return std::unexpected(
+            make_error(ErrorCode::DatabaseFailure, "failed to save state.db"));
+    }
     return {};
 }
 
@@ -2241,29 +2287,15 @@ execute(const runtime::RuntimeData& runtime_data,
 
             detail::ScopedUploadBatchCleanup batch_cleanup{*staged_batch};
 
-            auto transferred = mutation::transfer_upload_batch(
-                *staged_batch, storage, parallelism);
-
-            const bool transfer_unknown =
-                !transferred &&
-                transferred.error().code ==
-                    mutation::MutationErrorCode::RemoteResultUnknown;
-            if (!transferred && !transfer_unknown) {
-                return fail_mutation(transferred.error().operation_index,
-                                     transferred.error());
-            }
-
-            auto verified = mutation::verify_upload_batch(
-                *staged_batch, storage, key, *workspace, parallelism);
-
-            if (!verified) {
-                if (transfer_unknown &&
-                    verified.error().code ==
-                        mutation::MutationErrorCode::TransportFailure) {
-                    return std::unexpected(mutation_error(verified.error()));
+            if (auto batch_ok = detail::transfer_and_verify_upload_batch(
+                    *staged_batch, storage, key, *workspace, parallelism);
+                !batch_ok) {
+                if (batch_ok.error().transport_after_unknown_transfer) {
+                    return std::unexpected(
+                        mutation_error(batch_ok.error().mutation));
                 }
-                return fail_mutation(verified.error().operation_index,
-                                     verified.error());
+                return fail_mutation(batch_ok.error().mutation.operation_index,
+                                     batch_ok.error().mutation);
             }
 
             auto checkpointed = detail::checkpoint_upload_batch(
@@ -2410,8 +2442,7 @@ execute(const runtime::RuntimeData& runtime_data,
                 }
             }
         }
-        if (!state_storage::initialize(runtime_data.database_path) ||
-            !state_storage::save_state(
+        if (auto saved_state = detail::save_state_checked(
                 runtime_data.database_path,
                 state_storage::StoredState{
                     .tree = found->commit.tree,
@@ -2421,17 +2452,16 @@ execute(const runtime::RuntimeData& runtime_data,
                     .epoch_id = observed_input.storage.epoch_id,
                     .epoch_sequence = observed_input.storage.epoch_sequence,
                     .pending_materializations =
-                        reconciliation_result.pending_materializations})) {
-            const auto database_error = detail::make_error(
-                ErrorCode::DatabaseFailure, "failed to save state.db");
+                        reconciliation_result.pending_materializations});
+            !saved_state) {
             auto rolled = rollback_terminal();
             if (!rolled) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::RecoveryConflict,
-                    database_error.detail +
+                    saved_state.error().detail +
                         "; rollback failed: " + rolled.error().detail));
             }
-            return std::unexpected(database_error);
+            return std::unexpected(saved_state.error());
         }
         if (auto saved_phase =
                 advance_phase(transaction::Phase::DatabaseCommitted);
@@ -2634,9 +2664,7 @@ execute(const runtime::RuntimeData& runtime_data,
     if (!epoch_reference) {
         return std::unexpected(epoch_reference.error());
     }
-    const bool database_saved =
-        state_storage::initialize(runtime_data.database_path) &&
-        state_storage::save_state(
+    if (auto saved_state = detail::save_state_checked(
             runtime_data.database_path,
             state_storage::StoredState{
                 .tree = prepared_commit->commit.tree,
@@ -2649,9 +2677,8 @@ execute(const runtime::RuntimeData& runtime_data,
                     *epoch_reference ? (**epoch_reference).sequence : 0,
                 .pending_materializations =
                     reconciliation_result.pending_materializations});
-    if (!database_saved) {
-        return std::unexpected(detail::make_error(ErrorCode::DatabaseFailure,
-                                                  "failed to save state.db"));
+        !saved_state) {
+        return std::unexpected(saved_state.error());
     }
     if (auto saved_phase = advance_phase(transaction::Phase::DatabaseCommitted);
         !saved_phase) {

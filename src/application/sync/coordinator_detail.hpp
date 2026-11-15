@@ -10,6 +10,7 @@
 #include "crypto/file_crypto.hpp"
 #include "platform/workspace.hpp"
 #include "runtime/resolver.hpp"
+#include "state_storage/database.hpp"
 #include "transport/transport.hpp"
 
 #include <algorithm>
@@ -167,6 +168,24 @@ struct ScopedUploadBatchCleanup {
         }
     }
 };
+
+struct UploadBatchError {
+    bool transport_after_unknown_transfer = false;
+    mutation::MutationError mutation;
+};
+
+// Transfers an upload sub-batch and verifies every uploaded object on storage.
+std::expected<void, UploadBatchError> transfer_and_verify_upload_batch(
+    const mutation::StagedUploadBatch& batch,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const platform::Workspace& workspace,
+    std::size_t parallelism);
+
+// Initializes state.db (if needed) and persists the committed StoredState.
+std::expected<void, Error>
+save_state_checked(const std::filesystem::path& database_path,
+                   const state_storage::StoredState& state);
 
 // Publishes and verifies an Epoch checkpointed via EpochUploaded ->
 // EpochVerified.
