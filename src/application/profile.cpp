@@ -758,11 +758,6 @@ std::expected<void, ProfileError>
 create_profile(const ExecutionEnvironment& environment,
                Profile profile,
                ProfileCredentials credentials) {
-    auto lock = ScopedConfigLock::acquire(environment.app_data_dir);
-    if (!lock) {
-        wipe_credentials(credentials);
-        return std::unexpected(lock.error());
-    }
     std::expected<runtime::vault::KeyBytes, runtime::Error> master_key_res =
         std::unexpected(runtime::Error{.code = runtime::ErrorCode::KeyInvalid,
                                        .detail = "uninitialized"});
@@ -793,17 +788,12 @@ create_profile(const ExecutionEnvironment& environment,
             return std::unexpected(map_runtime_error(master_key_res.error()));
         }
 
-        auto config_path = environment.app_data_dir / "config.toml";
-        auto profiles_res = runtime::load_profiles(config_path);
-        std::vector<runtime::ProfileData> profiles;
-        if (!profiles_res) {
-            if (profiles_res.error().code !=
-                runtime::ErrorCode::ConfigNotFound) {
-                return std::unexpected(map_runtime_error(profiles_res.error()));
-            }
-        } else {
-            profiles = std::move(*profiles_res);
+        auto loaded = load_profiles_locked(environment.app_data_dir, true);
+        if (!loaded) {
+            return std::unexpected(loaded.error());
         }
+        auto& profiles = loaded->profiles;
+        const auto& config_path = loaded->config_path;
 
         if (find_profile(profiles, profile.name) != profiles.end()) {
             return std::unexpected(
@@ -818,8 +808,20 @@ create_profile(const ExecutionEnvironment& environment,
         }
 
         std::error_code ec;
-        if (std::filesystem::exists(paths_res->profile_dir, ec) ||
-            std::filesystem::exists(paths_res->key_path, ec)) {
+        const auto dir_status =
+            std::filesystem::symlink_status(paths_res->profile_dir, ec);
+        const bool dir_present =
+            (!ec &&
+             dir_status.type() != std::filesystem::file_type::not_found) ||
+            (ec && ec != std::errc::no_such_file_or_directory);
+        ec.clear();
+        const auto key_status =
+            std::filesystem::symlink_status(paths_res->key_path, ec);
+        const bool key_present =
+            (!ec &&
+             key_status.type() != std::filesystem::file_type::not_found) ||
+            (ec && ec != std::errc::no_such_file_or_directory);
+        if (dir_present || key_present) {
             return std::unexpected(ProfileError{
                 .code = ProfileErrorCode::StorageFailure,
                 .detail = "profile infrastructure already exists on disk"});
@@ -877,6 +879,11 @@ create_profile(const ExecutionEnvironment& environment,
 
 std::expected<void, ProfileError>
 update_profile(const ExecutionEnvironment& environment, Profile profile) {
+    if (!valid_retention_policy(profile)) {
+        return std::unexpected(
+            ProfileError{.code = ProfileErrorCode::ConfigFailure,
+                         .detail = "invalid retention policy"});
+    }
     if (const auto valid = validate_profile_locations(profile); !valid) {
         return valid;
     }
@@ -894,6 +901,8 @@ update_profile(const ExecutionEnvironment& environment, Profile profile) {
 
     it->local_dir = profile.local_dir;
     it->remote_dir = profile.remote_dir;
+    it->min_history_depth = profile.min_history_depth;
+    it->min_history_age_hours = profile.min_history_age_hours;
 
     auto save_res =
         runtime::save_profiles(loaded->config_path, loaded->profiles);
@@ -987,14 +996,24 @@ rename_profile(const ExecutionEnvironment& environment,
     }
 
     std::error_code ec;
-    if (std::filesystem::exists(new_paths_res->profile_dir, ec)) {
+    const auto new_status =
+        std::filesystem::symlink_status(new_paths_res->profile_dir, ec);
+    if ((ec && ec != std::errc::no_such_file_or_directory) ||
+        (!ec && new_status.type() != std::filesystem::file_type::not_found)) {
         return std::unexpected(
             ProfileError{.code = ProfileErrorCode::StorageFailure,
                          .detail = "physical destination already exists"});
     }
 
     bool phys_renamed = false;
-    if (std::filesystem::exists(old_paths_res->profile_dir, ec)) {
+    ec.clear();
+    const auto old_status =
+        std::filesystem::symlink_status(old_paths_res->profile_dir, ec);
+    if (ec && ec != std::errc::no_such_file_or_directory) {
+        return std::unexpected(ProfileError{
+            .code = ProfileErrorCode::StorageFailure, .detail = ec.message()});
+    }
+    if (!ec && old_status.type() != std::filesystem::file_type::not_found) {
         auto ren_res =
             runtime::rename_profile_directory(*old_paths_res, *new_paths_res);
         if (!ren_res) {
@@ -1449,6 +1468,7 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
     if (!key_bytes) {
         return ProfileLocalState::Problem;
     }
+    KeyBytesWiper key_wiper{*key_bytes};
 
     const auto database = query_entry(paths->database_path);
     if (database.state != EntryState::Present || !database.regular ||
@@ -1462,25 +1482,27 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
         return ProfileLocalState::Problem;
     }
 
-    const auto wal = query_entry(paths->profile_dir / "db.sqlite-wal");
-    if (wal.state == EntryState::Error ||
-        (wal.state == EntryState::Present && (!wal.regular || wal.link))) {
-        return ProfileLocalState::Problem;
-    }
     const auto auxiliary_corrupt = [](const auto& entry) {
         return entry.state == EntryState::Error ||
                (entry.state == EntryState::Present &&
                 (!entry.regular || entry.link));
     };
+    const auto rollback_path = paths->profile_dir / "db.sqlite-journal";
+    const auto rollback_corrupt = [&](const auto& entry) {
+        return auxiliary_corrupt(entry) ||
+               (entry.state == EntryState::Present && entry.size > 0 &&
+                !can_read_first_byte(rollback_path));
+    };
+
+    const auto wal = query_entry(paths->profile_dir / "db.sqlite-wal");
+    if (auxiliary_corrupt(wal)) {
+        return ProfileLocalState::Problem;
+    }
     if (auxiliary_corrupt(query_entry(paths->profile_dir / "db.sqlite-shm"))) {
         return ProfileLocalState::Problem;
     }
-    const auto rollback = query_entry(paths->profile_dir / "db.sqlite-journal");
-    if (auxiliary_corrupt(rollback)) {
-        return ProfileLocalState::Problem;
-    }
-    if (rollback.state == EntryState::Present && rollback.size > 0 &&
-        !can_read_first_byte(paths->profile_dir / "db.sqlite-journal")) {
+    const auto rollback = query_entry(rollback_path);
+    if (rollback_corrupt(rollback)) {
         return ProfileLocalState::Problem;
     }
 
@@ -1600,14 +1622,8 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
     if (final_journal == sync::journal::InspectionResult::Corrupted) {
         return ProfileLocalState::Problem;
     }
-    const auto final_rollback =
-        query_entry(paths->profile_dir / "db.sqlite-journal");
-    if (final_rollback.state == EntryState::Error ||
-        (final_rollback.state == EntryState::Present &&
-         (!final_rollback.regular || final_rollback.link)) ||
-        (final_rollback.state == EntryState::Present &&
-         final_rollback.size > 0 &&
-         !can_read_first_byte(paths->profile_dir / "db.sqlite-journal"))) {
+    const auto final_rollback = query_entry(rollback_path);
+    if (rollback_corrupt(final_rollback)) {
         return ProfileLocalState::Problem;
     }
     active_rollback_journal = active_rollback_journal ||

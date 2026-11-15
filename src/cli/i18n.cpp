@@ -72,7 +72,7 @@ std::vector<std::string> extract_language_argument(int argc,
     }
     sanitized.emplace_back(argv[0]);
     int command_index = 1;
-    if (argc >= 4 && argv[1] != nullptr &&
+    if (argc >= 3 && argv[1] != nullptr &&
         std::string_view{argv[1]} == "--lang" && argv[2] != nullptr &&
         argv[2][0] != '\0' && argv[2][0] != '-') {
         set_language(argv[2]);

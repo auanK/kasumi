@@ -31,10 +31,9 @@ enum_key(Enum value,
 }
 
 template <typename Enum, std::size_t N>
-std::string_view
-enum_tr(Enum value,
-        const std::array<std::pair<Enum, i18n::Key>, N>& table,
-        i18n::Key fallback) {
+std::string_view enum_tr(Enum value,
+                         const std::array<std::pair<Enum, i18n::Key>, N>& table,
+                         i18n::Key fallback) {
     return i18n::tr(enum_key(value, table, fallback));
 }
 
@@ -46,6 +45,16 @@ void print_status_line(std::string_view color,
 
 void print_ok_line(std::string_view message) {
     print_status_line(style::green, i18n::Key::LabelOk, message);
+}
+
+void print_error_line(std::string_view message) {
+    print_status_line(style::red, i18n::Key::LabelError, message);
+}
+
+std::string
+format_plural(std::uint64_t count, i18n::Key singular, i18n::Key plural) {
+    return count == 1 ? std::string{i18n::tr(singular)}
+                      : i18n::format(plural, count);
 }
 
 int present_help(std::string_view topic) {
@@ -706,11 +715,14 @@ void render_sync_summary(const application::SyncCompleted& summary) {
                                    const char* symbol) {
         if (count > 0) {
             parts.push_back(
-                bytes > 0 ? std::format("{} {} ({})", symbol, count, format_size(bytes))
+                bytes > 0 ? std::format(
+                                "{} {} ({})", symbol, count, format_size(bytes))
                           : std::format("{} {}", symbol, count));
         }
     };
-    const auto push_count = [&](std::size_t count, i18n::Key single, i18n::Key plural) {
+    const auto push_count = [&](std::size_t count,
+                                i18n::Key single,
+                                i18n::Key plural) {
         if (count > 0) {
             parts.push_back(i18n::format(count == 1 ? single : plural, count));
         }
@@ -815,7 +827,9 @@ void present(const application::GarbageCollectProgress& progress,
             {S::Applying, i18n::Key::GcStageApplying},
             {S::Finalizing, i18n::Key::GcStageFinalizing},
         }};
-        std::println("{}", enum_tr(progress.stage, kStages, i18n::Key::GcStageFinalizing));
+        std::println(
+            "{}",
+            enum_tr(progress.stage, kStages, i18n::Key::GcStageFinalizing));
         if (progress.stage == S::Finalizing) {
             std::println();
         }
@@ -827,12 +841,11 @@ void present(const application::GarbageCollectProgress& progress,
         state.last_candidate_count != progress.candidate_count) {
         if (*progress.candidate_count == 0) {
             std::println("{}", i18n::tr(i18n::Key::GcCandidatesNone));
-        } else if (*progress.candidate_count == 1) {
-            std::println("{}", i18n::tr(i18n::Key::GcCandidatesSingular));
         } else {
             std::println("{}",
-                         i18n::format(i18n::Key::GcCandidatesPlural,
-                                      *progress.candidate_count));
+                         format_plural(*progress.candidate_count,
+                                       i18n::Key::GcCandidatesSingular,
+                                       i18n::Key::GcCandidatesPlural));
         }
         state.last_candidate_count = progress.candidate_count;
     }
@@ -849,7 +862,9 @@ void present(const application::FsckProgress& progress,
             {S::AuditingContent, i18n::Key::FsckStageAuditingContent},
             {S::Finalizing, i18n::Key::FsckStageFinalizing},
         }};
-        std::println("{}", enum_tr(progress.stage, kStages, i18n::Key::FsckStageFinalizing));
+        std::println(
+            "{}",
+            enum_tr(progress.stage, kStages, i18n::Key::FsckStageFinalizing));
         state.last_stage = progress.stage;
     }
 
@@ -867,13 +882,15 @@ void present(const application::FsckProgress& progress,
         return;
     }
 
+    const auto calc_percent = [](std::uint64_t done, std::uint64_t total) {
+        return done == total ? 100u
+                             : static_cast<unsigned>(
+                                   static_cast<long double>(done) * 100.0L /
+                                   static_cast<long double>(total));
+    };
     const auto completed =
         std::min(progress.completed_objects, *progress.total_objects);
-    const auto percent =
-        completed == *progress.total_objects
-            ? 100u
-            : static_cast<unsigned>(static_cast<long double>(completed) *
-                                    100.0L / *progress.total_objects);
+    const auto percent = calc_percent(completed, *progress.total_objects);
     if (state.last_object_percent == percent) {
         return;
     }
@@ -896,16 +913,11 @@ void present(const application::FsckProgress& progress,
             line += i18n::format(
                 i18n::Key::FsckProgressBytes, completed_size, total_size);
         } else {
-            const auto byte_percent =
-                completed_bytes == *progress.total_plaintext_bytes
-                    ? 100u
-                    : static_cast<unsigned>(
-                          static_cast<long double>(completed_bytes) * 100.0L /
-                          *progress.total_plaintext_bytes);
-            line += i18n::format(i18n::Key::FsckProgressBytesPercent,
-                                 completed_size,
-                                 total_size,
-                                 byte_percent);
+            line += i18n::format(
+                i18n::Key::FsckProgressBytesPercent,
+                completed_size,
+                total_size,
+                calc_percent(completed_bytes, *progress.total_plaintext_bytes));
         }
     }
     std::println("{}.", line);
@@ -946,13 +958,10 @@ int present(const application::Response& response, bool full) {
             std::get_if<application::FsckCompleted>(&response.data);
         fsck && response.operation == application::Operation::Fsck) {
         print_ok_line(i18n::tr(i18n::Key::ErrorFsckClean));
-        if (fsck->checked_objects == 1) {
-            std::println("{}", i18n::tr(i18n::Key::FsckSummarySingular));
-        } else {
-            std::println("{}",
-                         i18n::format(i18n::Key::FsckSummaryPlural,
-                                      fsck->checked_objects));
-        }
+        std::println("{}",
+                     format_plural(fsck->checked_objects,
+                                   i18n::Key::FsckSummarySingular,
+                                   i18n::Key::FsckSummaryPlural));
         if (fsck->checked_plaintext_bytes.has_value()) {
             std::println(
                 "{}",
@@ -995,10 +1004,9 @@ int present(const application::Response& response, bool full) {
         ptr && response.operation == application::Operation::GarbageCollect) {
         if (ptr->analysis_only) {
             const auto header =
-                (ptr->candidate_objects == 1)
-                    ? std::string{i18n::tr(i18n::Key::GcWarningHeaderSingular)}
-                    : i18n::format(i18n::Key::GcWarningHeaderPlural,
-                                   ptr->candidate_objects);
+                format_plural(ptr->candidate_objects,
+                              i18n::Key::GcWarningHeaderSingular,
+                              i18n::Key::GcWarningHeaderPlural);
             const auto label = i18n::tr(i18n::Key::LabelWarning);
             const std::string indent(label.size() + 1, ' ');
             print_status_line(style::yellow, i18n::Key::LabelWarning, header);
@@ -1016,12 +1024,9 @@ int present(const application::Response& response, bool full) {
             std::get_if<application::ResolveMissingCompleted>(&response.data);
         ptr && response.operation == application::Operation::ResolveMissing) {
         if (ptr->resolved_count > 0) {
-            const auto message =
-                ptr->resolved_count == 1
-                    ? std::string{i18n::tr(i18n::Key::ResolveMissingSingular)}
-                    : i18n::format(i18n::Key::ResolveMissingPlural,
-                                   ptr->resolved_count);
-            print_ok_line(message);
+            print_ok_line(format_plural(ptr->resolved_count,
+                                        i18n::Key::ResolveMissingSingular,
+                                        i18n::Key::ResolveMissingPlural));
         } else {
             std::println("{}", i18n::tr(i18n::Key::ResolveMissingNone));
         }
@@ -1091,29 +1096,25 @@ int present(const application::InspectionResponse& response) {
 
 namespace {
 
-void print_error_line(std::string_view message) {
-    print_status_line(style::red, i18n::Key::LabelError, message);
-}
-
 std::string sanitize_error_detail(std::string_view detail) {
     std::string result{detail};
-    constexpr std::array<std::pair<std::string_view, std::string_view>, 4>
-        tokens_pt = {{{"CommitUploaded", "commit publicado"},
-                      {"HeadVerified", "head verificada"},
-                      {"EpochPrepared", "epoch preparado"},
-                      {"DatabaseCommitted", "estado persistido"}}};
-    constexpr std::array<std::pair<std::string_view, std::string_view>, 4>
-        tokens_en = {{{"CommitUploaded", "published commit"},
-                      {"HeadVerified", "verified head"},
-                      {"EpochPrepared", "prepared epoch"},
-                      {"DatabaseCommitted", "persisted state"}}};
-    const auto& internal_tokens =
-        (i18n::current_language() == i18n::Language::Portuguese) ? tokens_pt
-                                                                 : tokens_en;
-    for (const auto& [token, replacement] : internal_tokens) {
+    struct TokenReplacement {
+        std::string_view token;
+        std::string_view pt;
+        std::string_view en;
+    };
+    constexpr std::array<TokenReplacement, 4> tokens = {{
+        {"CommitUploaded", "commit publicado", "published commit"},
+        {"HeadVerified", "head verificada", "verified head"},
+        {"EpochPrepared", "epoch preparado", "prepared epoch"},
+        {"DatabaseCommitted", "estado persistido", "persisted state"},
+    }};
+    const bool is_pt = i18n::current_language() == i18n::Language::Portuguese;
+    for (const auto& entry : tokens) {
+        const auto replacement = is_pt ? entry.pt : entry.en;
         std::size_t pos = 0;
-        while ((pos = result.find(token, pos)) != std::string::npos) {
-            result.replace(pos, token.length(), replacement);
+        while ((pos = result.find(entry.token, pos)) != std::string::npos) {
+            result.replace(pos, entry.token.length(), replacement);
             pos += replacement.length();
         }
     }
@@ -1140,7 +1141,8 @@ int present(const application::Error& error) {
             {S::Publishing, i18n::Key::SyncErrorPublishing},
             {S::Finalizing, i18n::Key::SyncErrorFinalizing},
         }};
-        print_error_line(enum_tr(*error.stage, kStages, i18n::Key::SyncErrorObserving));
+        print_error_line(
+            enum_tr(*error.stage, kStages, i18n::Key::SyncErrorObserving));
         std::println("{}",
                      i18n::format(i18n::Key::SyncErrorReason,
                                   sanitize_error_detail(error.detail)));

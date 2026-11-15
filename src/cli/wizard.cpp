@@ -3,11 +3,12 @@
 #include "application/profile.hpp"
 #include "cli/credentials.hpp"
 #include "cli/i18n.hpp"
-#include "cli/style.hpp"
+#include "cli/presenter.hpp"
 #include "platform/cancellation.hpp"
 #include "platform/path.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <iostream>
 #include <print>
 #include <string>
@@ -15,17 +16,6 @@
 namespace kasumi::cli {
 
 int run_config_wizard(const application::ExecutionEnvironment& environment) {
-    const auto print_status =
-        [](std::string_view color, i18n::Key label, std::string_view message) {
-            std::println(
-                "{}{}{} {}", color, i18n::tr(label), style::reset, message);
-        };
-    const auto print_error = [&](std::string_view message) {
-        print_status(style::red, i18n::Key::LabelError, message);
-    };
-    const auto print_ok = [&](std::string_view message) {
-        print_status(style::green, i18n::Key::LabelOk, message);
-    };
     const auto prompt_line = [](std::string_view label, std::string& value) {
         std::print("{}", label);
         if (platform::cancellation::requested()) {
@@ -42,16 +32,16 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         [&](const std::expected<void, application::ProfileError>& result,
             std::string_view ok_message) {
             if (result) {
-                print_ok(ok_message);
+                print_ok_line(ok_message);
             } else {
-                print_error(result.error().detail);
+                print_error_line(result.error().detail);
             }
         };
 
     while (!platform::cancellation::requested()) {
         auto profiles_res = application::list_profiles(environment);
         if (!profiles_res) {
-            print_error(
+            print_error_line(
                 std::string{i18n::tr(i18n::Key::WizardConfigReadFailed)} +
                 profiles_res.error().detail);
             return 1;
@@ -77,10 +67,14 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         if (!prompt_line(i18n::tr(i18n::Key::WizardMenu), choice)) {
             break;
         }
+        if (choice.size() == 1) {
+            choice[0] = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(choice[0])));
+        }
 
-        if (choice == "q" || choice == "Q") {
+        if (choice == "q") {
             break;
-        } else if (choice == "n" || choice == "N") {
+        } else if (choice == "n") {
             std::string new_profile, new_local, new_remote;
             if (!prompt_line(i18n::tr(i18n::Key::WizardPromptProfileName),
                              new_profile)) {
@@ -89,8 +83,8 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             if (std::ranges::any_of(profiles, [&](const auto& profile) {
                     return profile.name == new_profile;
                 })) {
-                print_error(i18n::format(i18n::Key::WizardProfileAlreadyExists,
-                                         new_profile));
+                print_error_line(i18n::format(
+                    i18n::Key::WizardProfileAlreadyExists, new_profile));
                 continue;
             }
 
@@ -101,12 +95,13 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 break;
             }
             if (!platform::path::from_utf8(new_local).is_absolute()) {
-                print_error(i18n::tr(i18n::Key::WizardLocalPathMustBeAbsolute));
+                print_error_line(
+                    i18n::tr(i18n::Key::WizardLocalPathMustBeAbsolute));
                 continue;
             }
             if (new_remote.find(':') == std::string::npos &&
                 !platform::path::from_utf8(new_remote).is_absolute()) {
-                print_error(
+                print_error_line(
                     i18n::tr(i18n::Key::WizardRemotePathMustBeAbsolute));
                 continue;
             }
@@ -127,7 +122,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             application::wipe_credentials(creds);
             report_result(res, i18n::tr(i18n::Key::WizardProfileCreated));
 
-        } else if (choice == "c" || choice == "C") {
+        } else if (choice == "c") {
             std::string source, new_name;
             if (!prompt_line(i18n::tr(i18n::Key::WizardPromptSourceProfile),
                              source) ||
@@ -139,7 +134,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 application::clone_profile(environment, source, new_name),
                 i18n::format(i18n::Key::WizardProfileCloned, new_name, source));
 
-        } else if (choice == "d" || choice == "D") {
+        } else if (choice == "d") {
             std::string target;
             if (!prompt_line(i18n::tr(i18n::Key::WizardPromptProfileToDelete),
                              target)) {
@@ -149,7 +144,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 application::delete_profile(environment, target),
                 i18n::format(i18n::Key::WizardProfileDeleted, target));
 
-        } else if (choice == "e" || choice == "E") {
+        } else if (choice == "e") {
             std::string target;
             if (!prompt_line(i18n::tr(i18n::Key::WizardPromptProfileToEdit),
                              target)) {
@@ -193,10 +188,10 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                     application::update_profile(environment, p),
                     i18n::format(i18n::Key::WizardProfileEdited, target));
             } else {
-                print_error(i18n::tr(i18n::Key::WizardProfileNotFound));
+                print_error_line(i18n::tr(i18n::Key::WizardProfileNotFound));
             }
 
-        } else if (choice == "r" || choice == "R") {
+        } else if (choice == "r") {
             std::string target, new_name;
             if (!prompt_line(i18n::tr(i18n::Key::WizardPromptProfileToRename),
                              target) ||
@@ -208,7 +203,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 application::rename_profile(environment, target, new_name),
                 i18n::format(i18n::Key::WizardProfileRenamed, new_name));
         } else {
-            print_error(i18n::tr(i18n::Key::WizardInvalidOption));
+            print_error_line(i18n::tr(i18n::Key::WizardInvalidOption));
         }
     }
     return platform::cancellation::requested() ? 130 : 0;

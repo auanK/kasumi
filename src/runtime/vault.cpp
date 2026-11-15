@@ -3,15 +3,29 @@
 #include "platform/durability.hpp"
 #include "platform/private_storage.hpp"
 
+#include <array>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <limits>
 #include <monocypher.h>
+#include <string_view>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace kasumi::runtime::vault {
 
-constexpr const char* MAGIC = "KASUMI_EDGE_SYNC_V1_MASK";
+constexpr std::string_view MAGIC = "KASUMI_EDGE_SYNC_V1_MASK";
 
 std::expected<KeyBytes, runtime::Error> decode_hex(std::string_view text) {
     if (text.size() != KEY_SIZE * 2) {
@@ -29,6 +43,16 @@ std::expected<KeyBytes, runtime::Error> decode_hex(std::string_view text) {
         return -1;
     };
     KeyBytes key{};
+    bool success = false;
+    struct KeyWipeGuard {
+        KeyBytes& value;
+        bool& success;
+        ~KeyWipeGuard() noexcept {
+            if (!success) {
+                crypto_wipe(value.data(), value.size());
+            }
+        }
+    } guard{key, success};
     for (std::size_t index = 0; index < key.size(); ++index) {
         const int high = digit(text[index * 2]);
         const int low = digit(text[index * 2 + 1]);
@@ -40,13 +64,13 @@ std::expected<KeyBytes, runtime::Error> decode_hex(std::string_view text) {
         }
         key[index] = static_cast<uint8_t>((high << 4) | low);
     }
+    success = true;
     return key;
 }
 
 void obscure(std::span<std::uint8_t, KEY_SIZE> key) {
-    size_t magic_len = std::strlen(MAGIC);
-    for (size_t i = 0; i < KEY_SIZE; ++i) {
-        key[i] ^= static_cast<uint8_t>(MAGIC[i % magic_len]);
+    for (std::size_t i = 0; i < KEY_SIZE; ++i) {
+        key[i] ^= static_cast<uint8_t>(MAGIC[i % MAGIC.size()]);
     }
 }
 
@@ -71,20 +95,112 @@ read_impl(const std::filesystem::path& path, bool protect) {
                       .detail = "key.bin file is missing or invalid"});
         }
     }
-    std::ifstream input(path, std::ios::binary);
     KeyBytes key{};
-    if (!input.read(reinterpret_cast<char*>(key.data()),
-                    static_cast<std::streamsize>(key.size()))) {
+    bool success = false;
+    struct KeyWipeGuard {
+        KeyBytes& value;
+        bool& success;
+        ~KeyWipeGuard() noexcept {
+            if (!success) {
+                crypto_wipe(value.data(), value.size());
+            }
+        }
+    } guard{key, success};
+
+    std::array<char, KEY_SIZE + 1> buf{};
+    std::size_t total = 0;
+    struct BufWipeGuard {
+        std::array<char, KEY_SIZE + 1>& buf;
+        ~BufWipeGuard() noexcept {
+            crypto_wipe(buf.data(), buf.size());
+        }
+    } buf_guard{buf};
+
+#if defined(_WIN32)
+    const auto native =
+        CreateFileW(path.c_str(),
+                    GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr,
+                    OPEN_EXISTING,
+                    FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN,
+                    nullptr);
+    if (native == INVALID_HANDLE_VALUE) {
         return std::unexpected(
             Error{.code = ErrorCode::KeyNotFound,
                   .detail = "key.bin file is missing or corrupted"});
     }
-    if (input.peek() != std::ifstream::traits_type::eof()) {
+    platform::private_storage::PrivateHandle handle{
+        reinterpret_cast<std::intptr_t>(native)};
+    FILE_ATTRIBUTE_TAG_INFO attributes{};
+    if (!GetFileInformationByHandleEx(
+            native, FileAttributeTagInfo, &attributes, sizeof(attributes)) ||
+        (attributes.FileAttributes &
+         (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY |
+          FILE_ATTRIBUTE_DEVICE)) != 0) {
+        return std::unexpected(
+            Error{.code = ErrorCode::KeyNotFound,
+                  .detail = "key.bin file is missing or invalid"});
+    }
+    while (total < buf.size()) {
+        DWORD count = 0;
+        if (!ReadFile(native,
+                      buf.data() + total,
+                      static_cast<DWORD>(buf.size() - total),
+                      &count,
+                      nullptr)) {
+            return std::unexpected(
+                Error{.code = ErrorCode::KeyNotFound,
+                      .detail = "key.bin file is missing or corrupted"});
+        }
+        if (count == 0) {
+            break;
+        }
+        total += count;
+    }
+#else
+    const int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        return std::unexpected(
+            Error{.code = ErrorCode::KeyNotFound,
+                  .detail = "key.bin file is missing or invalid"});
+    }
+    platform::private_storage::PrivateHandle handle{fd};
+    struct stat st{};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        return std::unexpected(
+            Error{.code = ErrorCode::KeyNotFound,
+                  .detail = "key.bin file is missing or invalid"});
+    }
+    while (total < buf.size()) {
+        const auto count = ::read(fd, buf.data() + total, buf.size() - total);
+        if (count == 0) {
+            break;
+        }
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return std::unexpected(
+                Error{.code = ErrorCode::KeyNotFound,
+                      .detail = "key.bin file is missing or corrupted"});
+        }
+        total += static_cast<std::size_t>(count);
+    }
+#endif
+    if (total < key.size()) {
+        return std::unexpected(
+            Error{.code = ErrorCode::KeyNotFound,
+                  .detail = "key.bin file is missing or corrupted"});
+    }
+    if (total > key.size()) {
         return std::unexpected(
             Error{.code = ErrorCode::KeyInvalid,
                   .detail = "key.bin file has invalid size"});
     }
+    std::memcpy(key.data(), buf.data(), key.size());
     obscure(key);
+    success = true;
     return key;
 }
 
@@ -150,13 +266,13 @@ write_new(const std::filesystem::path& path,
     auto flushed =
         platform::private_storage::flush_and_close_private_file(*file);
     if (!flushed) {
-        return std::unexpected(
-            Error{.code = ErrorCode::KeyWriteFailure, .detail = flushed.error()});
+        return std::unexpected(Error{.code = ErrorCode::KeyWriteFailure,
+                                     .detail = flushed.error()});
     }
     auto synced = platform::durability::sync_parent_directory(path);
     if (!synced) {
-        return std::unexpected(
-            Error{.code = ErrorCode::KeyWriteFailure, .detail = synced.error()});
+        return std::unexpected(Error{.code = ErrorCode::KeyWriteFailure,
+                                     .detail = synced.error()});
     }
     return {};
 }

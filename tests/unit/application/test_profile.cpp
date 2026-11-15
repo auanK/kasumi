@@ -48,10 +48,9 @@
 #define NOMINMAX
 #endif
 #define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-
 #include <aclapi.h>
 #include <sddl.h>
+#include <windows.h>
 #include <winioctl.h>
 #else
 #include <spawn.h>
@@ -555,6 +554,35 @@ TEST(ApplicationProfileTest,
     EXPECT_FALSE(std::filesystem::exists(
         kasumi::test::workspace_path(workspace, "app/profiles/new")));
     EXPECT_TRUE(kasumi::application::list_profiles(environment)->empty());
+}
+
+TEST(ApplicationProfileTest, UpdateProfileValidatesAndPersistsRetentionPolicy) {
+    auto workspace = kasumi::test::make_temp_workspace(
+        "application-profile-update-retention");
+    const ExecutionEnvironment environment{
+        kasumi::test::workspace_path(workspace, "app")};
+    Profile profile{"demo",
+                    kasumi::test::workspace_path(workspace, "local"),
+                    kasumi::test::workspace_path(workspace, "remote").string()};
+    ASSERT_TRUE(
+        kasumi::application::create_profile(environment, profile, key()));
+
+    profile.min_history_depth = 0;
+    const auto invalid =
+        kasumi::application::update_profile(environment, profile);
+    ASSERT_FALSE(invalid.has_value());
+    EXPECT_EQ(invalid.error().code,
+              kasumi::application::ProfileErrorCode::ConfigFailure);
+
+    profile.min_history_depth = 12;
+    profile.min_history_age_hours = 48;
+    ASSERT_TRUE(kasumi::application::update_profile(environment, profile));
+
+    const auto profiles = kasumi::application::list_profiles(environment);
+    ASSERT_TRUE(profiles.has_value());
+    ASSERT_EQ(profiles->size(), 1U);
+    EXPECT_EQ(profiles->front().min_history_depth, 12U);
+    EXPECT_EQ(profiles->front().min_history_age_hours, 48U);
 }
 
 TEST(ApplicationProfileTest,

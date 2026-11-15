@@ -63,6 +63,9 @@ int present(const application::Error& error);
 // Displays the error of a remote inspection and returns 1.
 int present(const application::InspectionError& error);
 
+void print_ok_line(std::string_view message);
+void print_error_line(std::string_view message);
+
 } // namespace kasumi::cli
 
 #endif

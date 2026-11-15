@@ -88,6 +88,20 @@ TEST(CliI18nTest, ExtractsLanguageFlagCorrectly) {
     set_language(Language::English);
 }
 
+TEST(CliI18nTest, ExtractsStandaloneLanguageFlagPrefix) {
+    char arg0[] = "kasumi";
+    char arg1[] = "--lang";
+    char arg2[] = "pt";
+    char* argv[] = {arg0, arg1, arg2};
+
+    const auto sanitized = extract_language_argument(3, argv);
+    EXPECT_EQ(current_language(), Language::Portuguese);
+    ASSERT_EQ(sanitized.size(), 1U);
+    EXPECT_EQ(sanitized[0], "kasumi");
+
+    set_language(Language::English);
+}
+
 TEST(CliI18nTest, AllKeysHaveValidTranslations) {
     constexpr std::size_t count =
         static_cast<std::size_t>(Key::WizardConfigReadFailed) + 1;

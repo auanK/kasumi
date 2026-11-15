@@ -19,10 +19,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #else
-#include <windows.h>
-
 #include <aclapi.h>
 #include <sddl.h>
+#include <windows.h>
 #endif
 
 TEST(CliUpdateTest, ParsesTheSinglePublicUpdateCommand) {
@@ -111,22 +110,6 @@ TEST(CliUpdateTest, ParsesOnlyTheExpectedSha256AndArchiveEntries) {
         digest + "  other.tar.gz\n", package.archive));
     EXPECT_FALSE(kasumi::cli::update::parse_checksum(
         std::string(63, 'a') + "  " + package.archive, package.archive));
-    EXPECT_TRUE(kasumi::cli::update::valid_archive_listing(
-        "kasumi\nLICENSE\nTHIRD_PARTY_NOTICES.md\n", package));
-    EXPECT_FALSE(kasumi::cli::update::valid_archive_listing(
-        "../kasumi\nLICENSE\nTHIRD_PARTY_NOTICES.md\n", package));
-    EXPECT_FALSE(kasumi::cli::update::valid_archive_listing(
-        "kasumi\nkasumi\nLICENSE\nTHIRD_PARTY_NOTICES.md\n", package));
-    EXPECT_FALSE(kasumi::cli::update::valid_archive_listing(
-        "kasumi\nLICENSE\nTHIRD_PARTY_NOTICES.md\nextra\n", package));
-    EXPECT_TRUE(kasumi::cli::update::valid_archive_listing(
-        "CHANGELOG.md\nkasumi\nLICENSE\nREADME.md\n"
-        "THIRD_PARTY_NOTICES.md\n",
-        package));
-    EXPECT_FALSE(kasumi::cli::update::valid_archive_listing(
-        "CHANGELOG.md\nkasumi\nLICENSE\nREADME.md\n"
-        "THIRD_PARTY_NOTICES.md\nextra\n",
-        package));
     const std::string verbose =
         "-rwxr-xr-x user/group 1024 2026-10-09 12:00 kasumi\n"
         "-rw-r--r-- user/group 128 2026-10-09 12:00 LICENSE\n"

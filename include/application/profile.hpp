@@ -51,7 +51,7 @@ create_profile(const ExecutionEnvironment& environment,
                Profile profile,
                ProfileCredentials credentials);
 
-// Updates profile directories.
+// Updates profile directories and retention policy.
 std::expected<void, ProfileError>
 update_profile(const ExecutionEnvironment& environment, Profile profile);
 
@@ -74,7 +74,8 @@ clone_profile(const ExecutionEnvironment& environment,
               std::string_view source_profile_name,
               std::string_view destination_profile_name);
 
-// Local state of a profile based exclusively on local infrastructure and database evidence.
+// Local state of a profile based exclusively on local infrastructure and
+// database evidence.
 enum class ProfileLocalState {
     Initialized,
     Ready,
@@ -83,10 +84,11 @@ enum class ProfileLocalState {
 };
 
 // Inspects the local state of a profile based exclusively on local evidence.
-// Does not access remote storage, does not initialize SQLite, does not create files.
-ProfileLocalState inspect_profile_local_state(
-    const ExecutionEnvironment& environment,
-    std::string_view profile_name);
+// Does not access remote storage, does not initialize SQLite, does not create
+// files.
+ProfileLocalState
+inspect_profile_local_state(const ExecutionEnvironment& environment,
+                            std::string_view profile_name);
 
 // Returns a canonical string representation for the profile local state.
 std::string_view to_string(ProfileLocalState state) noexcept;

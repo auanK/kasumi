@@ -17,6 +17,11 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#else
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace kasumi::runtime {
@@ -70,9 +75,9 @@ load_profile(const std::filesystem::path& config_path,
     if (!profiles)
         return std::unexpected(profiles.error());
 
-    for (const auto& prof : *profiles) {
+    for (auto& prof : *profiles) {
         if (prof.name == profile_name)
-            return prof;
+            return std::move(prof);
     }
 
     return std::unexpected(Error{.code = ErrorCode::ProfileNotFound,
@@ -111,10 +116,13 @@ load_profiles(const std::filesystem::path& config_path) {
     try {
 #if defined(_WIN32)
         const auto native = CreateFileW(
-            config_path.c_str(), GENERIC_READ,
+            config_path.c_str(),
+            GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            nullptr, OPEN_EXISTING,
-            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN,
+            nullptr);
         if (native == INVALID_HANDLE_VALUE) {
             return std::unexpected(Error{
                 .code = ErrorCode::IoFailure,
@@ -124,25 +132,32 @@ load_profiles(const std::filesystem::path& config_path) {
         platform::private_storage::PrivateHandle input{
             reinterpret_cast<std::intptr_t>(native)};
         FILE_ATTRIBUTE_TAG_INFO attributes{};
-        if (!GetFileInformationByHandleEx(native, FileAttributeTagInfo,
-                                          &attributes, sizeof(attributes)) ||
+        if (!GetFileInformationByHandleEx(native,
+                                          FileAttributeTagInfo,
+                                          &attributes,
+                                          sizeof(attributes)) ||
             (attributes.FileAttributes &
              (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY |
               FILE_ATTRIBUTE_DEVICE)) != 0) {
             return std::unexpected(Error{
                 .code = ErrorCode::IoFailure,
-                .detail = "global configuration is not an accessible regular file"});
+                .detail =
+                    "global configuration is not an accessible regular file"});
         }
         std::string snapshot;
         std::array<char, 4096> buffer{};
         for (;;) {
             DWORD count = 0;
-            if (!ReadFile(native, buffer.data(),
-                          static_cast<DWORD>(buffer.size()), &count, nullptr)) {
+            if (!ReadFile(native,
+                          buffer.data(),
+                          static_cast<DWORD>(buffer.size()),
+                          &count,
+                          nullptr)) {
                 return std::unexpected(Error{
                     .code = ErrorCode::IoFailure,
-                    .detail = "failed to read global configuration (native_code=" +
-                              std::to_string(GetLastError()) + ")"});
+                    .detail =
+                        "failed to read global configuration (native_code=" +
+                        std::to_string(GetLastError()) + ")"});
             }
             if (count == 0) {
                 break;
@@ -152,13 +167,40 @@ load_profiles(const std::filesystem::path& config_path) {
         input.close();
         config = toml::parse(snapshot, platform::path::to_utf8(config_path));
 #else
-        std::ifstream input(config_path, std::ios::binary);
-        if (!input) {
+        const int fd =
+            ::open(config_path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0) {
             return std::unexpected(
                 Error{.code = ErrorCode::IoFailure,
                       .detail = "failed to open global configuration"});
         }
-        config = toml::parse(input, platform::path::to_utf8(config_path));
+        platform::private_storage::PrivateHandle input{fd};
+        struct stat st{};
+        if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+            return std::unexpected(Error{
+                .code = ErrorCode::IoFailure,
+                .detail =
+                    "global configuration is not an accessible regular file"});
+        }
+        std::string snapshot;
+        std::array<char, 4096> buffer{};
+        for (;;) {
+            const auto count = ::read(fd, buffer.data(), buffer.size());
+            if (count == 0) {
+                break;
+            }
+            if (count < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return std::unexpected(
+                    Error{.code = ErrorCode::IoFailure,
+                          .detail = "failed to read global configuration"});
+            }
+            snapshot.append(buffer.data(), static_cast<std::size_t>(count));
+        }
+        input.close();
+        config = toml::parse(snapshot, platform::path::to_utf8(config_path));
 #endif
     } catch (const toml::parse_error& error) {
         return std::unexpected(
@@ -189,6 +231,10 @@ load_profiles(const std::filesystem::path& config_path) {
 
     std::vector<ProfileData> result;
     for (const auto& [key, value] : *profiles) {
+        if (!is_valid_profile_name(key.str())) {
+            return std::unexpected(Error{.code = ErrorCode::InvalidProfileName,
+                                         .detail = "invalid profile name"});
+        }
         auto* prof = value.as_table();
         if (prof == nullptr) {
             return std::unexpected(
@@ -199,10 +245,10 @@ load_profiles(const std::filesystem::path& config_path) {
             if (field != "local_dir" && field != "remote_dir" &&
                 field != "min_history_depth" &&
                 field != "min_history_age_hours") {
-                return std::unexpected(Error{
-                    .code = ErrorCode::ProfileInvalid,
-                    .detail = "unsupported profile field: " +
-                              std::string{field.str()}});
+                return std::unexpected(
+                    Error{.code = ErrorCode::ProfileInvalid,
+                          .detail = "unsupported profile field: " +
+                                    std::string{field.str()}});
             }
         }
         const auto local = (*prof)["local_dir"].value<std::string>();
@@ -213,9 +259,8 @@ load_profiles(const std::filesystem::path& config_path) {
                 .detail = "profile must have 'local_dir' and 'remote_dir'"});
         }
 
-        ProfileData pd{std::string(key.str()),
-                       platform::path::from_utf8(*local),
-                       *remote};
+        ProfileData pd{
+            std::string(key.str()), platform::path::from_utf8(*local), *remote};
         auto min_depth = read_retention_value(*prof, "min_history_depth");
         if (!min_depth) {
             return std::unexpected(min_depth.error());
@@ -235,6 +280,10 @@ std::expected<void, Error>
 save_profiles(const std::filesystem::path& config_path,
               std::span<const ProfileData> profiles) {
     for (const auto& prof : profiles) {
+        if (!is_valid_profile_name(prof.name)) {
+            return std::unexpected(Error{.code = ErrorCode::InvalidProfileName,
+                                         .detail = "invalid profile name"});
+        }
         if (prof.min_history_depth == 0 || prof.min_history_age_hours == 0) {
             return std::unexpected(
                 Error{.code = ErrorCode::ProfileInvalid,

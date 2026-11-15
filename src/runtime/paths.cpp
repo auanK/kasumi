@@ -64,18 +64,19 @@ GlobalPaths default_global_paths() {
 
 #if defined(_WIN32)
     const auto appdata = get_windows_environment_path(L"APPDATA");
-    if (appdata.has_value() && !appdata->empty()) {
+    if (appdata && appdata->is_absolute()) {
         app_dir = *appdata / "kasumi";
     } else {
         app_dir = std::filesystem::current_path() / ".kasumi_data";
     }
 #else
     const char* xdg_config_home = std::getenv("XDG_CONFIG_HOME");
-    if (xdg_config_home && *xdg_config_home) {
+    if (xdg_config_home && *xdg_config_home &&
+        std::filesystem::path(xdg_config_home).is_absolute()) {
         app_dir = std::filesystem::path(xdg_config_home) / "kasumi";
     } else {
         const char* home = std::getenv("HOME");
-        if (home) {
+        if (home && *home && std::filesystem::path(home).is_absolute()) {
             app_dir = std::filesystem::path(home) / ".config" / "kasumi";
         } else {
             app_dir = std::filesystem::current_path() / ".kasumi_data";
@@ -158,7 +159,13 @@ std::expected<void, Error>
 rename_profile_directory(const ProfilePaths& source,
                          const ProfilePaths& destination) {
     std::error_code ec;
-    if (std::filesystem::exists(source.profile_dir, ec)) {
+    const auto status = std::filesystem::symlink_status(source.profile_dir, ec);
+    if (!ec && status.type() != std::filesystem::file_type::not_found) {
+        if (std::filesystem::is_symlink(status)) {
+            return std::unexpected(Error{
+                .code = ErrorCode::IoFailure,
+                .detail = "source profile directory cannot be a symlink"});
+        }
         auto secured =
             platform::private_storage::protect_tree(source.profile_dir);
         if (!secured) {

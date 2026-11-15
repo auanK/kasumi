@@ -2,6 +2,7 @@
 
 #include "cli/i18n.hpp"
 #include "cli/presenter.hpp"
+#include "crypto/physical_hash.hpp"
 #include "platform/cancellation.hpp"
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
@@ -36,12 +37,10 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <windows.h>
-
 #include <aclapi.h>
-#include <bcrypt.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
+#include <windows.h>
 #include <winhttp.h>
 #include <winver.h>
 #else
@@ -68,8 +67,8 @@ constexpr std::size_t PACKAGE_DOCUMENT_LIMIT = 2U * 1024U * 1024U;
 constexpr std::size_t PROCESS_OUTPUT_LIMIT = 64U * 1024U;
 
 #if defined(__linux__)
-constexpr std::array<std::string_view, 8> LINUX_SYSTEM_TOOLS{
-    "curl", "sha256sum", "tar", "dpkg-query", "rpm", "pacman", "apk", "pkexec"};
+constexpr std::array<std::string_view, 7> LINUX_SYSTEM_TOOLS{
+    "curl", "tar", "dpkg-query", "rpm", "pacman", "apk", "pkexec"};
 constexpr std::array<std::string_view, 1> LINUX_ELEVATION_TOOLS{"sudo"};
 constexpr std::array<std::string_view, 6> LINUX_TOOL_DIRECTORIES{
     "/usr/local/sbin",
@@ -120,9 +119,6 @@ bool trusted_system_directory(const std::filesystem::path& path,
         ::lstat(path.c_str(), &status) != 0 || status.st_uid != 0 ||
         (!S_ISDIR(status.st_mode) && !S_ISLNK(status.st_mode)) ||
         (S_ISDIR(status.st_mode) && (status.st_mode & 0022) != 0)) {
-        return false;
-    }
-    if (S_ISLNK(status.st_mode) && status.st_uid != 0) {
         return false;
     }
     const auto resolved = std::filesystem::canonical(path, error);
@@ -912,75 +908,7 @@ get_text(std::string url,
     auto response = read_limited_file(path, maximum_bytes);
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
-    if (!response) {
-        return std::unexpected(response.error());
-    }
     return response;
-}
-
-std::expected<std::string, std::string>
-sha256_file_impl(const std::filesystem::path& path) {
-#if defined(_WIN32)
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    if (BCryptOpenAlgorithmProvider(
-            &algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0) {
-        return std::unexpected("could not initialize SHA-256");
-    }
-    DWORD object_size = 0;
-    DWORD result_size = 0;
-    if (BCryptGetProperty(algorithm,
-                          BCRYPT_OBJECT_LENGTH,
-                          reinterpret_cast<PUCHAR>(&object_size),
-                          sizeof(object_size),
-                          &result_size,
-                          0) < 0 ||
-        object_size == 0) {
-        BCryptCloseAlgorithmProvider(algorithm, 0);
-        return std::unexpected("could not initialize SHA-256 hash state");
-    }
-    std::vector<UCHAR> object(object_size);
-    BCRYPT_HASH_HANDLE hash = nullptr;
-    if (BCryptCreateHash(
-            algorithm, &hash, object.data(), object_size, nullptr, 0, 0) < 0) {
-        BCryptCloseAlgorithmProvider(algorithm, 0);
-        return std::unexpected("could not create SHA-256 hash state");
-    }
-    std::ifstream input(path, std::ios::binary);
-    std::array<UCHAR, 65536> buffer{};
-    bool failed = !input;
-    while (!failed && input) {
-        input.read(reinterpret_cast<char*>(buffer.data()),
-                   static_cast<std::streamsize>(buffer.size()));
-        const auto read = input.gcount();
-        if (read > 0 &&
-            BCryptHashData(hash, buffer.data(), static_cast<ULONG>(read), 0) <
-                0) {
-            failed = true;
-        }
-    }
-    std::array<UCHAR, 32> digest{};
-    if (failed ||
-        BCryptFinishHash(
-            hash, digest.data(), static_cast<ULONG>(digest.size()), 0) < 0) {
-        BCryptDestroyHash(hash);
-        BCryptCloseAlgorithmProvider(algorithm, 0);
-        return std::unexpected("could not hash downloaded package");
-    }
-    BCryptDestroyHash(hash);
-    BCryptCloseAlgorithmProvider(algorithm, 0);
-    return bytes_to_hex(digest);
-#else
-    auto result =
-        run_capture({"sha256sum", "--", platform::path::to_utf8(path)});
-    if (!result || result->exit_code != 0 || result->output.size() < 64) {
-        return std::unexpected("could not hash downloaded package");
-    }
-    const std::string_view hash{result->output.data(), 64};
-    if (!valid_sha256(hash)) {
-        return std::unexpected("SHA-256 tool returned an invalid digest");
-    }
-    return lower_ascii(hash);
-#endif
 }
 
 std::expected<void, std::string>
@@ -1019,8 +947,8 @@ std::optional<std::filesystem::path> current_executable_path() {
             return std::nullopt;
         }
         if (length < buffer.size() - 1) {
-            return resolve_regular_executable(
-                std::filesystem::path{std::wstring_view{buffer.data(), length}});
+            return resolve_regular_executable(std::filesystem::path{
+                std::wstring_view{buffer.data(), length}});
         }
         if (buffer.size() >= 32768) {
             return std::nullopt;
@@ -1036,9 +964,9 @@ std::optional<std::filesystem::path> current_executable_path() {
             return std::nullopt;
         }
         if (static_cast<std::size_t>(length) < buffer.size()) {
-            return resolve_regular_executable(std::filesystem::path{
-                std::string_view{buffer.data(),
-                                 static_cast<std::size_t>(length)}});
+            return resolve_regular_executable(
+                std::filesystem::path{std::string_view{
+                    buffer.data(), static_cast<std::size_t>(length)}});
         }
         if (buffer.size() >= 65536) {
             return std::nullopt;
@@ -1131,24 +1059,23 @@ extract_and_validate(const std::filesystem::path& archive,
     if (!std::filesystem::create_directory(destination, error) || error) {
         return std::unexpected("could not create package extraction directory");
     }
-    std::vector<std::string> extract_args{
-        "tar",
+    std::vector<std::string> extract_args{"tar",
 #if defined(_WIN32)
-        "-xf",
+                                          "-xf",
 #else
-        "-xzf",
+                                          "-xzf",
 #endif
-        archive_utf8,
-        "-C",
-        platform::path::to_utf8(destination),
+                                          archive_utf8,
+                                          "-C",
+                                          platform::path::to_utf8(destination),
 #if !defined(_WIN32)
-        "--no-same-owner",
-        "--no-same-permissions",
+                                          "--no-same-owner",
+                                          "--no-same-permissions",
 #endif
-        "--",
-        package.executable,
-        "LICENSE",
-        "THIRD_PARTY_NOTICES.md"};
+                                          "--",
+                                          package.executable,
+                                          "LICENSE",
+                                          "THIRD_PARTY_NOTICES.md"};
     const auto extracted = run_capture(extract_args);
     if (!extracted || extracted->exit_code != 0) {
         return std::unexpected(extracted ? "could not extract verified package"
@@ -1176,28 +1103,103 @@ extract_and_validate(const std::filesystem::path& archive,
 
 std::expected<void, std::string>
 validate_executable_format(const std::filesystem::path& executable) {
-    auto bytes = read_limited_file(executable, EXECUTABLE_LIMIT);
-    if (!bytes || bytes->size() < 64) {
+    std::array<unsigned char, 64> header{};
+#if defined(_WIN32)
+    const auto handle =
+        CreateFileW(executable.c_str(),
+                    GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr,
+                    OPEN_EXISTING,
+                    FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN,
+                    nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
         return std::unexpected("package executable is incomplete");
     }
-#if defined(_WIN32)
-    if ((*bytes)[0] != 'M' || (*bytes)[1] != 'Z' || bytes->size() < 256) {
+    struct HandleGuard {
+        HANDLE h;
+        ~HandleGuard() noexcept {
+            CloseHandle(h);
+        }
+    } guard{handle};
+    FILE_ATTRIBUTE_TAG_INFO attributes{};
+    LARGE_INTEGER size{};
+    if (!GetFileInformationByHandleEx(
+            handle, FileAttributeTagInfo, &attributes, sizeof(attributes)) ||
+        (attributes.FileAttributes &
+         (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY |
+          FILE_ATTRIBUTE_DEVICE)) != 0 ||
+        !GetFileSizeEx(handle, &size) || size.QuadPart < 256 ||
+        static_cast<std::uint64_t>(size.QuadPart) > EXECUTABLE_LIMIT) {
+        return std::unexpected("package is not a Windows executable");
+    }
+    DWORD read_count = 0;
+    if (!ReadFile(handle,
+                  header.data(),
+                  static_cast<DWORD>(header.size()),
+                  &read_count,
+                  nullptr) ||
+        read_count != header.size()) {
+        return std::unexpected("package executable is incomplete");
+    }
+    if (header[0] != 'M' || header[1] != 'Z') {
         return std::unexpected("package is not a Windows executable");
     }
     std::uint32_t pe_offset = 0;
-    std::memcpy(&pe_offset, bytes->data() + 0x3c, sizeof(pe_offset));
-    if (pe_offset > bytes->size() - 6 ||
-        bytes->compare(pe_offset, 4, "PE\0\0", 4) != 0 ||
-        static_cast<unsigned char>((*bytes)[pe_offset + 4]) != 0x64 ||
-        static_cast<unsigned char>((*bytes)[pe_offset + 5]) != 0x86) {
+    std::memcpy(&pe_offset, header.data() + 0x3c, sizeof(pe_offset));
+    std::array<unsigned char, 6> pe_header{};
+    LARGE_INTEGER distance{};
+    distance.QuadPart = static_cast<LONGLONG>(pe_offset);
+    if (pe_offset >
+            static_cast<std::uint64_t>(size.QuadPart) - pe_header.size() ||
+        !SetFilePointerEx(handle, distance, nullptr, FILE_BEGIN) ||
+        !ReadFile(handle,
+                  pe_header.data(),
+                  static_cast<DWORD>(pe_header.size()),
+                  &read_count,
+                  nullptr) ||
+        read_count != pe_header.size()) {
+        return std::unexpected("package is not a Windows executable");
+    }
+    if (std::memcmp(pe_header.data(), "PE\0\0", 4) != 0 ||
+        pe_header[4] != 0x64 || pe_header[5] != 0x86) {
         return std::unexpected("package executable is not x86_64 Windows");
     }
 #else
-    if (static_cast<unsigned char>((*bytes)[0]) != 0x7f || (*bytes)[1] != 'E' ||
-        (*bytes)[2] != 'L' || (*bytes)[3] != 'F' ||
-        static_cast<unsigned char>((*bytes)[4]) != 2 ||
-        static_cast<unsigned char>((*bytes)[5]) != 1 ||
-        static_cast<unsigned char>((*bytes)[18]) != 62) {
+    const int fd =
+        ::open(executable.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        return std::unexpected("package executable is incomplete");
+    }
+    struct FdGuard {
+        int fd;
+        ~FdGuard() noexcept {
+            ::close(fd);
+        }
+    } guard{fd};
+    struct stat st{};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 64 ||
+        static_cast<std::uint64_t>(st.st_size) > EXECUTABLE_LIMIT) {
+        return std::unexpected("package executable is incomplete");
+    }
+    std::size_t filled = 0;
+    while (filled < header.size()) {
+        const auto count =
+            ::read(fd, header.data() + filled, header.size() - filled);
+        if (count == 0) {
+            return std::unexpected("package executable is incomplete");
+        }
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return std::unexpected("package executable is incomplete");
+        }
+        filled += static_cast<std::size_t>(count);
+    }
+    if (header[0] != 0x7f || header[1] != 'E' || header[2] != 'L' ||
+        header[3] != 'F' || header[4] != 2 || header[5] != 1 ||
+        header[18] != 62) {
         return std::unexpected("package executable is not x86_64 Linux");
     }
 #endif
@@ -1242,7 +1244,7 @@ prepare_verified_package(const std::filesystem::path& archive,
 
 std::expected<std::string, std::string>
 sha256_file(const std::filesystem::path& path) {
-    return sha256_file_impl(path);
+    return crypto::physical::hash_file(path, "sha256");
 }
 
 std::optional<Version> parse_version(std::string_view text) {
@@ -1507,37 +1509,6 @@ std::optional<std::string> parse_checksum(std::string_view body,
     return lower_ascii(digest);
 }
 
-bool valid_archive_listing(std::string_view listing,
-                           const PackageNames& package) {
-    const std::set<std::string_view> required{
-        package.executable, "LICENSE", "THIRD_PARTY_NOTICES.md"};
-    const std::set<std::string_view> optional{"CHANGELOG.md", "README.md"};
-    std::set<std::string_view> found;
-    std::size_t begin = 0;
-    while (begin < listing.size()) {
-        auto end = listing.find('\n', begin);
-        if (end == std::string_view::npos) {
-            end = listing.size();
-        }
-        auto entry = listing.substr(begin, end - begin);
-        if (!entry.empty() && entry.back() == '\r') {
-            entry.remove_suffix(1);
-        }
-        if (entry.empty() ||
-            (!required.contains(entry) && !optional.contains(entry)) ||
-            !found.insert(entry).second) {
-            return false;
-        }
-        if (end == listing.size()) {
-            break;
-        }
-        begin = end + 1;
-    }
-    return std::ranges::all_of(required, [&found](std::string_view entry) {
-        return found.contains(entry);
-    });
-}
-
 bool valid_verbose_archive_listing(std::string_view listing,
                                    const PackageNames& package) {
     const std::set<std::string_view> required{
@@ -1687,34 +1658,35 @@ InstallFailure replacement_failure(std::string detail) {
 std::expected<void, InstallFailure>
 preserve_posix_attributes(const std::filesystem::path& path,
                           const struct stat& original_stat,
-                          const std::filesystem::file_status& target_status,
                           std::string_view inspect_error,
                           std::string_view ownership_error,
                           std::string_view permission_error) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        return std::unexpected(filesystem_failure(
+            inspect_error, std::error_code{errno, std::generic_category()}));
+    }
+    platform::private_storage::PrivateHandle guard{fd};
     struct stat entry_stat{};
-    if (::stat(path.c_str(), &entry_stat) != 0) {
+    if (::fstat(fd, &entry_stat) != 0 || !S_ISREG(entry_stat.st_mode)) {
         return std::unexpected(filesystem_failure(
             inspect_error, std::error_code{errno, std::generic_category()}));
     }
     if ((entry_stat.st_uid != original_stat.st_uid ||
          entry_stat.st_gid != original_stat.st_gid) &&
-        ::chown(path.c_str(),
-                entry_stat.st_uid == original_stat.st_uid
-                    ? static_cast<uid_t>(-1)
-                    : original_stat.st_uid,
-                entry_stat.st_gid == original_stat.st_gid
-                    ? static_cast<gid_t>(-1)
-                    : original_stat.st_gid) != 0) {
+        ::fchown(fd,
+                 entry_stat.st_uid == original_stat.st_uid
+                     ? static_cast<uid_t>(-1)
+                     : original_stat.st_uid,
+                 entry_stat.st_gid == original_stat.st_gid
+                     ? static_cast<gid_t>(-1)
+                     : original_stat.st_gid) != 0) {
         return std::unexpected(filesystem_failure(
             ownership_error, std::error_code{errno, std::generic_category()}));
     }
-    std::error_code error;
-    std::filesystem::permissions(path,
-                                 target_status.permissions(),
-                                 std::filesystem::perm_options::replace,
-                                 error);
-    if (error) {
-        return std::unexpected(filesystem_failure(permission_error, error));
+    if (::fchmod(fd, original_stat.st_mode & 07777) != 0) {
+        return std::unexpected(filesystem_failure(
+            permission_error, std::error_code{errno, std::generic_category()}));
     }
     return {};
 }
@@ -1752,8 +1724,9 @@ InstallResult install_prepared_executable(const std::filesystem::path& prepared,
         return std::unexpected(install_failure(
             "installation directory cannot be identified safely"));
     }
-    const auto target_status = std::filesystem::status(target, error);
-    if (error) {
+    const auto target_status = std::filesystem::symlink_status(target, error);
+    if (error || std::filesystem::is_symlink(target_status) ||
+        !std::filesystem::is_regular_file(target_status)) {
         return std::unexpected(filesystem_failure(
             "could not read installed executable permissions", error));
     }
@@ -1810,18 +1783,18 @@ InstallResult install_prepared_executable(const std::filesystem::path& prepared,
     }
 #if !defined(_WIN32)
     struct stat original_stat{};
-    if (::stat(target.c_str(), &original_stat) != 0) {
+    if (::lstat(target.c_str(), &original_stat) != 0 ||
+        !S_ISREG(original_stat.st_mode)) {
         return std::unexpected(filesystem_failure(
             "could not inspect executable ownership",
             std::error_code{errno, std::generic_category()}));
     }
-    if (const auto preserved =
-            preserve_posix_attributes(staged,
-                                      original_stat,
-                                      target_status,
-                                      "could not inspect executable ownership",
-                                      "could not preserve executable ownership",
-                                      "could not preserve executable permissions");
+    if (const auto preserved = preserve_posix_attributes(
+            staged,
+            original_stat,
+            "could not inspect executable ownership",
+            "could not preserve executable ownership",
+            "could not preserve executable permissions");
         !preserved) {
         return std::unexpected(preserved.error());
     }
@@ -1848,7 +1821,6 @@ InstallResult install_prepared_executable(const std::filesystem::path& prepared,
     if (const auto preserved = preserve_posix_attributes(
             backup,
             original_stat,
-            target_status,
             "could not inspect recovery copy ownership",
             "could not preserve recovery copy ownership",
             "could not preserve recovery copy permissions");
@@ -1948,12 +1920,11 @@ bool query_current_user_token(std::vector<std::byte>& token_data) {
     DWORD required = 0;
     GetTokenInformation(token.value, TokenUser, nullptr, 0, &required);
     token_data.resize(required);
-    return required != 0 &&
-           GetTokenInformation(token.value,
-                               TokenUser,
-                               token_data.data(),
-                               required,
-                               &required) != 0;
+    return required != 0 && GetTokenInformation(token.value,
+                                                TokenUser,
+                                                token_data.data(),
+                                                required,
+                                                &required) != 0;
 }
 
 struct WindowsWorkspaceAcl {
@@ -1970,15 +1941,15 @@ query_windows_workspace_acl(const std::filesystem::path& root,
                             std::string_view read_error) {
     WindowsWorkspaceAcl acl{.path = root.native()};
     PSECURITY_DESCRIPTOR raw_descriptor = nullptr;
-    const auto query = GetNamedSecurityInfoW(
-        acl.path.data(),
-        SE_FILE_OBJECT,
-        DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION,
-        &acl.owner,
-        nullptr,
-        &acl.dacl,
-        nullptr,
-        &raw_descriptor);
+    const auto query = GetNamedSecurityInfoW(acl.path.data(),
+                                             SE_FILE_OBJECT,
+                                             DACL_SECURITY_INFORMATION |
+                                                 OWNER_SECURITY_INFORMATION,
+                                             &acl.owner,
+                                             nullptr,
+                                             &acl.dacl,
+                                             nullptr,
+                                             &raw_descriptor);
     acl.descriptor.reset(raw_descriptor);
     if (query != ERROR_SUCCESS || !acl.descriptor || acl.dacl == nullptr) {
         return std::unexpected(std::string{read_error});
@@ -1986,80 +1957,12 @@ query_windows_workspace_acl(const std::filesystem::path& root,
     SECURITY_DESCRIPTOR_CONTROL control = 0;
     DWORD revision = 0;
     acl.protected_dacl =
-        GetSecurityDescriptorControl(acl.descriptor.get(), &control, &revision) !=
-            0 &&
+        GetSecurityDescriptorControl(
+            acl.descriptor.get(), &control, &revision) != 0 &&
         (control & SE_DACL_PROTECTED) != 0 &&
         GetAclInformation(
             acl.dacl, &acl.info, sizeof(acl.info), AclSizeInformation) != 0;
     return acl;
-}
-
-std::expected<void, std::string>
-validate_windows_workspace_acl_impl(const std::filesystem::path& root) {
-    auto acl = query_windows_workspace_acl(
-        root, "could not verify update workspace permissions");
-    if (!acl) {
-        return std::unexpected(acl.error());
-    }
-    WindowsWellKnownSid system_sid;
-    WindowsWellKnownSid admin_sid;
-    bool valid = acl->protected_dacl && acl->owner != nullptr &&
-                 system_sid.init(WinLocalSystemSid) &&
-                 admin_sid.init(WinBuiltinAdministratorsSid) &&
-                 acl->info.AceCount == 3;
-    bool has_workspace_user = false;
-    bool has_system = false;
-    bool has_admin_read = false;
-    PSID workspace_user = nullptr;
-    for (DWORD index = 0; valid && index < acl->info.AceCount; ++index) {
-        void* raw_ace = nullptr;
-        if (!GetAce(acl->dacl, index, &raw_ace) || raw_ace == nullptr) {
-            valid = false;
-            break;
-        }
-        auto* ace = static_cast<ACCESS_ALLOWED_ACE*>(raw_ace);
-        if (ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE) {
-            valid = false;
-            break;
-        }
-        auto* sid = reinterpret_cast<PSID>(&ace->SidStart);
-        if (EqualSid(sid, system_sid.get())) {
-            has_system = ace->Mask == FILE_ALL_ACCESS;
-        } else if (EqualSid(sid, admin_sid.get())) {
-            has_admin_read =
-                ace->Mask == (FILE_GENERIC_READ | FILE_GENERIC_EXECUTE) &&
-                ace->Header.AceFlags ==
-                    (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE);
-        } else if (ace->Mask == FILE_ALL_ACCESS && !has_workspace_user) {
-            has_workspace_user = true;
-            workspace_user = sid;
-        } else {
-            valid = false;
-        }
-    }
-    std::vector<std::byte> token_data;
-    valid = valid && query_current_user_token(token_data);
-    const auto* current_user =
-        valid ? reinterpret_cast<const TOKEN_USER*>(token_data.data())
-              : nullptr;
-    const bool current_is_owner =
-        current_user != nullptr && workspace_user != nullptr &&
-        EqualSid(current_user->User.Sid, workspace_user);
-    BOOL is_member = FALSE;
-    const bool current_is_admin =
-        valid && !current_is_owner &&
-        CheckTokenMembership(nullptr, admin_sid.get(), &is_member) != 0 &&
-        is_member;
-    const bool owner_is_expected =
-        acl->owner != nullptr && workspace_user != nullptr &&
-        (EqualSid(acl->owner, workspace_user) ||
-         EqualSid(acl->owner, admin_sid.get()));
-    if (!valid || !owner_is_expected || !has_workspace_user || !has_system ||
-        !has_admin_read || (!current_is_owner && !current_is_admin)) {
-        return std::unexpected("update workspace ACL does not preserve owner "
-                               "privacy and administrator read access");
-    }
-    return {};
 }
 
 bool windows_entry_is_not_reparse_point(const std::filesystem::path& path) {
@@ -2102,7 +2005,7 @@ validate_staging_root(const std::filesystem::path& root) {
         return std::unexpected(
             "update staging directory cannot be resolved safely");
     }
-    return validate_windows_workspace_acl_impl(root);
+    return validate_windows_workspace_acl(root);
 #else
     const auto canonical_root = std::filesystem::canonical(root, error);
     if (error || canonical_root != root) {
@@ -2136,7 +2039,8 @@ validate_staging_root(const std::filesystem::path& root) {
 #endif
 }
 
-[[maybe_unused]] std::expected<PreparedExecutable, std::string>
+#if defined(_WIN32)
+std::expected<PreparedExecutable, std::string>
 prepare_archive_for_install(const std::filesystem::path& archive,
                             std::string_view checksum,
                             const PackageNames& package,
@@ -2169,6 +2073,7 @@ prepare_archive_for_install(const std::filesystem::path& archive,
     }
     return *prepared;
 }
+#endif
 
 ApiGet make_workspace_api_get(const platform::Workspace& workspace) {
     return [&](std::string_view url,
@@ -2194,7 +2099,8 @@ struct ScopedWorkspaceCleanup {
 std::optional<std::string> release_asset_url(const Release& release,
                                              std::string_view name);
 
-[[maybe_unused]] std::expected<std::string, std::string>
+#if defined(_WIN32)
+std::expected<std::string, std::string>
 refetch_official_digest(const std::filesystem::path& archive,
                         std::string_view requested_tag,
                         const PackageNames& package,
@@ -2235,6 +2141,7 @@ refetch_official_digest(const std::filesystem::path& archive,
     }
     return verify_package_checksum(archive, checksum_file, package.archive);
 }
+#endif
 
 #if !defined(_WIN32)
 std::optional<std::filesystem::path> find_program(std::string_view name) {
@@ -2260,8 +2167,17 @@ std::optional<std::filesystem::path> find_program(std::string_view name) {
 #endif
 
 #if defined(__linux__)
-std::expected<std::string, std::string>
-curl_checksum_as_user(std::string_view url, uid_t uid) {
+std::expected<HttpResponse, std::string>
+curl_get_as_user_once(std::string_view url,
+                      std::size_t max_bytes,
+                      bool api_request,
+                      uid_t uid,
+                      std::string& redirect_url) {
+    const auto parts = parse_https_url(url);
+    if (!parts || !(api_request ? allowed_api_host(parts->host)
+                                : allowed_download_host(parts->host))) {
+        return std::unexpected("download URL is outside the GitHub allowlist");
+    }
     const auto curl = resolve_linux_system_tool("curl");
     if (!curl) {
         return std::unexpected(curl.error());
@@ -2290,15 +2206,31 @@ curl_checksum_as_user(std::string_view url, uid_t uid) {
         groups.resize(static_cast<std::size_t>(group_count));
     }
     const std::string address{url};
-    const std::string max_size = "4096";
-    std::vector<std::string> argument_values{
-        curl->string(), "--disable",    "--fail",
-        "--location",   "--silent",     "--show-error",
-        "--proto",      "=https",       "--proto-redir",
-        "=https",       "--max-redirs", "5",
-        "--max-time",   "30",           "--max-filesize",
-        max_size,       "--write-out",  "\n%{url_effective}",
-        "--url",        address};
+    const std::string max_size = std::to_string(max_bytes);
+    const std::string max_time = api_request ? "30" : "30";
+    std::vector<std::string> argument_values{curl->string(),
+                                             "--disable",
+                                             "--silent",
+                                             "--show-error",
+                                             "--globoff",
+                                             "--proto",
+                                             "=https",
+                                             "--connect-timeout",
+                                             "15",
+                                             "--max-time",
+                                             max_time,
+                                             "--max-filesize",
+                                             max_size,
+                                             "--write-out",
+                                             "\n%{http_code}\n%{redirect_url}",
+                                             "--url",
+                                             address};
+    if (api_request) {
+        argument_values.push_back("--header");
+        argument_values.push_back("Accept: application/vnd.github+json");
+        argument_values.push_back("--header");
+        argument_values.push_back("User-Agent: kasumi-updater");
+    }
     std::vector<char*> arguments;
     arguments.reserve(argument_values.size() + 1);
     for (auto& argument : argument_values) {
@@ -2317,7 +2249,8 @@ curl_checksum_as_user(std::string_view url, uid_t uid) {
                              "ALL_PROXY",
                              "no_proxy",
                              "NO_PROXY"}) {
-        if (const char* value = std::getenv(name); value != nullptr) {
+        if (const char* value = std::getenv(name);
+            safe_environment_value(value, 4096)) {
             environment.push_back(std::string{name} + "=" + value);
         }
     }
@@ -2335,7 +2268,7 @@ curl_checksum_as_user(std::string_view url, uid_t uid) {
     if (child < 0) {
         ::close(pipe_fds[0]);
         ::close(pipe_fds[1]);
-        return std::unexpected("could not start unprivileged checksum request");
+        return std::unexpected("could not start unprivileged request");
     }
     if (child == 0) {
         ::close(pipe_fds[0]);
@@ -2353,7 +2286,8 @@ curl_checksum_as_user(std::string_view url, uid_t uid) {
     }
     ::close(pipe_fds[1]);
     std::string output;
-    std::array<char, 2048> buffer{};
+    std::array<char, 4096> buffer{};
+    const std::size_t hard_limit = max_bytes + 4096U;
     bool oversized = false;
     for (;;) {
         const auto count = ::read(pipe_fds[0], buffer.data(), buffer.size());
@@ -2368,7 +2302,7 @@ curl_checksum_as_user(std::string_view url, uid_t uid) {
             break;
         }
         if (static_cast<std::size_t>(count) >
-            8192U - std::min<std::size_t>(8192U, output.size())) {
+            hard_limit - std::min(hard_limit, output.size())) {
             oversized = true;
             break;
         }
@@ -2385,20 +2319,67 @@ curl_checksum_as_user(std::string_view url, uid_t uid) {
     } while (waited < 0 && errno == EINTR);
     if (oversized || waited != child || !WIFEXITED(status) ||
         WEXITSTATUS(status) != 0) {
-        return std::unexpected(
-            oversized ? "checksum response exceeds the permitted size"
-                      : "unprivileged checksum request failed");
+        return std::unexpected(oversized ? "response exceeds the permitted size"
+                                         : "unprivileged HTTPS request failed");
     }
-    const auto separator = output.rfind('\n');
-    if (separator == std::string::npos) {
-        return std::unexpected("checksum response has no final URL");
+    const auto second_sep = output.rfind('\n');
+    const auto first_sep = second_sep == std::string::npos || second_sep == 0
+                               ? std::string::npos
+                               : output.rfind('\n', second_sep - 1);
+    if (second_sep == std::string::npos || first_sep == std::string::npos) {
+        return std::unexpected("response is missing status metadata");
     }
-    const auto final_url = std::string_view{output}.substr(separator + 1);
-    const auto final_parts = parse_https_url(final_url);
-    if (!final_parts || !allowed_download_host(final_parts->host)) {
-        return std::unexpected("checksum redirect left the GitHub allowlist");
+    int http_code = 0;
+    const auto code_view = std::string_view{output}.substr(
+        first_sep + 1, second_sep - (first_sep + 1));
+    const auto [end, parse_err] = std::from_chars(
+        code_view.data(), code_view.data() + code_view.size(), http_code);
+    if (parse_err != std::errc{} ||
+        end != code_view.data() + code_view.size()) {
+        return std::unexpected("response HTTP status is invalid");
     }
-    return output.substr(0, separator);
+    redirect_url = output.substr(second_sep + 1);
+    return HttpResponse{.status = http_code,
+                        .body = output.substr(0, first_sep)};
+}
+
+std::expected<HttpResponse, std::string> curl_as_user(std::string url,
+                                                      std::size_t max_bytes,
+                                                      bool api_request,
+                                                      uid_t uid) {
+    for (int redirect = 0; redirect <= 5; ++redirect) {
+        std::string next_url;
+        auto response =
+            curl_get_as_user_once(url, max_bytes, api_request, uid, next_url);
+        if (!response) {
+            return std::unexpected(response.error());
+        }
+        if (response->status >= 300 && response->status < 400) {
+            const auto next_parts = parse_https_url(next_url);
+            if (api_request || !next_parts ||
+                !allowed_download_host(next_parts->host) || redirect == 5) {
+                return std::unexpected(
+                    "checksum redirect left the GitHub allowlist");
+            }
+            url = std::move(next_url);
+            continue;
+        }
+        return response;
+    }
+    return std::unexpected("too many GitHub redirects");
+}
+
+std::expected<std::string, std::string>
+curl_checksum_as_user(std::string_view url, uid_t uid) {
+    auto response = curl_as_user(std::string{url}, 4096, false, uid);
+    if (!response) {
+        return std::unexpected(response.error());
+    }
+    if (response->status != 200) {
+        return std::unexpected("GitHub checksum request failed with HTTP " +
+                               std::to_string(response->status));
+    }
+    return std::move(response->body);
 }
 #endif
 
@@ -2499,12 +2480,6 @@ install_with_elevation(const std::filesystem::path& executable,
                                          platform::path::to_utf8(archive),
                                          std::string{tag},
                                          std::string{language}};
-            const auto tool = resolve_linux_system_tool("pkexec");
-            if (!tool) {
-                return LinuxElevationResult{LinuxElevationState::Failed,
-                                            tool.error()};
-            }
-            command.front() = platform::path::to_utf8(*tool);
             reproc::options options;
             auto environment = linux_pkexec_environment();
             options.env.behavior = reproc::env::empty;
@@ -2533,13 +2508,8 @@ install_with_elevation(const std::filesystem::path& executable,
         }}
                : LinuxElevationAttempt{},
         sudo ? LinuxElevationAttempt{[&] {
-            const auto tool = resolve_linux_system_tool("sudo");
-            if (!tool) {
-                return LinuxElevationResult{LinuxElevationState::Failed,
-                                            tool.error()};
-            }
             const auto elevated =
-                run_inherited({platform::path::to_utf8(*tool),
+                run_inherited({platform::path::to_utf8(*sudo),
                                "--",
                                self,
                                "--kasumi-update-install",
@@ -3164,6 +3134,89 @@ InstallResult install_linux_handoff(const std::filesystem::path& archive,
 namespace {
 
 #if defined(__linux__)
+bool copy_private_staged_archive(const std::filesystem::path& archive,
+                                 const std::filesystem::path& trusted_archive,
+                                 uid_t expected_uid,
+                                 std::size_t max_bytes) {
+    const int dir_fd = ::open(archive.parent_path().c_str(),
+                              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dir_fd < 0) {
+        return false;
+    }
+    platform::private_storage::PrivateHandle dir_guard{dir_fd};
+    struct stat dir_stat{};
+    if (::fstat(dir_fd, &dir_stat) != 0 || !S_ISDIR(dir_stat.st_mode) ||
+        dir_stat.st_uid != expected_uid || (dir_stat.st_mode & 0077) != 0) {
+        return false;
+    }
+    const int src_fd = ::openat(
+        dir_fd, archive.filename().c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (src_fd < 0) {
+        return false;
+    }
+    platform::private_storage::PrivateHandle src_guard{src_fd};
+    struct stat src_stat{};
+    if (::fstat(src_fd, &src_stat) != 0 || !S_ISREG(src_stat.st_mode) ||
+        src_stat.st_uid != expected_uid || src_stat.st_size <= 0 ||
+        static_cast<std::uint64_t>(src_stat.st_size) > max_bytes) {
+        return false;
+    }
+    const int dst_fd =
+        ::open(trusted_archive.c_str(),
+               O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+               0600);
+    if (dst_fd < 0) {
+        return false;
+    }
+    platform::private_storage::PrivateHandle dst_guard{dst_fd};
+    std::array<char, 65536> buffer{};
+    std::size_t copied = 0;
+    for (;;) {
+        const auto count = ::read(src_fd, buffer.data(), buffer.size());
+        if (count == 0) {
+            break;
+        }
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        const auto chunk = static_cast<std::size_t>(count);
+        if (chunk > max_bytes - copied) {
+            return false;
+        }
+        std::size_t offset = 0;
+        while (offset < chunk) {
+            const auto written =
+                ::write(dst_fd, buffer.data() + offset, chunk - offset);
+            if (written < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return false;
+            }
+            offset += static_cast<std::size_t>(written);
+        }
+        copied += chunk;
+    }
+    return copied > 0 && copied == static_cast<std::size_t>(src_stat.st_size);
+}
+
+std::optional<std::pair<dev_t, ino_t>>
+linux_target_identity(const std::filesystem::path& path) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        return std::nullopt;
+    }
+    platform::private_storage::PrivateHandle guard{fd};
+    struct stat st{};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        return std::nullopt;
+    }
+    return std::pair<dev_t, ino_t>{st.st_dev, st.st_ino};
+}
+
 int run_linux_install_helper(int argc, char* argv[]) {
     if (argc != 5 || argv[2] == nullptr || argv[3] == nullptr ||
         argv[4] == nullptr ||
@@ -3178,7 +3231,10 @@ int run_linux_install_helper(int argc, char* argv[]) {
     const auto uid = invoking_user_id();
     const auto package = package_names_for_this_platform();
     const auto target = current_executable_path();
-    if (!uid || !package || !target || target->filename() != "kasumi") {
+    const auto target_id =
+        target ? linux_target_identity(*target) : std::nullopt;
+    if (!uid || !package || !target || !target_id ||
+        target->filename() != "kasumi") {
         return report_failure(
             "could not validate the privileged update handoff");
     }
@@ -3190,12 +3246,9 @@ int run_linux_install_helper(int argc, char* argv[]) {
         return report_failure("installer handoff release is invalid or older");
     }
     auto stage_valid = validate_staging_root(archive.parent_path());
-    std::error_code error;
-    const auto archive_size = std::filesystem::file_size(archive, error);
     if (!stage_valid ||
         archive.filename() != platform::path::from_utf8(package->archive) ||
-        !is_regular_file_without_redirect(archive) || error ||
-        archive_size == 0 || archive_size > PACKAGE_LIMIT) {
+        !is_regular_file_without_redirect(archive)) {
         return report_failure(
             "update package is outside the original private staging directory");
     }
@@ -3203,6 +3256,17 @@ int run_linux_install_helper(int argc, char* argv[]) {
     if (package_managed_installation(*target, manager)) {
         return report_failure(
             i18n::format(i18n::Key::UpdateManagedInstallation, manager));
+    }
+    auto releases = fetch_releases(
+        [uid = *uid](std::string_view url, std::size_t max_bytes) {
+            return curl_as_user(std::string{url}, max_bytes, true, uid);
+        });
+    if (!releases) {
+        return report_failure(releases.error());
+    }
+    const auto selected = select_release_index(*releases);
+    if (!selected || (*releases)[*selected].tag != tag) {
+        return report_failure("official update release changed during handoff");
     }
     auto workspace = platform::create_workspace("update-elevated");
     if (!workspace) {
@@ -3212,11 +3276,8 @@ int run_linux_install_helper(int argc, char* argv[]) {
     const auto trusted_archive =
         platform::workspace_file(*workspace, package->archive);
     if (trusted_archive.empty() ||
-        !std::filesystem::copy_file(archive,
-                                    trusted_archive,
-                                    std::filesystem::copy_options::none,
-                                    error) ||
-        error) {
+        !copy_private_staged_archive(
+            archive, trusted_archive, *uid, PACKAGE_LIMIT)) {
         return report_failure(
             "could not copy update package into a private workspace");
     }
@@ -3229,10 +3290,22 @@ int run_linux_install_helper(int argc, char* argv[]) {
         -> std::expected<PreparedExecutable, std::string> {
         return prepare_verified_package(source, digest, *package, *workspace);
     };
-    hooks.install = [](const PreparedExecutable& prepared,
-                       const std::filesystem::path& destination) {
+    hooks.install = [target_id =
+                         *target_id](const PreparedExecutable& prepared,
+                                     const std::filesystem::path& destination) {
+        InstallHooks install_hooks;
+        install_hooks.validate_target =
+            [target_id](const std::filesystem::path& dest)
+            -> std::expected<void, std::string> {
+            const auto current_id = linux_target_identity(dest);
+            if (!current_id || *current_id != target_id) {
+                return std::unexpected(
+                    "installed kasumi binary changed during update");
+            }
+            return {};
+        };
         return install_prepared_executable(
-            prepared.path, destination, prepared.sha256);
+            prepared.path, destination, prepared.sha256, &install_hooks);
     };
     const auto installed =
         install_linux_handoff(trusted_archive, tag, *target, hooks);
@@ -3464,7 +3537,8 @@ grant_windows_admin_read_access(const std::filesystem::path& root) {
     bool valid = acl->protected_dacl && acl->owner != nullptr &&
                  system_sid.init(WinLocalSystemSid) &&
                  admin_sid.init(WinBuiltinAdministratorsSid) &&
-                 query_current_user_token(token_data) && acl->info.AceCount == 2;
+                 query_current_user_token(token_data) &&
+                 acl->info.AceCount == 2;
     const auto* current_user =
         valid ? reinterpret_cast<const TOKEN_USER*>(token_data.data())
               : nullptr;
@@ -3533,17 +3607,89 @@ grant_windows_admin_read_access(const std::filesystem::path& root) {
 
 std::expected<void, std::string>
 validate_windows_workspace_acl(const std::filesystem::path& root) {
-    return validate_windows_workspace_acl_impl(root);
+    auto acl = query_windows_workspace_acl(
+        root, "could not verify update workspace permissions");
+    if (!acl) {
+        return std::unexpected(acl.error());
+    }
+    WindowsWellKnownSid system_sid;
+    WindowsWellKnownSid admin_sid;
+    bool valid = acl->protected_dacl && acl->owner != nullptr &&
+                 system_sid.init(WinLocalSystemSid) &&
+                 admin_sid.init(WinBuiltinAdministratorsSid) &&
+                 acl->info.AceCount == 3;
+    bool has_workspace_user = false;
+    bool has_system = false;
+    bool has_admin_read = false;
+    PSID workspace_user = nullptr;
+    for (DWORD index = 0; valid && index < acl->info.AceCount; ++index) {
+        void* raw_ace = nullptr;
+        if (!GetAce(acl->dacl, index, &raw_ace) || raw_ace == nullptr) {
+            valid = false;
+            break;
+        }
+        auto* ace = static_cast<ACCESS_ALLOWED_ACE*>(raw_ace);
+        if (ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE) {
+            valid = false;
+            break;
+        }
+        auto* sid = reinterpret_cast<PSID>(&ace->SidStart);
+        constexpr BYTE expected_flags =
+            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
+        if (ace->Header.AceFlags != expected_flags) {
+            valid = false;
+            break;
+        }
+        if (EqualSid(sid, system_sid.get())) {
+            has_system = ace->Mask == FILE_ALL_ACCESS;
+        } else if (EqualSid(sid, admin_sid.get())) {
+            has_admin_read =
+                ace->Mask == (FILE_GENERIC_READ | FILE_GENERIC_EXECUTE);
+        } else if (ace->Mask == FILE_ALL_ACCESS && !has_workspace_user &&
+                   !IsWellKnownSid(sid, WinWorldSid) &&
+                   !IsWellKnownSid(sid, WinBuiltinUsersSid) &&
+                   !IsWellKnownSid(sid, WinAuthenticatedUserSid) &&
+                   !IsWellKnownSid(sid, WinBuiltinGuestsSid) &&
+                   !IsWellKnownSid(sid, WinAnonymousSid)) {
+            has_workspace_user = true;
+            workspace_user = sid;
+        } else {
+            valid = false;
+        }
+    }
+    std::vector<std::byte> token_data;
+    valid = valid && query_current_user_token(token_data);
+    const auto* current_user =
+        valid ? reinterpret_cast<const TOKEN_USER*>(token_data.data())
+              : nullptr;
+    const bool current_is_owner =
+        current_user != nullptr && workspace_user != nullptr &&
+        EqualSid(current_user->User.Sid, workspace_user);
+    BOOL is_member = FALSE;
+    const bool current_is_admin =
+        valid && !current_is_owner &&
+        CheckTokenMembership(nullptr, admin_sid.get(), &is_member) != 0 &&
+        is_member;
+    const bool owner_is_expected = acl->owner != nullptr &&
+                                   workspace_user != nullptr &&
+                                   (EqualSid(acl->owner, workspace_user) ||
+                                    EqualSid(acl->owner, admin_sid.get()));
+    if (!valid || !owner_is_expected || !has_workspace_user || !has_system ||
+        !has_admin_read || (!current_is_owner && !current_is_admin)) {
+        return std::unexpected("update workspace ACL does not preserve owner "
+                               "privacy and administrator read access");
+    }
+    return {};
 }
 
 std::optional<WindowsFileIdentity>
 windows_file_identity(const std::filesystem::path& path) {
     FILE_ID_INFO info{};
-    if (!windows_has_attribute_flags(
-            path,
-            0,
-            FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY,
-            &info)) {
+    if (!windows_has_attribute_flags(path,
+                                     0,
+                                     FILE_ATTRIBUTE_REPARSE_POINT |
+                                         FILE_ATTRIBUTE_DIRECTORY,
+                                     &info)) {
         return std::nullopt;
     }
     WindowsFileIdentity result;
