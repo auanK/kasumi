@@ -121,22 +121,14 @@ release on all clients; downgrade is not a supported recovery procedure.
 
 Before replacing binaries:
 
-1. Read the release notes and verify compatibility before reusing existing state.
+1. Read the [release notes](../RELEASE_NOTES.md) and [changelog](../CHANGELOG.md)
+   for compatibility and recovery instructions before reusing existing state.
 2. Complete pending Sync/recovery with the compatible executable, then stop Sync
    and maintenance on every client using the vault.
 3. Independently back up synchronized files, complete profiles/local state, and
    credentials securely; preserve access to remote data and retain the old binary.
 4. Preserve journals and diagnostics for partial or uncertain operations. Never
    delete SQLite, accepted state, or recovery evidence to force initialization.
-
-For a v0.9.2 synchronization that stopped because an old directory still contains ignored files, preserve the complete local profile, synchronized files, transaction evidence, and remote data before upgrading. Kasumi v0.9.3 corrects the directory reconciliation behavior and has been validated against the affected recovery scenarios. With all clients stopped and backups retained, start the updated Sync normally and allow its existing recovery mechanism to evaluate any pending transaction. If recovery reports a conflict or indeterminate state, stop and preserve the evidence rather than deleting journals, SQLite files, or ignored content.
-
-The v0.9.4 `(?d)` ignore modifier is opt-in and applies only to regular files
-whose removal is authorized by reconciliation; ordinary ignore rules still
-preserve local content. The new transaction journal is written as format 10 and
-can read format 9, but this does not promise general compatibility across 0.x
-releases or change the remote format or SQLite schema. Use the same Kasumi
-release on every client and keep independent backups before upgrading.
 
 [`kasumi update`](configuration-and-usage.md#updating-kasumi) replaces only the
 executable; it does not migrate data or validate cross-version compatibility.

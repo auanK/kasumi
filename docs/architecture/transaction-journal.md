@@ -6,7 +6,7 @@ The writer emits journal codec format 10 and the reader accepts formats 9 and
 ID 11 for the new action. Format 9 remains readable and does not contain that
 action. Other incompatible journal formats (including format 8 and earlier) stop recovery and retain their
 artifacts. This journal compatibility does not promise compatibility of other
-0.x state or remote formats.
+local state or remote formats.
 
 The profile's private `transaction.bin.enc` directory contains:
 

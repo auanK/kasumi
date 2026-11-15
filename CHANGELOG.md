@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.10.0]
+
+### Changed
+
+- Consolidated duplicated Sync, recovery, history, storage, cryptography, and CLI code.
+- Replaced runtime translation-catalog parsing with generated compile-time tables.
+
+### Fixed
+
+- Hardened local file access, credential-buffer cleanup, and rclone identifier filters.
+
+### Removed
+
+- Removed auxiliary Fsck checkpoints and the persistent remote-inspection history cache. Fsck still downloads and authenticates every referenced payload.
+- Removed standalone benchmark and provider-certification runners and reduced performance tracing.
+
+### Upgrade Notes
+
+- Remote formats, SQLite schema, and supported journal formats remain unchanged from v0.9.4. Use the same release on all clients and follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi).
+
 ## [0.9.4]
 
 ### Added
@@ -145,7 +165,7 @@
 ### Upgrade Notes
 
 - Use the same release on all clients. See [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi) for compatibility and backup requirements.
-- See [Release Notes](RELEASE_NOTES.md) for user-facing changes and the [provider certification scope](docs/provider-certification.md#requirements-and-limits) for current requirements and limitations.
+- See [Release Notes](RELEASE_NOTES.md) for user-facing changes and [Transport and Provider Capabilities](docs/architecture/transport.md) for current requirements and limitations.
 
 ## [0.7.0]
 

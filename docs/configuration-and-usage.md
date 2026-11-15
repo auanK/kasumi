@@ -113,7 +113,7 @@ Run the command with no command-specific arguments:
 kasumi update
 ```
 
-The command supports official Windows and Linux x86_64 binaries. Kasumi queries the official GitHub Releases API and selects the newest release on its supported channel: before a stable v1.0.0 release exists, this is the newest v0.x release, including prereleases; after a stable v1.0.0 or later exists, prereleases and v0.x releases are excluded.
+The command supports official Windows and Linux x86_64 binaries. Kasumi queries the official GitHub Releases API and selects the newest release on its supported channel. Until a stable release with a nonzero major version exists, it selects the newest development release, including prereleases; afterwards it selects only stable releases with a nonzero major version.
 
 Kasumi downloads the platform archive and its published SHA-256 checksum, verifies the archive, then replaces only the Kasumi executable. It keeps the previous executable beside it as a `.kasumi-previous-*` recovery copy. If verification of the replacement fails, Kasumi attempts to restore that copy; this is not a universal rollback guarantee. The updater does not access profile data, configuration files, keys, or configured remote storage, and it does not migrate local data.
 

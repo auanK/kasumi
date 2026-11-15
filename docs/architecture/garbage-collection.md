@@ -57,7 +57,7 @@ Globally validated deletion plan
 Eligible for deletion
 ```
 
-Under Kasumi v0.9.0, GC does not authenticate orphan candidate bytes, download ciphertexts, or decrypt payloads before deletion. Unreferenced content is discarded based solely on reachability. Corrupted orphan ciphertext does not alter its reachability: a corrupted unreferenced content object is still an orphan and remains eligible for deletion without downloading its payload. Conversely, all Content referenced by protected history remains strictly protected; if a referenced Content object is damaged, its integrity is audited and reported by [Fsck](fsck.md), not downloaded or repaired by GC.
+GC does not authenticate orphan candidate bytes, download ciphertexts, or decrypt payloads before deletion. Unreferenced content is discarded based solely on reachability. Corrupted orphan ciphertext does not alter its reachability: a corrupted unreferenced content object is still an orphan and remains eligible for deletion without downloading its payload. Conversely, all Content referenced by protected history remains strictly protected; if a referenced Content object is damaged, its integrity is audited and reported by [Fsck](fsck.md), not downloaded or repaired by GC.
 
 The controlled remote vault namespace contract assumes that physical storage objects within the vault scope adhere to protocol identity structure. Unknown or ambiguous storage objects (such as alien files or malformed identifiers) are never inferred safe to delete and trigger fail-closed aborts before any deletion. The maintenance barrier coordinates cooperative clients but provides no distributed compare-and-swap (CAS).
 
