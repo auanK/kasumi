@@ -464,7 +464,6 @@ add_library(kasumi_application STATIC
     src/application/environment.cpp
     src/application/execute.cpp
     src/application/profile.cpp
-    src/application/use_cases/error_mapping.cpp
     src/application/use_cases/context.cpp
     src/application/use_cases/maintenance.cpp
     src/application/use_cases/plan.cpp

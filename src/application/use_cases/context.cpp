@@ -5,7 +5,6 @@
 #include "application/observation/history.hpp"
 #include "application/observation/history_detail.hpp"
 #include "application/sync/journal.hpp"
-#include "application/use_cases/error_mapping.hpp"
 #include "core/history.hpp"
 #include "crypto/secure_memory.hpp"
 #include "platform/profile_lock.hpp"
@@ -84,10 +83,14 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
                                          input.request.profile_name,
                                          access_mode);
     if (!runtime_data) {
-        return fail(
-            runtime_data.error().detail,
-            runtime_error_to_application_error(runtime_data.error().code),
-            false);
+        return fail(runtime_data.error().detail,
+                    map_runtime_error_code(runtime_data.error().code,
+                                           ErrorCode::InvalidProfile,
+                                           ErrorCode::ProfileNotFound,
+                                           ErrorCode::CredentialFailure,
+                                           ErrorCode::RuntimeFailure,
+                                           ErrorCode::RuntimeFailure),
+                    false);
     }
 
     output.runtime = *runtime_data;
@@ -214,11 +217,22 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
                     "uses an unsupported schema; existing data was "
                     "left untouched");
     }
-    auto key = resolve_key_into(operation,
-                                input.credentials,
-                                *runtime_data,
-                                output.summary,
-                                output.key);
+    // Resolves and validates the key from the provided credentials.
+    auto key = resolve_vault_key<Error>(
+        input.credentials,
+        *runtime_data,
+        output.key,
+        VaultKeyPolicy<Error>{
+            .read_only = false,
+            .missing_code = ErrorCode::CredentialFailure,
+            .mismatch_code = ErrorCode::RuntimeFailure,
+            .io_code = ErrorCode::CredentialFailure,
+            .credential_code = ErrorCode::CredentialFailure,
+            .missing_detail = "key not found and credentials not provided",
+        },
+        [&](ErrorCode code, std::string detail) {
+            return make_error(output, code, std::move(detail));
+        });
     if (!key) {
         wipe_operation(output);
         return std::unexpected(key.error());

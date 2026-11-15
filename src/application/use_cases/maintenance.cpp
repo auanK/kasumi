@@ -6,7 +6,6 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "application/sync/coordinator.hpp"
 #include "application/use_cases/context.hpp"
-#include "application/use_cases/error_mapping.hpp"
 
 #include <optional>
 

@@ -2,7 +2,6 @@
 
 #include "application/observation/state.hpp"
 #include "application/use_cases/context.hpp"
-#include "application/use_cases/error_mapping.hpp"
 #include "application/use_cases/plan_support.hpp"
 #include "core/operation.hpp"
 #include "platform/path.hpp"

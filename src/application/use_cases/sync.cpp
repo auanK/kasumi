@@ -7,7 +7,6 @@
 #include "application/sync/journal_fault_test.hpp"
 #include "application/sync/reobservation.hpp"
 #include "application/use_cases/context.hpp"
-#include "application/use_cases/error_mapping.hpp"
 #include "application/use_cases/plan_support.hpp"
 #include "core/hasher.hpp"
 #include "core/reconciliation/plan.hpp"
