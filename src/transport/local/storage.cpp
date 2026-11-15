@@ -29,20 +29,18 @@ Error make_error(const std::error_code& error, ErrorCode fallback) {
     } else if (error == std::errc::no_such_file_or_directory) {
         code = ErrorCode::ObjectNotFound;
     }
-    return Error{
-        .code = code, .message = error.message(), .native_code = error.value()};
+    return detail::make_error(code, error.message(), error.value());
 }
 
 Error invalid_context_error() {
-    return Error{.code = ErrorCode::InvalidContext,
-                 .message = "local transport state is missing or invalid",
-                 .native_code = 0};
+    return detail::make_error(ErrorCode::InvalidContext,
+                              "local transport state is missing or invalid",
+                              0);
 }
 
 Error invalid_identifier_error() {
-    return Error{.code = ErrorCode::InvalidIdentifier,
-                 .message = "invalid object identifier",
-                 .native_code = 0};
+    return detail::make_error(
+        ErrorCode::InvalidIdentifier, "invalid object identifier", 0);
 }
 
 std::filesystem::path objects_directory(const State& state) {
@@ -83,9 +81,8 @@ resolve_ready_path(void* context, std::string_view identifier) {
 }
 
 Error storage_not_found() {
-    return Error{.code = ErrorCode::StorageNotFound,
-                 .message = "objects directory does not exist",
-                 .native_code = 0};
+    return detail::make_error(
+        ErrorCode::StorageNotFound, "objects directory does not exist", 0);
 }
 
 Result ensure_parent_directory(const std::filesystem::path& path) {
@@ -111,11 +108,10 @@ Result copy_file_overwrite(const std::filesystem::path& source,
     }
     if (std::filesystem::is_symlink(dest_status) ||
         std::filesystem::is_directory(dest_status)) {
-        return std::unexpected(Error{
-            .code = ErrorCode::InvalidContext,
-            .message = "destination cannot be a symlink or directory",
-            .native_code = 0,
-        });
+        return std::unexpected(
+            detail::make_error(ErrorCode::InvalidContext,
+                               "destination cannot be a symlink or directory",
+                               0));
     }
 #if defined(_WIN32)
     if (!CopyFileW(source.c_str(), destination.c_str(), FALSE)) {
@@ -197,11 +193,8 @@ Result local_put(void* context,
     }
     if (std::filesystem::is_symlink(source_status) ||
         !std::filesystem::is_regular_file(source_status)) {
-        return std::unexpected(Error{
-            .code = ErrorCode::ObjectNotFound,
-            .message = "source file does not exist",
-            .native_code = 0,
-        });
+        return std::unexpected(detail::make_error(
+            ErrorCode::ObjectNotFound, "source file does not exist", 0));
     }
     if (auto parent = ensure_parent_directory(*destination); !parent) {
         return parent;
@@ -290,21 +283,19 @@ validate_destination(const std::filesystem::path& root) {
         }
         if (!error && std::filesystem::exists(status)) {
             if (!std::filesystem::is_directory(status)) {
-                return std::unexpected(Error{
-                    .code = ErrorCode::InvalidContext,
-                    .message = "local destination traverses a file",
-                    .native_code = 0,
-                });
+                return std::unexpected(
+                    detail::make_error(ErrorCode::InvalidContext,
+                                       "local destination traverses a file",
+                                       0));
             }
             return {};
         }
         const auto parent = candidate.parent_path();
         if (parent.empty() || parent == candidate) {
-            return std::unexpected(Error{
-                .code = ErrorCode::StorageNotFound,
-                .message = "local destination root is not available",
-                .native_code = error.value(),
-            });
+            return std::unexpected(
+                detail::make_error(ErrorCode::StorageNotFound,
+                                   "local destination root is not available",
+                                   error.value()));
         }
         candidate = parent;
     }
@@ -335,11 +326,8 @@ namespace kasumi::transport {
 std::expected<Transport, Error>
 detail::open_local_backend(detail::LocalConfiguration configuration) {
     if (configuration.root.empty()) {
-        return std::unexpected(Error{
-            .code = ErrorCode::InvalidContext,
-            .message = "storage path is invalid",
-            .native_code = 0,
-        });
+        return std::unexpected(detail::make_error(
+            ErrorCode::InvalidContext, "storage path is invalid", 0));
     }
     if (auto valid = local_detail::validate_destination(configuration.root);
         !valid) {
@@ -348,11 +336,8 @@ detail::open_local_backend(detail::LocalConfiguration configuration) {
     auto* state = new (std::nothrow)
         local_detail::State{.root = std::move(configuration.root)};
     if (state == nullptr) {
-        return std::unexpected(Error{
-            .code = ErrorCode::Io,
-            .message = "could not allocate local state",
-            .native_code = 0,
-        });
+        return std::unexpected(detail::make_error(
+            ErrorCode::Io, "could not allocate local state", 0));
     }
     return Transport{
         .state = TransportStateHandle{state, local_detail::destroy_local_state},

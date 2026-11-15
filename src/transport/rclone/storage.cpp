@@ -99,11 +99,16 @@ PresenceResult parse_stat_presence(const nlohmann::json& item,
     return Presence::Present;
 }
 
-State* ready_state(void* context) noexcept {
+std::expected<State*, Error>
+require_ready(void* context,
+              std::optional<std::string_view> identifier = std::nullopt) {
     auto* state = static_cast<State*>(context);
     if (state == nullptr || !state->ready ||
         state->configuration.remote_name.empty()) {
-        return nullptr;
+        return std::unexpected(invalid_context_error());
+    }
+    if (identifier && !valid_identifier(*identifier)) {
+        return std::unexpected(invalid_identifier_error());
     }
     return state;
 }
@@ -372,15 +377,15 @@ Result copyfile_object(State& state,
 PresenceResult rclone_presence(void* context, std::string_view identifier);
 
 Result rclone_initialize(void* context) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
+    auto state = require_ready(context);
+    if (!state) {
+        return std::unexpected(state.error());
     }
 
     const auto created = request_json(
-        *state,
+        **state,
         "operations/mkdir",
-        nlohmann::json{{"fs", rooted_remote_fs(*state)}, {"remote", ""}},
+        nlohmann::json{{"fs", rooted_remote_fs(**state)}, {"remote", ""}},
         maximum_response_size,
         quick_timeout);
     if (!created) {
@@ -392,12 +397,9 @@ Result rclone_initialize(void* context) {
 Result rclone_put(void* context,
                   const std::filesystem::path& source,
                   std::string_view identifier) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
-    }
-    if (!valid_identifier(identifier)) {
-        return std::unexpected(invalid_identifier_error());
+    auto state = require_ready(context, identifier);
+    if (!state) {
+        return std::unexpected(state.error());
     }
 
     const auto local = split_local_path(source, "invalid source file");
@@ -409,10 +411,10 @@ Result rclone_put(void* context,
         return source_file;
     }
 
-    return copyfile_object(*state,
+    return copyfile_object(**state,
                            local->parent,
                            local->name,
-                           rooted_remote_fs(*state),
+                           rooted_remote_fs(**state),
                            identifier);
 }
 
@@ -458,9 +460,9 @@ Result sync_copy_batch(State& state,
 }
 
 Result rclone_put_batch(void* context, const PutBatch& batch) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
+    auto state = require_ready(context);
+    if (!state) {
+        return std::unexpected(state.error());
     }
     if (batch.identifiers.empty()) {
         return {};
@@ -469,9 +471,9 @@ Result rclone_put_batch(void* context, const PutBatch& batch) {
     if (!absolute_source) {
         return std::unexpected(absolute_source.error());
     }
-    return sync_copy_batch(*state,
+    return sync_copy_batch(**state,
                            platform::path::to_utf8(*absolute_source),
-                           rooted_remote_fs(*state),
+                           rooted_remote_fs(**state),
                            batch.identifiers,
                            batch.max_parallel_transfers,
                            {{"NoTraverse", true}, {"NoUpdateModTime", true}},
@@ -481,12 +483,9 @@ Result rclone_put_batch(void* context, const PutBatch& batch) {
 Result rclone_get(void* context,
                   std::string_view identifier,
                   const std::filesystem::path& destination) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
-    }
-    if (!valid_identifier(identifier)) {
-        return std::unexpected(invalid_identifier_error());
+    auto state = require_ready(context, identifier);
+    if (!state) {
+        return std::unexpected(state.error());
     }
 
     const auto local =
@@ -510,8 +509,8 @@ Result rclone_get(void* context,
         return parent;
     }
 
-    if (const auto copied = copyfile_object(*state,
-                                            rooted_remote_fs(*state),
+    if (const auto copied = copyfile_object(**state,
+                                            rooted_remote_fs(**state),
                                             identifier,
                                             local->parent,
                                             local->name,
@@ -536,9 +535,9 @@ Result rclone_get(void* context,
 }
 
 Result rclone_get_batch(void* context, const GetBatch& batch) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
+    auto state = require_ready(context);
+    if (!state) {
+        return std::unexpected(state.error());
     }
     if (!batch.source_prefix.empty() &&
         !valid_identifier(batch.source_prefix)) {
@@ -552,10 +551,10 @@ Result rclone_get_batch(void* context, const GetBatch& batch) {
         return std::unexpected(absolute_destination.error());
     }
     return sync_copy_batch(
-        *state,
+        **state,
         batch.source_prefix.empty()
-            ? rooted_remote_fs(*state)
-            : join_remote_path(rooted_remote_fs(*state), batch.source_prefix),
+            ? rooted_remote_fs(**state)
+            : join_remote_path(rooted_remote_fs(**state), batch.source_prefix),
         platform::path::to_utf8(*absolute_destination),
         batch.identifiers,
         batch.max_parallel_transfers,
@@ -603,15 +602,12 @@ ListingResult parse_list_response_json(const nlohmann::json& response,
 }
 
 PresenceResult rclone_presence(void* context, std::string_view identifier) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
-    }
-    if (!valid_identifier(identifier)) {
-        return std::unexpected(invalid_identifier_error());
+    auto state = require_ready(context, identifier);
+    if (!state) {
+        return std::unexpected(state.error());
     }
 
-    const auto response = stat_remote(*state, identifier);
+    const auto response = stat_remote(**state, identifier);
     if (!response) {
         if (not_found(response.error())) {
             return Presence::Absent;
@@ -630,9 +626,9 @@ PresenceResult rclone_presence(void* context, std::string_view identifier) {
 ListingResult
 list_remote_objects(void* context,
                     std::optional<std::string_view> prefix = std::nullopt) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
+    auto state = require_ready(context);
+    if (!state) {
+        return std::unexpected(state.error());
     }
     if (prefix && !valid_identifier(*prefix)) {
         return std::unexpected(invalid_identifier_error());
@@ -640,10 +636,10 @@ list_remote_objects(void* context,
     const std::string_view effective_prefix =
         prefix.value_or(std::string_view{});
     const auto response =
-        request_read_json(*state,
+        request_read_json(**state,
                           "operations/list",
                           nlohmann::json{
-                              {"fs", rooted_remote_fs(*state)},
+                              {"fs", rooted_remote_fs(**state)},
                               {"remote", effective_prefix},
                               {"opt", stat_opt(true, effective_prefix.empty())},
                           },
@@ -670,24 +666,21 @@ ListingResult rclone_list_prefix(void* context, std::string_view prefix) {
 
 std::expected<std::string, Error> rclone_physical_hash(
     void* context, std::string_view identifier, std::string_view algorithm) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
-    }
-    if (!valid_identifier(identifier)) {
-        return std::unexpected(invalid_identifier_error());
+    auto state = require_ready(context, identifier);
+    if (!state) {
+        return std::unexpected(state.error());
     }
     if (algorithm != "sha256" ||
-        state->sha256_unsupported.load(std::memory_order_relaxed)) {
+        (*state)->sha256_unsupported.load(std::memory_order_relaxed)) {
         return std::unexpected(
             make_error(ErrorCode::Unsupported,
                        "rclone backend does not expose algorithm"));
     }
 
     const auto response =
-        request_read_json(*state,
+        request_read_json(**state,
                           "operations/hashsumfile",
-                          nlohmann::json{{"fs", rooted_remote_fs(*state)},
+                          nlohmann::json{{"fs", rooted_remote_fs(**state)},
                                          {"remote", identifier},
                                          {"hashType", "SHA-256"}},
                           maximum_response_size,
@@ -712,7 +705,7 @@ std::expected<std::string, Error> rclone_physical_hash(
             response.error().native_code == 501 ||
             response.error().message.find("hash type not supported") !=
                 std::string::npos) {
-            state->sha256_unsupported.store(true, std::memory_order_relaxed);
+            (*state)->sha256_unsupported.store(true, std::memory_order_relaxed);
             return std::unexpected(
                 make_error(ErrorCode::Unsupported,
                            "rclone backend does not expose algorithm",
@@ -768,51 +761,43 @@ PhysicalHashBatchResult parse_physical_hash_batch_response_json(
     }
 
     std::unordered_set<std::string> seen;
-    auto matched = check_entries(response, "match", expected, seen);
-    if (!matched) {
-        return std::unexpected(matched.error());
-    }
-    auto mismatched = check_entries(response, "differ", expected, seen);
-    if (!mismatched) {
-        return std::unexpected(mismatched.error());
-    }
-    auto missing = check_entries(response, "missingOnDst", expected, seen);
-    if (!missing) {
-        return std::unexpected(missing.error());
-    }
-    auto errors = check_entries(response, "error", expected, seen);
-    if (!errors) {
-        return std::unexpected(errors.error());
+    PhysicalHashBatchReport report;
+    for (const auto& [name, destination] :
+         {std::pair{"match", &report.matched},
+          std::pair{"differ", &report.mismatched},
+          std::pair{"missingOnDst", &report.missing},
+          std::pair{"error", &report.errors}}) {
+        auto entries = check_entries(response, name, expected, seen);
+        if (!entries) {
+            return std::unexpected(entries.error());
+        }
+        *destination = std::move(*entries);
     }
 
     const bool success = response.at("success").get<bool>();
-    const bool has_failures =
-        !mismatched->empty() || !missing->empty() || !errors->empty();
+    const bool has_failures = !report.mismatched.empty() ||
+                              !report.missing.empty() || !report.errors.empty();
     if (seen.size() != expected.size() ||
-        (success && (has_failures || matched->size() != expected.size())) ||
+        (success &&
+         (has_failures || report.matched.size() != expected.size())) ||
         (!success && !has_failures)) {
         return std::unexpected(
             make_error(ErrorCode::ProtocolFailure,
                        "inconsistent operations/check response"));
     }
 
-    return PhysicalHashBatchReport{
-        .matched = std::move(*matched),
-        .mismatched = std::move(*mismatched),
-        .missing = std::move(*missing),
-        .errors = std::move(*errors),
-    };
+    return report;
 }
 
 PhysicalHashBatchResult
 rclone_physical_hash_batch(void* context,
                            const PhysicalHashBatchRequest& request) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
+    auto state = require_ready(context);
+    if (!state) {
+        return std::unexpected(state.error());
     }
     if (ascii_lower(request.algorithm) != "sha256" ||
-        state->sha256_unsupported.load(std::memory_order_relaxed)) {
+        (*state)->sha256_unsupported.load(std::memory_order_relaxed)) {
         return std::unexpected(
             make_error(ErrorCode::Unsupported,
                        "rclone backend does not expose algorithm for batch"));
@@ -879,10 +864,10 @@ rclone_physical_hash_batch(void* context,
 
     const auto manifest_parent = platform::path::to_utf8(*root);
     const auto response = request_read_json(
-        *state,
+        **state,
         "operations/check",
         nlohmann::json{
-            {"dstFs", rooted_remote_fs(*state)},
+            {"dstFs", rooted_remote_fs(**state)},
             {"checkFileHash", "SHA-256"},
             {"checkFileFs", manifest_parent},
             {"checkFileRemote", platform::path::to_utf8(manifest.filename())},
@@ -907,7 +892,7 @@ rclone_physical_hash_batch(void* context,
             response.error().code == ErrorCode::Unsupported ||
             response.error().native_code == 400 ||
             response.error().native_code == 501) {
-            state->sha256_unsupported.store(true, std::memory_order_relaxed);
+            (*state)->sha256_unsupported.store(true, std::memory_order_relaxed);
             return std::unexpected(
                 make_error(ErrorCode::Unsupported,
                            "rclone does not support operations/check",
@@ -1107,9 +1092,9 @@ execute_single_control_read_batch(State& state,
 ControlReadBatchResponse
 rclone_control_read_batch(void* context,
                           const ControlReadBatchRequest& request) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
+    auto state = require_ready(context);
+    if (!state) {
+        return std::unexpected(state.error());
     }
 
     constexpr std::size_t control_presence_concurrency = 8;
@@ -1119,7 +1104,7 @@ rclone_control_read_batch(void* context,
     // rclone executes inputs sequentially when concurrency <= 1.
     if (!request.list_prefixes.empty() &&
         request.presence_identifiers.size() <= max_presence_batch_chunk_size) {
-        return execute_single_control_read_batch(*state, request, 1);
+        return execute_single_control_read_batch(**state, request, 1);
     }
 
     if (request.list_prefixes.empty() && request.presence_identifiers.empty()) {
@@ -1130,7 +1115,7 @@ rclone_control_read_batch(void* context,
     if (!request.list_prefixes.empty()) {
         ControlReadBatchRequest list_req;
         list_req.list_prefixes = request.list_prefixes;
-        auto list_res = execute_single_control_read_batch(*state, list_req, 1);
+        auto list_res = execute_single_control_read_batch(**state, list_req, 1);
         if (!list_res) {
             return std::unexpected(list_res.error());
         }
@@ -1151,7 +1136,7 @@ rclone_control_read_batch(void* context,
                 static_cast<std::ptrdiff_t>(offset + count));
 
         auto chunk_res = execute_single_control_read_batch(
-            *state, chunk_req, control_presence_concurrency);
+            **state, chunk_req, control_presence_concurrency);
         if (!chunk_res) {
             return std::unexpected(chunk_res.error());
         }
@@ -1164,18 +1149,15 @@ rclone_control_read_batch(void* context,
 }
 
 RemovalResult rclone_remove(void* context, std::string_view identifier) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
-    }
-    if (!valid_identifier(identifier)) {
-        return std::unexpected(invalid_identifier_error());
+    auto state = require_ready(context, identifier);
+    if (!state) {
+        return std::unexpected(state.error());
     }
 
     const auto deleted =
-        request_json(*state,
+        request_json(**state,
                      "operations/deletefile",
-                     nlohmann::json{{"fs", rooted_remote_fs(*state)},
+                     nlohmann::json{{"fs", rooted_remote_fs(**state)},
                                     {"remote", std::string{identifier}}},
                      maximum_response_size,
                      remove_timeout);
@@ -1189,9 +1171,9 @@ RemovalResult rclone_remove(void* context, std::string_view identifier) {
 }
 
 RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
-    auto* state = ready_state(context);
-    if (state == nullptr) {
-        return std::unexpected(invalid_context_error());
+    auto state = require_ready(context);
+    if (!state) {
+        return std::unexpected(state.error());
     }
     if (batch.items.empty()) {
         return RemoveBatchReport{};
@@ -1212,12 +1194,12 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
         }
         inputs.push_back(nlohmann::json{
             {"_path", "operations/deletefile"},
-            {"fs", rooted_remote_fs(*state)},
+            {"fs", rooted_remote_fs(**state)},
             {"remote", identifier},
         });
     }
 
-    const auto response = run_job_batch(*state,
+    const auto response = run_job_batch(**state,
                                         inputs,
                                         batch.concurrency,
                                         maximum_response_size,

@@ -77,6 +77,22 @@ sync_posix_descriptor(int fd, std::string_view operation) {
     }
     return {};
 }
+std::expected<void, std::string> sync_posix_path(
+    const std::filesystem::path& path, int flags, std::string_view operation) {
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    const int descriptor = ::open(path.c_str(), flags);
+    if (descriptor < 0) {
+        return std::unexpected(std::string{operation} +
+                               ": open failed: " + std::strerror(errno));
+    }
+    return sync_posix_descriptor(descriptor, operation);
+}
+
 #endif
 
 [[maybe_unused]] std::string native_error(std::string_view operation,
@@ -364,22 +380,7 @@ std::expected<void, std::string> sync_file(const std::filesystem::path& path) {
             native_error("sync_file: CloseHandle failed", close_error));
     }
 #else
-    int flags = O_RDONLY;
-#ifdef O_CLOEXEC
-    flags |= O_CLOEXEC;
-#endif
-#ifdef O_NOFOLLOW
-    flags |= O_NOFOLLOW;
-#endif
-    const int file = ::open(path.c_str(), flags);
-    if (file < 0) {
-        return std::unexpected("sync_file: open failed: " +
-                               std::string{std::strerror(errno)});
-    }
-
-    if (const auto synced = sync_posix_descriptor(file, "sync_file"); !synced) {
-        return synced;
-    }
+    return sync_posix_path(path, O_RDONLY, "sync_file");
 #endif
     return {};
 }
@@ -401,25 +402,7 @@ sync_parent_directory(const std::filesystem::path& path) {
 #ifdef O_DIRECTORY
     flags |= O_DIRECTORY;
 #endif
-#ifdef O_CLOEXEC
-    flags |= O_CLOEXEC;
-#endif
-#ifdef O_NOFOLLOW
-    flags |= O_NOFOLLOW;
-#endif
-    const auto parent = path.parent_path();
-    const int directory = ::open(parent.c_str(), flags);
-    if (directory < 0) {
-        return std::unexpected("sync_parent_directory: open failed: " +
-                               std::string{std::strerror(errno)});
-    }
-
-    if (const auto synced =
-            sync_posix_descriptor(directory, "sync_parent_directory");
-        !synced) {
-        return synced;
-    }
-    return {};
+    return sync_posix_path(path.parent_path(), flags, "sync_parent_directory");
 #endif
 }
 

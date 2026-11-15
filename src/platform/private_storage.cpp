@@ -38,6 +38,13 @@ std::string system_error(std::string_view operation,
     return std::string{operation} + ": " + error.message();
 }
 
+std::unexpected<StreamError> make_stream_error(StreamErrorKind kind,
+                                               std::string detail,
+                                               std::error_code error = {}) {
+    return std::unexpected(StreamError{
+        .kind = kind, .detail = std::move(detail), .system_error = error});
+}
+
 #if defined(_WIN32)
 
 std::string windows_error(std::string_view operation, DWORD code) {
@@ -276,6 +283,13 @@ std::string cleanup_created_file_on_error(const std::filesystem::path& path,
                std::error_code{errno, std::generic_category()}.message() + ")";
     }
     return {};
+}
+
+FileIdentity to_file_identity(const struct stat& status) noexcept {
+    return FileIdentity{
+        .volume_or_dev = static_cast<std::uint64_t>(status.st_dev),
+        .file_id_low = static_cast<std::uint64_t>(status.st_ino),
+        .valid = true};
 }
 
 std::expected<struct stat, std::string>
@@ -849,11 +863,7 @@ FileIdentity query_file_identity(const std::filesystem::path& path) noexcept {
     if (::lstat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
         return {};
     }
-    return FileIdentity{
-        .volume_or_dev = static_cast<std::uint64_t>(st.st_dev),
-        .file_id_low = static_cast<std::uint64_t>(st.st_ino),
-        .valid = true,
-    };
+    return to_file_identity(st);
 #endif
 }
 
@@ -879,11 +889,7 @@ query_directory_identity(const std::filesystem::path& path) noexcept {
     if (::fstat(descriptor, &status) != 0 || !S_ISDIR(status.st_mode)) {
         return {};
     }
-    return DirectoryIdentity{
-        .volume_or_dev = static_cast<std::uint64_t>(status.st_dev),
-        .file_id_low = static_cast<std::uint64_t>(status.st_ino),
-        .valid = true,
-    };
+    return to_file_identity(status);
 #endif
 }
 
@@ -1071,12 +1077,7 @@ CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
         same = same && S_ISREG(st_fd.st_mode) &&
                st_fd.st_dev == st_path.st_dev && st_fd.st_ino == st_path.st_ino;
     } else {
-        same = same &&
-               FileIdentity{
-                   .volume_or_dev = static_cast<std::uint64_t>(st_path.st_dev),
-                   .file_id_low = static_cast<std::uint64_t>(st_path.st_ino),
-                   .valid = true,
-               } == file.identity;
+        same = same && to_file_identity(st_path) == file.identity;
     }
     if (!same) {
         close_private_file(file);
@@ -1161,10 +1162,8 @@ stream_regular_file_raw(const std::filesystem::path& path,
                         void* context,
                         std::optional<std::uint64_t> expected_size) {
     if (scratch.empty() || on_chunk == nullptr) {
-        return std::unexpected(StreamError{
-            .kind = StreamErrorKind::ReadFailed,
-            .detail = "invalid stream buffer or callback",
-        });
+        return make_stream_error(StreamErrorKind::ReadFailed,
+                                 "invalid stream buffer or callback");
     }
 #if defined(_WIN32)
     const auto handle =
@@ -1184,77 +1183,34 @@ stream_regular_file_raw(const std::filesystem::path& path,
             (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND)
                 ? StreamErrorKind::NotFound
                 : StreamErrorKind::OpenFailed;
-        return std::unexpected(StreamError{
-            .kind = kind,
-            .detail = sys_err.message(),
-            .system_error = sys_err,
-        });
+        return make_stream_error(kind, sys_err.message(), sys_err);
     }
     PrivateHandle guard{reinterpret_cast<std::intptr_t>(handle)};
     FILE_ATTRIBUTE_TAG_INFO attributes{};
     if (!GetFileInformationByHandleEx(
             handle, FileAttributeTagInfo, &attributes, sizeof(attributes))) {
-        return std::unexpected(StreamError{
-            .kind = StreamErrorKind::OpenFailed,
-            .detail = "could not query opened file attributes",
-        });
+        return make_stream_error(StreamErrorKind::OpenFailed,
+                                 "could not query opened file attributes");
     }
     if ((attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return std::unexpected(StreamError{
-            .kind = StreamErrorKind::Symlink,
-            .detail = "path is a symlink",
-        });
+        return make_stream_error(StreamErrorKind::Symlink, "path is a symlink");
     }
     if ((attributes.FileAttributes &
          (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_DEVICE)) != 0) {
-        return std::unexpected(StreamError{
-            .kind = StreamErrorKind::NotRegular,
-            .detail = "path is not a regular file",
-        });
+        return make_stream_error(StreamErrorKind::NotRegular,
+                                 "path is not a regular file");
     }
     LARGE_INTEGER actual_size{};
     if (!GetFileSizeEx(handle, &actual_size) || actual_size.QuadPart < 0) {
-        return std::unexpected(StreamError{
-            .kind = StreamErrorKind::ReadFailed,
-            .detail = "could not read file size",
-        });
+        return make_stream_error(StreamErrorKind::ReadFailed,
+                                 "could not read file size");
     }
     if (expected_size &&
         static_cast<std::uint64_t>(actual_size.QuadPart) != *expected_size) {
-        return std::unexpected(StreamError{
-            .kind = StreamErrorKind::SizeMismatch,
-            .detail = "file size does not match expected size",
-        });
+        return make_stream_error(StreamErrorKind::SizeMismatch,
+                                 "file size does not match expected size");
     }
-    std::uint64_t total_read = 0;
-    for (;;) {
-        DWORD count = 0;
-        if (!ReadFile(handle,
-                      scratch.data(),
-                      static_cast<DWORD>(scratch.size()),
-                      &count,
-                      nullptr)) {
-            const DWORD code = GetLastError();
-            return std::unexpected(StreamError{
-                .kind = StreamErrorKind::ReadFailed,
-                .detail = windows_error("ReadFile failed", code),
-                .system_error = {static_cast<int>(code),
-                                 std::system_category()},
-            });
-        }
-        if (count == 0) {
-            break;
-        }
-        const auto chunk_size = static_cast<std::size_t>(count);
-        total_read += chunk_size;
-        if (!on_chunk(context, scratch.first(chunk_size))) {
-            return std::unexpected(StreamError{
-                .kind = StreamErrorKind::Aborted,
-                .detail = "stream aborted by consumer",
-            });
-        }
-    }
-    return total_read;
+
 #else
     const int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) {
@@ -1263,63 +1219,62 @@ stream_regular_file_raw(const std::filesystem::path& path,
                           : (errno == ENOENT || errno == ENOTDIR)
                               ? StreamErrorKind::NotFound
                               : StreamErrorKind::OpenFailed;
-        return std::unexpected(StreamError{
-            .kind = kind,
-            .detail = sys_err.message(),
-            .system_error = sys_err,
-        });
+        return make_stream_error(kind, sys_err.message(), sys_err);
     }
     PrivateHandle guard{fd};
     struct stat st{};
     if (::fstat(fd, &st) != 0) {
         const std::error_code sys_err{errno, std::generic_category()};
-        return std::unexpected(StreamError{
-            .kind = StreamErrorKind::OpenFailed,
-            .detail = sys_err.message(),
-            .system_error = sys_err,
-        });
+        return make_stream_error(
+            StreamErrorKind::OpenFailed, sys_err.message(), sys_err);
     }
     if (!S_ISREG(st.st_mode)) {
-        return std::unexpected(StreamError{
-            .kind = StreamErrorKind::NotRegular,
-            .detail = "path is not a regular file",
-        });
+        return make_stream_error(StreamErrorKind::NotRegular,
+                                 "path is not a regular file");
     }
     if (expected_size &&
         static_cast<std::uint64_t>(st.st_size) != *expected_size) {
-        return std::unexpected(StreamError{
-            .kind = StreamErrorKind::SizeMismatch,
-            .detail = "file size does not match expected size",
-        });
+        return make_stream_error(StreamErrorKind::SizeMismatch,
+                                 "file size does not match expected size");
     }
+#endif
     std::uint64_t total_read = 0;
     for (;;) {
-        const auto count = ::read(fd, scratch.data(), scratch.size());
-        if (count == 0) {
-            break;
+#if defined(_WIN32)
+        DWORD count = 0;
+        if (!ReadFile(handle,
+                      scratch.data(),
+                      static_cast<DWORD>(scratch.size()),
+                      &count,
+                      nullptr)) {
+            const DWORD code = GetLastError();
+            return make_stream_error(
+                StreamErrorKind::ReadFailed,
+                windows_error("ReadFile failed", code),
+                {static_cast<int>(code), std::system_category()});
         }
+#else
+        const auto count = ::read(fd, scratch.data(), scratch.size());
         if (count < 0) {
             if (errno == EINTR) {
                 continue;
             }
-            const std::error_code sys_err{errno, std::generic_category()};
-            return std::unexpected(StreamError{
-                .kind = StreamErrorKind::ReadFailed,
-                .detail = sys_err.message(),
-                .system_error = sys_err,
-            });
+            const std::error_code error{errno, std::generic_category()};
+            return make_stream_error(
+                StreamErrorKind::ReadFailed, error.message(), error);
+        }
+#endif
+        if (count == 0) {
+            break;
         }
         const auto chunk_size = static_cast<std::size_t>(count);
         total_read += chunk_size;
         if (!on_chunk(context, scratch.first(chunk_size))) {
-            return std::unexpected(StreamError{
-                .kind = StreamErrorKind::Aborted,
-                .detail = "stream aborted by consumer",
-            });
+            return make_stream_error(StreamErrorKind::Aborted,
+                                     "stream aborted by consumer");
         }
     }
     return total_read;
-#endif
 }
 
 } // namespace kasumi::platform::private_storage
