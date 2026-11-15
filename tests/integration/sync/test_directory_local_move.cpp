@@ -263,44 +263,110 @@ bool contains_identifier(const std::vector<std::string>& list,
     return std::ranges::find(list, identifier) != list.end();
 }
 
+[[nodiscard]] ::testing::AssertionResult
+init_pair(SyncNode& first,
+          std::string_view first_label,
+          SyncNode& second,
+          std::string_view second_label) {
+    if (!init_sync_node(first, first_label)) {
+        return ::testing::AssertionFailure() << "init failed: " << first_label;
+    }
+    if (!init_sync_node(second, second_label, first.storage_root)) {
+        return ::testing::AssertionFailure() << "init failed: " << second_label;
+    }
+    return ::testing::AssertionSuccess();
+}
+
+[[nodiscard]] ::testing::AssertionResult sync_ok(SyncNode& node) {
+    const auto result = run_node_sync(node);
+    if (!result.has_value()) {
+        return ::testing::AssertionFailure() << result.error().detail;
+    }
+    return ::testing::AssertionSuccess();
+}
+
+[[nodiscard]] ::testing::AssertionResult sync_pair(SyncNode& first,
+                                                   SyncNode& second) {
+    if (const auto r = sync_ok(first); !r) {
+        return r;
+    }
+    return sync_ok(second);
+}
+
+[[nodiscard]] ::testing::AssertionResult
+has_zero_content_io(const SyncNode& node) {
+    if (node.counters.content_gets != 0U || node.counters.content_puts != 0U ||
+        node.counters.content_presences != 0U ||
+        node.counters.content_copies != 0U) {
+        return ::testing::AssertionFailure()
+               << "expected zero content IO (gets="
+               << node.counters.content_gets
+               << ", puts=" << node.counters.content_puts
+               << ", presences=" << node.counters.content_presences
+               << ", copies=" << node.counters.content_copies << ")";
+    }
+    return ::testing::AssertionSuccess();
+}
+
+[[nodiscard]] ::testing::AssertionResult sync_zero_io(SyncNode& node) {
+    if (const auto r = sync_ok(node); !r) {
+        return r;
+    }
+    return has_zero_content_io(node);
+}
+
+[[nodiscard]] ::testing::AssertionResult sync_pair_and_reset(SyncNode& first,
+                                                             SyncNode& second) {
+    if (const auto r = sync_pair(first, second); !r) {
+        return r;
+    }
+    reset_content_counts(first);
+    reset_content_counts(second);
+    return ::testing::AssertionSuccess();
+}
+
+void reset_content_counts(SyncNode& first, SyncNode& second) noexcept {
+    reset_content_counts(first);
+    reset_content_counts(second);
+}
+
+[[nodiscard]] ::testing::AssertionResult trees_equal(const SyncNode& first,
+                                                     const SyncNode& second) {
+    const auto lhs = kasumi::test::snapshot_tree(first.local);
+    const auto rhs = kasumi::test::snapshot_tree(second.local);
+    if (lhs != rhs) {
+        return ::testing::AssertionFailure() << "snapshot trees differ";
+    }
+    return ::testing::AssertionSuccess();
+}
+
 // RED 1 — Renomeação pura entre dois clientes
 TEST(DirectoryLocalMoveTest,
      PureDirectoryRenameBetweenClientsHasZeroContentIo) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-red1-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-red1-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-red1-sender",
+                          receiver,
+                          "dir-rename-red1-receiver"));
 
     write_local_file(sender, "A/main.cpp", "int main() { return 0; }\n");
     write_local_file(
         sender, "A/include/main.hpp", "#pragma once\nint entry();\n");
     write_local_file(sender, "A/tests/test.cpp", "#include \"main.hpp\"\n");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
-    ASSERT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
+    ASSERT_TRUE(sync_pair(sender, receiver));
+    ASSERT_TRUE(trees_equal(sender, receiver));
 
     // Separate fixture setup transport calls from the rename synchronization.
-    reset_content_counts(sender);
-    reset_content_counts(receiver);
+    reset_content_counts(sender, receiver);
 
     rename_local_entry(sender, "A", "B");
 
-    const auto sender_sync = run_node_sync(sender);
-    ASSERT_TRUE(sender_sync.has_value()) << sender_sync.error().detail;
-    EXPECT_EQ(sender.counters.content_gets, 0U);
-    EXPECT_EQ(sender.counters.content_puts, 0U);
-    EXPECT_EQ(sender.counters.content_presences, 0U);
-    EXPECT_EQ(sender.counters.content_copies, 0U);
+    ASSERT_TRUE(sync_zero_io(sender));
 
     const auto receiver_sync = run_node_sync(receiver);
     ASSERT_TRUE(receiver_sync.has_value()) << receiver_sync.error().detail;
-    EXPECT_EQ(receiver.counters.content_gets, 0U);
-    EXPECT_EQ(receiver.counters.content_puts, 0U);
-    EXPECT_EQ(receiver.counters.content_presences, 0U);
-    EXPECT_EQ(receiver.counters.content_copies, 0U);
+    EXPECT_TRUE(has_zero_content_io(receiver));
 
     const auto* summary =
         std::get_if<kasumi::application::SyncCompleted>(&receiver_sync->data);
@@ -318,155 +384,106 @@ TEST(DirectoryLocalMoveTest,
               "#pragma once\nint entry();\n");
     EXPECT_EQ(read_local_file(receiver, "B/tests/test.cpp"),
               "#include \"main.hpp\"\n");
-    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
+    EXPECT_TRUE(trees_equal(sender, receiver));
 }
 
 // RED 2 — Diretório movido para outro pai
 TEST(DirectoryLocalMoveTest, DirectoryMovedToAnotherParentHasZeroContentIo) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-red2-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-red2-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-red2-sender",
+                          receiver,
+                          "dir-rename-red2-receiver"));
 
     write_local_file(
         sender, "Projects/A/file.bin", "binary-payload-projects-a");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
-    ASSERT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
+    ASSERT_TRUE(sync_pair(sender, receiver));
+    ASSERT_TRUE(trees_equal(sender, receiver));
 
-    reset_content_counts(sender);
-    reset_content_counts(receiver);
+    reset_content_counts(sender, receiver);
 
     rename_local_entry(sender, "Projects/A", "Archive/A");
     remove_local_subtree(sender, "Projects");
 
-    const auto sender_sync = run_node_sync(sender);
-    ASSERT_TRUE(sender_sync.has_value()) << sender_sync.error().detail;
-    EXPECT_EQ(sender.counters.content_gets, 0U);
-    EXPECT_EQ(sender.counters.content_puts, 0U);
-    EXPECT_EQ(sender.counters.content_presences, 0U);
-    EXPECT_EQ(sender.counters.content_copies, 0U);
+    ASSERT_TRUE(sync_zero_io(sender));
 
-    const auto receiver_sync = run_node_sync(receiver);
-    ASSERT_TRUE(receiver_sync.has_value()) << receiver_sync.error().detail;
-    EXPECT_EQ(receiver.counters.content_gets, 0U);
-    EXPECT_EQ(receiver.counters.content_puts, 0U);
-    EXPECT_EQ(receiver.counters.content_presences, 0U);
-    EXPECT_EQ(receiver.counters.content_copies, 0U);
+    ASSERT_TRUE(sync_zero_io(receiver));
 
     EXPECT_FALSE(local_entry_exists(receiver, "Projects"));
     EXPECT_FALSE(local_entry_exists(receiver, "Projects/A/file.bin"));
     EXPECT_EQ(read_local_file(receiver, "Archive/A/file.bin"),
               "binary-payload-projects-a");
-    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
+    EXPECT_TRUE(trees_equal(sender, receiver));
 }
 
 // RED 3 — Diretórios aninhados
 TEST(DirectoryLocalMoveTest,
      NestedDirectoriesRenamePreservesStructureWithZeroContentIo) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-red3-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-red3-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-red3-sender",
+                          receiver,
+                          "dir-rename-red3-receiver"));
 
     write_local_file(sender, "A/B/C/file.bin", "deeply-nested-payload");
     write_local_file(sender, "A/B/sibling.bin", "intermediate-level-payload");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
-
-    reset_content_counts(sender);
-    reset_content_counts(receiver);
+    ASSERT_TRUE(sync_pair_and_reset(sender, receiver));
 
     write_local_file(sender, "X/Y/Z/file.bin", "deeply-nested-payload");
     write_local_file(sender, "X/Y/sibling.bin", "intermediate-level-payload");
     remove_local_subtree(sender, "A");
 
-    const auto sender_sync = run_node_sync(sender);
-    ASSERT_TRUE(sender_sync.has_value()) << sender_sync.error().detail;
-    EXPECT_EQ(sender.counters.content_gets, 0U);
-    EXPECT_EQ(sender.counters.content_puts, 0U);
-    EXPECT_EQ(sender.counters.content_presences, 0U);
-    EXPECT_EQ(sender.counters.content_copies, 0U);
+    ASSERT_TRUE(sync_zero_io(sender));
 
-    const auto receiver_sync = run_node_sync(receiver);
-    ASSERT_TRUE(receiver_sync.has_value()) << receiver_sync.error().detail;
-    EXPECT_EQ(receiver.counters.content_gets, 0U);
-    EXPECT_EQ(receiver.counters.content_puts, 0U);
-    EXPECT_EQ(receiver.counters.content_presences, 0U);
-    EXPECT_EQ(receiver.counters.content_copies, 0U);
+    ASSERT_TRUE(sync_zero_io(receiver));
 
     EXPECT_FALSE(local_entry_exists(receiver, "A"));
     EXPECT_EQ(read_local_file(receiver, "X/Y/Z/file.bin"),
               "deeply-nested-payload");
     EXPECT_EQ(read_local_file(receiver, "X/Y/sibling.bin"),
               "intermediate-level-payload");
-    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
+    EXPECT_TRUE(trees_equal(sender, receiver));
 }
 
 // RED 4 — Renomeação de arquivo individual
 TEST(DirectoryLocalMoveTest, SingleFileRenameHasZeroContentIo) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-red4-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-red4-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-red4-sender",
+                          receiver,
+                          "dir-rename-red4-receiver"));
 
     write_local_file(sender, "A/file.bin", "single-file-move-payload");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
-
-    reset_content_counts(sender);
-    reset_content_counts(receiver);
+    ASSERT_TRUE(sync_pair_and_reset(sender, receiver));
 
     rename_local_entry(sender, "A/file.bin", "B/file.bin");
     remove_local_subtree(sender, "A");
 
-    const auto sender_sync = run_node_sync(sender);
-    ASSERT_TRUE(sender_sync.has_value()) << sender_sync.error().detail;
-    EXPECT_EQ(sender.counters.content_gets, 0U);
-    EXPECT_EQ(sender.counters.content_puts, 0U);
-    EXPECT_EQ(sender.counters.content_presences, 0U);
-    EXPECT_EQ(sender.counters.content_copies, 0U);
+    ASSERT_TRUE(sync_zero_io(sender));
 
-    const auto receiver_sync = run_node_sync(receiver);
-    ASSERT_TRUE(receiver_sync.has_value()) << receiver_sync.error().detail;
-    EXPECT_EQ(receiver.counters.content_gets, 0U);
-    EXPECT_EQ(receiver.counters.content_puts, 0U);
-    EXPECT_EQ(receiver.counters.content_presences, 0U);
-    EXPECT_EQ(receiver.counters.content_copies, 0U);
+    ASSERT_TRUE(sync_zero_io(receiver));
 
     EXPECT_FALSE(local_entry_exists(receiver, "A"));
     EXPECT_FALSE(local_entry_exists(receiver, "A/file.bin"));
     EXPECT_EQ(read_local_file(receiver, "B/file.bin"),
               "single-file-move-payload");
-    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
+    EXPECT_TRUE(trees_equal(sender, receiver));
 }
 
 TEST(DirectoryLocalMoveTest, DirectoryRenameWithAddedFileTransfersOnlyNewFile) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-added-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-added-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-added-sender",
+                          receiver,
+                          "dir-rename-added-receiver"));
 
     write_local_file(sender, "A/1.bin", "payload-h1");
     write_local_file(sender, "A/2.bin", "payload-h2");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
-
-    reset_content_counts(sender);
-    reset_content_counts(receiver);
+    ASSERT_TRUE(sync_pair_and_reset(sender, receiver));
 
     rename_local_entry(sender, "A", "B");
     write_local_file(sender, "B/3.bin", "payload-h3-new");
@@ -475,8 +492,7 @@ TEST(DirectoryLocalMoveTest, DirectoryRenameWithAddedFileTransfersOnlyNewFile) {
     const auto id_h2 = content_identifier_for_payload(sender, "payload-h2");
     const auto id_h3 = content_identifier_for_payload(sender, "payload-h3-new");
 
-    const auto sender_sync = run_node_sync(sender);
-    ASSERT_TRUE(sender_sync.has_value()) << sender_sync.error().detail;
+    ASSERT_TRUE(sync_ok(sender));
     EXPECT_EQ(sender.counters.content_puts, 1U);
     EXPECT_EQ(sender.counters.content_presences, 0U);
     EXPECT_EQ(sender.counters.content_copies, 0U);
@@ -509,26 +525,19 @@ TEST(DirectoryLocalMoveTest, DirectoryRenameWithAddedFileTransfersOnlyNewFile) {
     EXPECT_EQ(read_local_file(receiver, "B/1.bin"), "payload-h1");
     EXPECT_EQ(read_local_file(receiver, "B/2.bin"), "payload-h2");
     EXPECT_EQ(read_local_file(receiver, "B/3.bin"), "payload-h3-new");
-    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
+    EXPECT_TRUE(trees_equal(sender, receiver));
 }
 
 TEST(DirectoryLocalMoveTest,
      DirectoryRenameWithModifiedFileTransfersOnlyModifiedFile) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-mod-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-mod-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(
+        sender, "dir-rename-mod-sender", receiver, "dir-rename-mod-receiver"));
 
     write_local_file(sender, "A/1.bin", "payload-h1-unchanged");
     write_local_file(sender, "A/2.bin", "payload-h2-original");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
-
-    reset_content_counts(sender);
-    reset_content_counts(receiver);
+    ASSERT_TRUE(sync_pair_and_reset(sender, receiver));
 
     rename_local_entry(sender, "A", "B");
     write_local_file(sender, "B/2.bin", "payload-h3-modified");
@@ -540,8 +549,7 @@ TEST(DirectoryLocalMoveTest,
     const auto id_h3 =
         content_identifier_for_payload(sender, "payload-h3-modified");
 
-    const auto sender_sync = run_node_sync(sender);
-    ASSERT_TRUE(sender_sync.has_value()) << sender_sync.error().detail;
+    ASSERT_TRUE(sync_ok(sender));
     EXPECT_EQ(sender.counters.content_puts, 1U);
     EXPECT_EQ(sender.counters.content_presences, 0U);
     EXPECT_EQ(sender.counters.content_copies, 0U);
@@ -571,42 +579,27 @@ TEST(DirectoryLocalMoveTest,
     EXPECT_FALSE(local_entry_exists(receiver, "A"));
     EXPECT_EQ(read_local_file(receiver, "B/1.bin"), "payload-h1-unchanged");
     EXPECT_EQ(read_local_file(receiver, "B/2.bin"), "payload-h3-modified");
-    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
+    EXPECT_TRUE(trees_equal(sender, receiver));
 }
 
 TEST(DirectoryLocalMoveTest,
      DirectoryRenameWithDuplicateContentPairsSourcesOneToOne) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-dup-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-dup-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(
+        sender, "dir-rename-dup-sender", receiver, "dir-rename-dup-receiver"));
 
     write_local_file(sender, "A/one.bin", "identical-duplicate-content");
     write_local_file(sender, "A/two.bin", "identical-duplicate-content");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
-
-    reset_content_counts(sender);
-    reset_content_counts(receiver);
+    ASSERT_TRUE(sync_pair_and_reset(sender, receiver));
 
     rename_local_entry(sender, "A", "B");
 
-    const auto sender_sync = run_node_sync(sender);
-    ASSERT_TRUE(sender_sync.has_value()) << sender_sync.error().detail;
-    EXPECT_EQ(sender.counters.content_gets, 0U);
-    EXPECT_EQ(sender.counters.content_puts, 0U);
-    EXPECT_EQ(sender.counters.content_presences, 0U);
-    EXPECT_EQ(sender.counters.content_copies, 0U);
+    ASSERT_TRUE(sync_zero_io(sender));
 
     const auto receiver_sync = run_node_sync(receiver);
     ASSERT_TRUE(receiver_sync.has_value()) << receiver_sync.error().detail;
-    EXPECT_EQ(receiver.counters.content_gets, 0U);
-    EXPECT_EQ(receiver.counters.content_puts, 0U);
-    EXPECT_EQ(receiver.counters.content_presences, 0U);
-    EXPECT_EQ(receiver.counters.content_copies, 0U);
+    EXPECT_TRUE(has_zero_content_io(receiver));
 
     const auto* summary =
         std::get_if<kasumi::application::SyncCompleted>(&receiver_sync->data);
@@ -619,75 +612,56 @@ TEST(DirectoryLocalMoveTest,
               "identical-duplicate-content");
     EXPECT_EQ(read_local_file(receiver, "B/two.bin"),
               "identical-duplicate-content");
-    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
+    EXPECT_TRUE(trees_equal(sender, receiver));
 }
 
 TEST(DirectoryLocalMoveTest,
      EmptyDirectoryRenamePreservesStructureWithZeroContentIo) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-empty-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-empty-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-empty-sender",
+                          receiver,
+                          "dir-rename-empty-receiver"));
 
     std::error_code ec;
     ASSERT_TRUE(
         std::filesystem::create_directories(sender.local / "A/Empty", ec));
     ASSERT_FALSE(ec);
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
     ASSERT_TRUE(local_entry_exists(receiver, "A/Empty"));
 
-    reset_content_counts(sender);
-    reset_content_counts(receiver);
+    reset_content_counts(sender, receiver);
 
     ASSERT_TRUE(
         std::filesystem::create_directories(sender.local / "B/Empty", ec));
     ASSERT_FALSE(ec);
     remove_local_subtree(sender, "A");
 
-    const auto sender_sync = run_node_sync(sender);
-    ASSERT_TRUE(sender_sync.has_value()) << sender_sync.error().detail;
-    EXPECT_EQ(sender.counters.content_gets, 0U);
-    EXPECT_EQ(sender.counters.content_puts, 0U);
-    EXPECT_EQ(sender.counters.content_presences, 0U);
-    EXPECT_EQ(sender.counters.content_copies, 0U);
+    ASSERT_TRUE(sync_zero_io(sender));
 
-    const auto receiver_sync = run_node_sync(receiver);
-    ASSERT_TRUE(receiver_sync.has_value()) << receiver_sync.error().detail;
-    EXPECT_EQ(receiver.counters.content_gets, 0U);
-    EXPECT_EQ(receiver.counters.content_puts, 0U);
-    EXPECT_EQ(receiver.counters.content_presences, 0U);
-    EXPECT_EQ(receiver.counters.content_copies, 0U);
+    ASSERT_TRUE(sync_zero_io(receiver));
 
     EXPECT_FALSE(local_entry_exists(receiver, "A"));
     EXPECT_TRUE(local_entry_exists(receiver, "B/Empty"));
-    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
+    EXPECT_TRUE(trees_equal(sender, receiver));
 }
 
 TEST(DirectoryLocalMoveTest,
      CopyPreservingSourceUsesDownloadAndDoesNotConsumeSource) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-copy-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-copy-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-copy-sender",
+                          receiver,
+                          "dir-rename-copy-receiver"));
 
     write_local_file(sender, "A/file.bin", "copy-must-not-consume-source");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
-
-    reset_content_counts(sender);
-    reset_content_counts(receiver);
+    ASSERT_TRUE(sync_pair_and_reset(sender, receiver));
 
     write_local_file(sender, "B/file.bin", "copy-must-not-consume-source");
 
-    const auto sender_sync = run_node_sync(sender);
-    ASSERT_TRUE(sender_sync.has_value()) << sender_sync.error().detail;
+    ASSERT_TRUE(sync_ok(sender));
     EXPECT_EQ(sender.counters.content_puts, 0U);
 
     const auto receiver_sync = run_node_sync(receiver);
@@ -705,16 +679,15 @@ TEST(DirectoryLocalMoveTest,
               "copy-must-not-consume-source");
     EXPECT_EQ(read_local_file(receiver, "B/file.bin"),
               "copy-must-not-consume-source");
-    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
+    EXPECT_TRUE(trees_equal(sender, receiver));
 }
 
 TEST(DirectoryLocalMoveTest, DirectoryRenameWithUnicodePathsHasZeroContentIo) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-unicode-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-unicode-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-unicode-sender",
+                          receiver,
+                          "dir-rename-unicode-receiver"));
 
     write_local_file(sender,
                      "Projetos/Aplicação_日本語/código/núcleo_α.cpp",
@@ -722,11 +695,7 @@ TEST(DirectoryLocalMoveTest, DirectoryRenameWithUnicodePathsHasZeroContentIo) {
     write_local_file(
         sender, "Projetos/Aplicação_日本語/leia_me_çãõ.md", "unicode-md-2");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
-
-    reset_content_counts(sender);
-    reset_content_counts(receiver);
+    ASSERT_TRUE(sync_pair_and_reset(sender, receiver));
 
     write_local_file(
         sender, "Arquivo/Motor_日本語_v2/código/núcleo_α.cpp", "unicode-cpp-1");
@@ -734,19 +703,9 @@ TEST(DirectoryLocalMoveTest, DirectoryRenameWithUnicodePathsHasZeroContentIo) {
         sender, "Arquivo/Motor_日本語_v2/leia_me_çãõ.md", "unicode-md-2");
     remove_local_subtree(sender, "Projetos");
 
-    const auto sender_sync = run_node_sync(sender);
-    ASSERT_TRUE(sender_sync.has_value()) << sender_sync.error().detail;
-    EXPECT_EQ(sender.counters.content_gets, 0U);
-    EXPECT_EQ(sender.counters.content_puts, 0U);
-    EXPECT_EQ(sender.counters.content_presences, 0U);
-    EXPECT_EQ(sender.counters.content_copies, 0U);
+    ASSERT_TRUE(sync_zero_io(sender));
 
-    const auto receiver_sync = run_node_sync(receiver);
-    ASSERT_TRUE(receiver_sync.has_value()) << receiver_sync.error().detail;
-    EXPECT_EQ(receiver.counters.content_gets, 0U);
-    EXPECT_EQ(receiver.counters.content_puts, 0U);
-    EXPECT_EQ(receiver.counters.content_presences, 0U);
-    EXPECT_EQ(receiver.counters.content_copies, 0U);
+    ASSERT_TRUE(sync_zero_io(receiver));
 
     EXPECT_FALSE(local_entry_exists(receiver, "Projetos"));
     EXPECT_EQ(read_local_file(receiver,
@@ -755,26 +714,24 @@ TEST(DirectoryLocalMoveTest, DirectoryRenameWithUnicodePathsHasZeroContentIo) {
     EXPECT_EQ(
         read_local_file(receiver, "Arquivo/Motor_日本語_v2/leia_me_çãõ.md"),
         "unicode-md-2");
-    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
+    EXPECT_TRUE(trees_equal(sender, receiver));
 }
 
 TEST(DirectoryLocalMoveTest,
      OccupiedDestinationFailsSafelyWithoutOverwritingExternalContent) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-occupied-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-occupied-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-occupied-sender",
+                          receiver,
+                          "dir-rename-occupied-receiver"));
 
     write_local_file(sender, "A/1.bin", "payload-1");
     write_local_file(sender, "A/2.bin", "payload-2");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     rename_local_entry(sender, "A", "B");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     reset_content_counts(receiver);
 
@@ -803,20 +760,19 @@ TEST(DirectoryLocalMoveTest,
 
 TEST(DirectoryLocalMoveTest,
      SourceModifiedDuringExecutionFailsSafelyWithoutMovingCorruptedBytes) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-srcmod-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-srcmod-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-srcmod-sender",
+                          receiver,
+                          "dir-rename-srcmod-receiver"));
 
     write_local_file(sender, "A/1.bin", "payload-1");
     write_local_file(sender, "A/2.bin", "payload-2");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     rename_local_entry(sender, "A", "B");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     reset_content_counts(receiver);
 
@@ -844,20 +800,19 @@ TEST(DirectoryLocalMoveTest,
 
 TEST(DirectoryLocalMoveTest,
      SourceMissingAtExecutionFailsSafelyWithoutSilentDownload) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-srcmissing-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-srcmissing-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-srcmissing-sender",
+                          receiver,
+                          "dir-rename-srcmissing-receiver"));
 
     write_local_file(sender, "A/1.bin", "payload-1");
     write_local_file(sender, "A/2.bin", "payload-2");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     rename_local_entry(sender, "A", "B");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     reset_content_counts(receiver);
 
@@ -884,20 +839,19 @@ struct SimulatedInterruption {};
 
 TEST(DirectoryLocalMoveTest,
      LatestIgnoredPhysicalEvidencePreservesDirectoryDuringStabilization) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "ignored-evidence-stabilize-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "ignored-evidence-stabilize-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "ignored-evidence-stabilize-sender",
+                          receiver,
+                          "ignored-evidence-stabilize-receiver"));
 
     write_local_file(sender, ".kasumiignore", "antigo/*.cache\n");
     write_local_file(sender, "antigo/main.cpp", "managed");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     remove_local_subtree(sender, "antigo/main.cpp");
     remove_local_subtree(sender, "antigo");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     auto input = kasumi::application::observation::collect_reconciliation_input(
         receiver.runtime, receiver.context.storage, receiver.key, false);
@@ -995,8 +949,7 @@ TEST(DirectoryLocalMoveTest,
     ASSERT_TRUE(accepted_before_noop.has_value())
         << accepted_before_noop.error();
     ASSERT_TRUE(accepted_before_noop->has_value());
-    const auto no_op = run_node_sync(receiver);
-    ASSERT_TRUE(no_op.has_value()) << no_op.error().detail;
+    ASSERT_TRUE(sync_ok(receiver));
     const auto accepted_after_noop =
         kasumi::state_storage::load_state(receiver.database);
     ASSERT_TRUE(accepted_after_noop.has_value())
@@ -1009,27 +962,25 @@ TEST(DirectoryLocalMoveTest,
 
 TEST(DirectoryLocalMoveTest,
      DisposableIgnoredFileFollowsRemoteManagedDirectoryRemoval) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-delete-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-delete-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-delete-sender",
+                          receiver,
+                          "disposable-delete-receiver"));
 
     write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
     write_local_file(sender, "Projetos/main.cpp", "managed source");
     write_local_file(sender, "Projetos/cache.bak", "never publish");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
     EXPECT_FALSE(local_entry_exists(receiver, "Projetos/cache.bak"));
 
     write_local_file(receiver, "Projetos/cache.bak", "local disposable");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
     remove_local_subtree(sender, "Projetos");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     reset_content_counts(receiver);
-    const auto synchronized = run_node_sync(receiver);
-    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    ASSERT_TRUE(sync_ok(receiver));
     EXPECT_FALSE(local_entry_exists(receiver, "Projetos/main.cpp"));
     EXPECT_FALSE(local_entry_exists(receiver, "Projetos/cache.bak"));
     EXPECT_FALSE(local_entry_exists(receiver, "Projetos"));
@@ -1046,22 +997,21 @@ TEST(DirectoryLocalMoveTest,
 
 TEST(DirectoryLocalMoveTest,
      DisposableIgnoredFileIsRemovedAlongsideRemoteRename) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-rename-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-rename-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-rename-sender",
+                          receiver,
+                          "disposable-rename-receiver"));
 
     write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
     write_local_file(sender, "Projects/main.cpp", "managed source");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
     write_local_file(receiver, "Projects/cache.bak", "local disposable");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
 
     rename_local_entry(sender, "Projects/main.cpp", "Projects2/main.cpp");
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
     auto preview = run_plan(receiver.context);
     ASSERT_TRUE(preview.has_value()) << preview.error().detail;
     const auto* preview_report =
@@ -1075,8 +1025,7 @@ TEST(DirectoryLocalMoveTest,
     }));
     EXPECT_TRUE(local_entry_exists(receiver, "Projects/cache.bak"));
     reset_content_counts(receiver);
-    const auto synchronized = run_node_sync(receiver);
-    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    ASSERT_TRUE(sync_ok(receiver));
 
     EXPECT_FALSE(local_entry_exists(receiver, "Projects/main.cpp"));
     EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache.bak"));
@@ -1088,24 +1037,23 @@ TEST(DirectoryLocalMoveTest,
 
 TEST(DirectoryLocalMoveTest,
      ProtectedIgnorePreventsPartialDisposableRemoval) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-mixed-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-mixed-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-mixed-sender",
+                          receiver,
+                          "disposable-mixed-receiver"));
 
     write_local_file(sender,
                      ".kasumiignore",
                      "(?d)*.bak\n*.env\n");
     write_local_file(sender, "Projects/main.cpp", "managed source");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
     write_local_file(receiver, "Projects/cache.bak", "disposable");
     write_local_file(receiver, "Projects/segredo.env", "protected");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
 
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
     reset_content_counts(receiver);
     const auto synchronized = run_node_sync(receiver);
     ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
@@ -1122,11 +1070,11 @@ TEST(DirectoryLocalMoveTest,
 
 TEST(DirectoryLocalMoveTest,
      DisposableRemovalDeduplicatesDirectoryDeletionsInPlan) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-dedup-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-dedup-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-dedup-sender",
+                          receiver,
+                          "disposable-dedup-receiver"));
 
     write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
     write_local_file(sender, "Projects/main.cpp", "managed");
@@ -1135,15 +1083,14 @@ TEST(DirectoryLocalMoveTest,
         sender.local / "Projects/empty", ec));
     ASSERT_FALSE(ec);
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
     ASSERT_TRUE(local_entry_exists(receiver, "Projects/empty"));
 
     write_local_file(receiver, "Projects/cache.bak", "disposable cache");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
 
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     auto preview = run_plan(receiver.context);
     ASSERT_TRUE(preview.has_value()) << preview.error().detail;
@@ -1172,8 +1119,7 @@ TEST(DirectoryLocalMoveTest,
     EXPECT_EQ(delete_empty_count, 1U);
     EXPECT_EQ(delete_projects_count, 1U);
 
-    const auto synchronized = run_node_sync(receiver);
-    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    ASSERT_TRUE(sync_ok(receiver));
     EXPECT_FALSE(local_entry_exists(receiver, "Projects/main.cpp"));
     EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache.bak"));
     EXPECT_FALSE(local_entry_exists(receiver, "Projects/empty"));
@@ -1190,28 +1136,26 @@ TEST(DirectoryLocalMoveTest,
 
 TEST(DirectoryLocalMoveTest,
      ProtectedAncestorDoesNotBlockIndependentDisposableSubtree) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-ancestor-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-ancestor-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-ancestor-sender",
+                          receiver,
+                          "disposable-ancestor-receiver"));
 
     write_local_file(sender, ".kasumiignore", "*.env\n(?d)*.bak\n");
     write_local_file(sender, "Projects/main.cpp", "managed main");
     write_local_file(sender, "Projects/cache/marker.txt", "managed marker");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     write_local_file(receiver, "Projects/segredo.env", "secret protected");
     write_local_file(receiver, "Projects/cache/cache.bak", "disposable cache");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
 
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     reset_content_counts(receiver);
-    const auto synchronized = run_node_sync(receiver);
-    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    ASSERT_TRUE(sync_ok(receiver));
 
     EXPECT_EQ(read_local_file(receiver, "Projects/segredo.env"), "secret protected");
     EXPECT_TRUE(local_entry_exists(receiver, "Projects"));
@@ -1231,26 +1175,22 @@ TEST(DirectoryLocalMoveTest,
 
 TEST(DirectoryLocalMoveTest,
      ProtectedDescendantBlocksDisposalWithinSameProtectedSubtree) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-inv-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-inv-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(
+        sender, "disposable-inv-sender", receiver, "disposable-inv-receiver"));
 
     write_local_file(sender, ".kasumiignore", "*.env\n(?d)*.bak\n");
     write_local_file(sender, "Projects/cache/marker.txt", "managed marker");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     write_local_file(receiver, "Projects/cache/cache.bak", "disposable cache");
     write_local_file(receiver, "Projects/cache/segredo.env", "secret protected");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
 
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
-    const auto synchronized = run_node_sync(receiver);
-    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    ASSERT_TRUE(sync_ok(receiver));
 
     EXPECT_EQ(read_local_file(receiver, "Projects/cache/segredo.env"), "secret protected");
     EXPECT_EQ(read_local_file(receiver, "Projects/cache/cache.bak"), "disposable cache");
@@ -1258,15 +1198,14 @@ TEST(DirectoryLocalMoveTest,
 }
 
 TEST(DirectoryLocalMoveTest, NewLocalDisposableDirectoryIsNeverDiscarded) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-new-dir-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-new-dir-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-new-dir-sender",
+                          receiver,
+                          "disposable-new-dir-receiver"));
     write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
     write_local_file(sender, "tracked.txt", "managed");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     write_local_file(receiver, "novo/cache.bak", "local only");
     const auto synchronized = run_node_sync(receiver);
@@ -1287,52 +1226,47 @@ TEST(DirectoryLocalMoveTest, NewLocalDisposableDirectoryIsNeverDiscarded) {
 }
 
 TEST(DirectoryLocalMoveTest, NewRuleDoesNotRetroactivelyCleanOldResidue) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-residue-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-residue-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-residue-sender",
+                          receiver,
+                          "disposable-residue-receiver"));
     write_local_file(sender, ".kasumiignore", "*.bak\n");
     write_local_file(sender, "Projects/main.cpp", "managed source");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
     write_local_file(receiver, "Projects/cache.bak", "legacy residue");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
 
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
     EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"), "legacy residue");
 
     write_local_file(receiver, ".kasumiignore", "(?d)*.bak\n");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
     EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"), "legacy residue");
     EXPECT_TRUE(local_entry_exists(receiver, "Projects"));
 }
 
 TEST(DirectoryLocalMoveTest, ManagedFileCanBecomeDisposableAfterPolicySync) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-managed-transition-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-managed-transition-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-managed-transition-sender",
+                          receiver,
+                          "disposable-managed-transition-receiver"));
 
     write_local_file(sender, "Projects/main.cpp", "managed source");
     write_local_file(sender, "Projects/cache.bak", "was managed");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
     EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"), "was managed");
 
     write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
     EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"), "was managed");
 
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
     reset_content_counts(receiver);
-    const auto synchronized = run_node_sync(receiver);
-    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    ASSERT_TRUE(sync_ok(receiver));
     EXPECT_FALSE(local_entry_exists(receiver, "Projects/cache.bak"));
     EXPECT_FALSE(local_entry_exists(receiver, "Projects"));
     EXPECT_EQ(receiver.counters.content_puts, 0U);
@@ -1340,24 +1274,22 @@ TEST(DirectoryLocalMoveTest, ManagedFileCanBecomeDisposableAfterPolicySync) {
 }
 
 TEST(DirectoryLocalMoveTest, NestedDisposableSubtreeIsRemovedBottomUp) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-nested-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-nested-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-nested-sender",
+                          receiver,
+                          "disposable-nested-receiver"));
     write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
     write_local_file(sender, "Projects/inner/deep/main.cpp", "managed source");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
     write_local_file(receiver, "Projects/outer.bak", "outer cache");
     write_local_file(receiver, "Projects/inner/middle.bak", "middle cache");
     write_local_file(receiver, "Projects/inner/deep/inner.bak", "deep cache");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
 
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    const auto synchronized = run_node_sync(receiver);
-    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
+    ASSERT_TRUE(sync_ok(sender));
+    ASSERT_TRUE(sync_ok(receiver));
     EXPECT_FALSE(local_entry_exists(receiver, "Projects/outer.bak"));
     EXPECT_FALSE(local_entry_exists(receiver, "Projects/inner/middle.bak"));
     EXPECT_FALSE(local_entry_exists(receiver, "Projects/inner/deep/inner.bak"));
@@ -1365,19 +1297,18 @@ TEST(DirectoryLocalMoveTest, NestedDisposableSubtreeIsRemovedBottomUp) {
 }
 
 TEST(DirectoryLocalMoveTest, RuleBecomingProtectedDuringStabilizationPreventsDisposal) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-rule-race-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-rule-race-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-rule-race-sender",
+                          receiver,
+                          "disposable-rule-race-receiver"));
     write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
     write_local_file(sender, "Projects/main.cpp", "managed source");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
     write_local_file(receiver, "Projects/cache.bak", "keep after rule change");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     bool changed_rules = false;
     kasumi::application::sync::mutation_fault_test::set_hook(
@@ -1398,20 +1329,19 @@ TEST(DirectoryLocalMoveTest, RuleBecomingProtectedDuringStabilizationPreventsDis
 }
 
 TEST(DirectoryLocalMoveTest, ExternalSameContentReplacementIsPreserved) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-replacement-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-replacement-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-replacement-sender",
+                          receiver,
+                          "disposable-replacement-receiver"));
     write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
     write_local_file(sender, "Projects/main.cpp", "managed source");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
     constexpr std::string_view payload = "same bytes, new identity";
     write_local_file(receiver, "Projects/cache.bak", payload);
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
     const auto target = receiver.local / "Projects/cache.bak";
     const auto original_identity =
         kasumi::platform::private_storage::query_file_identity(target);
@@ -1451,19 +1381,18 @@ TEST(DirectoryLocalMoveTest, ExternalSameContentReplacementIsPreserved) {
 }
 
 TEST(DirectoryLocalMoveTest, RecoveryRestoresFileRemovedBeforeAppliedCheckpoint) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-recovery-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-recovery-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-recovery-sender",
+                          receiver,
+                          "disposable-recovery-receiver"));
     write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
     write_local_file(sender, "Projects/main.cpp", "managed source");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
     write_local_file(receiver, "Projects/cache.bak", "recover this cache");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     auto staged = stage_disposable_journal(receiver);
     ASSERT_TRUE(staged.has_value()) << staged.error();
@@ -1507,27 +1436,25 @@ TEST(DirectoryLocalMoveTest, RecoveryRestoresFileRemovedBeforeAppliedCheckpoint)
     EXPECT_EQ(read_local_file(receiver, "Projects/cache.bak"),
               "recover this cache");
 
-    const auto converged = run_node_sync(receiver);
-    ASSERT_TRUE(converged.has_value()) << converged.error().detail;
+    ASSERT_TRUE(sync_ok(receiver));
     EXPECT_FALSE(local_entry_exists(receiver, "Projects"));
 }
 
 
 TEST(DirectoryLocalMoveTest,
      DisposableRecoveryFailsClosedOnCorruptedBackup) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-corrupt-backup-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-corrupt-backup-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-corrupt-backup-sender",
+                          receiver,
+                          "disposable-corrupt-backup-receiver"));
     write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
     write_local_file(sender, "Projects/main.cpp", "managed source");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
     write_local_file(receiver, "Projects/cache.bak", "important cache");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     auto staged = stage_disposable_journal(receiver);
     ASSERT_TRUE(staged.has_value()) << staged.error();
@@ -1565,19 +1492,18 @@ TEST(DirectoryLocalMoveTest,
 
 TEST(DirectoryLocalMoveTest,
      DisposableRecoveryFailsClosedOnExternalDestinationConflict) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-ext-conflict-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-ext-conflict-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-ext-conflict-sender",
+                          receiver,
+                          "disposable-ext-conflict-receiver"));
     write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
     write_local_file(sender, "Projects/main.cpp", "managed source");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
     write_local_file(receiver, "Projects/cache.bak", "original cache");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     auto staged = stage_disposable_journal(receiver);
     ASSERT_TRUE(staged.has_value()) << staged.error();
@@ -1614,20 +1540,19 @@ TEST(DirectoryLocalMoveTest,
 }
 
 TEST(DirectoryLocalMoveTest, PartialDisposableRemovalRollsBackWholeSubtree) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-partial-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-partial-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-partial-sender",
+                          receiver,
+                          "disposable-partial-receiver"));
     write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
     write_local_file(sender, "Projects/main.cpp", "managed source");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
     write_local_file(receiver, "Projects/a.bak", "first cache");
     write_local_file(receiver, "Projects/b.bak", "second cache");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     auto staged = stage_disposable_journal(receiver);
     ASSERT_TRUE(staged.has_value()) << staged.error();
@@ -1662,25 +1587,23 @@ TEST(DirectoryLocalMoveTest, PartialDisposableRemovalRollsBackWholeSubtree) {
     EXPECT_EQ(read_local_file(receiver, "Projects/a.bak"), "first cache");
     EXPECT_EQ(read_local_file(receiver, "Projects/b.bak"), "second cache");
 
-    const auto converged = run_node_sync(receiver);
-    ASSERT_TRUE(converged.has_value()) << converged.error().detail;
+    ASSERT_TRUE(sync_ok(receiver));
     EXPECT_FALSE(local_entry_exists(receiver, "Projects"));
 }
 
 TEST(DirectoryLocalMoveTest, DisposablePreviewReportsDeletionWithoutApplyingIt) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-preview-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-preview-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-preview-sender",
+                          receiver,
+                          "disposable-preview-receiver"));
     write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
     write_local_file(sender, "Projects/main.cpp", "managed source");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
     write_local_file(receiver, "Projects/cache.bak", "preview cache");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     const auto preview = run_plan(receiver.context);
     ASSERT_TRUE(preview.has_value()) << preview.error().detail;
@@ -1712,16 +1635,15 @@ TEST(DirectoryLocalMoveTest, DisposablePreviewReportsDeletionWithoutApplyingIt) 
 }
 
 TEST(DirectoryLocalMoveTest, BroadDisposableRuleNeverHidesKasumiIgnore) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-ignore-rules-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-ignore-rules-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-ignore-rules-sender",
+                          receiver,
+                          "disposable-ignore-rules-receiver"));
     write_local_file(sender, ".kasumiignore", "(?d)*\n!tracked.txt\n");
     write_local_file(sender, "tracked.txt", "managed source");
-    const auto initial = run_node_sync(sender);
-    ASSERT_TRUE(initial.has_value()) << initial.error().detail;
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(sender));
+    ASSERT_TRUE(sync_ok(receiver));
     EXPECT_EQ(read_local_file(receiver, ".kasumiignore"), "(?d)*\n!tracked.txt\n");
     EXPECT_EQ(read_local_file(receiver, "tracked.txt"), "managed source");
     const auto remote =
@@ -1736,20 +1658,17 @@ TEST(DirectoryLocalMoveTest, BroadDisposableRuleNeverHidesKasumiIgnore) {
 
 TEST(DirectoryLocalMoveTest,
      NewUnignoredEntryAfterStabilizationConflictsAndRollsBack) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "directory-race-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "directory-race-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(
+        sender, "directory-race-sender", receiver, "directory-race-receiver"));
 
     write_local_file(sender, ".kasumiignore", "antigo/*.cache\n");
     write_local_file(sender, "antigo/main.cpp", "managed");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     remove_local_subtree(sender, "antigo/main.cpp");
     remove_local_subtree(sender, "antigo");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     const auto remote_before =
         kasumi::application::observation::collect_storage_state(
@@ -1817,8 +1736,7 @@ TEST(DirectoryLocalMoveTest,
     ASSERT_FALSE(error) << error.message();
     ASSERT_TRUE(std::filesystem::remove(receiver.local / "antigo", error));
     ASSERT_FALSE(error) << error.message();
-    const auto converged = run_node_sync(receiver);
-    ASSERT_TRUE(converged.has_value()) << converged.error().detail;
+    ASSERT_TRUE(sync_ok(receiver));
     EXPECT_FALSE(local_entry_exists(receiver, "antigo"));
     const auto accepted_after_recovery =
         kasumi::state_storage::load_state(receiver.database);
@@ -1830,23 +1748,22 @@ TEST(DirectoryLocalMoveTest,
 
 TEST(DirectoryLocalMoveTest,
      LegacyPendingDirectoryRemovalRollsBackBeforeConverging) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "legacy-ignore-recovery-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "legacy-ignore-recovery-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "legacy-ignore-recovery-sender",
+                          receiver,
+                          "legacy-ignore-recovery-receiver"));
 
     write_local_file(sender, "A/main.cpp", "managed");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     write_local_file(receiver, ".kasumiignore", "A/*.cache\n");
     write_local_file(receiver, "A/local.cache", "local-only cache");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
 
     rename_local_entry(sender, "A/main.cpp", "B/main.cpp");
     remove_local_subtree(sender, "A");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     auto input = kasumi::application::observation::collect_reconciliation_input(
         receiver.runtime,
@@ -1976,8 +1893,7 @@ TEST(DirectoryLocalMoveTest,
     EXPECT_EQ(read_local_file(receiver, "A/local.cache"), "local-only cache");
     EXPECT_FALSE(local_entry_exists(receiver, "B/main.cpp"));
 
-    const auto converged = run_node_sync(receiver);
-    ASSERT_TRUE(converged.has_value()) << converged.error().detail;
+    ASSERT_TRUE(sync_ok(receiver));
     EXPECT_EQ(read_local_file(receiver, "B/main.cpp"), "managed");
     EXPECT_EQ(read_local_file(receiver, "A/local.cache"), "local-only cache");
     EXPECT_FALSE(local_entry_exists(receiver, "A/main.cpp"));
@@ -1998,20 +1914,19 @@ void corrupt_or_remove_transaction_backups(const SyncNode& node) {
 
 TEST(DirectoryLocalMoveTest,
      InterruptedBeforePhysicalMoveRecoversCleanlyWithZeroContentIo) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-int-before-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-int-before-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-int-before-sender",
+                          receiver,
+                          "dir-rename-int-before-receiver"));
 
     write_local_file(sender, "A/1.bin", "payload-1");
     write_local_file(sender, "A/2.bin", "payload-2");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     rename_local_entry(sender, "A", "B");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     reset_content_counts(receiver);
 
@@ -2034,36 +1949,29 @@ TEST(DirectoryLocalMoveTest,
     EXPECT_FALSE(local_entry_exists(receiver, "B/1.bin"));
 
     reset_content_counts(receiver);
-    const auto recovered_sync = run_node_sync(receiver);
-    ASSERT_TRUE(recovered_sync.has_value()) << recovered_sync.error().detail;
-    EXPECT_EQ(receiver.counters.content_gets, 0U);
-    EXPECT_EQ(receiver.counters.content_puts, 0U);
-    EXPECT_EQ(receiver.counters.content_presences, 0U);
-    EXPECT_EQ(receiver.counters.content_copies, 0U);
+    ASSERT_TRUE(sync_zero_io(receiver));
 
     EXPECT_FALSE(local_entry_exists(receiver, "A"));
     EXPECT_EQ(read_local_file(receiver, "B/1.bin"), "payload-1");
     EXPECT_EQ(read_local_file(receiver, "B/2.bin"), "payload-2");
-    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
+    EXPECT_TRUE(trees_equal(sender, receiver));
 }
 
 TEST(DirectoryLocalMoveTest,
      InterruptedAfterPhysicalMoveBeforeCheckpointRecoversWithZeroContentIo) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-int-after-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-int-after-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-int-after-sender",
+                          receiver,
+                          "dir-rename-int-after-receiver"));
 
     write_local_file(sender, "A/1.bin", "payload-1");
     write_local_file(sender, "A/2.bin", "payload-2");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     rename_local_entry(sender, "A", "B");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     reset_content_counts(receiver);
 
@@ -2087,37 +1995,30 @@ TEST(DirectoryLocalMoveTest,
     EXPECT_TRUE(local_entry_exists(receiver, "A/2.bin"));
 
     reset_content_counts(receiver);
-    const auto recovered_sync = run_node_sync(receiver);
-    ASSERT_TRUE(recovered_sync.has_value()) << recovered_sync.error().detail;
-    EXPECT_EQ(receiver.counters.content_gets, 0U);
-    EXPECT_EQ(receiver.counters.content_puts, 0U);
-    EXPECT_EQ(receiver.counters.content_presences, 0U);
-    EXPECT_EQ(receiver.counters.content_copies, 0U);
+    ASSERT_TRUE(sync_zero_io(receiver));
 
     EXPECT_FALSE(local_entry_exists(receiver, "A"));
     EXPECT_EQ(read_local_file(receiver, "B/1.bin"), "payload-1");
     EXPECT_EQ(read_local_file(receiver, "B/2.bin"), "payload-2");
-    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
+    EXPECT_TRUE(trees_equal(sender, receiver));
 }
 
 TEST(DirectoryLocalMoveTest,
      MultiFileDirectoryMoveRollsBackAppliedMovesWhenLaterOperationFails) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-multirb-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-multirb-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-multirb-sender",
+                          receiver,
+                          "dir-rename-multirb-receiver"));
 
     write_local_file(sender, "Haruka/1.bin", "payload-1");
     write_local_file(sender, "Haruka/src/2.bin", "payload-2");
     write_local_file(sender, "Haruka/tests/3.bin", "payload-3");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     rename_local_entry(sender, "Haruka", "HarukaEngine");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     reset_content_counts(receiver);
 
@@ -2148,20 +2049,19 @@ TEST(DirectoryLocalMoveTest,
 
 TEST(DirectoryLocalMoveTest,
      ExternalModificationOfMovedDestinationBeforeRecoveryFailsClosed) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-extdest-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-extdest-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-extdest-sender",
+                          receiver,
+                          "dir-rename-extdest-receiver"));
 
     write_local_file(sender, "A/1.bin", "payload-1");
     write_local_file(sender, "A/2.bin", "payload-2");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     rename_local_entry(sender, "A", "B");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     const auto target_dest =
         receiver.local / kasumi::platform::path::from_utf8("B/1.bin");
@@ -2189,20 +2089,19 @@ TEST(DirectoryLocalMoveTest,
 
 TEST(DirectoryLocalMoveTest,
      ExternalRecreationOfSourceBeforeRecoveryPreservesExternalSource) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-extsrc-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-extsrc-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-extsrc-sender",
+                          receiver,
+                          "dir-rename-extsrc-receiver"));
 
     write_local_file(sender, "A/1.bin", "payload-1");
     write_local_file(sender, "A/2.bin", "payload-2");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     rename_local_entry(sender, "A", "B");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     const auto target_dest =
         receiver.local / kasumi::platform::path::from_utf8("B/1.bin");
@@ -2230,20 +2129,19 @@ TEST(DirectoryLocalMoveTest,
 
 TEST(DirectoryLocalMoveTest,
      MissingOrInvalidMoveBackupFailsClosedDuringRecovery) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-badbkp-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-badbkp-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-badbkp-sender",
+                          receiver,
+                          "dir-rename-badbkp-receiver"));
 
     write_local_file(sender, "A/1.bin", "payload-1");
     write_local_file(sender, "A/2.bin", "payload-2");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     rename_local_entry(sender, "A", "B");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     const auto target_dest =
         receiver.local / kasumi::platform::path::from_utf8("B/1.bin");
@@ -2270,20 +2168,19 @@ TEST(DirectoryLocalMoveTest,
 
 TEST(DirectoryLocalMoveTest,
      RepeatedRecoveryAndSyncAfterMoveInterruptionIsIdempotent) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "dir-rename-idemp-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "dir-rename-idemp-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "dir-rename-idemp-sender",
+                          receiver,
+                          "dir-rename-idemp-receiver"));
 
     write_local_file(sender, "A/1.bin", "payload-1");
     write_local_file(sender, "A/2.bin", "payload-2");
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     rename_local_entry(sender, "A", "B");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     const auto target_dest =
         receiver.local / kasumi::platform::path::from_utf8("B/1.bin");
@@ -2299,20 +2196,13 @@ TEST(DirectoryLocalMoveTest,
     kasumi::application::sync::mutation_fault_test::clear_hook();
 
     reset_content_counts(receiver);
-    const auto first_sync = run_node_sync(receiver);
-    ASSERT_TRUE(first_sync.has_value()) << first_sync.error().detail;
-    const auto second_sync = run_node_sync(receiver);
-    ASSERT_TRUE(second_sync.has_value()) << second_sync.error().detail;
+    ASSERT_TRUE(sync_pair(receiver, receiver));
 
-    EXPECT_EQ(receiver.counters.content_gets, 0U);
-    EXPECT_EQ(receiver.counters.content_puts, 0U);
-    EXPECT_EQ(receiver.counters.content_presences, 0U);
-    EXPECT_EQ(receiver.counters.content_copies, 0U);
+    EXPECT_TRUE(has_zero_content_io(receiver));
     EXPECT_FALSE(local_entry_exists(receiver, "A"));
     EXPECT_EQ(read_local_file(receiver, "B/1.bin"), "payload-1");
     EXPECT_EQ(read_local_file(receiver, "B/2.bin"), "payload-2");
-    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
+    EXPECT_TRUE(trees_equal(sender, receiver));
 }
 
 
@@ -2383,12 +2273,8 @@ ControlledMetrics run_controlled_reproduction(std::size_t count, std::size_t fil
     const auto elapsed = std::chrono::steady_clock::now() - start;
     EXPECT_TRUE(r2.has_value()) << (r2 ? "" : r2.error().detail);
 
-    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
-    EXPECT_EQ(receiver.counters.content_gets, 0U);
-    EXPECT_EQ(receiver.counters.content_puts, 0U);
-    EXPECT_EQ(receiver.counters.content_presences, 0U);
-    EXPECT_EQ(receiver.counters.content_copies, 0U);
+    EXPECT_TRUE(trees_equal(sender, receiver));
+    EXPECT_TRUE(has_zero_content_io(receiver));
 
     m.total_sync_s = std::chrono::duration<double>(elapsed).count();
     m.prep_wall_s = static_cast<double>(kasumi::platform::perf_trace::get_time("move preparation wall")) / 1e6;
@@ -2598,18 +2484,19 @@ TEST(DirectoryLocalMoveTest, SourceModifiedAfterPreparationRejectedByPreparedVal
 }
 
 TEST(DirectoryLocalMoveTest, DownloadMetricsDoNotContaminateMoveMetrics) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "download-metrics-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(receiver, "download-metrics-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "download-metrics-sender",
+                          receiver,
+                          "download-metrics-receiver"));
 
     write_local_file(sender, "new_file.txt", "download-content-sample");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     kasumi::platform::perf_trace::force_enable(true);
     kasumi::platform::perf_trace::reset();
 
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
 
     EXPECT_EQ(kasumi::platform::perf_trace::get_count("move planned count"), 0U);
     EXPECT_EQ(kasumi::platform::perf_trace::get_count("move applied count"), 0U);
@@ -2639,11 +2526,10 @@ void run_eight_file_move_recovery_scenario(std::size_t interrupt_after_k_moves,
         write_local_file(sender, "A/file" + std::to_string(i) + ".bin", "payload-" + std::to_string(i));
     }
 
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     rename_local_entry(sender, "A", "B");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     reset_content_counts(receiver);
 
@@ -2714,31 +2600,19 @@ void run_eight_file_move_recovery_scenario(std::size_t interrupt_after_k_moves,
     }
 
     reset_content_counts(receiver);
-    const auto recovered_sync = run_node_sync(receiver);
-    ASSERT_TRUE(recovered_sync.has_value()) << recovered_sync.error().detail;
-    EXPECT_EQ(receiver.counters.content_gets, 0U);
-    EXPECT_EQ(receiver.counters.content_puts, 0U);
-    EXPECT_EQ(receiver.counters.content_presences, 0U);
-    EXPECT_EQ(receiver.counters.content_copies, 0U);
+    ASSERT_TRUE(sync_zero_io(receiver));
 
     EXPECT_FALSE(local_entry_exists(receiver, "A"));
     for (std::size_t i = 1; i <= 8; ++i) {
         EXPECT_EQ(read_local_file(receiver, "B/file" + std::to_string(i) + ".bin"),
                   "payload-" + std::to_string(i));
     }
-    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
+    EXPECT_TRUE(trees_equal(sender, receiver));
 
     // Subsequent sync must be idempotent with zero content I/O
     reset_content_counts(receiver);
-    const auto subsequent_sync = run_node_sync(receiver);
-    ASSERT_TRUE(subsequent_sync.has_value()) << subsequent_sync.error().detail;
-    EXPECT_EQ(receiver.counters.content_gets, 0U);
-    EXPECT_EQ(receiver.counters.content_puts, 0U);
-    EXPECT_EQ(receiver.counters.content_presences, 0U);
-    EXPECT_EQ(receiver.counters.content_copies, 0U);
-    EXPECT_EQ(kasumi::test::snapshot_tree(sender.local),
-              kasumi::test::snapshot_tree(receiver.local));
+    ASSERT_TRUE(sync_zero_io(receiver));
+    EXPECT_TRUE(trees_equal(sender, receiver));
 }
 
 TEST(DirectoryLocalMoveTest, BatchMoveRecoveryInterruptedAtK1) {
@@ -3137,26 +3011,25 @@ TEST(DirectoryLocalMoveTest, ContentCounterConcurrentCallbacksAreThreadSafe) {
 
 
 TEST(DirectoryLocalMoveTest, DisposableCoordinatorInterruptionRecovery) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "coord-interrupt-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "coord-interrupt-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "coord-interrupt-sender",
+                          receiver,
+                          "coord-interrupt-receiver"));
 
     write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
     write_local_file(sender, "Projects/main.cpp", "int main() { return 0; }\n");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     write_local_file(receiver, "Projects/a.bak", "content-a");
     write_local_file(receiver, "Projects/b.bak", "content-b");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
 
     EXPECT_TRUE(local_entry_exists(receiver, "Projects/a.bak"));
     EXPECT_TRUE(local_entry_exists(receiver, "Projects/b.bak"));
 
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     const auto preview = run_plan(receiver.context);
     ASSERT_TRUE(preview.has_value()) << preview.error().detail;
@@ -3268,8 +3141,7 @@ TEST(DirectoryLocalMoveTest, DisposableCoordinatorInterruptionRecovery) {
     EXPECT_EQ(read_local_file(restarted, "Projects/b.bak"), "content-b");
     EXPECT_EQ(read_local_file(restarted, "Projects/main.cpp"), "int main() { return 0; }\n");
 
-    const auto synced = run_node_sync(restarted);
-    ASSERT_TRUE(synced.has_value()) << synced.error().detail;
+    ASSERT_TRUE(sync_ok(restarted));
     EXPECT_FALSE(local_entry_exists(restarted, "Projects"));
 
     const auto noop = run_node_sync(restarted);
@@ -3282,23 +3154,22 @@ TEST(DirectoryLocalMoveTest, DisposableCoordinatorInterruptionRecovery) {
 
 
 TEST(DirectoryLocalMoveTest, DisposableRemovalFailsClosedWhenSourceDisappearsBeforeApply) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-missing-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-missing-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-missing-sender",
+                          receiver,
+                          "disposable-missing-receiver"));
 
     write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
     write_local_file(sender, "Projects/main.cpp", "int main() { return 0; }\n");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     write_local_file(receiver, "Projects/a.bak", "content-a");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
     EXPECT_TRUE(local_entry_exists(receiver, "Projects/a.bak"));
 
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     std::size_t hook_hits = 0;
     kasumi::application::sync::mutation_fault_test::set_hook(
@@ -3322,23 +3193,22 @@ TEST(DirectoryLocalMoveTest, DisposableRemovalFailsClosedWhenSourceDisappearsBef
 
 TEST(DirectoryLocalMoveTest,
      DisposableRemovalRejectsAlreadyAbsentAfterFinalVerification) {
-    SyncNode sender;
-    ASSERT_TRUE(init_sync_node(sender, "disposable-absent-sender"));
-    SyncNode receiver;
-    ASSERT_TRUE(init_sync_node(
-        receiver, "disposable-absent-receiver", sender.storage_root));
+    SyncNode sender, receiver;
+    ASSERT_TRUE(init_pair(sender,
+                          "disposable-absent-sender",
+                          receiver,
+                          "disposable-absent-receiver"));
 
     write_local_file(sender, ".kasumiignore", "(?d)*.bak\n");
     write_local_file(sender, "Projects/main.cpp", "int main() { return 0; }\n");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_pair(sender, receiver));
 
     write_local_file(receiver, "Projects/cache.bak", "disposable cache");
-    ASSERT_TRUE(run_node_sync(receiver).has_value());
+    ASSERT_TRUE(sync_ok(receiver));
     EXPECT_TRUE(local_entry_exists(receiver, "Projects/cache.bak"));
 
     remove_local_subtree(sender, "Projects");
-    ASSERT_TRUE(run_node_sync(sender).has_value());
+    ASSERT_TRUE(sync_ok(sender));
 
     std::size_t hook_hits = 0;
     kasumi::application::sync::mutation_fault_test::set_hook(
