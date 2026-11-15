@@ -1,12 +1,14 @@
 #include "mutation_detail.hpp"
 
 #include "core/hasher.hpp"
+#include "core/wire.hpp"
 #include "crypto/content.hpp"
 #include "mutation_fault_test.hpp"
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
 
 #include <algorithm>
+#include <array>
 #include <fstream>
 #include <iterator>
 #include <system_error>
@@ -324,17 +326,18 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
 
 namespace {
 
-#pragma pack(push, 1)
-struct DiskCopyIdentity {
-    std::uint32_t magic{0x49445043}; // 'CPDI'
-    std::uint16_t version{1};
-    std::uint16_t reserved{0};
-    std::uint64_t volume_or_dev{0};
-    std::uint64_t file_id_low{0};
-    std::uint64_t file_id_high{0};
-    std::uint32_t valid{1};
-};
-#pragma pack(pop)
+constexpr std::uint32_t copy_identity_magic = 0x49445043; // 'CPDI'
+constexpr std::uint16_t copy_identity_version = 1;
+constexpr std::size_t copy_identity_bytes = 36;
+
+std::filesystem::path
+copy_identity_marker_path(const platform::Workspace& workspace,
+                          std::size_t operation_index) {
+    return workspace.root.empty() ? std::filesystem::path{}
+                                  : platform::workspace_file(workspace,
+                                                             operation_index,
+                                                             ".copy_identity");
+}
 
 } // namespace
 
@@ -348,20 +351,23 @@ std::expected<void, MutationError> record_copy_installed_identity(
                                           workspace.root,
                                           operation_index));
     }
-    if (workspace.root.empty()) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "workspace root is empty",
-                                          workspace.root,
-                                          operation_index));
-    }
     const auto marker_path =
-        platform::workspace_file(workspace, operation_index, ".copy_identity");
+        copy_identity_marker_path(workspace, operation_index);
     if (marker_path.empty()) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "marker path is empty",
+                                          "workspace or marker path is empty",
                                           workspace.root,
                                           operation_index));
     }
+
+    wire::Writer writer;
+    wire::write<std::uint32_t>(writer, copy_identity_magic);
+    wire::write<std::uint16_t>(writer, copy_identity_version);
+    wire::write<std::uint16_t>(writer, 0);
+    wire::write<std::uint64_t>(writer, identity.volume_or_dev);
+    wire::write<std::uint64_t>(writer, identity.file_id_low);
+    wire::write<std::uint64_t>(writer, identity.file_id_high);
+    wire::write<std::uint32_t>(writer, 1);
 
     std::ofstream out(marker_path, std::ios::binary | std::ios::trunc);
     if (!out) {
@@ -371,27 +377,13 @@ std::expected<void, MutationError> record_copy_installed_identity(
                        marker_path,
                        operation_index));
     }
-    const DiskCopyIdentity disk{
-        .magic = 0x49445043,
-        .version = 1,
-        .reserved = 0,
-        .volume_or_dev = identity.volume_or_dev,
-        .file_id_low = identity.file_id_low,
-        .file_id_high = identity.file_id_high,
-        .valid = 1,
-    };
-    out.write(reinterpret_cast<const char*>(&disk), sizeof(disk));
+    out.write(reinterpret_cast<const char*>(writer.buffer.data()),
+              static_cast<std::streamsize>(writer.buffer.size()));
     out.flush();
-    if (out.fail()) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "failed writing copy identity marker",
-                                          marker_path,
-                                          operation_index));
-    }
     out.close();
     if (out.fail()) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "failed closing copy identity marker",
+                                          "failed writing copy identity marker",
                                           marker_path,
                                           operation_index));
     }
@@ -431,12 +423,8 @@ std::expected<std::optional<platform::private_storage::FileIdentity>,
               MutationError>
 read_copy_installed_identity(const platform::Workspace& workspace,
                              std::size_t operation_index) {
-    if (workspace.root.empty()) {
-        return std::optional<platform::private_storage::FileIdentity>{
-            std::nullopt};
-    }
     const auto marker_path =
-        platform::workspace_file(workspace, operation_index, ".copy_identity");
+        copy_identity_marker_path(workspace, operation_index);
     if (marker_path.empty()) {
         return std::optional<platform::private_storage::FileIdentity>{
             std::nullopt};
@@ -454,7 +442,7 @@ read_copy_installed_identity(const platform::Workspace& workspace,
                        marker_path,
                        operation_index));
     }
-    if (sz != sizeof(DiskCopyIdentity)) {
+    if (sz != copy_identity_bytes) {
         return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
                                           "corrupted copy identity marker size",
                                           marker_path,
@@ -468,16 +456,28 @@ read_copy_installed_identity(const platform::Workspace& workspace,
                                           marker_path,
                                           operation_index));
     }
-    DiskCopyIdentity disk{};
-    in.read(reinterpret_cast<char*>(&disk), sizeof(disk));
-    if (in.gcount() != sizeof(disk)) {
+    std::array<std::byte, copy_identity_bytes> raw{};
+    in.read(reinterpret_cast<char*>(raw.data()),
+            static_cast<std::streamsize>(raw.size()));
+    if (in.gcount() != static_cast<std::streamsize>(raw.size())) {
         return std::unexpected(
             make_error(MutationErrorCode::IntegrityMismatch,
                        "incomplete read of copy identity marker",
                        marker_path,
                        operation_index));
     }
-    if (disk.magic != 0x49445043 || disk.version != 1 || disk.valid != 1) {
+
+    wire::Reader reader{raw};
+    const auto magic = wire::read<std::uint32_t>(reader);
+    const auto version = wire::read<std::uint16_t>(reader);
+    const auto reserved = wire::read<std::uint16_t>(reader);
+    const auto vol = wire::read<std::uint64_t>(reader);
+    const auto low = wire::read<std::uint64_t>(reader);
+    const auto high = wire::read<std::uint64_t>(reader);
+    const auto valid = wire::read<std::uint32_t>(reader);
+    if (!magic || !version || !reserved || !vol || !low || !high || !valid ||
+        *magic != copy_identity_magic || *version != copy_identity_version ||
+        *valid != 1) {
         return std::unexpected(
             make_error(MutationErrorCode::IntegrityMismatch,
                        "invalid copy identity marker header or content",
@@ -487,9 +487,9 @@ read_copy_installed_identity(const platform::Workspace& workspace,
 
     return std::optional<platform::private_storage::FileIdentity>{
         platform::private_storage::FileIdentity{
-            .volume_or_dev = disk.volume_or_dev,
-            .file_id_low = disk.file_id_low,
-            .file_id_high = disk.file_id_high,
+            .volume_or_dev = *vol,
+            .file_id_low = *low,
+            .file_id_high = *high,
             .valid = true,
         }};
 }

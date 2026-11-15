@@ -158,6 +158,31 @@ rollback_local_mutations(transaction::Record& record,
                          const std::optional<platform::Workspace>& workspace,
                          const std::filesystem::path& local_root);
 
+struct ScopedUploadBatchCleanup {
+    const mutation::StagedUploadBatch& batch;
+    bool dismissed = false;
+    ~ScopedUploadBatchCleanup() noexcept {
+        if (!dismissed) {
+            static_cast<void>(mutation::cleanup_upload_batch(batch));
+        }
+    }
+};
+
+// Publishes and verifies an Epoch checkpointed via EpochUploaded ->
+// EpochVerified.
+std::expected<void, Error> publish_and_verify_epoch(
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const std::filesystem::path& workspace_dir,
+    const journal::Paths& paths,
+    transaction::Record& record,
+    const history_storage::epoch::Epoch& expected_epoch,
+    const history_storage::epoch::SealedEpoch& sealed_epoch,
+    std::string_view epoch_kind,
+    ErrorCode publish_error_code,
+    ErrorCode verify_error_code,
+    journal::Session* session = nullptr);
+
 } // namespace kasumi::application::sync::coordinator::detail
 
 #endif

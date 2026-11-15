@@ -7,6 +7,7 @@
 #include "platform/path.hpp"
 #include "platform/private_storage.hpp"
 
+#include <array>
 #include <fstream>
 #include <limits>
 #include <optional>
@@ -176,10 +177,10 @@ move_local_without_replace(const std::filesystem::path& source,
 
 std::expected<void, MutationError>
 verify_local_file(const std::filesystem::path& path,
-                  const Operation& operation,
+                  std::string_view hash,
+                  std::uint64_t size,
                   std::size_t operation_index) {
-    auto result =
-        crypto::content::verify_file(path, operation.hash, operation.size);
+    auto result = crypto::content::verify_file(path, hash, size);
     if (!result) {
         return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
                                           result.error(),
@@ -187,6 +188,105 @@ verify_local_file(const std::filesystem::path& path,
                                           operation_index));
     }
     return {};
+}
+
+std::expected<void, MutationError>
+verify_local_file(const std::filesystem::path& path,
+                  const Operation& operation,
+                  std::size_t operation_index) {
+    return verify_local_file(
+        path, operation.hash, operation.size, operation_index);
+}
+
+std::expected<void, MutationError>
+require_regular_file(const std::filesystem::path& path,
+                     MutationErrorCode invalid_code,
+                     std::string_view invalid_message,
+                     std::size_t operation_index) {
+    auto status = read_status(path, operation_index);
+    if (!status || std::filesystem::is_symlink(*status) ||
+        !std::filesystem::is_regular_file(*status)) {
+        return std::unexpected(make_error(
+            invalid_code, std::string(invalid_message), path, operation_index));
+    }
+    return {};
+}
+
+std::expected<void, MutationError>
+fetch_decrypt_and_verify(transport::Transport& storage,
+                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                         std::string_view identifier,
+                         const std::filesystem::path& encrypted,
+                         const std::filesystem::path& plaintext,
+                         std::string_view plaintext_hash,
+                         std::uint64_t expected_size,
+                         std::size_t operation_index,
+                         bool skip_get,
+                         std::optional<std::uintmax_t> expected_ciphertext_size,
+                         const std::filesystem::path& error_path,
+                         MutationErrorCode not_found_code,
+                         std::string_view not_found_detail,
+                         std::string_view decrypt_detail) {
+    if (!skip_get) {
+        auto downloaded = transport::get(storage, identifier, encrypted);
+        if (!downloaded) {
+            return std::unexpected(make_error(
+                downloaded.error().code == transport::ErrorCode::ObjectNotFound
+                    ? not_found_code
+                    : MutationErrorCode::TransportFailure,
+                downloaded.error().code ==
+                            transport::ErrorCode::ObjectNotFound &&
+                        !not_found_detail.empty()
+                    ? std::string(not_found_detail)
+                    : transport::describe(downloaded.error()),
+                error_path,
+                operation_index));
+        }
+    }
+
+    if (auto ok = require_regular_file(
+            encrypted,
+            expected_ciphertext_size ? MutationErrorCode::IntegrityMismatch
+                                     : MutationErrorCode::LocalIo,
+            "downloaded encrypted object is invalid",
+            operation_index);
+        !ok) {
+        return ok;
+    }
+
+    if (expected_ciphertext_size) {
+        std::error_code size_error;
+        const auto actual_size =
+            std::filesystem::file_size(encrypted, size_error);
+        if (size_error || actual_size != *expected_ciphertext_size) {
+            return std::unexpected(
+                make_error(MutationErrorCode::IntegrityMismatch,
+                           "ciphertext size does not match expected plaintext",
+                           encrypted,
+                           operation_index));
+        }
+    }
+
+    if (!crypto::decrypt_file(encrypted, plaintext, key)) {
+        return std::unexpected(make_error(MutationErrorCode::CryptoFailure,
+                                          std::string(decrypt_detail),
+                                          error_path,
+                                          operation_index));
+    }
+
+    if (expected_ciphertext_size) {
+        if (auto ok = require_regular_file(
+                plaintext,
+                MutationErrorCode::IntegrityMismatch,
+                "decrypted plaintext is not a regular file",
+                operation_index);
+            !ok) {
+            return ok;
+        }
+    }
+
+    return verify_local_file(
+        plaintext, plaintext_hash, expected_size, operation_index);
 }
 
 } // namespace
@@ -277,41 +377,8 @@ std::expected<void, MutationError> verify_uploaded_content_object(
                                           operation_index));
     }
 
-    auto downloaded = transport::get(storage, identifier, encrypted);
-    if (!downloaded) {
-        cleanup();
-        if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
-            return std::unexpected(
-                make_error(MutationErrorCode::IntegrityMismatch,
-                           "remote object missing after upload",
-                           encrypted,
-                           operation_index));
-        }
-        return std::unexpected(
-            make_error(MutationErrorCode::TransportFailure,
-                       transport::describe(downloaded.error()),
-                       encrypted,
-                       operation_index));
-    }
-
-    auto status = read_status(encrypted, operation_index);
-    if (!status || std::filesystem::is_symlink(*status) ||
-        !std::filesystem::is_regular_file(*status)) {
-        cleanup();
-        return std::unexpected(
-            make_error(MutationErrorCode::IntegrityMismatch,
-                       "downloaded encrypted object is not a regular file",
-                       encrypted,
-                       operation_index));
-    }
-
     const auto expected_ciphertext_size = encoded_content_size(expected_size);
-    std::error_code size_error;
-    const auto actual_ciphertext_size =
-        std::filesystem::file_size(encrypted, size_error);
-    if (size_error || !expected_ciphertext_size ||
-        actual_ciphertext_size != *expected_ciphertext_size) {
-        cleanup();
+    if (!expected_ciphertext_size) {
         return std::unexpected(
             make_error(MutationErrorCode::IntegrityMismatch,
                        "ciphertext size does not match expected plaintext",
@@ -319,37 +386,23 @@ std::expected<void, MutationError> verify_uploaded_content_object(
                        operation_index));
     }
 
-    if (!crypto::decrypt_file(encrypted, plaintext, key)) {
-        cleanup();
-        return std::unexpected(make_error(MutationErrorCode::CryptoFailure,
-                                          "failed to decrypt published object",
-                                          encrypted,
-                                          operation_index));
-    }
-
-    auto plaintext_status = read_status(plaintext, operation_index);
-    if (!plaintext_status || std::filesystem::is_symlink(*plaintext_status) ||
-        !std::filesystem::is_regular_file(*plaintext_status)) {
-        cleanup();
-        return std::unexpected(
-            make_error(MutationErrorCode::IntegrityMismatch,
-                       "decrypted plaintext is not a regular file",
-                       plaintext,
-                       operation_index));
-    }
-
     auto verified =
-        crypto::content::verify_file(plaintext, plaintext_hash, expected_size);
-    if (!verified) {
-        cleanup();
-        return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
-                                          verified.error(),
-                                          plaintext,
-                                          operation_index));
-    }
-
+        fetch_decrypt_and_verify(storage,
+                                 key,
+                                 identifier,
+                                 encrypted,
+                                 plaintext,
+                                 plaintext_hash,
+                                 expected_size,
+                                 operation_index,
+                                 false,
+                                 expected_ciphertext_size,
+                                 encrypted,
+                                 MutationErrorCode::IntegrityMismatch,
+                                 "remote object missing after upload",
+                                 "failed to decrypt published object");
     cleanup();
-    return {};
+    return verified;
 }
 
 } // namespace detail
@@ -560,12 +613,11 @@ apply_download(const Operation& operation,
             std::filesystem::is_regular_file(*plaintext_status)) {
             std::error_code copy_error;
             std::filesystem::copy_file(plaintext, candidate, copy_error);
-            if (!copy_error) {
-                auto verified =
-                    verify_local_file(candidate, operation, operation_index);
-                if (verified) {
-                    candidate_ready = true;
-                }
+            if (!copy_error && verify_local_file(candidate,
+                                                 operation.hash,
+                                                 operation.size,
+                                                 operation_index)) {
+                candidate_ready = true;
             }
             if (!candidate_ready) {
                 std::error_code cleanup_error;
@@ -604,11 +656,27 @@ apply_download(const Operation& operation,
         const bool reuse_cached =
             download_cache == DownloadCacheMode::Reuse &&
             std::filesystem::is_regular_file(*encrypted_status);
-        if (!reuse_cached) {
-            auto downloaded =
-                transport::get(storage, remote_identifier, encrypted);
-            if (!downloaded) {
-                remove_temporary_file(encrypted);
+        auto fetched =
+            fetch_decrypt_and_verify(storage,
+                                     key,
+                                     remote_identifier,
+                                     encrypted,
+                                     candidate,
+                                     operation.hash,
+                                     operation.size,
+                                     operation_index,
+                                     reuse_cached,
+                                     std::nullopt,
+                                     destination,
+                                     MutationErrorCode::RemoteContentMissing,
+                                     {},
+                                     "failed to decrypt object");
+        if (!fetched) {
+            remove_temporary_file(encrypted);
+            remove_temporary_file(candidate);
+            if (fetched.error().code ==
+                    MutationErrorCode::RemoteContentMissing ||
+                fetched.error().code == MutationErrorCode::TransportFailure) {
                 prepared =
                     detail::validate_prepared_destination(operation,
                                                           operation_index,
@@ -616,63 +684,20 @@ apply_download(const Operation& operation,
                                                           workspace,
                                                           progress,
                                                           condition);
-                if (!prepared)
+                if (!prepared) {
                     return prepared;
-                return std::unexpected(
-                    make_error(downloaded.error().code ==
-                                       transport::ErrorCode::ObjectNotFound
-                                   ? MutationErrorCode::RemoteContentMissing
-                                   : MutationErrorCode::TransportFailure,
-                               transport::describe(downloaded.error()),
-                               destination,
-                               operation_index));
+                }
             }
-        }
-
-        auto encrypted_after_get = read_status(encrypted, operation_index);
-        if (!encrypted_after_get ||
-            std::filesystem::is_symlink(*encrypted_after_get) ||
-            !std::filesystem::is_regular_file(*encrypted_after_get)) {
-            remove_temporary_file(encrypted);
-            return std::unexpected(
-                make_error(MutationErrorCode::LocalIo,
-                           "downloaded encrypted object is invalid",
-                           encrypted,
-                           operation_index));
-        }
-
-        const bool decrypted = crypto::decrypt_file(encrypted, candidate, key);
-        if (!decrypted) {
-            remove_temporary_file(encrypted);
-            remove_temporary_file(candidate);
-            return std::unexpected(make_error(MutationErrorCode::CryptoFailure,
-                                              "failed to decrypt object",
-                                              destination,
-                                              operation_index));
-        }
-
-        auto verified =
-            verify_local_file(candidate, operation, operation_index);
-        if (!verified) {
-            remove_temporary_file(encrypted);
-            remove_temporary_file(candidate);
-            return std::unexpected(
-                make_error(MutationErrorCode::IntegrityMismatch,
-                           verified.error().detail,
-                           destination,
-                           operation_index));
+            return fetched;
         }
 
         if (cache_plaintext) {
             std::error_code copy_error;
             std::filesystem::copy_file(candidate, plaintext, copy_error);
-            if (!copy_error) {
-                auto cache_verified =
-                    verify_local_file(plaintext, operation, operation_index);
-                if (!cache_verified) {
-                    std::filesystem::remove(plaintext, copy_error);
-                }
-            } else {
+            if (copy_error || !verify_local_file(plaintext,
+                                                 operation.hash,
+                                                 operation.size,
+                                                 operation_index)) {
                 std::filesystem::remove(plaintext, copy_error);
             }
         }
@@ -738,143 +763,117 @@ apply_download(const Operation& operation,
     return {};
 }
 
-MutationResult apply_rename(const Operation& operation,
-                            std::size_t operation_index,
-                            const std::filesystem::path& source,
-                            const std::filesystem::path& destination) {
-    auto source_status = read_status(source, operation_index);
-    if (!source_status) {
-        return std::unexpected(source_status.error());
-    }
-    auto destination_status = read_status(destination, operation_index);
-    if (!destination_status) {
-        return std::unexpected(destination_status.error());
-    }
-    if (std::filesystem::is_symlink(*source_status) ||
-        std::filesystem::is_symlink(*destination_status)) {
-        return std::unexpected(make_error(
-            MutationErrorCode::UnsafePath,
-            "rename does not accept symlink",
-            std::filesystem::is_symlink(*source_status) ? source : destination,
-            operation_index));
-    }
-
-    const bool source_missing = missing(*source_status);
-    const bool destination_missing = missing(*destination_status);
-    if (!source_missing && destination_missing) {
-        mutation_fault_test::hit("before_rename_move", source);
-        auto result =
-            move_local_without_replace(source, destination, operation_index);
-        if (!result) {
-            return std::unexpected(result.error());
-        }
-        mutation_fault_test::hit("after_rename_move", destination);
-        return {};
-    }
-    if (source_missing && !destination_missing) {
-        return {};
-    }
-    if (!source_missing && !destination_missing) {
-        return std::unexpected(
-            make_error(MutationErrorCode::DestinationConflict,
-                       "rename destination already exists",
-                       destination,
-                       operation_index));
-    }
-    return std::unexpected(
-        make_error(MutationErrorCode::LocalIo,
-                   "rename source and destination do not exist",
-                   operation.path,
-                   operation_index));
-}
-
 MutationResult
-apply_move_local(const Operation& operation,
-                 std::size_t operation_index,
-                 const std::filesystem::path& source,
-                 const std::filesystem::path& destination,
-                 const platform::Workspace& workspace,
-                 const transaction::OperationProgress& progress) {
-    if (auto parent_ok =
-            validate_parent_directory(destination, operation_index);
-        !parent_ok) {
-        return parent_ok;
+apply_rename_or_move(const Operation& operation,
+                     std::size_t operation_index,
+                     const std::filesystem::path& source,
+                     const std::filesystem::path& destination,
+                     const platform::Workspace& workspace,
+                     const transaction::OperationProgress& progress,
+                     bool is_move) {
+    if (is_move) {
+        if (auto parent_ok =
+                validate_parent_directory(destination, operation_index);
+            !parent_ok) {
+            return parent_ok;
+        }
+        mutation_fault_test::hit("before_rename_move", source);
     }
-
-    mutation_fault_test::hit("before_rename_move", source);
 
     auto source_status = read_status(source, operation_index);
-    if (!source_status) {
-        return std::unexpected(source_status.error());
-    }
     auto destination_status = read_status(destination, operation_index);
-    if (!destination_status) {
-        return std::unexpected(destination_status.error());
+    if (!source_status || !destination_status) {
+        return std::unexpected(!source_status ? source_status.error()
+                                              : destination_status.error());
     }
     if (std::filesystem::is_symlink(*source_status) ||
         std::filesystem::is_symlink(*destination_status)) {
         return std::unexpected(make_error(
             MutationErrorCode::UnsafePath,
-            "move does not accept symlink",
+            is_move ? "move does not accept symlink"
+                    : "rename does not accept symlink",
             std::filesystem::is_symlink(*source_status) ? source : destination,
             operation_index));
     }
 
     const bool source_missing = missing(*source_status);
     const bool destination_missing = missing(*destination_status);
-    if (source_missing && destination_missing) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "move source does not exist",
-                                          source,
-                                          operation_index));
-    }
-    if (!source_missing) {
-        if (!std::filesystem::is_regular_file(*source_status)) {
-            return std::unexpected(
-                make_error(MutationErrorCode::DestinationConflict,
-                           "move source is not a regular file",
-                           source,
-                           operation_index));
+    if (is_move) {
+        if (source_missing && destination_missing) {
+            return std::unexpected(make_error(MutationErrorCode::LocalIo,
+                                              "move source does not exist",
+                                              source,
+                                              operation_index));
         }
-        auto verified_source =
-            verify_local_file(source, operation, operation_index);
-        if (!verified_source) {
-            return std::unexpected(verified_source.error());
+        if (!source_missing) {
+            if (!std::filesystem::is_regular_file(*source_status)) {
+                return std::unexpected(
+                    make_error(MutationErrorCode::DestinationConflict,
+                               "move source is not a regular file",
+                               source,
+                               operation_index));
+            }
+            if (auto verified = verify_local_file(
+                    source, operation.hash, operation.size, operation_index);
+                !verified) {
+                return verified;
+            }
+            if (!destination_missing) {
+                return std::unexpected(
+                    make_error(MutationErrorCode::DestinationConflict,
+                               "move destination already exists",
+                               destination,
+                               operation_index));
+            }
         }
-        if (!destination_missing) {
-            return std::unexpected(
-                make_error(MutationErrorCode::DestinationConflict,
-                           "move destination already exists",
-                           destination,
-                           operation_index));
+        if (auto prepared = detail::validate_prepared_rename(operation,
+                                                             operation_index,
+                                                             source,
+                                                             destination,
+                                                             workspace,
+                                                             progress);
+            !prepared) {
+            return prepared;
         }
-    }
-
-    auto prepared = detail::validate_prepared_rename(
-        operation, operation_index, source, destination, workspace, progress);
-    if (!prepared) {
-        return prepared;
     }
 
     if (!source_missing && destination_missing) {
-        auto moved =
-            move_local_without_replace(source, destination, operation_index);
-        if (!moved) {
-            return std::unexpected(moved.error());
+        if (!is_move) {
+            mutation_fault_test::hit("before_rename_move", source);
+        }
+        if (auto moved = move_local_without_replace(
+                source, destination, operation_index);
+            !moved) {
+            return moved;
         }
         mutation_fault_test::hit("after_rename_move", destination);
     } else if (source_missing && !destination_missing) {
-        auto verified_dest =
-            verify_local_file(destination, operation, operation_index);
-        if (!verified_dest) {
-            return std::unexpected(
-                make_error(MutationErrorCode::DestinationConflict,
-                           verified_dest.error().detail,
-                           destination,
-                           operation_index));
+        if (is_move) {
+            if (auto verified = verify_local_file(destination,
+                                                  operation.hash,
+                                                  operation.size,
+                                                  operation_index);
+                !verified) {
+                return std::unexpected(
+                    make_error(MutationErrorCode::DestinationConflict,
+                               verified.error().detail,
+                               destination,
+                               operation_index));
+            }
         }
+    } else if (!is_move) {
+        return std::unexpected(make_error(
+            !source_missing ? MutationErrorCode::DestinationConflict
+                            : MutationErrorCode::LocalIo,
+            !source_missing ? "rename destination already exists"
+                            : "rename source and destination do not exist",
+            !source_missing ? destination : operation.path,
+            operation_index));
     }
 
+    if (!is_move) {
+        return {};
+    }
     if (auto synced = sync_parent_checked(destination, operation_index);
         !synced) {
         return synced;
@@ -1132,28 +1131,20 @@ apply_copy_local(const Operation& operation,
     return {};
 }
 
-std::string mutation_code_name(MutationErrorCode code) noexcept {
-    switch (code) {
-        case MutationErrorCode::InvalidOperation:
-            return "invalid_operation";
-        case MutationErrorCode::UnsafePath:
-            return "unsafe_path";
-        case MutationErrorCode::LocalIo:
-            return "local_io";
-        case MutationErrorCode::TransportFailure:
-            return "transport_failure";
-        case MutationErrorCode::RemoteContentMissing:
-            return "remote_content_missing";
-        case MutationErrorCode::RemoteResultUnknown:
-            return "remote_result_unknown";
-        case MutationErrorCode::CryptoFailure:
-            return "crypto_failure";
-        case MutationErrorCode::IntegrityMismatch:
-            return "integrity_mismatch";
-        case MutationErrorCode::DestinationConflict:
-            return "destination_conflict";
-    }
-    return "local_io";
+std::string_view mutation_code_name(MutationErrorCode code) noexcept {
+    constexpr std::array<std::string_view, 9> names{
+        "invalid_operation",
+        "unsafe_path",
+        "local_io",
+        "transport_failure",
+        "remote_content_missing",
+        "remote_result_unknown",
+        "crypto_failure",
+        "integrity_mismatch",
+        "destination_conflict",
+    };
+    const auto idx = static_cast<std::size_t>(code);
+    return idx < names.size() ? names[idx] : "local_io";
 }
 
 } // namespace
@@ -1195,8 +1186,13 @@ apply_operation(const Operation& operation,
             if (!prepared) {
                 return prepared;
             }
-            return apply_rename(
-                operation, operation_index, pair->first, pair->second);
+            return apply_rename_or_move(operation,
+                                        operation_index,
+                                        pair->first,
+                                        pair->second,
+                                        workspace,
+                                        progress,
+                                        false);
         }
 
         case Action::Upload: {
@@ -1264,12 +1260,13 @@ apply_operation(const Operation& operation,
             if (!pair) {
                 return std::unexpected(pair.error());
             }
-            return apply_move_local(operation,
-                                    operation_index,
-                                    pair->first,
-                                    pair->second,
-                                    workspace,
-                                    progress);
+            return apply_rename_or_move(operation,
+                                        operation_index,
+                                        pair->first,
+                                        pair->second,
+                                        workspace,
+                                        progress,
+                                        true);
         }
 
         case Action::CopyLocal: {
@@ -1524,7 +1521,7 @@ apply_operation(const Operation& operation,
 }
 
 std::string describe(const MutationError& error) {
-    std::string result = mutation_code_name(error.code);
+    std::string result{mutation_code_name(error.code)};
     result += " in operation ";
     result += std::to_string(error.operation_index);
     if (!error.path.empty()) {

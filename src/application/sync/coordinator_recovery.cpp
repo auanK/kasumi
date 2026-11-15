@@ -494,16 +494,7 @@ std::expected<void, Error> resume_pending_storage_repairs(
                                    staged_batch.error().operation_index));
         }
 
-        bool checkpoint_complete = false;
-        struct StagedBatchCleanup {
-            const mutation::StagedUploadBatch& batch;
-            bool& checkpoint_complete;
-            ~StagedBatchCleanup() noexcept {
-                if (!checkpoint_complete) {
-                    static_cast<void>(mutation::cleanup_upload_batch(batch));
-                }
-            }
-        } batch_cleanup{*staged_batch, checkpoint_complete};
+        detail::ScopedUploadBatchCleanup batch_cleanup{*staged_batch};
 
         mutation::StagedUploadBatch missing_batch{.root = staged_batch->root};
         auto listing = transport::list(storage);
@@ -588,7 +579,7 @@ std::expected<void, Error> resume_pending_storage_repairs(
         if (!checkpointed) {
             return std::unexpected(checkpointed.error());
         }
-        checkpoint_complete = true;
+        batch_cleanup.dismissed = true;
 
         auto cleaned = mutation::cleanup_upload_batch(*staged_batch);
 
@@ -723,44 +714,19 @@ roll_forward(const journal::Paths& paths,
                 return std::unexpected(saved.error());
             }
         }
-        if (record.phase < transaction::Phase::EpochUploaded) {
-            auto published = history_storage::epoch::publish(
-                storage, key, *epoch, runtime_data.database_path.parent_path());
-            if (!published) {
-                auto visible = history_storage::epoch::verify(
-                    storage,
-                    detail::genesis_epoch(record),
-                    epoch->reference,
-                    key,
-                    runtime_data.database_path.parent_path());
-                if (!visible) {
-                    return std::unexpected(
-                        detail::make_error(ErrorCode::RecoveryIndeterminate,
-                                           "failed to publish genesis Epoch: " +
-                                               published.error().detail));
-                }
-            }
-            if (auto saved = save_phase(
-                    paths, record, transaction::Phase::EpochUploaded, key);
-                !saved) {
-                return std::unexpected(saved.error());
-            }
-        }
-        auto verified = history_storage::epoch::verify(
-            storage,
-            detail::genesis_epoch(record),
-            epoch->reference,
-            key,
-            runtime_data.database_path.parent_path());
-        if (!verified) {
-            return std::unexpected(detail::make_error(
-                ErrorCode::RecoveryConflict,
-                "failed to verify genesis Epoch: " + verified.error().detail));
-        }
-        if (auto saved = save_phase(
-                paths, record, transaction::Phase::EpochVerified, key);
-            !saved) {
-            return std::unexpected(saved.error());
+        if (auto ok = detail::publish_and_verify_epoch(
+                storage,
+                key,
+                runtime_data.database_path.parent_path(),
+                paths,
+                record,
+                detail::genesis_epoch(record),
+                *epoch,
+                "genesis",
+                ErrorCode::RecoveryIndeterminate,
+                ErrorCode::RecoveryConflict);
+            !ok) {
+            return std::unexpected(ok.error());
         }
         recovered_epoch_reference = history_storage::epoch::Reference{
             .sequence = 0, .epoch_id = record.epoch_id};

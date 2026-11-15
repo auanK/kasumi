@@ -247,16 +247,20 @@ create_backup(const std::filesystem::path& source,
               const std::filesystem::path& backup,
               std::string_view expected_hash,
               std::size_t operation_index) {
+    const auto reuse_existing = [&]() -> std::expected<void, MutationError> {
+        if (auto ok = validate_backup(backup, expected_hash, operation_index);
+            !ok) {
+            return ok;
+        }
+        return make_backup_durable(backup, operation_index);
+    };
+
     auto status = read_status(backup, operation_index);
     if (!status) {
         return std::unexpected(status.error());
     }
     if (!missing(*status)) {
-        auto validated =
-            validate_backup(backup, expected_hash, operation_index);
-        if (!validated)
-            return validated;
-        return make_backup_durable(backup, operation_index);
+        return reuse_existing();
     }
 
     const auto source_mtime = platform::metadata::last_write_time(source);
@@ -272,11 +276,7 @@ create_backup(const std::filesystem::path& source,
         source, backup, std::filesystem::copy_options::none, error);
     if (!copied || error) {
         if (error == std::errc::file_exists) {
-            auto validated =
-                validate_backup(backup, expected_hash, operation_index);
-            if (!validated)
-                return validated;
-            return make_backup_durable(backup, operation_index);
+            return reuse_existing();
         }
         return std::unexpected(
             make_error(MutationErrorCode::LocalIo,
@@ -285,35 +285,29 @@ create_backup(const std::filesystem::path& source,
                        backup,
                        operation_index));
     }
-    auto secured = platform::private_storage::protect_file(backup);
-    if (!secured) {
+    const auto fail_cleanup =
+        [&](MutationError err) -> std::expected<void, MutationError> {
         remove_temporary_file(backup);
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          secured.error(),
-                                          backup,
-                                          operation_index));
+        return std::unexpected(std::move(err));
+    };
+    if (auto secured = platform::private_storage::protect_file(backup);
+        !secured) {
+        return fail_cleanup(make_error(MutationErrorCode::LocalIo,
+                                       secured.error(),
+                                       backup,
+                                       operation_index));
     }
-
-    auto backup_metadata =
-        platform::metadata::set_last_write_time(backup, *source_mtime);
-    if (!backup_metadata) {
-        remove_temporary_file(backup);
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "failed to preserve backup mtime: " +
-                                              backup_metadata.error(),
-                                          backup,
-                                          operation_index));
+    if (auto mtime =
+            platform::metadata::set_last_write_time(backup, *source_mtime);
+        !mtime) {
+        return fail_cleanup(
+            make_error(MutationErrorCode::LocalIo,
+                       "failed to preserve backup mtime: " + mtime.error(),
+                       backup,
+                       operation_index));
     }
-
-    auto verified = validate_backup(backup, expected_hash, operation_index);
-    if (!verified) {
-        remove_temporary_file(backup);
-        return verified;
-    }
-    auto durable = make_backup_durable(backup, operation_index);
-    if (!durable) {
-        remove_temporary_file(backup);
-        return durable;
+    if (auto ok = reuse_existing(); !ok) {
+        return fail_cleanup(ok.error());
     }
     return {};
 }
@@ -322,126 +316,82 @@ std::expected<void, MutationError>
 validate_progress(const Operation& operation,
                   const transaction::OperationProgress& progress,
                   std::size_t operation_index) {
-    if (!transaction::valid(progress.state)) {
+    const auto invalid = [&](std::string_view msg) {
         return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
-                                          "invalid progress state",
+                                          std::string(msg),
                                           operation.path,
                                           operation_index));
+    };
+    if (!transaction::valid(progress.state)) {
+        return invalid("invalid progress state");
     }
-    if (progress.state == transaction::OperationState::Pending &&
-
-        (progress.had_original || !progress.previous_hash.empty())) {
-        return std::unexpected(
-            make_error(MutationErrorCode::InvalidOperation,
-                       "Pending progress contains residual data",
-                       operation.path,
-                       operation_index));
+    const bool pending = progress.state == transaction::OperationState::Pending;
+    if (pending && (progress.had_original || !progress.previous_hash.empty())) {
+        return invalid("Pending progress contains residual data");
     }
     const auto valid_hash = [](std::string_view value) {
         return !value.empty() && hash_from_hex(value).has_value();
     };
-    const auto require_slot = [&] {
-        return progress.backup_slot != no_backup_slot;
-    };
-    const auto require_file_hash = [&] {
-        return progress.had_original ? valid_hash(progress.previous_hash)
+    const bool has_slot = progress.backup_slot != no_backup_slot;
+    const bool valid_file_hash = progress.had_original
+                                     ? valid_hash(progress.previous_hash)
                                      : progress.previous_hash.empty();
-    };
+    const bool valid_pair =
+        has_slot && valid_hash(operation.hash) && !operation.path.empty() &&
+        !operation.alt_path.empty() && operation.path != operation.alt_path &&
+        !operation.exclusive_destination;
+
     switch (operation.action) {
         case Action::Upload:
         case Action::CreateRemoteDirectory:
         case Action::DeleteRemote:
         case Action::DeleteRemoteDirectory:
-            if (progress.backup_slot != no_backup_slot ||
-                progress.had_original || !progress.previous_hash.empty()) {
-                return std::unexpected(
-                    make_error(MutationErrorCode::InvalidOperation,
-                               "remote operation contains local progress",
-                               operation.path,
-                               operation_index));
+            if (has_slot || progress.had_original ||
+                !progress.previous_hash.empty()) {
+                return invalid("remote operation contains local progress");
             }
-            break;
+            return {};
         case Action::Download:
         case Action::DeleteLocal:
-            if (!require_slot() || !require_file_hash()) {
-                return std::unexpected(
-                    make_error(MutationErrorCode::InvalidOperation,
-                               "invalid local file progress",
-                               operation.path,
-                               operation_index));
-            }
-            break;
+            return (has_slot && valid_file_hash)
+                       ? std::expected<void, MutationError>{}
+                       : invalid("invalid local file progress");
         case Action::DeleteIgnoredLocalFile:
-            if (!require_slot() || !require_file_hash() ||
-                (progress.state != transaction::OperationState::Pending &&
-                 (!progress.had_original ||
-                  progress.previous_hash != operation.hash))) {
-                return std::unexpected(
-                    make_error(MutationErrorCode::InvalidOperation,
-                               "invalid disposable file progress",
-                               operation.path,
-                               operation_index));
+            if (!has_slot || !valid_file_hash ||
+                (!pending && (!progress.had_original ||
+                              progress.previous_hash != operation.hash))) {
+                return invalid("invalid disposable file progress");
             }
-            break;
+            return {};
         case Action::MoveLocal:
-            if (!require_slot() || !valid_hash(operation.hash) ||
-                operation.path.empty() || operation.alt_path.empty() ||
-                operation.path == operation.alt_path ||
-                operation.exclusive_destination ||
-                (progress.state != transaction::OperationState::Pending &&
-                 (!progress.had_original ||
-                  progress.previous_hash != operation.hash))) {
-                return std::unexpected(
-                    make_error(MutationErrorCode::InvalidOperation,
-                               "invalid move progress",
-                               operation.path,
-                               operation_index));
+            if (!valid_pair ||
+                (!pending && (!progress.had_original ||
+                              progress.previous_hash != operation.hash))) {
+                return invalid("invalid move progress");
             }
-            break;
+            return {};
         case Action::CopyLocal:
-            if (!require_slot() || !valid_hash(operation.hash) ||
-                operation.path.empty() || operation.alt_path.empty() ||
-                operation.path == operation.alt_path ||
-                operation.exclusive_destination ||
-                (progress.state != transaction::OperationState::Pending &&
-                 !progress.previous_hash.empty() &&
-                 progress.previous_hash != operation.hash)) {
-                return std::unexpected(
-                    make_error(MutationErrorCode::InvalidOperation,
-                               "invalid copy progress",
-                               operation.path,
-                               operation_index));
+            if (!valid_pair || (!pending && !progress.previous_hash.empty() &&
+                                progress.previous_hash != operation.hash)) {
+                return invalid("invalid copy progress");
             }
-            break;
+            return {};
         case Action::RenameLocal:
-            if (!require_slot() ||
-                (progress.state != transaction::OperationState::Pending &&
-                 !valid_hash(progress.previous_hash))) {
-                return std::unexpected(
-                    make_error(MutationErrorCode::InvalidOperation,
-                               "invalid rename progress",
-                               operation.path,
-                               operation_index));
+            if (!has_slot ||
+                (!pending && !valid_hash(progress.previous_hash))) {
+                return invalid("invalid rename progress");
             }
-            break;
+            return {};
         case Action::CreateLocalDirectory:
         case Action::DeleteLocalDirectory:
-            if (!require_slot() || !progress.previous_hash.empty()) {
-                return std::unexpected(
-                    make_error(MutationErrorCode::InvalidOperation,
-                               "invalid local directory progress",
-                               operation.path,
-                               operation_index));
+            if (!has_slot || !progress.previous_hash.empty()) {
+                return invalid("invalid local directory progress");
             }
-            break;
+            return {};
         case Action::Count:
-            return std::unexpected(
-                make_error(MutationErrorCode::InvalidOperation,
-                           "count action is not transactional",
-                           operation.path,
-                           operation_index));
+            return invalid("count action is not transactional");
     }
-    return {};
+    return invalid("invalid operation action");
 }
 
 PreparationResult
@@ -1447,9 +1397,12 @@ rollback_operation(const Operation& operation,
         }
     }
 
-    if (operation.action == Action::CreateLocalDirectory) {
-        if (progress.had_original)
+    if (operation.action == Action::CreateLocalDirectory ||
+        operation.action == Action::DeleteLocalDirectory) {
+        const bool is_create = operation.action == Action::CreateLocalDirectory;
+        if (is_create ? progress.had_original : !progress.had_original) {
             return {};
+        }
         auto path =
             resolve_local_path(local_root, operation.path, operation_index);
         if (!path)
@@ -1457,15 +1410,31 @@ rollback_operation(const Operation& operation,
         auto status = read_status(*path, operation_index);
         if (!status)
             return std::unexpected(status.error());
-        if (missing(*status))
+        if (missing(*status)) {
+            if (is_create) {
+                return {};
+            }
+            std::error_code error;
+            if (!std::filesystem::create_directory(*path, error) || error) {
+                return std::unexpected(make_error(
+                    MutationErrorCode::LocalIo,
+                    error ? error.message() : "failed to recreate directory",
+                    *path,
+                    operation_index));
+            }
             return {};
+        }
         if (std::filesystem::is_symlink(*status) ||
             !std::filesystem::is_directory(*status)) {
-            return std::unexpected(
-                make_error(MutationErrorCode::DestinationConflict,
-                           "created object is not a regular directory",
-                           *path,
-                           operation_index));
+            return std::unexpected(make_error(
+                MutationErrorCode::DestinationConflict,
+                is_create ? "created object is not a regular directory"
+                          : "restored object is not a regular directory",
+                *path,
+                operation_index));
+        }
+        if (!is_create) {
+            return {};
         }
         std::error_code error;
         std::filesystem::directory_iterator iterator(*path, error);
@@ -1480,37 +1449,6 @@ rollback_operation(const Operation& operation,
             return std::unexpected(make_error(
                 MutationErrorCode::LocalIo,
                 error ? error.message() : "failed to remove directory",
-                *path,
-                operation_index));
-        }
-        return {};
-    }
-    if (operation.action == Action::DeleteLocalDirectory) {
-        if (!progress.had_original)
-            return {};
-        auto path =
-            resolve_local_path(local_root, operation.path, operation_index);
-        if (!path)
-            return std::unexpected(path.error());
-        auto status = read_status(*path, operation_index);
-        if (!status)
-            return std::unexpected(status.error());
-        if (!missing(*status)) {
-            if (std::filesystem::is_symlink(*status) ||
-                !std::filesystem::is_directory(*status)) {
-                return std::unexpected(
-                    make_error(MutationErrorCode::DestinationConflict,
-                               "restored object is not a regular directory",
-                               *path,
-                               operation_index));
-            }
-            return {};
-        }
-        std::error_code error;
-        if (!std::filesystem::create_directory(*path, error) || error) {
-            return std::unexpected(make_error(
-                MutationErrorCode::LocalIo,
-                error ? error.message() : "failed to recreate directory",
                 *path,
                 operation_index));
         }

@@ -975,6 +975,50 @@ validate_epoch_policy_presence(const reconciliation::StorageState& observed) {
     return {};
 }
 
+std::expected<void, Error> publish_and_verify_epoch(
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const std::filesystem::path& workspace_dir,
+    const journal::Paths& paths,
+    transaction::Record& record,
+    const history_storage::epoch::Epoch& expected_epoch,
+    const history_storage::epoch::SealedEpoch& sealed_epoch,
+    std::string_view epoch_kind,
+    ErrorCode publish_error_code,
+    ErrorCode verify_error_code,
+    journal::Session* session) {
+    auto verify_epoch = [&]() {
+        return history_storage::epoch::verify(
+            storage, expected_epoch, sealed_epoch.reference, key, workspace_dir);
+    };
+    const auto save_phase =
+        [&](transaction::Phase phase) -> std::expected<void, Error> {
+        record.phase = phase;
+        return save_record(
+            paths, record, key, journal::SaveMode::Advance, session);
+    };
+    if (record.phase < transaction::Phase::EpochUploaded) {
+        if (auto published = history_storage::epoch::publish(
+                storage, key, sealed_epoch, workspace_dir);
+            !published && !verify_epoch()) {
+            return std::unexpected(
+                make_error(publish_error_code,
+                           "failed to publish " + std::string(epoch_kind) +
+                               " Epoch: " + published.error().detail));
+        }
+        if (auto saved = save_phase(transaction::Phase::EpochUploaded); !saved) {
+            return std::unexpected(saved.error());
+        }
+    }
+    if (auto verified = verify_epoch(); !verified) {
+        return std::unexpected(make_error(verify_error_code,
+                                          "failed to verify " +
+                                              std::string(epoch_kind) +
+                                              " Epoch: " + verified.error().detail));
+    }
+    return save_phase(transaction::Phase::EpochVerified);
+}
+
 std::expected<history_storage::epoch::RetentionPolicy, Error>
 authenticated_epoch_policy(const reconciliation::StorageState& observed) {
     if (observed.epoch_id.empty() || observed.epoch_vault_id.empty() ||
@@ -2195,17 +2239,7 @@ execute(const runtime::RuntimeData& runtime_data,
                                      staged_batch.error());
             }
 
-            bool cleaned_explicitly = false;
-            struct StagedBatchCleanup {
-                const mutation::StagedUploadBatch& batch;
-                bool& cleaned_explicitly;
-                ~StagedBatchCleanup() noexcept {
-                    if (!cleaned_explicitly) {
-                        static_cast<void>(
-                            mutation::cleanup_upload_batch(batch));
-                    }
-                }
-            } batch_cleanup{*staged_batch, cleaned_explicitly};
+            detail::ScopedUploadBatchCleanup batch_cleanup{*staged_batch};
 
             auto transferred = mutation::transfer_upload_batch(
                 *staged_batch, storage, parallelism);
@@ -2239,7 +2273,7 @@ execute(const runtime::RuntimeData& runtime_data,
                 return std::unexpected(checkpointed.error());
             }
 
-            cleaned_explicitly = true;
+            batch_cleanup.dismissed = true;
             auto cleaned = mutation::cleanup_upload_batch(*staged_batch);
 
             if (!cleaned) {
@@ -2507,39 +2541,24 @@ execute(const runtime::RuntimeData& runtime_data,
     }
 
     std::optional<history_storage::epoch::Reference> verified_new_epoch;
-    const auto publish_and_verify_epoch =
+    const auto publish_epoch =
         [&](const history_storage::epoch::Epoch& expected_epoch,
             const history_storage::epoch::SealedEpoch& sealed_epoch,
             std::string_view epoch_kind) -> std::expected<void, Error> {
-        const auto workspace_dir = runtime_data.database_path.parent_path();
-        auto verify_epoch = [&]() {
-            return history_storage::epoch::verify(storage,
-                                                  expected_epoch,
-                                                  sealed_epoch.reference,
-                                                  key,
-                                                  workspace_dir);
-        };
-        if (auto epoch_published = history_storage::epoch::publish(
-                storage, key, sealed_epoch, workspace_dir);
-            !epoch_published && !verify_epoch()) {
-            return std::unexpected(detail::make_error(
+        if (auto ok = detail::publish_and_verify_epoch(
+                storage,
+                key,
+                runtime_data.database_path.parent_path(),
+                *paths,
+                *record,
+                expected_epoch,
+                sealed_epoch,
+                epoch_kind,
                 ErrorCode::PublicationFailure,
-                "failed to publish " + std::string(epoch_kind) +
-                    " Epoch: " + epoch_published.error().detail));
-        }
-        if (auto saved_phase = advance_phase(transaction::Phase::EpochUploaded);
-            !saved_phase) {
-            return std::unexpected(saved_phase.error());
-        }
-        if (auto epoch_verified = verify_epoch(); !epoch_verified) {
-            return std::unexpected(detail::make_error(
                 ErrorCode::PublicationFailure,
-                "failed to verify " + std::string(epoch_kind) +
-                    " Epoch: " + epoch_verified.error().detail));
-        }
-        if (auto saved_phase = advance_phase(transaction::Phase::EpochVerified);
-            !saved_phase) {
-            return std::unexpected(saved_phase.error());
+                &journal_session);
+            !ok) {
+            return ok;
         }
         verified_new_epoch = sealed_epoch.reference;
         return {};
@@ -2557,7 +2576,7 @@ execute(const runtime::RuntimeData& runtime_data,
             !saved_phase) {
             return std::unexpected(saved_phase.error());
         }
-        if (auto published_epoch = publish_and_verify_epoch(
+        if (auto published_epoch = publish_epoch(
                 detail::genesis_epoch(*record), *epoch, "genesis");
             !published_epoch) {
             return std::unexpected(published_epoch.error());
@@ -2601,8 +2620,8 @@ execute(const runtime::RuntimeData& runtime_data,
                     .anchors = plan->anchors,
                     .previous_epoch_id = observed_input.storage.epoch_id};
 
-                if (auto published_epoch = publish_and_verify_epoch(
-                        expected_epoch, *epoch, "pruning");
+                if (auto published_epoch =
+                        publish_epoch(expected_epoch, *epoch, "pruning");
                     !published_epoch) {
                     return std::unexpected(published_epoch.error());
                 }
