@@ -134,7 +134,7 @@ put_verified(transport::Transport& storage,
         return std::unexpected(history_error(temporary.error()));
     }
     const auto source = (*temporary)->workspace.root / "marker.source";
-
+    const auto copy = (*temporary)->workspace.root / "marker.copy";
     if (auto written = detail::write_file(source, bytes); !written) {
         return std::unexpected(history_error(written.error()));
     }
@@ -147,12 +147,27 @@ put_verified(transport::Transport& storage,
     if (!sent) {
         return std::unexpected(transport_error(sent.error()));
     }
-    auto matches = verify_remote_payload(
-        storage, identifier, bytes, workspace_root, *local_hash);
-    if (!matches) {
-        return std::unexpected(matches.error());
+    auto remote_hash = transport::physical_hash(storage, identifier, "sha256");
+    if (remote_hash) {
+        if (*remote_hash != *local_hash) {
+            return std::unexpected(
+                error(ErrorCode::VerificationFailure,
+                      "remote physical hash does not match published marker"));
+        }
+        return *local_hash;
     }
-    if (!*matches) {
+    if (remote_hash.error().code != transport::ErrorCode::Unsupported) {
+        return std::unexpected(transport_error(remote_hash.error()));
+    }
+    if (auto downloaded = detail::download(storage, identifier, copy);
+        !downloaded) {
+        return std::unexpected(history_error(downloaded.error()));
+    }
+    auto observed = detail::read_file(copy, maximum_marker_size);
+    if (!observed) {
+        return std::unexpected(history_error(observed.error()));
+    }
+    if (!std::ranges::equal(*observed, bytes)) {
         return std::unexpected(
             error(ErrorCode::VerificationFailure,
                   "remote marker does not match published marker"));

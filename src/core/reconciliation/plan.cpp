@@ -230,7 +230,7 @@ synchronize_ancestor_rows(Snapshot& candidate,
         if (end == path.size()) {
             break;
         }
-        const auto next = path.find('/', end == 0 ? 0 : end + 1);
+        const auto next = path.find('/', end + 1);
         if (next == std::string_view::npos) {
             if (!include_target) {
                 break;
