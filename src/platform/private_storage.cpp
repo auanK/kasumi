@@ -364,14 +364,25 @@ protect_windows_tree(const std::filesystem::path& root) {
 } // namespace
 
 #if defined(_WIN32)
+} // namespace kasumi::platform::private_storage
+
+namespace kasumi::platform::detail {
+
 std::expected<void, std::string>
-detail::walk_windows_tree(const std::filesystem::path& root,
-                          bool postorder_dirs,
-                          WalkEntryFn on_entry,
-                          void* context) {
+walk_windows_tree(const std::filesystem::path& root,
+                  bool postorder_dirs,
+                  WalkEntryFn on_entry,
+                  void* context) {
     struct Frame {
         std::filesystem::path path;
         bool postorder{false};
+    };
+    const auto win_err = [](std::string_view op,
+                            const std::filesystem::path& p,
+                            DWORD code) {
+        return std::string{op} + " for '" + platform::path::to_utf8(p) + "': " +
+               std::error_code{static_cast<int>(code), std::system_category()}
+                   .message();
     };
     std::vector<Frame> stack{{root, false}};
     while (!stack.empty()) {
@@ -398,9 +409,7 @@ detail::walk_windows_tree(const std::filesystem::path& root,
                 continue;
             }
             return std::unexpected(
-                windows_error("FindFirstFileW failed for '" +
-                                  platform::path::to_utf8(frame.path) + "'",
-                              code));
+                win_err("FindFirstFileW failed", frame.path, code));
         }
         if (postorder_dirs) {
             stack.push_back({frame.path, true});
@@ -447,13 +456,15 @@ detail::walk_windows_tree(const std::filesystem::path& root,
             enumeration_error != ERROR_FILE_NOT_FOUND &&
             enumeration_error != ERROR_PATH_NOT_FOUND) {
             return std::unexpected(
-                windows_error("FindNextFileW failed for '" +
-                                  platform::path::to_utf8(frame.path) + "'",
-                              enumeration_error));
+                win_err("FindNextFileW failed", frame.path, enumeration_error));
         }
     }
     return {};
 }
+
+} // namespace kasumi::platform::detail
+
+namespace kasumi::platform::private_storage {
 #endif
 
 std::expected<void, std::string>
