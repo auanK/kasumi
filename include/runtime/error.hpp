@@ -1,6 +1,7 @@
 #ifndef KASUMI_RUNTIME_ERROR_HPP
 #define KASUMI_RUNTIME_ERROR_HPP
 
+#include <expected>
 #include <string>
 
 namespace kasumi::runtime {
@@ -25,6 +26,10 @@ struct Error {
     ErrorCode code = ErrorCode::IoFailure;
     std::string detail;
 };
+
+inline std::unexpected<Error> fail(ErrorCode code, std::string detail) {
+    return std::unexpected(Error{.code = code, .detail = std::move(detail)});
+}
 
 } // namespace kasumi::runtime
 

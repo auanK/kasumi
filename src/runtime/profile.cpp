@@ -7,22 +7,9 @@
 #include <array>
 #include <cctype>
 #include <cstdint>
-#include <fstream>
 #include <limits>
 #include <sstream>
 #include <toml++/toml.h>
-
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#else
-#include <cerrno>
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
 
 namespace kasumi::runtime {
 
@@ -32,23 +19,20 @@ std::expected<std::uint32_t, Error>
 read_retention_value(const toml::table& profile, std::string_view name) {
     const auto field = profile[name];
     if (!field) {
-        return std::unexpected(Error{.code = ErrorCode::ProfileInvalid,
-                                     .detail = "retention field is required: " +
-                                               std::string{name}});
+        return fail(ErrorCode::ProfileInvalid,
+                    "retention field is required: " + std::string{name});
     }
     if (!field.is_integer()) {
-        return std::unexpected(
-            Error{.code = ErrorCode::ProfileInvalid,
-                  .detail = "retention field must be a positive integer: " +
-                            std::string{name}});
+        return fail(ErrorCode::ProfileInvalid,
+                    "retention field must be a positive integer: " +
+                        std::string{name});
     }
     const auto value = field.value_exact<std::int64_t>();
     if (!value || *value <= 0 ||
         static_cast<std::uint64_t>(*value) >
             std::numeric_limits<std::uint32_t>::max()) {
-        return std::unexpected(Error{
-            .code = ErrorCode::ProfileInvalid,
-            .detail = "retention field out of range: " + std::string{name}});
+        return fail(ErrorCode::ProfileInvalid,
+                    "retention field out of range: " + std::string{name});
     }
     return static_cast<std::uint32_t>(*value);
 }
@@ -67,8 +51,7 @@ std::expected<ProfileData, Error>
 load_profile(const std::filesystem::path& config_path,
              std::string_view profile_name) {
     if (!is_valid_profile_name(profile_name)) {
-        return std::unexpected(Error{.code = ErrorCode::InvalidProfileName,
-                                     .detail = "invalid profile name"});
+        return fail(ErrorCode::InvalidProfileName, "invalid profile name");
     }
 
     auto profiles = load_profiles(config_path);
@@ -80,8 +63,7 @@ load_profile(const std::filesystem::path& config_path,
             return std::move(prof);
     }
 
-    return std::unexpected(Error{.code = ErrorCode::ProfileNotFound,
-                                 .detail = "profile not found"});
+    return fail(ErrorCode::ProfileNotFound, "profile not found");
 }
 
 std::expected<std::vector<ProfileData>, Error>
@@ -90,123 +72,49 @@ load_profiles(const std::filesystem::path& config_path) {
     const auto status =
         std::filesystem::symlink_status(config_path, status_error);
     if (status.type() == std::filesystem::file_type::not_found) {
-        return std::unexpected(
-            Error{.code = ErrorCode::ConfigNotFound,
-                  .detail = "global configuration file does not exist; run "
-                            "'kasumi config' first"});
+        return fail(ErrorCode::ConfigNotFound,
+                    "global configuration file does not exist; run "
+                    "'kasumi config' first");
     }
     if (status_error) {
-        return std::unexpected(
-            Error{.code = ErrorCode::IoFailure,
-                  .detail = "failed to inspect global configuration: " +
-                            status_error.message()});
+        return fail(ErrorCode::IoFailure,
+                    "failed to inspect global configuration: " +
+                        status_error.message());
     }
     auto parent =
         platform::private_storage::protect_directory(config_path.parent_path());
     if (!parent) {
-        return std::unexpected(
-            Error{.code = ErrorCode::IoFailure, .detail = parent.error()});
+        return fail(ErrorCode::IoFailure, parent.error());
     }
     auto secured = platform::private_storage::protect_file(config_path);
     if (!secured) {
-        return std::unexpected(
-            Error{.code = ErrorCode::IoFailure, .detail = secured.error()});
+        return fail(ErrorCode::IoFailure, secured.error());
     }
     toml::table config;
     try {
-#if defined(_WIN32)
-        const auto native = CreateFileW(
-            config_path.c_str(),
-            GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN,
-            nullptr);
-        if (native == INVALID_HANDLE_VALUE) {
-            return std::unexpected(Error{
-                .code = ErrorCode::IoFailure,
-                .detail = "failed to open global configuration (native_code=" +
-                          std::to_string(GetLastError()) + ")"});
-        }
-        platform::private_storage::PrivateHandle input{
-            reinterpret_cast<std::intptr_t>(native)};
-        FILE_ATTRIBUTE_TAG_INFO attributes{};
-        if (!GetFileInformationByHandleEx(native,
-                                          FileAttributeTagInfo,
-                                          &attributes,
-                                          sizeof(attributes)) ||
-            (attributes.FileAttributes &
-             (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY |
-              FILE_ATTRIBUTE_DEVICE)) != 0) {
-            return std::unexpected(Error{
-                .code = ErrorCode::IoFailure,
-                .detail =
-                    "global configuration is not an accessible regular file"});
-        }
         std::string snapshot;
-        std::array<char, 4096> buffer{};
-        for (;;) {
-            DWORD count = 0;
-            if (!ReadFile(native,
-                          buffer.data(),
-                          static_cast<DWORD>(buffer.size()),
-                          &count,
-                          nullptr)) {
-                return std::unexpected(Error{
-                    .code = ErrorCode::IoFailure,
-                    .detail =
-                        "failed to read global configuration (native_code=" +
-                        std::to_string(GetLastError()) + ")"});
+        std::array<std::uint8_t, 4096> buffer{};
+        auto streamed = platform::private_storage::stream_regular_file(
+            config_path, buffer, [&](std::span<const std::uint8_t> chunk) {
+                snapshot.append(reinterpret_cast<const char*>(chunk.data()),
+                                chunk.size());
+            });
+        if (!streamed) {
+            using Kind = platform::private_storage::StreamErrorKind;
+            const auto& err = streamed.error();
+            if (err.kind == Kind::Symlink || err.kind == Kind::NotRegular) {
+                return fail(
+                    ErrorCode::IoFailure,
+                    "global configuration is not an accessible regular file");
             }
-            if (count == 0) {
-                break;
-            }
-            snapshot.append(buffer.data(), count);
+            return fail(ErrorCode::IoFailure,
+                        "failed to read global configuration: " + err.detail);
         }
-        input.close();
         config = toml::parse(snapshot, platform::path::to_utf8(config_path));
-#else
-        const int fd =
-            ::open(config_path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-        if (fd < 0) {
-            return std::unexpected(
-                Error{.code = ErrorCode::IoFailure,
-                      .detail = "failed to open global configuration"});
-        }
-        platform::private_storage::PrivateHandle input{fd};
-        struct stat st{};
-        if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
-            return std::unexpected(Error{
-                .code = ErrorCode::IoFailure,
-                .detail =
-                    "global configuration is not an accessible regular file"});
-        }
-        std::string snapshot;
-        std::array<char, 4096> buffer{};
-        for (;;) {
-            const auto count = ::read(fd, buffer.data(), buffer.size());
-            if (count == 0) {
-                break;
-            }
-            if (count < 0) {
-                if (errno == EINTR) {
-                    continue;
-                }
-                return std::unexpected(
-                    Error{.code = ErrorCode::IoFailure,
-                          .detail = "failed to read global configuration"});
-            }
-            snapshot.append(buffer.data(), static_cast<std::size_t>(count));
-        }
-        input.close();
-        config = toml::parse(snapshot, platform::path::to_utf8(config_path));
-#endif
     } catch (const toml::parse_error& error) {
-        return std::unexpected(
-            Error{.code = ErrorCode::ConfigInvalid,
-                  .detail = "failed to read global configuration: " +
-                            std::string(error.description())});
+        return fail(ErrorCode::ConfigInvalid,
+                    "failed to read global configuration: " +
+                        std::string(error.description()));
     }
 
     if (config.empty()) {
@@ -215,48 +123,42 @@ load_profiles(const std::filesystem::path& config_path) {
 
     for (const auto& [name, _] : config) {
         if (name != "profiles") {
-            return std::unexpected(
-                Error{.code = ErrorCode::ConfigInvalid,
-                      .detail = "unsupported top-level configuration field: " +
-                                std::string{name.str()}});
+            return fail(ErrorCode::ConfigInvalid,
+                        "unsupported top-level configuration field: " +
+                            std::string{name.str()});
         }
     }
 
     auto* profiles = config["profiles"].as_table();
     if (profiles == nullptr) {
-        return std::unexpected(
-            Error{.code = ErrorCode::ConfigInvalid,
-                  .detail = "configuration must contain a profiles table"});
+        return fail(ErrorCode::ConfigInvalid,
+                    "configuration must contain a profiles table");
     }
 
     std::vector<ProfileData> result;
     for (const auto& [key, value] : *profiles) {
         if (!is_valid_profile_name(key.str())) {
-            return std::unexpected(Error{.code = ErrorCode::InvalidProfileName,
-                                         .detail = "invalid profile name"});
+            return fail(ErrorCode::InvalidProfileName, "invalid profile name");
         }
         auto* prof = value.as_table();
         if (prof == nullptr) {
-            return std::unexpected(
-                Error{.code = ErrorCode::ProfileInvalid,
-                      .detail = "profile has invalid format"});
+            return fail(ErrorCode::ProfileInvalid,
+                        "profile has invalid format");
         }
         for (const auto& [field, _] : *prof) {
             if (field != "local_dir" && field != "remote_dir" &&
                 field != "min_history_depth" &&
                 field != "min_history_age_hours") {
-                return std::unexpected(
-                    Error{.code = ErrorCode::ProfileInvalid,
-                          .detail = "unsupported profile field: " +
-                                    std::string{field.str()}});
+                return fail(ErrorCode::ProfileInvalid,
+                            "unsupported profile field: " +
+                                std::string{field.str()});
             }
         }
         const auto local = (*prof)["local_dir"].value<std::string>();
         const auto remote = (*prof)["remote_dir"].value<std::string>();
         if (!local || !remote) {
-            return std::unexpected(Error{
-                .code = ErrorCode::ProfileInvalid,
-                .detail = "profile must have 'local_dir' and 'remote_dir'"});
+            return fail(ErrorCode::ProfileInvalid,
+                        "profile must have 'local_dir' and 'remote_dir'");
         }
 
         ProfileData pd{
@@ -281,13 +183,11 @@ save_profiles(const std::filesystem::path& config_path,
               std::span<const ProfileData> profiles) {
     for (const auto& prof : profiles) {
         if (!is_valid_profile_name(prof.name)) {
-            return std::unexpected(Error{.code = ErrorCode::InvalidProfileName,
-                                         .detail = "invalid profile name"});
+            return fail(ErrorCode::InvalidProfileName, "invalid profile name");
         }
         if (prof.min_history_depth == 0 || prof.min_history_age_hours == 0) {
-            return std::unexpected(
-                Error{.code = ErrorCode::ProfileInvalid,
-                      .detail = "retention policy must be positive"});
+            return fail(ErrorCode::ProfileInvalid,
+                        "retention policy must be positive");
         }
     }
     toml::table config;
@@ -305,19 +205,16 @@ save_profiles(const std::filesystem::path& config_path,
     auto parent =
         platform::private_storage::ensure_directory(config_path.parent_path());
     if (!parent) {
-        return std::unexpected(
-            Error{.code = ErrorCode::IoFailure, .detail = parent.error()});
+        return fail(ErrorCode::IoFailure, parent.error());
     }
     std::ostringstream output;
     output << config;
     if (!output)
-        return std::unexpected(Error{.code = ErrorCode::IoFailure,
-                                     .detail = "failed to write config"});
+        return fail(ErrorCode::IoFailure, "failed to write config");
     auto saved =
         platform::private_storage::write_atomically(config_path, output.str());
     if (!saved) {
-        return std::unexpected(
-            Error{.code = ErrorCode::IoFailure, .detail = saved.error()});
+        return fail(ErrorCode::IoFailure, saved.error());
     }
     return {};
 }
