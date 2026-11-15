@@ -31,24 +31,19 @@ RemoveMarkersResult remove_marker_variants_impl(
         if (identifiers) {
             listing.assign(identifiers->begin(), identifiers->end());
         } else {
-            auto observed = transport::list(
-                storage, trim_trailing_slash(layout.heads_prefix));
+            auto observed = list_identifiers(storage, layout.heads_prefix);
             if (!observed) {
-                if (observed.error().code !=
-                    transport::ErrorCode::StorageNotFound) {
-                    return std::unexpected(transport_error(observed.error()));
+                return std::unexpected(observed.error());
+            }
+            listing.reserve(observed->size());
+            for (const auto& child : *observed) {
+                if (child.empty() || child.find('/') != std::string::npos ||
+                    child.find('\\') != std::string::npos) {
+                    return std::unexpected(
+                        error(ErrorCode::InvalidIdentifier,
+                              "scoped listing returned a non-direct child"));
                 }
-            } else {
-                listing.reserve(observed->size());
-                for (const auto& child : *observed) {
-                    if (child.empty() || child.find('/') != std::string::npos ||
-                        child.find('\\') != std::string::npos) {
-                        return std::unexpected(error(
-                            ErrorCode::InvalidIdentifier,
-                            "scoped listing returned a non-direct child"));
-                    }
-                    listing.push_back(layout.heads_prefix + child);
-                }
+                listing.push_back(layout.heads_prefix + child);
             }
         }
 

@@ -35,17 +35,29 @@ void sort_unique(std::vector<std::string>& values) {
     values.erase(std::ranges::unique(values).begin(), values.end());
 }
 
+std::expected<std::vector<std::string>, Error>
+list_identifiers(transport::Transport& storage, std::string_view prefix) {
+    const auto trimmed = trim_trailing_slash(prefix);
+    auto listed = trimmed.empty() ? transport::list(storage)
+                                  : transport::list(storage, trimmed);
+    if (!listed) {
+        if (listed.error().code == transport::ErrorCode::StorageNotFound) {
+            return std::vector<std::string>{};
+        }
+        return std::unexpected(transport_error(listed.error()));
+    }
+    return std::move(*listed);
+}
+
 std::expected<HistoryInventory, Error>
 build_history_inventory(transport::Transport& storage,
                         const RemoteLayout& layout) {
-    auto listing = transport::list(storage);
-    if (!listing) {
-        if (listing.error().code == transport::ErrorCode::StorageNotFound) {
-            return HistoryInventory{};
-        }
-        return std::unexpected(transport_error(listing.error()));
+    auto listing = list_identifiers(storage);
+    if (!listing || listing->empty()) {
+        return listing
+                   ? std::expected<HistoryInventory, Error>{HistoryInventory{}}
+                   : std::unexpected(listing.error());
     }
-
     return build_history_inventory(*listing, layout);
 }
 

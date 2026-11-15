@@ -109,26 +109,14 @@ ReachabilityResult inventory_impl(
         return std::unexpected(listed.error());
     }
 
-    if (storage.storage.get_batch != nullptr) {
-        transport::GetBatch batch{
-            .source_prefix =
-                std::string{detail::trim_trailing_slash(layout.commits_prefix)},
-            .destination_root = (*temporary)->workspace.root,
-        };
-        for (const auto& [unused, references] : listed->commit_variants) {
-            static_cast<void>(unused);
-            for (const auto& reference : references) {
-                batch.identifiers.push_back(reference.commit_id + "/" +
-                                            reference.ciphertext_id);
-            }
-        }
-        if (batch.identifiers.size() > 1) {
-            auto prefetched = transport::get_batch(storage, batch);
-            if (!prefetched) {
-                return std::unexpected(
-                    detail::transport_error(prefetched.error()));
-            }
-        }
+    if (auto prefetched =
+            detail::prefetch_commit_batch(storage,
+                                          layout,
+                                          listed->commit_variants,
+                                          (*temporary)->workspace.root,
+                                          2);
+        !prefetched) {
+        return std::unexpected(prefetched.error());
     }
 
     CommitList commits;

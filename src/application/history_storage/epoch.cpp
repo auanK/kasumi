@@ -155,14 +155,10 @@ std::expected<EpochInventory, Error> discover_epoch_inventory(
             }
         }
     } else {
-        auto listed = transport::list(
-            storage, detail::trim_trailing_slash(layout.epochs_prefix));
+        auto listed = detail::list_identifiers(storage, layout.epochs_prefix);
         if (!listed) {
-            if (listed.error().code == transport::ErrorCode::StorageNotFound) {
-                return EpochInventory{};
-            }
-            return std::unexpected(error(ErrorCode::TransportFailure,
-                                         transport::describe(listed.error())));
+            return std::unexpected(
+                error(ErrorCode::TransportFailure, listed.error().detail));
         }
         identifiers.reserve(listed->size());
         for (const auto& name : *listed) {
@@ -732,23 +728,6 @@ verify(transport::Transport& storage,
                                      "remote epoch diverges from expected"));
     }
     return {};
-}
-
-LatestResult
-load_latest(transport::Transport& storage,
-            std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
-            const std::filesystem::path& workspace_root) {
-    return load_latest_impl(
-        storage, master_key, workspace_root, std::nullopt, std::nullopt);
-}
-
-LatestResult
-load_latest(transport::Transport& storage,
-            std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
-            const std::filesystem::path& workspace_root,
-            std::span<const std::string> identifiers) {
-    return load_latest_impl(
-        storage, master_key, workspace_root, identifiers, std::nullopt);
 }
 
 LatestResult

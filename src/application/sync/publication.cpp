@@ -1,5 +1,6 @@
 #include "application/sync/publication.hpp"
 
+#include "application/history_storage/detail.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
 
@@ -149,38 +150,16 @@ publish_commit(transport::Transport& storage,
                std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                const PreparedCommit& prepared,
                const std::filesystem::path& workspace_root) {
-    const auto layout = history_storage::derive_remote_layout(key);
-    auto object =
-        publish_commit_object(storage, layout, key, prepared, workspace_root);
-    if (!object) {
-        return std::unexpected(object.error());
+    auto computed = commit_identifier(key, prepared.commit);
+    if (!computed || !history::valid_commit_id(prepared.commit_id) ||
+        *computed != prepared.commit_id) {
+        return std::unexpected(
+            Error{ErrorCode::InvalidCommit, "invalid commit"});
     }
-    if (auto verified = verify_commit_object(storage,
-                                             layout,
-                                             key,
-                                             prepared,
-                                             object->head,
-                                             workspace_root,
-                                             object->physical_hash);
-        !verified) {
-        return std::unexpected(verified.error());
-    }
-    auto marker = history_storage::publish_head_marker_scoped(
-        storage, layout, object->head, workspace_root);
-    if (!marker) {
-        return std::unexpected(marker.error());
-    }
-    if (auto verified = verify_head_marker(storage,
-                                           layout,
-                                           object->head,
-                                           workspace_root,
-                                           marker->physical_hash);
-        !verified) {
-        return std::unexpected(verified.error());
-    }
-    return history_storage::PublishedCommit{
-        .head = object->head,
-        .reused_existing_ciphertext = object->reused_existing_ciphertext};
+    return history_storage::detail::guard_alloc([&] {
+        return history_storage::detail::publish_impl(
+            storage, key, prepared.commit, workspace_root, true);
+    });
 }
 
 ReachableResult

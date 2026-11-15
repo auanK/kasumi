@@ -88,6 +88,11 @@ template <typename Fn> auto guard_alloc(Fn&& fn) -> decltype(fn()) {
     }
 }
 
+// Lists remote identifiers (or children under a prefix), returning empty on
+// StorageNotFound.
+std::expected<std::vector<std::string>, Error>
+list_identifiers(transport::Transport& storage, std::string_view prefix = {});
+
 // Builds an inventory of all remote history objects.
 std::expected<HistoryInventory, Error>
 build_history_inventory(transport::Transport& storage,
@@ -97,6 +102,23 @@ build_history_inventory(transport::Transport& storage,
 std::expected<HistoryInventory, Error>
 build_history_inventory(std::span<const std::string> identifiers,
                         const RemoteLayout& layout);
+
+// Prefetches all commit variants into workspace via batch transport when
+// available and meeting the minimum object threshold.
+std::expected<void, Error>
+prefetch_commit_batch(transport::Transport& storage,
+                      const RemoteLayout& layout,
+                      const ObjectMap& commit_variants,
+                      const std::filesystem::path& destination_root,
+                      std::size_t min_objects = 1);
+
+// Verifies remote SHA-256 against local_hash; returns false when the backend
+// does not support remote physical hashing.
+std::expected<bool, Error>
+verify_remote_physical_hash(transport::Transport& storage,
+                            std::string_view identifier,
+                            std::string_view local_hash,
+                            std::string_view mismatch_detail);
 
 // Computes new objects required by the publication.
 PublicationDelta publication_delta(const HistoryInventory& inventory,
@@ -218,7 +240,8 @@ verify_published_commit(transport::Transport& storage,
 PublishResult publish_impl(transport::Transport& storage,
                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                            const history::Commit& commit,
-                           const std::filesystem::path& workspace_root);
+                           const std::filesystem::path& workspace_root,
+                           bool scoped = false);
 
 // Implements full or scoped history loading.
 LoadResult load_impl(

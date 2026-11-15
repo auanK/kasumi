@@ -21,12 +21,6 @@ struct ReferencedContent {
     std::vector<ContentReference> references;
 };
 
-struct RawReference {
-    std::string remote_id;
-    std::string plaintext_hash;
-    ContentReference reference;
-};
-
 } // namespace
 
 std::expected<ContentAuditResult, Error>
@@ -99,7 +93,7 @@ inventory_impl(transport::Transport& storage,
             temporary = std::move(*ws);
         }
 
-        std::vector<RawReference> raw_references;
+        std::map<std::string, ReferencedContent> by_remote_id;
         std::size_t reference_count = 0;
         for (const auto& commit : history_inventory.commits) {
             if (!commit.valid || !commit.reachable) {
@@ -115,70 +109,50 @@ inventory_impl(transport::Transport& storage,
                 if (row.is_directory) {
                     continue;
                 }
-                const auto plaintext_hash = hash_hex(row.hash);
-                const auto remote_id =
-                    crypto::content_identifier(key, row.hash);
                 if (++reference_count > maximum_content_object_count) {
                     return std::unexpected(
                         detail::error(ErrorCode::LimitExceeded,
                                       "too many content references"));
                 }
-                raw_references.push_back(RawReference{
-                    .remote_id = remote_id,
-                    .plaintext_hash = plaintext_hash,
-                    .reference =
-                        ContentReference{
-                            .commit_id = commit.commit_id,
-                            .path = row.path,
-                            .size = row.size,
-                        },
-                });
-            }
-        }
-
-        std::ranges::sort(raw_references, {}, &RawReference::remote_id);
-
-        std::vector<ReferencedContent> references;
-        references.reserve(raw_references.size());
-        for (auto& item : raw_references) {
-            if (references.empty() ||
-                references.back().remote_id != item.remote_id) {
-                references.push_back(ReferencedContent{
-                    .remote_id = std::move(item.remote_id),
-                    .plaintext_hash = std::move(item.plaintext_hash),
-                    .references = {},
-                });
-                references.back().references.push_back(
-                    std::move(item.reference));
-            } else {
-                auto& current = references.back();
-                if (!current.references.empty() &&
-                    current.references.front().size != item.reference.size) {
+                const auto remote_id =
+                    crypto::content_identifier(key, row.hash);
+                auto [it, inserted] = by_remote_id.try_emplace(
+                    remote_id,
+                    ReferencedContent{.remote_id = remote_id,
+                                      .plaintext_hash = hash_hex(row.hash),
+                                      .references = {}});
+                if (!inserted && !it->second.references.empty() &&
+                    it->second.references.front().size != row.size) {
                     return std::unexpected(
                         detail::error(ErrorCode::VerificationFailure,
                                       "content reference sizes conflict"));
                 }
-                current.references.push_back(std::move(item.reference));
+                it->second.references.push_back(ContentReference{
+                    .commit_id = commit.commit_id,
+                    .path = row.path,
+                    .size = row.size,
+                });
             }
         }
 
-        std::span<const std::string> listing_span;
-        std::vector<std::string> fallback_listing;
-        if (identifiers) {
-            listing_span = *identifiers;
-        } else {
-            auto listing = transport::list(storage);
-            if (!listing) {
-                if (listing.error().code !=
-                    transport::ErrorCode::StorageNotFound) {
-                    return std::unexpected(
-                        detail::transport_error(listing.error()));
-                }
-            } else {
-                fallback_listing = std::move(*listing);
-                listing_span = fallback_listing;
-            }
+        std::vector<ReferencedContent> references;
+        references.reserve(by_remote_id.size());
+        for (auto& [unused, entry] : by_remote_id) {
+            static_cast<void>(unused);
+            references.push_back(std::move(entry));
         }
+
+        std::vector<std::string> fallback_listing;
+        if (!identifiers) {
+            auto listing = detail::list_identifiers(storage);
+            if (!listing) {
+                return std::unexpected(listing.error());
+            }
+            fallback_listing = std::move(*listing);
+        }
+        const std::span<const std::string> listing_span =
+            identifiers ? *identifiers
+                        : std::span<const std::string>{fallback_listing};
 
         std::vector<std::string> physical;
         std::vector<std::string> unknown;

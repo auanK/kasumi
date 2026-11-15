@@ -18,10 +18,13 @@ namespace kasumi::application::history_storage::detail {
 PublishResult publish_impl(transport::Transport& storage,
                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                            const history::Commit& commit,
-                           const std::filesystem::path& workspace_root) {
+                           const std::filesystem::path& workspace_root,
+                           bool scoped) {
     const auto layout = derive_remote_layout(key);
-    auto object =
-        publish_commit_object(storage, layout, key, commit, workspace_root);
+    auto object = scoped ? publish_commit_object_scoped(
+                               storage, layout, key, commit, workspace_root)
+                         : publish_commit_object(
+                               storage, layout, key, commit, workspace_root);
     if (!object) {
         return std::unexpected(object.error());
     }
@@ -35,8 +38,10 @@ PublishResult publish_impl(transport::Transport& storage,
     if (!object_verified) {
         return std::unexpected(object_verified.error());
     }
-    auto marker =
-        publish_head_marker(storage, layout, object->head, workspace_root);
+    auto marker = scoped ? publish_head_marker_scoped(
+                               storage, layout, object->head, workspace_root)
+                         : publish_head_marker(
+                               storage, layout, object->head, workspace_root);
     if (!marker) {
         return std::unexpected(marker.error());
     }
@@ -57,29 +62,6 @@ namespace kasumi::application::history_storage {
 namespace {
 
 inline constexpr std::string_view physical_hash_algorithm = "sha256";
-
-std::expected<bool, Error>
-verify_remote_physical_hash(transport::Transport& storage,
-                            std::string_view identifier,
-                            std::string_view local_hash) {
-    if (local_hash.empty()) {
-        return false;
-    }
-    auto remote_hash =
-        transport::physical_hash(storage, identifier, physical_hash_algorithm);
-    if (!remote_hash) {
-        if (remote_hash.error().code == transport::ErrorCode::Unsupported) {
-            return false;
-        }
-        return std::unexpected(detail::transport_error(remote_hash.error()));
-    }
-    if (*remote_hash != local_hash) {
-        return std::unexpected(detail::error(
-            ErrorCode::VerificationFailure,
-            "remote physical hash does not match published object"));
-    }
-    return true;
-}
 
 PublishObjectResult
 publish_commit_object_impl(transport::Transport& storage,
@@ -360,8 +342,11 @@ verify_commit_object(transport::Transport& storage,
             return std::unexpected(
                 detail::error(ErrorCode::InvalidCommit, "commit ID mismatch"));
         }
-        auto physical = verify_remote_physical_hash(
-            storage, commit_object(layout, reference), local_physical_hash);
+        auto physical = detail::verify_remote_physical_hash(
+            storage,
+            commit_object(layout, reference),
+            local_physical_hash,
+            "remote physical hash does not match published object");
         if (!physical) {
             return std::unexpected(physical.error());
         }
@@ -433,8 +418,11 @@ verify_head_marker(transport::Transport& storage,
                 detail::error(ErrorCode::InvalidInput,
                               "invalid transport or head reference"));
         }
-        auto physical = verify_remote_physical_hash(
-            storage, marker_object(layout, reference), local_physical_hash);
+        auto physical = detail::verify_remote_physical_hash(
+            storage,
+            marker_object(layout, reference),
+            local_physical_hash,
+            "remote physical hash does not match published object");
         if (!physical) {
             return std::unexpected(physical.error());
         }
@@ -505,13 +493,9 @@ list_remote_head_commit_ids(transport::Transport& storage,
         return std::unexpected(
             detail::error(ErrorCode::InvalidInput, "invalid transport"));
     }
-    auto listing = transport::list(
-        storage, detail::trim_trailing_slash(layout.heads_prefix));
+    auto listing = detail::list_identifiers(storage, layout.heads_prefix);
     if (!listing) {
-        if (listing.error().code == transport::ErrorCode::StorageNotFound) {
-            return std::vector<std::string>{};
-        }
-        return std::unexpected(detail::transport_error(listing.error()));
+        return std::unexpected(listing.error());
     }
     std::vector<std::string> heads;
     for (const auto& name : *listing) {

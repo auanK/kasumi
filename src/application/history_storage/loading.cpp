@@ -19,31 +19,29 @@ namespace kasumi::application::history_storage::detail {
 
 std::expected<std::vector<std::uint8_t>, Error>
 read_file(const std::filesystem::path& path, std::size_t maximum_size) {
-    std::error_code filesystem_error;
-    const auto size = std::filesystem::file_size(path, filesystem_error);
-    if (filesystem_error) {
-        return std::unexpected(
-            error(ErrorCode::WorkspaceFailure, filesystem_error.message()));
-    }
-    if (size > maximum_size || size > std::numeric_limits<std::size_t>::max()) {
+    std::vector<std::uint8_t> bytes;
+    std::array<std::uint8_t, 65536> scratch{};
+    bool oversized = false;
+    const auto streamed = platform::private_storage::stream_regular_file(
+        path, scratch, [&](std::span<const std::uint8_t> chunk) {
+            if (chunk.size() >
+                maximum_size - std::min(maximum_size, bytes.size())) {
+                oversized = true;
+                return false;
+            }
+            bytes.insert(bytes.end(), chunk.begin(), chunk.end());
+            return true;
+        });
+    if (oversized ||
+        (!streamed &&
+         streamed.error().kind ==
+             platform::private_storage::StreamErrorKind::SizeMismatch)) {
         return std::unexpected(
             error(ErrorCode::LimitExceeded, "temporary file exceeds limit"));
     }
-
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        return std::unexpected(error(ErrorCode::WorkspaceFailure,
-                                     "could not open temporary file"));
-    }
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-    if (!bytes.empty()) {
-        input.read(reinterpret_cast<char*>(bytes.data()),
-                   static_cast<std::streamsize>(bytes.size()));
-    }
-    if (!input ||
-        input.gcount() != static_cast<std::streamsize>(bytes.size())) {
-        return std::unexpected(error(ErrorCode::WorkspaceFailure,
-                                     "could not read temporary file"));
+    if (!streamed) {
+        return std::unexpected(
+            error(ErrorCode::WorkspaceFailure, streamed.error().detail));
     }
     return bytes;
 }
@@ -394,16 +392,72 @@ verify_published_commit(transport::Transport& storage,
     return {};
 }
 
+std::expected<void, Error>
+prefetch_commit_batch(transport::Transport& storage,
+                      const RemoteLayout& layout,
+                      const ObjectMap& commit_variants,
+                      const std::filesystem::path& destination_root,
+                      std::size_t min_objects) {
+    if (storage.storage.get_batch == nullptr) {
+        return {};
+    }
+    transport::GetBatch batch{
+        .source_prefix =
+            std::string{trim_trailing_slash(layout.commits_prefix)},
+        .destination_root = destination_root,
+    };
+    for (const auto& [unused, references] : commit_variants) {
+        static_cast<void>(unused);
+        for (const auto& reference : references) {
+            batch.identifiers.push_back(reference.commit_id + "/" +
+                                        reference.ciphertext_id);
+        }
+    }
+    if (batch.identifiers.size() < min_objects) {
+        return {};
+    }
+    if (auto prefetched = transport::get_batch(storage, batch); !prefetched) {
+        return std::unexpected(transport_error(prefetched.error()));
+    }
+    return {};
+}
+
+std::expected<bool, Error>
+verify_remote_physical_hash(transport::Transport& storage,
+                            std::string_view identifier,
+                            std::string_view local_hash,
+                            std::string_view mismatch_detail) {
+    if (local_hash.empty()) {
+        return false;
+    }
+    auto remote_hash = transport::physical_hash(storage, identifier, "sha256");
+    if (!remote_hash) {
+        if (remote_hash.error().code == transport::ErrorCode::Unsupported) {
+            return false;
+        }
+        if (remote_hash.error().code == transport::ErrorCode::ObjectNotFound) {
+            return std::unexpected(
+                error(ErrorCode::VerificationFailure,
+                      "remote object disappeared before verification"));
+        }
+        return std::unexpected(transport_error(remote_hash.error()));
+    }
+    if (*remote_hash != local_hash) {
+        return std::unexpected(error(ErrorCode::VerificationFailure,
+                                     std::string{mismatch_detail}));
+    }
+    return true;
+}
+
 std::expected<HistoryInventory, Error>
 build_scoped_history_inventory(transport::Transport& storage,
                                const RemoteLayout& layout) {
-    const auto heads_dir = trim_trailing_slash(layout.heads_prefix);
-    auto listing = transport::list(storage, heads_dir);
+    auto listing = list_identifiers(storage, layout.heads_prefix);
     if (!listing) {
-        if (listing.error().code == transport::ErrorCode::StorageNotFound) {
-            return HistoryInventory{};
-        }
-        return std::unexpected(transport_error(listing.error()));
+        return std::unexpected(listing.error());
+    }
+    if (listing->empty()) {
+        return HistoryInventory{};
     }
 
     HistoryInventory inventory;
@@ -452,12 +506,10 @@ discover_scoped_commit_variants(transport::Transport& storage,
             error(ErrorCode::InvalidIdentifier, "invalid commit identifier"));
     }
     const auto prefix = layout.commits_prefix + std::string{commit_id};
-    auto listing = transport::list(storage, prefix);
-    if (!listing) {
-        if (listing.error().code == transport::ErrorCode::StorageNotFound) {
-            return {};
-        }
-        return std::unexpected(transport_error(listing.error()));
+    auto listing = list_identifiers(storage, prefix);
+    if (!listing || listing->empty()) {
+        return listing ? std::expected<void, Error>{}
+                       : std::unexpected(listing.error());
     }
 
     auto& variants = inventory.commit_variants[std::string{commit_id}];
@@ -625,22 +677,13 @@ LoadResult load_impl(transport::Transport& storage,
             if (auto cancel = cancelled(true)) {
                 return std::unexpected(*cancel);
             }
-            transport::GetBatch batch{
-                .source_prefix =
-                    std::string{trim_trailing_slash(layout.commits_prefix)},
-                .destination_root = (*temporary)->workspace.root,
-            };
-            for (const auto& entry : inventory->commit_variants) {
-                for (const auto& reference : entry.second) {
-                    batch.identifiers.push_back(reference.commit_id + "/" +
-                                                reference.ciphertext_id);
-                }
-            }
-            if (!batch.identifiers.empty()) {
-                if (auto prefetched = transport::get_batch(storage, batch);
-                    !prefetched) {
-                    return std::unexpected(transport_error(prefetched.error()));
-                }
+            if (auto prefetched =
+                    prefetch_commit_batch(storage,
+                                          layout,
+                                          inventory->commit_variants,
+                                          (*temporary)->workspace.root);
+                !prefetched) {
+                return prefetched;
             }
             if (auto cancel = cancelled(true)) {
                 return std::unexpected(*cancel);

@@ -102,12 +102,12 @@ inspect_commit_variants(transport::Transport& storage,
 
         const auto layout = derive_remote_layout(key);
         const auto prefix = layout.commits_prefix + std::string{commit_id};
-        auto listed = transport::list(storage, prefix);
+        auto listed = list_identifiers(storage, prefix);
         if (!listed) {
-            if (listed.error().code == transport::ErrorCode::StorageNotFound) {
-                return std::vector<PhysicalCommitVariant>{};
-            }
-            return std::unexpected(transport_error(listed.error()));
+            return std::unexpected(listed.error());
+        }
+        if (listed->empty()) {
+            return std::vector<PhysicalCommitVariant>{};
         }
 
         std::vector<HeadReference> references;
