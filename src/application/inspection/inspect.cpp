@@ -1305,37 +1305,29 @@ make_health_report(InspectionContext& context,
                            history_storage::ContentObjectState::Corrupt;
             }));
 
-    const auto add_reason = [&](bool condition, std::string reason) {
-        if (condition) {
-            report.reasons.push_back(std::move(reason));
+    const auto add_count_reason = [&](std::size_t count,
+                                      std::string_view label) {
+        if (count != 0) {
+            report.reasons.push_back(std::string(label) + ": " +
+                                     std::to_string(count));
         }
     };
-    add_reason(markers.invalid_count != 0,
-               "invalid physical markers: " +
-                   std::to_string(markers.invalid_count));
-    add_reason(
-        !history_inventory->missing_parent_ids.empty(),
-        "missing commit parents: " +
-            std::to_string(history_inventory->missing_parent_ids.size()));
-    add_reason(
-        !history_inventory->invalid_parent_ids.empty(),
-        "invalid commit parents: " +
-            std::to_string(history_inventory->invalid_parent_ids.size()));
-    add_reason(report.missing_content_count != 0,
-               "missing required contents: " +
-                   std::to_string(report.missing_content_count));
-    add_reason(report.invalid_content_count != 0,
-               "invalid required contents: " +
-                   std::to_string(report.invalid_content_count));
-    add_reason(!writers.protocol_consistent,
-               "inconsistent maintenance protocol");
+    add_count_reason(markers.invalid_count, "invalid physical markers");
+    add_count_reason(history_inventory->missing_parent_ids.size(),
+                     "missing commit parents");
+    add_count_reason(history_inventory->invalid_parent_ids.size(),
+                     "invalid commit parents");
+    add_count_reason(report.missing_content_count, "missing required contents");
+    add_count_reason(report.invalid_content_count, "invalid required contents");
+    if (!writers.protocol_consistent) {
+        report.reasons.emplace_back("inconsistent maintenance protocol");
+    }
     const auto critical_reason_count = report.reasons.size();
-    add_reason(report.orphan_count != 0,
-               "unreachable objects: " + std::to_string(report.orphan_count));
-    add_reason(report.unknown_object_count != 0,
-               "unknown objects: " +
-                   std::to_string(report.unknown_object_count));
-    add_reason(writers.maintenance_blocked, "maintenance currently blocked");
+    add_count_reason(report.orphan_count, "unreachable objects");
+    add_count_reason(report.unknown_object_count, "unknown objects");
+    if (writers.maintenance_blocked) {
+        report.reasons.emplace_back("maintenance currently blocked");
+    }
     report.state = critical_reason_count != 0 ? RemoteHealthState::Critical
                    : report.reasons.empty()   ? RemoteHealthState::Healthy
                                               : RemoteHealthState::Degraded;
@@ -1344,19 +1336,22 @@ make_health_report(InspectionContext& context,
 
 std::expected<InspectionResponse, InspectionError>
 inspect_physical(InspectionContext& context, InspectionOperation operation) {
+    const auto respond = [&](auto payload) {
+        return InspectionResponse{.operation = operation,
+                                  .payload = std::move(payload)};
+    };
     if (operation == InspectionOperation::RemoteMarkers) {
         auto inventory = reachability(context, operation);
         if (!inventory) {
             return std::unexpected(inventory.error());
         }
-        return InspectionResponse{.operation = operation,
-                                  .payload = make_markers_report(*inventory)};
+        return respond(make_markers_report(*inventory));
+    }
+    auto identifiers = physical_objects(context, operation);
+    if (!identifiers) {
+        return std::unexpected(identifiers.error());
     }
     if (operation == InspectionOperation::RemoteOrphans) {
-        auto identifiers = physical_objects(context, operation);
-        if (!identifiers) {
-            return std::unexpected(identifiers.error());
-        }
         auto history_inventory = reachability(context, operation, *identifiers);
         if (!history_inventory) {
             return std::unexpected(history_inventory.error());
@@ -1366,31 +1361,21 @@ inspect_physical(InspectionContext& context, InspectionOperation operation) {
         if (!contents) {
             return std::unexpected(contents.error());
         }
-        return InspectionResponse{
-            .operation = operation,
-            .payload = make_orphans_report(
-                context.layout, *history_inventory, *contents)};
-    }
-    auto identifiers = physical_objects(context, operation);
-    if (!identifiers) {
-        return std::unexpected(identifiers.error());
+        return respond(
+            make_orphans_report(context.layout, *history_inventory, *contents));
     }
     if (operation == InspectionOperation::RemoteObjects) {
-        return InspectionResponse{.operation = operation,
-                                  .payload = make_objects_report(
-                                      context.layout, std::move(*identifiers))};
+        return respond(
+            make_objects_report(context.layout, std::move(*identifiers)));
     }
     if (operation == InspectionOperation::RemoteWriters) {
-        return InspectionResponse{
-            .operation = operation,
-            .payload = make_writers_report(context.layout, *identifiers)};
+        return respond(make_writers_report(context.layout, *identifiers));
     }
     auto health = make_health_report(context, operation, *identifiers);
     if (!health) {
         return std::unexpected(health.error());
     }
-    return InspectionResponse{.operation = operation,
-                              .payload = std::move(*health)};
+    return respond(std::move(*health));
 }
 
 RemoteCommitInfo
@@ -1589,6 +1574,15 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     }
     context.workspace = std::move(*workspace);
 
+    const auto respond = [&](auto expected_payload)
+        -> std::expected<InspectionResponse, InspectionError> {
+        if (!expected_payload) {
+            return std::unexpected(expected_payload.error());
+        }
+        return InspectionResponse{.operation = operation,
+                                  .payload = std::move(*expected_payload)};
+    };
+
     if (operation == InspectionOperation::RemoteEpochs ||
         operation == InspectionOperation::RemoteEpoch) {
         return inspect_epochs(input.request, context, operation);
@@ -1606,18 +1600,14 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
         operation == InspectionOperation::RemoteContents ||
         operation == InspectionOperation::RemoteContentsAudit ||
         operation == InspectionOperation::RemoteContent;
-    const auto observe_remote = [&](const auto* frontier) {
-        return observation::history::observe(
-            context.storage,
-            context.key,
-            context.workspace->root,
-            audit_content_objects,
-            frontier,
-            context.hints.trusted_marker_identifiers,
-            requires_complete_history(operation));
-    };
-    auto observed = observe_remote(
-        context.hints.frontier ? &*context.hints.frontier : nullptr);
+    auto observed = observation::history::observe(
+        context.storage,
+        context.key,
+        context.workspace->root,
+        audit_content_objects,
+        context.hints.frontier ? &*context.hints.frontier : nullptr,
+        context.hints.trusted_marker_identifiers,
+        requires_complete_history(operation));
     if (!observed) {
         return std::unexpected(
             error(operation,
@@ -1633,12 +1623,8 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
             context,
             operation,
             operation == InspectionOperation::RemoteContentsAudit);
-        if (!contents) {
-            return std::unexpected(contents.error());
-        }
-        if (operation != InspectionOperation::RemoteContent) {
-            return InspectionResponse{.operation = operation,
-                                      .payload = std::move(*contents)};
+        if (!contents || operation != InspectionOperation::RemoteContent) {
+            return respond(std::move(contents));
         }
         const auto selected = std::ranges::find(contents->contents,
                                                 *input.request.content_id,
@@ -1654,36 +1640,6 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
             .payload = RemoteContentReport{.content = std::move(*selected)}};
     }
 
-    if (operation == InspectionOperation::RemoteHeads) {
-        auto heads = make_head_infos(*observed, operation);
-        if (!heads) {
-            return std::unexpected(heads.error());
-        }
-        RemoteHeadsReport report{
-            .history_present = observed->history_present,
-            .observed_height = observed->observed_height,
-            .physical_marker_count = observed->marked_head_identifiers.size(),
-            .ancestral_marker_count = observed->ancestral_marked_heads.size(),
-            .heads = std::move(*heads),
-        };
-        return InspectionResponse{.operation = operation,
-                                  .payload = std::move(report)};
-    }
-
-    if (operation == InspectionOperation::RemoteTree) {
-        auto heads = make_head_infos(*observed, operation);
-        if (!heads) {
-            return std::unexpected(heads.error());
-        }
-        auto tree =
-            make_tree_report(input.request, *observed, *heads, operation);
-        if (!tree) {
-            return std::unexpected(tree.error());
-        }
-        return InspectionResponse{.operation = operation,
-                                  .payload = std::move(*tree)};
-    }
-
     if (operation == InspectionOperation::RemoteSummary) {
         auto writers = history_storage::maintenance_protocol::active_writers(
             context.storage, context.layout);
@@ -1693,55 +1649,55 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
                       InspectionErrorCode::RemoteObservationFailure,
                       "failed to observe remote writers"));
         }
-        RemoteSummaryReport report{
-            .history_present = observed->history_present,
-            .observed_height = observed->observed_height,
-            .reachable_commit_count = observed->reachable_commit_ids.size(),
-            .logical_head_count = observed->logical_heads.size(),
-            .has_conflicts = observed->has_conflicts,
-            .missing_content_count = observed->missing_content_count,
-            .orphan_content_count = observed->orphan_content_count,
-            .active_writer_count = writers->size(),
-        };
-        return InspectionResponse{.operation = operation,
-                                  .payload = std::move(report)};
+        return InspectionResponse{
+            .operation = operation,
+            .payload = RemoteSummaryReport{
+                .history_present = observed->history_present,
+                .observed_height = observed->observed_height,
+                .reachable_commit_count = observed->reachable_commit_ids.size(),
+                .logical_head_count = observed->logical_heads.size(),
+                .has_conflicts = observed->has_conflicts,
+                .missing_content_count = observed->missing_content_count,
+                .orphan_content_count = observed->orphan_content_count,
+                .active_writer_count = writers->size(),
+            }};
+    }
+
+    if (operation == InspectionOperation::RemoteHeads ||
+        operation == InspectionOperation::RemoteTree) {
+        auto heads = make_head_infos(*observed, operation);
+        if (!heads) {
+            return std::unexpected(heads.error());
+        }
+        if (operation == InspectionOperation::RemoteTree) {
+            return respond(
+                make_tree_report(input.request, *observed, *heads, operation));
+        }
+        return InspectionResponse{
+            .operation = operation,
+            .payload = RemoteHeadsReport{
+                .history_present = observed->history_present,
+                .observed_height = observed->observed_height,
+                .physical_marker_count =
+                    observed->marked_head_identifiers.size(),
+                .ancestral_marker_count =
+                    observed->ancestral_marked_heads.size(),
+                .heads = std::move(*heads),
+            }};
     }
 
     if (operation == InspectionOperation::RemoteStat) {
-        auto stat = make_stat_report(input.request, *observed, operation);
-        if (!stat) {
-            return std::unexpected(stat.error());
-        }
-        return InspectionResponse{.operation = operation,
-                                  .payload = std::move(*stat)};
+        return respond(make_stat_report(input.request, *observed, operation));
     }
-
     if (operation == InspectionOperation::RemoteCommit) {
-        auto commit =
-            make_commit_report(input.request, *observed, context, operation);
-        if (!commit) {
-            return std::unexpected(commit.error());
-        }
-        return InspectionResponse{.operation = operation,
-                                  .payload = std::move(*commit)};
+        return respond(
+            make_commit_report(input.request, *observed, context, operation));
     }
-
     if (operation == InspectionOperation::RemoteGet) {
-        auto file =
-            download_remote_file(input.request, *observed, context, operation);
-        if (!file) {
-            return std::unexpected(file.error());
-        }
-        return InspectionResponse{.operation = operation,
-                                  .payload = std::move(*file)};
+        return respond(
+            download_remote_file(input.request, *observed, context, operation));
     }
-
-    auto commits = make_commits_report(*observed, operation);
-    if (!commits) {
-        return std::unexpected(commits.error());
-    }
-    return InspectionResponse{.operation = operation,
-                              .payload = std::move(*commits)};
+    return respond(make_commits_report(*observed, operation));
 }
 
 void finish_inspection(InspectionInput& input, InspectionContext& context) {

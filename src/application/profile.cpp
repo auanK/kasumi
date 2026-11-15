@@ -565,19 +565,25 @@ bool take_sqlite_snapshot(const std::filesystem::path& source,
     if (!database_before) {
         return false;
     }
-    std::optional<SnapshotFileState> wal_before;
-    std::optional<SnapshotFileState> rollback_before;
+    struct Sidecar {
+        std::filesystem::path source;
+        std::string_view suffix;
+        std::optional<SnapshotFileState> before;
+    };
+    std::vector<Sidecar> sidecars;
     if (wal.state == EntryState::Present) {
-        wal_before = snapshot_file_state(wal_source);
-        if (!wal_before) {
+        auto state = snapshot_file_state(wal_source);
+        if (!state) {
             return false;
         }
+        sidecars.push_back(Sidecar{wal_source, "-wal", *state});
     }
     if (rollback.state == EntryState::Present && rollback.size > 0) {
-        rollback_before = snapshot_file_state(rollback_source);
-        if (!rollback_before) {
+        auto state = snapshot_file_state(rollback_source);
+        if (!state) {
             return false;
         }
+        sidecars.push_back(Sidecar{rollback_source, "-journal", *state});
     }
 
 #ifdef KASUMI_MUTATION_FAULT_TESTS
@@ -600,21 +606,11 @@ bool take_sqlite_snapshot(const std::filesystem::path& source,
             fault_test::InspectFaultStage::SnapshotDatabaseCopied);
     }
 #endif
-    if (wal_before) {
-        auto wal_destination = destination;
-        wal_destination += "-wal";
+    for (const auto& item : sidecars) {
+        auto sidecar_dest = destination;
+        sidecar_dest += item.suffix;
         error.clear();
-        if (!std::filesystem::copy_file(wal_source, wal_destination, error) ||
-            error) {
-            return false;
-        }
-    }
-    if (rollback_before) {
-        auto rollback_destination = destination;
-        rollback_destination += "-journal";
-        error.clear();
-        if (!std::filesystem::copy_file(
-                rollback_source, rollback_destination, error) ||
+        if (!std::filesystem::copy_file(item.source, sidecar_dest, error) ||
             error) {
             return false;
         }
@@ -623,15 +619,9 @@ bool take_sqlite_snapshot(const std::filesystem::path& source,
     if (!database_after || *database_after != *database_before) {
         return false;
     }
-    if (wal_before) {
-        const auto state = snapshot_file_state(wal_source);
-        if (!state || *state != *wal_before) {
-            return false;
-        }
-    }
-    if (rollback_before) {
-        const auto state = snapshot_file_state(rollback_source);
-        if (!state || *state != *rollback_before) {
+    for (const auto& item : sidecars) {
+        const auto state = snapshot_file_state(item.source);
+        if (!state || *state != *item.before) {
             return false;
         }
     }
@@ -807,21 +797,8 @@ create_profile(const ExecutionEnvironment& environment,
             return std::unexpected(map_runtime_error(paths_res.error()));
         }
 
-        std::error_code ec;
-        const auto dir_status =
-            std::filesystem::symlink_status(paths_res->profile_dir, ec);
-        const bool dir_present =
-            (!ec &&
-             dir_status.type() != std::filesystem::file_type::not_found) ||
-            (ec && ec != std::errc::no_such_file_or_directory);
-        ec.clear();
-        const auto key_status =
-            std::filesystem::symlink_status(paths_res->key_path, ec);
-        const bool key_present =
-            (!ec &&
-             key_status.type() != std::filesystem::file_type::not_found) ||
-            (ec && ec != std::errc::no_such_file_or_directory);
-        if (dir_present || key_present) {
+        if (query_entry(paths_res->profile_dir).state != EntryState::Absent ||
+            query_entry(paths_res->key_path).state != EntryState::Absent) {
             return std::unexpected(ProfileError{
                 .code = ProfileErrorCode::StorageFailure,
                 .detail = "profile infrastructure already exists on disk"});
@@ -995,21 +972,17 @@ rename_profile(const ExecutionEnvironment& environment,
                          .detail = "failed to resolve paths"});
     }
 
-    std::error_code ec;
-    const auto new_status =
-        std::filesystem::symlink_status(new_paths_res->profile_dir, ec);
-    if ((ec && ec != std::errc::no_such_file_or_directory) ||
-        (!ec && new_status.type() != std::filesystem::file_type::not_found)) {
+    if (query_entry(new_paths_res->profile_dir).state != EntryState::Absent) {
         return std::unexpected(
             ProfileError{.code = ProfileErrorCode::StorageFailure,
                          .detail = "physical destination already exists"});
     }
 
     bool phys_renamed = false;
-    ec.clear();
+    std::error_code ec;
     const auto old_status =
         std::filesystem::symlink_status(old_paths_res->profile_dir, ec);
-    if (ec && ec != std::errc::no_such_file_or_directory) {
+    if (ec && !path_missing(ec)) {
         return std::unexpected(ProfileError{
             .code = ProfileErrorCode::StorageFailure, .detail = ec.message()});
     }
@@ -1089,17 +1062,7 @@ clone_profile(const ExecutionEnvironment& environment,
         return std::unexpected(map_runtime_error(dest_paths_res.error()));
     }
 
-    std::error_code ec;
-    const auto dest_status =
-        std::filesystem::symlink_status(dest_paths_res->profile_dir, ec);
-    if (ec && ec != std::errc::no_such_file_or_directory) {
-        return std::unexpected(ProfileError{
-            .code = ProfileErrorCode::StorageFailure,
-            .detail = "failed to inspect destination profile directory: " +
-                      ec.message(),
-        });
-    }
-    if (dest_status.type() != std::filesystem::file_type::not_found) {
+    if (query_entry(dest_paths_res->profile_dir).state != EntryState::Absent) {
         return std::unexpected(ProfileError{
             .code = ProfileErrorCode::StorageFailure,
             .detail =

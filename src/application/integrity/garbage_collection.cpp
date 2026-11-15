@@ -211,28 +211,36 @@ std::optional<Error> cancellation_error() {
 }
 
 std::expected<void, Error>
+fail_if_nonempty(const std::vector<std::string>& items,
+                 std::string_view label) {
+    if (items.empty()) {
+        return {};
+    }
+    return std::unexpected(
+        make_error(ErrorCode::IntegrityFailure,
+                   std::string(label) + ": " + join_values(items)));
+}
+
+std::expected<void, Error>
 validate_history(const history_storage::ReachabilityInventory& inventory) {
     if (inventory.logical_heads.empty()) {
         return std::unexpected(
             make_error(ErrorCode::IntegrityFailure, "remote history absent"));
     }
-    if (!inventory.unknown_history_objects.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::IntegrityFailure,
-                       "unknown history objects: " +
-                           join_values(inventory.unknown_history_objects)));
+    if (auto ok = fail_if_nonempty(inventory.unknown_history_objects,
+                                   "unknown history objects");
+        !ok) {
+        return ok;
     }
-    if (!inventory.missing_parent_ids.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::IntegrityFailure,
-                       "missing parent commits: " +
-                           join_values(inventory.missing_parent_ids)));
+    if (auto ok = fail_if_nonempty(inventory.missing_parent_ids,
+                                   "missing parent commits");
+        !ok) {
+        return ok;
     }
-    if (!inventory.invalid_parent_ids.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::IntegrityFailure,
-                       "invalid parent commits: " +
-                           join_values(inventory.invalid_parent_ids)));
+    if (auto ok = fail_if_nonempty(inventory.invalid_parent_ids,
+                                   "invalid parent commits");
+        !ok) {
+        return ok;
     }
 
     std::vector<std::string> invalid_markers;
@@ -241,10 +249,9 @@ validate_history(const history_storage::ReachabilityInventory& inventory) {
             invalid_markers.push_back(marker.identifier);
         }
     }
-    if (!invalid_markers.empty()) {
-        return std::unexpected(make_error(ErrorCode::IntegrityFailure,
-                                          "invalid head markers: " +
-                                              join_values(invalid_markers)));
+    if (auto ok = fail_if_nonempty(invalid_markers, "invalid head markers");
+        !ok) {
+        return ok;
     }
 
     std::vector<std::string> invalid_commits;
@@ -256,21 +263,15 @@ validate_history(const history_storage::ReachabilityInventory& inventory) {
             invalid_commits.push_back(commit.commit_id);
         }
     }
-    if (!invalid_commits.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::IntegrityFailure,
-                       "invalid commits: " + join_values(invalid_commits)));
-    }
-    return {};
+    return fail_if_nonempty(invalid_commits, "invalid commits");
 }
 
 std::expected<void, Error> validate_content(
     const history_storage::ContentReachabilityInventory& inventory) {
-    if (!inventory.unknown_storage_objects.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::IntegrityFailure,
-                       "unknown physical identifiers: " +
-                           join_values(inventory.unknown_storage_objects)));
+    if (auto ok = fail_if_nonempty(inventory.unknown_storage_objects,
+                                   "unknown physical identifiers");
+        !ok) {
+        return ok;
     }
     std::vector<std::string> damaged;
     for (const auto& content : inventory.contents) {
@@ -279,13 +280,7 @@ std::expected<void, Error> validate_content(
             damaged.push_back(content.content_id);
         }
     }
-    if (!damaged.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::IntegrityFailure,
-                       "reachable contents missing or corrupted: " +
-                           join_values(damaged)));
-    }
-    return {};
+    return fail_if_nonempty(damaged, "reachable contents missing or corrupted");
 }
 
 std::vector<std::string>
@@ -584,6 +579,26 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             std::size_t chunk_start = 0;
             const std::size_t total_candidates = candidates.size();
 
+            const auto fail_uncertain = [&](std::optional<std::string> id,
+                                            transport::Error error,
+                                            std::string_view detail) {
+                failure_diagnostic.failed_identifier = std::move(id);
+                failure_diagnostic.transport_error = error;
+                failure_diagnostic.mutation_state =
+                    GarbageCollectMutationState::Uncertain;
+                return std::unexpected(transport_error(error, detail));
+            };
+            const auto record_acknowledged = [&](std::size_t count) {
+                acknowledged_removals += count;
+                failure_diagnostic.confirmed_removed = acknowledged_removals;
+                failure_diagnostic.mutation_state =
+                    GarbageCollectMutationState::Confirmed;
+                notify(on_progress,
+                       GarbageCollectStage::Applying,
+                       candidate_count,
+                       acknowledged_removals);
+            };
+
             while (chunk_start < total_candidates) {
                 failure_diagnostic.failed_identifier.reset();
                 failure_diagnostic.mutation_state =
@@ -618,13 +633,8 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                             fallback_sequential = true;
                             continue;
                         }
-
-                        failure_diagnostic.failed_identifier.reset();
-                        failure_diagnostic.transport_error = err;
-                        failure_diagnostic.mutation_state =
-                            GarbageCollectMutationState::Uncertain;
-                        return std::unexpected(transport_error(
-                            err, "batch object removal failed"));
+                        return fail_uncertain(
+                            std::nullopt, err, "batch object removal failed");
                     }
 
                     const auto& report = *batch_result;
@@ -643,33 +653,27 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                                 break;
                             }
                         }
-                        if (report_valid) {
-                            for (std::size_t i = 0; i < chunk_size; ++i) {
-                                if (!result_by_id.contains(
-                                        candidates[chunk_start + i])) {
-                                    report_valid = false;
-                                    break;
-                                }
+                        for (std::size_t i = 0; report_valid && i < chunk_size;
+                             ++i) {
+                            if (!result_by_id.contains(
+                                    candidates[chunk_start + i])) {
+                                report_valid = false;
                             }
                         }
                     }
 
                     if (!report_valid) {
-                        failure_diagnostic.failed_identifier.reset();
-                        failure_diagnostic.transport_error = transport::Error{
-                            .code = transport::ErrorCode::ProtocolFailure,
-                            .message =
-                                "invalid or incomplete remove batch report",
-                        };
-                        failure_diagnostic.mutation_state =
-                            GarbageCollectMutationState::Uncertain;
-                        return std::unexpected(
-                            transport_error(*failure_diagnostic.transport_error,
-                                            "invalid remove batch report"));
+                        return fail_uncertain(
+                            std::nullopt,
+                            transport::Error{
+                                .code = transport::ErrorCode::ProtocolFailure,
+                                .message =
+                                    "invalid or incomplete remove batch report",
+                            },
+                            "invalid remove batch report");
                     }
 
                     std::size_t batch_acknowledged = 0;
-                    std::size_t batch_errors = 0;
                     const transport::RemoveBatchItemResult* first_failure =
                         nullptr;
                     std::string first_failed_identifier;
@@ -679,39 +683,20 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                         const auto* res = result_by_id.at(cand_id);
                         if (res->result.has_value()) {
                             ++batch_acknowledged;
-                        } else {
-                            ++batch_errors;
-                            if (first_failure == nullptr) {
-                                first_failure = res;
-                                first_failed_identifier = cand_id;
-                            }
+                        } else if (first_failure == nullptr) {
+                            first_failure = res;
+                            first_failed_identifier = cand_id;
                         }
                     }
 
-                    acknowledged_removals += batch_acknowledged;
                     if (batch_acknowledged > 0) {
-                        failure_diagnostic.confirmed_removed =
-                            acknowledged_removals;
-                        failure_diagnostic.mutation_state =
-                            GarbageCollectMutationState::Confirmed;
-                        notify(on_progress,
-                               GarbageCollectStage::Applying,
-                               candidate_count,
-                               acknowledged_removals);
+                        record_acknowledged(batch_acknowledged);
                     }
-
-                    if (batch_errors > 0) {
-                        failure_diagnostic.failed_identifier =
-                            first_failed_identifier;
-                        failure_diagnostic.transport_error =
-                            first_failure->result.error();
-                        failure_diagnostic.mutation_state =
-                            GarbageCollectMutationState::Uncertain;
-                        return std::unexpected(
-                            transport_error(first_failure->result.error(),
-                                            "object removal failed"));
+                    if (first_failure != nullptr) {
+                        return fail_uncertain(first_failed_identifier,
+                                              first_failure->result.error(),
+                                              "object removal failed");
                     }
-
                     chunk_start += chunk_size;
                 } else {
                     const auto& candidate = candidates[chunk_start];
@@ -720,21 +705,11 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                     auto removed = transport::remove(storage, candidate);
                     mutation_in_flight = false;
                     if (!removed) {
-                        failure_diagnostic.mutation_state =
-                            GarbageCollectMutationState::Uncertain;
-                        return std::unexpected(transport_error(
-                            removed.error(), "object removal failed"));
+                        return fail_uncertain(candidate,
+                                              removed.error(),
+                                              "object removal failed");
                     }
-
-                    ++acknowledged_removals;
-                    failure_diagnostic.confirmed_removed =
-                        acknowledged_removals;
-                    failure_diagnostic.mutation_state =
-                        GarbageCollectMutationState::Confirmed;
-                    notify(on_progress,
-                           GarbageCollectStage::Applying,
-                           candidate_count,
-                           acknowledged_removals);
+                    record_acknowledged(1);
                     ++chunk_start;
                 }
             }

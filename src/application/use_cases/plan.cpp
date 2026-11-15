@@ -114,11 +114,19 @@ std::string describe_reconciliation_error(const reconciliation::Error& error) {
 }
 
 std::expected<Response, Error> run_plan(OperationContext& context) {
-    if (context.on_progress) {
-        context.on_progress(SyncProgress{
-            .stage = SyncStage::Observing,
-        });
-    }
+    const auto notify = [&](SyncStage stage) {
+        if (context.on_progress) {
+            context.on_progress(SyncProgress{.stage = stage});
+        }
+    };
+    const auto fail_stage = [&](SyncStage stage, std::string detail) {
+        auto err =
+            plan_error(context.operation, std::move(detail), context.summary);
+        err.stage = stage;
+        return std::unexpected(std::move(err));
+    };
+
+    notify(SyncStage::Observing);
 
     observation::LocalObservationSession observation_session;
     observation_session.database_path = context.runtime.database_path;
@@ -131,33 +139,20 @@ std::expected<Response, Error> run_plan(OperationContext& context) {
                                                   {},
                                                   &observation_session);
     if (!collected) {
-        auto err = plan_error(
-            context.operation, collected.error().detail, context.summary);
-        err.stage = SyncStage::Observing;
-        return std::unexpected(err);
+        return fail_stage(SyncStage::Observing, collected.error().detail);
     }
 
-    if (context.on_progress) {
-        context.on_progress(SyncProgress{
-            .stage = SyncStage::Calculating,
-        });
-    }
+    notify(SyncStage::Calculating);
 
     auto reconciled = reconciliation::reconcile(*collected);
     if (!reconciled) {
-        auto err = plan_error(context.operation,
-                              describe_reconciliation_error(reconciled.error()),
-                              context.summary);
-        err.stage = SyncStage::Calculating;
-        return std::unexpected(err);
+        return fail_stage(SyncStage::Calculating,
+                          describe_reconciliation_error(reconciled.error()));
     }
 
     auto report = reconciliation_to_report(*collected, *reconciled);
     if (!report) {
-        auto err =
-            plan_error(context.operation, report.error(), context.summary);
-        err.stage = SyncStage::Calculating;
-        return std::unexpected(err);
+        return fail_stage(SyncStage::Calculating, report.error());
     }
     return Response{.operation = context.operation,
                     .runtime = context.summary,

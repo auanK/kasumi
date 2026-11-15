@@ -379,32 +379,23 @@ void run_audit_worker(
 } // namespace
 
 std::string describe(const Error& error) {
-    std::string result;
-    switch (error.code) {
-        case ErrorCode::InvalidInput:
-            result = "invalid_input";
+    static constexpr std::array<std::pair<ErrorCode, std::string_view>, 8>
+        labels{{
+            {ErrorCode::InvalidInput, "invalid_input"},
+            {ErrorCode::StateFailure, "state_failure"},
+            {ErrorCode::WorkspaceFailure, "workspace_failure"},
+            {ErrorCode::TransportFailure, "transport_failure"},
+            {ErrorCode::CryptoFailure, "crypto_failure"},
+            {ErrorCode::IntegrityFailure, "integrity_failure"},
+            {ErrorCode::Unrecoverable, "unrecoverable"},
+            {ErrorCode::ConcurrentChange, "concurrent_change"},
+        }};
+    std::string result{"unknown_error"};
+    for (const auto& [code, label] : labels) {
+        if (code == error.code) {
+            result = label;
             break;
-        case ErrorCode::StateFailure:
-            result = "state_failure";
-            break;
-        case ErrorCode::WorkspaceFailure:
-            result = "workspace_failure";
-            break;
-        case ErrorCode::TransportFailure:
-            result = "transport_failure";
-            break;
-        case ErrorCode::CryptoFailure:
-            result = "crypto_failure";
-            break;
-        case ErrorCode::IntegrityFailure:
-            result = "integrity_failure";
-            break;
-        case ErrorCode::Unrecoverable:
-            result = "unrecoverable";
-            break;
-        case ErrorCode::ConcurrentChange:
-            result = "concurrent_change";
-            break;
+        }
     }
     if (error.object_identifier) {
         result += " no objeto ";

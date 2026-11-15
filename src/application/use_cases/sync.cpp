@@ -50,8 +50,6 @@ SyncCompleted compute_sync_summary(const reconciliation::Result& result) {
                 ++summary.removed;
                 break;
             case Action::RenameLocal:
-                ++summary.renamed;
-                break;
             case Action::MoveLocal:
                 ++summary.renamed;
                 break;
@@ -76,13 +74,32 @@ SyncCompleted compute_sync_summary(const reconciliation::Result& result) {
 
 std::expected<Response, Error> run_sync(OperationContext& context) {
     const auto sync_start = std::chrono::steady_clock::now();
+    const auto with_stage = [](SyncStage stage, Error err) {
+        err.stage = stage;
+        return std::unexpected(std::move(err));
+    };
+    const auto plan_fail = [&](SyncStage stage, std::string detail) {
+        return with_stage(
+            stage,
+            plan_error(context.operation, std::move(detail), context.summary));
+    };
+    const auto tx_fail = [&](SyncStage stage,
+                             const sync::coordinator::Error& error) {
+        return with_stage(
+            stage,
+            transaction_error(context.operation, error, context.summary));
+    };
+    const auto sync_fail = [&](SyncStage stage, std::string detail) {
+        return with_stage(stage,
+                          synchronization_error(context.operation,
+                                                std::move(detail),
+                                                context.summary));
+    };
+
     auto recovery = sync::coordinator::recover_if_needed(
         context.runtime, context.storage, context.key);
     if (!recovery) {
-        auto err = transaction_error(
-            context.operation, recovery.error(), context.summary);
-        err.stage = SyncStage::Observing;
-        return std::unexpected(err);
+        return tx_fail(SyncStage::Observing, recovery.error());
     }
     sync::journal_fault_test::hit(
         "recovery", nullptr, static_cast<std::size_t>(*recovery));
@@ -94,15 +111,23 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
         eager_writer;
     history_storage::maintenance_protocol::RegistrationState writer;
     SyncStage current_stage = SyncStage::Observing;
+    const auto notify_stage = [&](SyncStage stage,
+                                  SyncCompleted summary_arg = {},
+                                  std::uint32_t total_items = 0) {
+        current_stage = stage;
+        if (context.on_progress) {
+            context.on_progress(SyncProgress{
+                .stage = stage,
+                .summary = std::move(summary_arg),
+                .total_items = total_items,
+            });
+        }
+    };
     auto outcome = [&]() -> std::expected<Response, Error> {
         try {
             const auto layout =
                 history_storage::derive_remote_layout(context.key);
-            current_stage = SyncStage::Observing;
-            if (context.on_progress) {
-                context.on_progress(
-                    SyncProgress{.stage = SyncStage::Observing});
-            }
+            notify_stage(SyncStage::Observing);
             auto collected = observation::collect_reconciliation_input(
                 context.runtime,
                 context.storage,
@@ -118,48 +143,32 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                             context.runtime.database_path.parent_path()));
                 });
             if (!collected) {
-                auto err = plan_error(context.operation,
-                                      collected.error().detail,
-                                      context.summary);
-                err.stage = SyncStage::Observing;
-                return std::unexpected(err);
+                return plan_fail(SyncStage::Observing,
+                                 collected.error().detail);
             }
             if (context.trust_existing_content &&
                 collected->storage.history_present) {
-                auto err = plan_error(context.operation,
-                                      "remote history was published "
-                                      "concurrently during initial sync with "
-                                      "--trust-existing-content; operation was "
-                                      "rejected to prevent unverified "
-                                      "content reuse",
-                                      context.summary);
-                err.stage = SyncStage::Observing;
-                return std::unexpected(err);
+                return plan_fail(
+                    SyncStage::Observing,
+                    "remote history was published concurrently "
+                    "during initial sync with "
+                    "--trust-existing-content; operation was "
+                    "rejected to prevent unverified content reuse");
             }
             if (context.initial_sync && context.has_remote_history_objects &&
                 !collected->storage.history_present) {
-                auto err = plan_error(
-                    context.operation,
-                    "remote history contains head markers but no valid "
-                    "authenticated history could be observed",
-                    context.summary);
-                err.stage = SyncStage::Observing;
-                return std::unexpected(err);
+                return plan_fail(
+                    SyncStage::Observing,
+                    "remote history contains head markers but no "
+                    "valid authenticated history could be observed");
             }
 
-            current_stage = SyncStage::Calculating;
-            if (context.on_progress) {
-                context.on_progress(
-                    SyncProgress{.stage = SyncStage::Calculating});
-            }
+            notify_stage(SyncStage::Calculating);
             auto reconciled = reconciliation::reconcile(*collected);
             if (!reconciled) {
-                auto err = plan_error(
-                    context.operation,
-                    describe_reconciliation_error(reconciled.error()),
-                    context.summary);
-                err.stage = SyncStage::Calculating;
-                return std::unexpected(err);
+                return plan_fail(
+                    SyncStage::Calculating,
+                    describe_reconciliation_error(reconciled.error()));
             }
 
             const bool allow_unreferenced_content_reuse =
@@ -176,10 +185,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     context.trust_existing_content,
                     &context.initial_content_identifiers);
             if (!available) {
-                auto err = transaction_error(
-                    context.operation, available.error(), context.summary);
-                err.stage = SyncStage::Calculating;
-                return std::unexpected(err);
+                return tx_fail(SyncStage::Calculating, available.error());
             }
             reconciled = std::move(*available);
 
@@ -191,25 +197,17 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                                      reconciled->requires_state_commit;
             if (eager_writer) {
                 if (!*eager_writer) {
-                    auto err =
-                        synchronization_error(context.operation,
-                                              eager_writer->error().detail,
-                                              context.summary);
-                    err.stage = SyncStage::Calculating;
-                    return std::unexpected(err);
+                    return sync_fail(SyncStage::Calculating,
+                                     eager_writer->error().detail);
                 }
                 writer = std::move(**eager_writer);
                 (**eager_writer).storage = nullptr;
             }
             if (remote_write_required && !collected->storage.history_present) {
-                auto initialized = transport::initialize(context.storage);
-                if (!initialized) {
-                    auto err = synchronization_error(
-                        context.operation,
-                        transport::describe(initialized.error()),
-                        context.summary);
-                    err.stage = SyncStage::Calculating;
-                    return std::unexpected(err);
+                if (auto initialized = transport::initialize(context.storage);
+                    !initialized) {
+                    return sync_fail(SyncStage::Calculating,
+                                     transport::describe(initialized.error()));
                 }
             }
             if (active_sync &&
@@ -221,11 +219,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                         layout,
                         context.runtime.database_path.parent_path());
                 if (!registered) {
-                    auto err = synchronization_error(context.operation,
-                                                     registered.error().detail,
-                                                     context.summary);
-                    err.stage = SyncStage::Calculating;
-                    return std::unexpected(err);
+                    return sync_fail(SyncStage::Calculating,
+                                     registered.error().detail);
                 }
                 writer = std::move(*registered);
             }
@@ -243,10 +238,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 context.trust_existing_content,
                 &context.initial_content_identifiers);
             if (!stable) {
-                auto err = transaction_error(
-                    context.operation, stable.error(), context.summary);
-                err.stage = SyncStage::Calculating;
-                return std::unexpected(err);
+                return tx_fail(SyncStage::Calculating, stable.error());
             }
 
             const auto update_progress_after_stabilize =
@@ -254,13 +246,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     target = compute_sync_summary(stable->result);
                     target.trusted_content_reused = static_cast<std::uint32_t>(
                         stable->input.trusted_remote_content_objects.size());
-                    if (context.on_progress) {
-                        context.on_progress(SyncProgress{
-                            .stage = SyncStage::Calculating,
-                            .summary = target,
-                            .total_items = target.total,
-                        });
-                    }
+                    notify_stage(SyncStage::Calculating, target, target.total);
                     return !stable->result.requires_publication &&
                            !stable->result.requires_local_mutation &&
                            !stable->result.requires_storage_repair &&
@@ -281,13 +267,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                                 .data = summary};
             }
 
-            current_stage = SyncStage::Applying;
-            if (context.on_progress) {
-                context.on_progress(SyncProgress{
-                    .stage = SyncStage::Applying,
-                    .total_items = summary.total,
-                });
-            }
+            notify_stage(SyncStage::Applying, {}, summary.total);
 
             std::vector<Hash> confirmed_missing;
             std::expected<void, sync::coordinator::Error> synchronized;
@@ -339,11 +319,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 }
                 confirmed_missing.push_back(*missing_hash);
 
-                current_stage = SyncStage::Calculating;
-                if (context.on_progress) {
-                    context.on_progress(
-                        SyncProgress{.stage = SyncStage::Calculating});
-                }
+                notify_stage(SyncStage::Calculating);
                 auto refreshed = observation::collect_reconciliation_input(
                     context.runtime,
                     context.storage,
@@ -352,22 +328,16 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     stable->input.storage.marked_head_identifiers,
                     &observation_session);
                 if (!refreshed) {
-                    auto err = plan_error(context.operation,
-                                          refreshed.error().detail,
-                                          context.summary);
-                    err.stage = SyncStage::Observing;
-                    return std::unexpected(err);
+                    return plan_fail(SyncStage::Observing,
+                                     refreshed.error().detail);
                 }
                 refreshed->known_missing_content_objects.insert(
                     confirmed_missing.begin(), confirmed_missing.end());
                 auto replanned = reconciliation::reconcile(*refreshed);
                 if (!replanned) {
-                    auto err = plan_error(
-                        context.operation,
-                        describe_reconciliation_error(replanned.error()),
-                        context.summary);
-                    err.stage = SyncStage::Calculating;
-                    return std::unexpected(err);
+                    return plan_fail(
+                        SyncStage::Calculating,
+                        describe_reconciliation_error(replanned.error()));
                 }
                 auto restabilized = sync::coordinator::reobservation::stabilize(
                     context.runtime,
@@ -382,24 +352,15 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     context.trust_existing_content,
                     &context.initial_content_identifiers);
                 if (!restabilized) {
-                    auto err = transaction_error(context.operation,
-                                                 restabilized.error(),
-                                                 context.summary);
-                    err.stage = SyncStage::Calculating;
-                    return std::unexpected(err);
+                    return tx_fail(SyncStage::Calculating,
+                                   restabilized.error());
                 }
                 stable = std::move(restabilized);
                 if (update_progress_after_stabilize(summary)) {
                     synchronized = {};
                     break;
                 }
-                current_stage = SyncStage::Applying;
-                if (context.on_progress) {
-                    context.on_progress(SyncProgress{
-                        .stage = SyncStage::Applying,
-                        .total_items = summary.total,
-                    });
-                }
+                notify_stage(SyncStage::Applying, {}, summary.total);
             }
             if (!synchronized) {
                 const auto fail_stage =
@@ -407,27 +368,14 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                             sync::coordinator::ErrorCode::PublicationFailure
                         ? SyncStage::Publishing
                         : SyncStage::Applying;
-                auto err = transaction_error(
-                    context.operation, synchronized.error(), context.summary);
-                err.stage = fail_stage;
-                return std::unexpected(err);
+                return tx_fail(fail_stage, synchronized.error());
             }
 
             if (summary.published) {
-                current_stage = SyncStage::Publishing;
-                if (context.on_progress) {
-                    context.on_progress(SyncProgress{
-                        .stage = SyncStage::Publishing,
-                    });
-                }
+                notify_stage(SyncStage::Publishing);
             }
 
-            current_stage = SyncStage::Finalizing;
-            if (context.on_progress) {
-                context.on_progress(SyncProgress{
-                    .stage = SyncStage::Finalizing,
-                });
-            }
+            notify_stage(SyncStage::Finalizing);
 
             if (observation_session.cache_dirty) {
                 static_cast<void>(state_storage::save_file_cache_delta(
@@ -438,10 +386,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                             .runtime = context.summary,
                             .data = summary};
         } catch (const std::exception& exception) {
-            auto err = synchronization_error(
-                context.operation, exception.what(), context.summary);
-            err.stage = current_stage;
-            return std::unexpected(err);
+            return sync_fail(current_stage, exception.what());
         }
     }();
     auto* pending =
@@ -457,10 +402,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             history_storage::maintenance_protocol::release_registration(
                 *pending);
         if (outcome && !released) {
-            auto err = synchronization_error(
-                context.operation, released.error().detail, context.summary);
-            err.stage = SyncStage::Finalizing;
-            return std::unexpected(err);
+            return sync_fail(SyncStage::Finalizing, released.error().detail);
         }
     }
     if (outcome && context.audit_inventory) {

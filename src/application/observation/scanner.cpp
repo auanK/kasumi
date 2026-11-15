@@ -103,12 +103,13 @@ classify_entry(const std::filesystem::path& path,
                              .linklike = false};
 }
 
-std::expected<NodeRow, ScanError>
-process_file(const std::filesystem::path& file_path,
-             std::string relative,
-             ScanContext& context) {
-    NodeRow row{.path = std::move(relative)};
-    const auto meta_result = context.metadata_query(file_path, row.path);
+std::expected<cache::FileMetadata, ScanError>
+query_file_metadata(const MetadataQuery& metadata_query,
+                    const std::filesystem::path& file_path,
+                    std::string_view relative_path,
+                    const char* operation,
+                    const char* missing_detail) {
+    const auto meta_result = metadata_query(file_path, relative_path);
     if (!meta_result) {
         const auto& err = meta_result.error();
         return std::unexpected(ScanError{
@@ -116,19 +117,34 @@ process_file(const std::filesystem::path& file_path,
                         ? ScanErrorCode::PermissionDenied
                         : ScanErrorCode::Metadata,
             .path = file_path,
-            .operation = "read metadata",
+            .operation = operation,
             .detail = err.message});
     }
     if (!meta_result->has_value()) {
-        return std::unexpected(ScanError{
-            .code = ScanErrorCode::Metadata,
-            .path = file_path,
-            .operation = "read metadata",
-            .detail =
-                "metadata query returned no metadata for a regular file"});
+        return std::unexpected(ScanError{.code = ScanErrorCode::Metadata,
+                                         .path = file_path,
+                                         .operation = operation,
+                                         .detail = missing_detail});
+    }
+    return **meta_result;
+}
+
+std::expected<NodeRow, ScanError>
+process_file(const std::filesystem::path& file_path,
+             std::string relative,
+             ScanContext& context) {
+    NodeRow row{.path = std::move(relative)};
+    auto initial_meta = query_file_metadata(
+        context.metadata_query,
+        file_path,
+        row.path,
+        "read metadata",
+        "metadata query returned no metadata for a regular file");
+    if (!initial_meta) {
+        return std::unexpected(initial_meta.error());
     }
 
-    auto current_meta = **meta_result;
+    auto current_meta = *initial_meta;
     row.size = current_meta.size;
     row.mtime = current_meta.mtime_nanoseconds;
 
@@ -150,9 +166,8 @@ process_file(const std::filesystem::path& file_path,
                                             .file_high = cached_row.file_high},
             .is_valid = true};
 
-        const auto decision =
-            cache::evaluate_cache_reuse(cached_meta, current_meta);
-        if (decision == cache::CacheReuseResult::Reusable) {
+        if (cache::evaluate_cache_reuse(cached_meta, current_meta) ==
+            cache::CacheReuseResult::Reusable) {
             row.hash = cached_row.hash;
             context.cache.push_back(cached_row);
             platform::perf_trace::count("local hash cache hits");
@@ -172,40 +187,20 @@ process_file(const std::filesystem::path& file_path,
             if (!hash)
                 break;
 
-            const auto after_result =
-                context.metadata_query(file_path, row.path);
+            auto after_result =
+                query_file_metadata(context.metadata_query,
+                                    file_path,
+                                    row.path,
+                                    "read metadata after hashing",
+                                    "file replaced or removed during hash");
             if (!after_result) {
-                const auto& err = after_result.error();
-                return std::unexpected(ScanError{
-                    .code =
-                        err.code ==
-                                cache::FileMetadataErrorCode::PermissionDenied
-                            ? ScanErrorCode::PermissionDenied
-                            : ScanErrorCode::Metadata,
-                    .path = file_path,
-                    .operation = "read metadata after hashing",
-                    .detail = err.message});
+                return std::unexpected(after_result.error());
             }
-            if (!after_result->has_value()) {
-                return std::unexpected(ScanError{
-                    .code = ScanErrorCode::Metadata,
-                    .path = file_path,
-                    .operation = "read metadata after hashing",
-                    .detail = "file replaced or removed during hash"});
-            }
-            const auto after_meta = **after_result;
+            const auto after_meta = *after_result;
 
-            const bool same_identity =
-                (!before_meta.identity.has_value() &&
-                 !after_meta.identity.has_value()) ||
-                (before_meta.identity.has_value() &&
-                 after_meta.identity.has_value() &&
-                 *before_meta.identity == *after_meta.identity);
-            const bool same_size = before_meta.size == after_meta.size;
-            const bool same_mtime =
-                before_meta.mtime_nanoseconds == after_meta.mtime_nanoseconds;
-
-            if (same_identity && same_size && same_mtime) {
+            if (before_meta.identity == after_meta.identity &&
+                before_meta.size == after_meta.size &&
+                before_meta.mtime_nanoseconds == after_meta.mtime_nanoseconds) {
                 stable = true;
                 current_meta = after_meta;
                 break;
@@ -496,29 +491,27 @@ scan_result(const std::filesystem::path& local_root,
                 !valid_logical_path_component(entry_name)) {
                 effective_disposition = IgnoreDisposition::IgnoredProtected;
             } else if (disposition == IgnoreDisposition::IgnoredDisposable) {
-                const auto metadata = metadata_query(entry.path(), relative);
+                const auto metadata =
+                    query_file_metadata(metadata_query,
+                                        entry.path(),
+                                        relative,
+                                        "read disposable file metadata",
+                                        "");
                 if (!metadata) {
-                    return std::unexpected(ScanError{
-                        .code = metadata.error().code ==
-                                        cache::FileMetadataErrorCode::
-                                            PermissionDenied
-                                    ? ScanErrorCode::PermissionDenied
-                                    : ScanErrorCode::Metadata,
-                        .path = entry.path(),
-                        .operation = "read disposable file metadata",
-                        .detail = metadata.error().message,
-                    });
-                }
-                if (!metadata->has_value() ||
-                    !(**metadata).identity.has_value()) {
+                    if (metadata.error().detail.empty()) {
+                        effective_disposition =
+                            IgnoreDisposition::IgnoredProtected;
+                    } else {
+                        return std::unexpected(metadata.error());
+                    }
+                } else if (!metadata->identity.has_value()) {
                     effective_disposition = IgnoreDisposition::IgnoredProtected;
                 } else {
-                    const auto& file_metadata = **metadata;
-                    ignored_size = file_metadata.size;
+                    ignored_size = metadata->size;
                     identity = {
-                        .volume_or_dev = file_metadata.identity->volume,
-                        .file_id_low = file_metadata.identity->file_low,
-                        .file_id_high = file_metadata.identity->file_high,
+                        .volume_or_dev = metadata->identity->volume,
+                        .file_id_low = metadata->identity->file_low,
+                        .file_id_high = metadata->identity->file_high,
                         .valid = true,
                     };
                 }

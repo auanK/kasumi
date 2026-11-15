@@ -95,15 +95,19 @@ prepare_stmt(sqlite3* database, std::string_view sql, const Args&... args) {
     if (!stmt) {
         throw std::runtime_error(stmt.error());
     }
-    int idx = 0;
-    (require(sqlite::bind(*stmt, ++idx, sql_arg(args))), ...);
+    if constexpr (sizeof...(Args) > 0) {
+        int idx = 0;
+        (require(sqlite::bind(*stmt, ++idx, sql_arg(args))), ...);
+    }
     return std::move(*stmt);
 }
 
 template <typename... Args>
 void exec_stmt(sqlite::Statement& stmt, const Args&... args) {
-    int idx = 0;
-    (require(sqlite::bind(stmt, ++idx, sql_arg(args))), ...);
+    if constexpr (sizeof...(Args) > 0) {
+        int idx = 0;
+        (require(sqlite::bind(stmt, ++idx, sql_arg(args))), ...);
+    }
     require(sqlite::run(stmt));
     require(sqlite::reset(stmt));
 }
