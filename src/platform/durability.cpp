@@ -1,7 +1,7 @@
 #include "platform/durability.hpp"
 
+#include "detail.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <cerrno>
 #include <cstddef>
@@ -25,9 +25,75 @@
 #include <unistd.h>
 #endif
 
+namespace kasumi::platform::detail {
+
+std::error_code rename_no_replace(const std::filesystem::path& source,
+                                  const std::filesystem::path& destination) {
+#if defined(_WIN32)
+    if (MoveFileExW(
+            source.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        return {};
+    }
+    return {static_cast<int>(GetLastError()), std::system_category()};
+#elif defined(__linux__) && defined(SYS_renameat2)
+    if (::syscall(SYS_renameat2,
+                  AT_FDCWD,
+                  source.c_str(),
+                  AT_FDCWD,
+                  destination.c_str(),
+                  RENAME_NOREPLACE) == 0) {
+        return {};
+    }
+    return {errno, std::generic_category()};
+#else
+    static_cast<void>(source);
+    static_cast<void>(destination);
+    return std::make_error_code(std::errc::operation_not_supported);
+#endif
+}
+
+} // namespace kasumi::platform::detail
+
 namespace kasumi::platform::durability {
 
 namespace {
+
+#if !defined(_WIN32)
+std::expected<void, std::string>
+sync_posix_descriptor(int fd, std::string_view operation) {
+    int sync_result = 0;
+    do {
+        sync_result = ::fsync(fd);
+    } while (sync_result != 0 && errno == EINTR);
+    const auto sync_error = sync_result == 0 ? 0 : errno;
+    const auto close_error = ::close(fd) == 0 ? 0 : errno;
+    if (sync_error != 0) {
+        return std::unexpected(std::string{operation} +
+                               ": fsync failed: " + std::strerror(sync_error));
+    }
+    if (close_error != 0) {
+        return std::unexpected(std::string{operation} +
+                               ": close failed: " + std::strerror(close_error));
+    }
+    return {};
+}
+std::expected<void, std::string> sync_posix_path(
+    const std::filesystem::path& path, int flags, std::string_view operation) {
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    const int descriptor = ::open(path.c_str(), flags);
+    if (descriptor < 0) {
+        return std::unexpected(std::string{operation} +
+                               ": open failed: " + std::strerror(errno));
+    }
+    return sync_posix_descriptor(descriptor, operation);
+}
+
+#endif
 
 [[maybe_unused]] std::string native_error(std::string_view operation,
                                           unsigned long code) {
@@ -40,33 +106,14 @@ bool path_not_found(const std::error_code& error) noexcept {
 }
 
 std::expected<void, std::string>
-validate_parent(const std::filesystem::path& path, std::string_view operation) {
-    const auto parent = path.parent_path();
-    if (parent.empty()) {
-        return std::unexpected(std::string{operation} +
-                               ": empty parent directory for '" +
-                               platform::path::to_utf8(path) + "'");
+validate_entry(const std::filesystem::path& path,
+               bool expect_directory,
+               std::string_view operation,
+               std::string_view label) {
+    if (path.empty()) {
+        return std::unexpected(std::string{operation} + ": empty " +
+                               std::string{label});
     }
-
-    std::error_code error;
-    const auto status = std::filesystem::symlink_status(parent, error);
-    if (error) {
-        return std::unexpected(
-            std::string{operation} +
-            ": could not query parent directory: " + error.message());
-    }
-    if (std::filesystem::is_symlink(status) ||
-        !std::filesystem::is_directory(status)) {
-        return std::unexpected(std::string{operation} +
-                               ": invalid parent directory for '" +
-                               platform::path::to_utf8(path) + "'");
-    }
-    return {};
-}
-
-std::expected<void, std::string>
-validate_regular_file(const std::filesystem::path& path,
-                      std::string_view operation) {
     std::error_code error;
     const auto status = std::filesystem::symlink_status(path, error);
     if (error) {
@@ -74,65 +121,58 @@ validate_regular_file(const std::filesystem::path& path,
                                platform::path::to_utf8(path) +
                                "': " + error.message());
     }
-    if (std::filesystem::is_symlink(status) ||
-        !std::filesystem::is_regular_file(status)) {
-        return std::unexpected(std::string{operation} +
-                               ": regular file expected at '" +
+    const bool type_ok = expect_directory
+                             ? std::filesystem::is_directory(status)
+                             : std::filesystem::is_regular_file(status);
+    if (std::filesystem::is_symlink(status) || !type_ok) {
+        return std::unexpected(std::string{operation} + ": invalid " +
+                               std::string{label} + " '" +
                                platform::path::to_utf8(path) + "'");
     }
     return {};
 }
 
+bool same_parent_dir(const std::filesystem::path& source,
+                     const std::filesystem::path& target) {
+    return !source.empty() && !target.empty() &&
+           source.parent_path().lexically_normal() ==
+               target.parent_path().lexically_normal();
+}
+
 std::expected<void, std::string>
 validate_replace_paths(const std::filesystem::path& source,
                        const std::filesystem::path& target) {
-    if (source.empty() || target.empty()) {
+    if (!same_parent_dir(source, target)) {
         return std::unexpected(
-            "replace_atomically: source and target cannot be empty");
+            "replace_atomically: source and target must share a valid parent");
     }
-
-    auto source_file = validate_regular_file(source, "replace_atomically");
-    if (!source_file) {
-        return source_file;
+    for (const auto& [path, dir, label] :
+         {std::tuple{&source, false, "regular file"},
+          std::tuple{&source, true, "parent directory"},
+          std::tuple{&target, true, "parent directory"}}) {
+        const auto check_path = dir ? path->parent_path() : *path;
+        if (auto res =
+                validate_entry(check_path, dir, "replace_atomically", label);
+            !res) {
+            return res;
+        }
     }
-
-    auto source_parent = validate_parent(source, "replace_atomically");
-    if (!source_parent) {
-        return source_parent;
-    }
-    auto target_parent = validate_parent(target, "replace_atomically");
-    if (!target_parent) {
-        return target_parent;
-    }
-
-    if (source.parent_path().lexically_normal() !=
-        target.parent_path().lexically_normal()) {
-        return std::unexpected(
-            "replace_atomically: source and target must share "
-            "the parent directory");
-    }
-
     std::error_code error;
     const auto target_status = std::filesystem::symlink_status(target, error);
-    std::filesystem::file_status effective_target_status = target_status;
-    if (path_not_found(error)) {
-        error.clear();
-        effective_target_status =
-            std::filesystem::file_status{std::filesystem::file_type::not_found};
-    } else if (error) {
+    if (path_not_found(error) ||
+        (!error &&
+         target_status.type() == std::filesystem::file_type::not_found)) {
+        return {};
+    }
+    if (error) {
         return std::unexpected("replace_atomically: could not query target: " +
                                error.message());
     }
-    if (std::filesystem::is_symlink(effective_target_status) ||
-        std::filesystem::is_directory(effective_target_status)) {
+    if (std::filesystem::is_symlink(target_status) ||
+        !std::filesystem::is_regular_file(target_status)) {
         return std::unexpected(
-            "replace_atomically: target cannot be symlink or directory");
-    }
-    if (!std::filesystem::is_regular_file(effective_target_status) &&
-        effective_target_status.type() !=
-            std::filesystem::file_type::not_found) {
-        return std::unexpected(
-            "replace_atomically: target is not a regular file");
+            "replace_atomically: target cannot be symlink, directory, or "
+            "non-regular file");
     }
     return {};
 }
@@ -160,14 +200,17 @@ replace_atomically(const std::filesystem::path& source,
             const auto target_name =
                 std::filesystem::absolute(target, path_error).wstring();
             if (path_error) {
-                return std::unexpected("replace_atomically: " + path_error.message());
+                return std::unexpected("replace_atomically: " +
+                                       path_error.message());
             }
             const auto name_bytes = target_name.size() * sizeof(wchar_t);
-            if (name_bytes > std::numeric_limits<DWORD>::max() -
-                                 sizeof(FILE_RENAME_INFO)) {
-                return std::unexpected("replace_atomically: target path is too long");
+            if (name_bytes >
+                std::numeric_limits<DWORD>::max() - sizeof(FILE_RENAME_INFO)) {
+                return std::unexpected(
+                    "replace_atomically: target path is too long");
             }
-            std::vector<std::byte> buffer(sizeof(FILE_RENAME_INFO) + name_bytes);
+            std::vector<std::byte> buffer(sizeof(FILE_RENAME_INFO) +
+                                          name_bytes);
             auto* rename = reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
             rename->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS |
                             FILE_RENAME_FLAG_POSIX_SEMANTICS;
@@ -175,26 +218,36 @@ replace_atomically(const std::filesystem::path& source,
             rename->FileNameLength = static_cast<DWORD>(name_bytes);
             std::memcpy(rename->FileName, target_name.data(), name_bytes);
             const auto file = CreateFileW(
-                source.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE,
+                source.c_str(),
+                GENERIC_READ | GENERIC_WRITE | DELETE,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                nullptr, OPEN_EXISTING,
-                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH, nullptr);
+                nullptr,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
+                nullptr);
             if (file == INVALID_HANDLE_VALUE) {
                 return std::unexpected(native_error(
                     "replace_atomically: open source failed", GetLastError()));
             }
             FILE_ATTRIBUTE_TAG_INFO attributes{};
-            if (!GetFileInformationByHandleEx(file, FileAttributeTagInfo,
-                                              &attributes, sizeof(attributes)) ||
+            if (!GetFileInformationByHandleEx(file,
+                                              FileAttributeTagInfo,
+                                              &attributes,
+                                              sizeof(attributes)) ||
                 (attributes.FileAttributes &
                  (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY |
                   FILE_ATTRIBUTE_DEVICE)) != 0) {
                 CloseHandle(file);
-                return std::unexpected("replace_atomically: source is not a regular file");
+                return std::unexpected(
+                    "replace_atomically: source is not a regular file");
             }
             const bool flushed = FlushFileBuffers(file) != 0;
-            const bool renamed = flushed && SetFileInformationByHandle(
-                file, FileRenameInfoEx, rename, static_cast<DWORD>(buffer.size()));
+            const bool renamed =
+                flushed &&
+                SetFileInformationByHandle(file,
+                                           FileRenameInfoEx,
+                                           rename,
+                                           static_cast<DWORD>(buffer.size()));
             const auto rename_error = renamed ? ERROR_SUCCESS : GetLastError();
             CloseHandle(file);
             if (!renamed) {
@@ -222,32 +275,29 @@ replace_atomically(const std::filesystem::path& source,
 std::expected<void, std::error_code>
 install_without_overwrite(const std::filesystem::path& source,
                           const std::filesystem::path& target) {
-    if (source.empty() || target.empty() || source == target ||
-        source.parent_path().lexically_normal() !=
-            target.parent_path().lexically_normal()) {
+    if (source == target || !same_parent_dir(source, target)) {
         return std::unexpected(
             std::make_error_code(std::errc::invalid_argument));
     }
-    std::error_code error;
-    const auto source_status = std::filesystem::symlink_status(source, error);
-    if (error)
-        return std::unexpected(error);
-    if (std::filesystem::is_symlink(source_status))
-        return std::unexpected(
-            std::make_error_code(std::errc::too_many_symbolic_link_levels));
-    if (!std::filesystem::is_regular_file(source_status))
-        return std::unexpected(
-            std::make_error_code(std::errc::invalid_argument));
-    const auto parent_status =
-        std::filesystem::symlink_status(source.parent_path(), error);
-    if (error)
-        return std::unexpected(error);
-    if (std::filesystem::is_symlink(parent_status))
-        return std::unexpected(
-            std::make_error_code(std::errc::too_many_symbolic_link_levels));
-    if (!std::filesystem::is_directory(parent_status))
-        return std::unexpected(
-            std::make_error_code(std::errc::invalid_argument));
+    const auto inspect = [](const std::filesystem::path& p,
+                            bool dir) -> std::expected<void, std::error_code> {
+        std::error_code ec;
+        const auto s = std::filesystem::symlink_status(p, ec);
+        if (ec)
+            return std::unexpected(ec);
+        if (std::filesystem::is_symlink(s))
+            return std::unexpected(
+                std::make_error_code(std::errc::too_many_symbolic_link_levels));
+        if (!(dir ? std::filesystem::is_directory(s)
+                  : std::filesystem::is_regular_file(s)))
+            return std::unexpected(
+                std::make_error_code(std::errc::invalid_argument));
+        return {};
+    };
+    if (auto ok = inspect(source, false); !ok)
+        return ok;
+    if (auto ok = inspect(source.parent_path(), true); !ok)
+        return ok;
 #if defined(_WIN32)
     const auto attributes = GetFileAttributesW(source.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES)
@@ -256,37 +306,24 @@ install_without_overwrite(const std::filesystem::path& source,
     if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
         return std::unexpected(
             std::make_error_code(std::errc::too_many_symbolic_link_levels));
-    if (!MoveFileExW(source.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH))
-        return std::unexpected(std::error_code(static_cast<int>(GetLastError()),
-                                               std::system_category()));
-#elif defined(__linux__) && defined(SYS_renameat2)
-    if (::syscall(SYS_renameat2,
-                  AT_FDCWD,
-                  source.c_str(),
-                  AT_FDCWD,
-                  target.c_str(),
-                  RENAME_NOREPLACE) != 0)
-        return std::unexpected(std::error_code(errno, std::generic_category()));
-#else
-    return std::unexpected(
-        std::make_error_code(std::errc::operation_not_supported));
 #endif
+    if (const auto ec = detail::rename_no_replace(source, target); ec)
+        return std::unexpected(ec);
     return {};
 }
 
 std::expected<void, std::string>
 retire_directory(const std::filesystem::path& source,
                  const std::filesystem::path& target) {
-    if (source.empty() || target.empty() ||
-        source.parent_path().lexically_normal() !=
-            target.parent_path().lexically_normal())
+    if (!same_parent_dir(source, target))
         return std::unexpected("retire_directory: physical siblings required");
-    auto parent = validate_parent(source, "retire_directory");
-    if (!parent)
-        return parent;
-    auto directory = validate_parent(source / ".", "retire_directory");
-    if (!directory)
-        return directory;
+    if (auto ok = validate_entry(
+            source.parent_path(), true, "retire_directory", "parent directory");
+        !ok)
+        return ok;
+    if (auto ok = validate_entry(source, true, "retire_directory", "directory");
+        !ok)
+        return ok;
     std::error_code error;
     auto status = std::filesystem::symlink_status(target, error);
     if ((error && !path_not_found(error)) ||
@@ -306,16 +343,14 @@ retire_directory(const std::filesystem::path& source,
 }
 
 std::expected<void, std::string> sync_file(const std::filesystem::path& path) {
-    if (path.empty()) {
-        return std::unexpected("sync_file: path cannot be empty");
+    if (auto ok = validate_entry(
+            path.parent_path(), true, "sync_file", "parent directory");
+        !ok) {
+        return ok;
     }
-    auto parent_validation = validate_parent(path, "sync_file");
-    if (!parent_validation) {
-        return parent_validation;
-    }
-    auto validation = validate_regular_file(path, "sync_file");
-    if (!validation) {
-        return validation;
+    if (auto ok = validate_entry(path, false, "sync_file", "regular file");
+        !ok) {
+        return ok;
     }
 
 #if defined(_WIN32)
@@ -345,48 +380,19 @@ std::expected<void, std::string> sync_file(const std::filesystem::path& path) {
             native_error("sync_file: CloseHandle failed", close_error));
     }
 #else
-    int flags = O_RDONLY;
-#ifdef O_CLOEXEC
-    flags |= O_CLOEXEC;
+    return sync_posix_path(path, O_RDONLY, "sync_file");
 #endif
-#ifdef O_NOFOLLOW
-    flags |= O_NOFOLLOW;
-#endif
-    const int file = ::open(path.c_str(), flags);
-    if (file < 0) {
-        return std::unexpected("sync_file: open failed: " +
-                               std::string{std::strerror(errno)});
-    }
-
-    int sync_result = 0;
-    do {
-        sync_result = ::fsync(file);
-    } while (sync_result != 0 && errno == EINTR);
-    const bool synced = sync_result == 0;
-    const auto sync_error = synced ? 0 : errno;
-    const bool closed = ::close(file) == 0;
-    const auto close_error = closed ? 0 : errno;
-    if (!synced) {
-        return std::unexpected("sync_file: fsync failed: " +
-                               std::string{std::strerror(sync_error)});
-    }
-    if (!closed) {
-        return std::unexpected("sync_file: close failed: " +
-                               std::string{std::strerror(close_error)});
-    }
-#endif
-    platform::perf_trace::count("platform durable file sync completions");
     return {};
 }
 
 std::expected<void, std::string>
 sync_parent_directory(const std::filesystem::path& path) {
-    if (path.empty()) {
-        return std::unexpected("sync_parent_directory: path cannot be empty");
-    }
-    auto validation = validate_parent(path, "sync_parent_directory");
-    if (!validation) {
-        return validation;
+    if (auto ok = validate_entry(path.parent_path(),
+                                 true,
+                                 "sync_parent_directory",
+                                 "parent directory");
+        !ok) {
+        return ok;
     }
 
 #if defined(_WIN32)
@@ -396,37 +402,7 @@ sync_parent_directory(const std::filesystem::path& path) {
 #ifdef O_DIRECTORY
     flags |= O_DIRECTORY;
 #endif
-#ifdef O_CLOEXEC
-    flags |= O_CLOEXEC;
-#endif
-#ifdef O_NOFOLLOW
-    flags |= O_NOFOLLOW;
-#endif
-    const auto parent = path.parent_path();
-    const int directory = ::open(parent.c_str(), flags);
-    if (directory < 0) {
-        return std::unexpected("sync_parent_directory: open failed: " +
-                               std::string{std::strerror(errno)});
-    }
-
-    int sync_result = 0;
-    do {
-        sync_result = ::fsync(directory);
-    } while (sync_result != 0 && errno == EINTR);
-    const bool synced = sync_result == 0;
-    const auto sync_error = synced ? 0 : errno;
-    const bool closed = ::close(directory) == 0;
-    const auto close_error = closed ? 0 : errno;
-    if (!synced) {
-        return std::unexpected("sync_parent_directory: fsync failed: " +
-                               std::string{std::strerror(sync_error)});
-    }
-    if (!closed) {
-        return std::unexpected("sync_parent_directory: close failed: " +
-                               std::string{std::strerror(close_error)});
-    }
-    platform::perf_trace::count("platform durable directory sync completions");
-    return {};
+    return sync_posix_path(path.parent_path(), flags, "sync_parent_directory");
 #endif
 }
 

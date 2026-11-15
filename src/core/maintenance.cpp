@@ -68,18 +68,15 @@ AnalyzeResult analyze(const Snapshot& history_tree,
     }
 
     using SourceKey = std::pair<std::string, std::uint64_t>;
-    std::map<SourceKey, std::filesystem::path> local_sources;
+    std::map<SourceKey, std::string_view> local_sources;
     for (const auto& row : local_tree.rows) {
         if (row.is_directory) {
             continue;
         }
-        const auto identifier = hash_hex(row.hash);
-        const SourceKey key{identifier, row.size};
-        const auto source = platform::path::from_utf8(row.path);
+        const SourceKey key{hash_hex(row.hash), row.size};
         auto position = local_sources.find(key);
-        if (position == local_sources.end() ||
-            path_text(source) < path_text(position->second)) {
-            local_sources.insert_or_assign(key, source);
+        if (position == local_sources.end() || row.path < position->second) {
+            local_sources.insert_or_assign(key, row.path);
         }
     }
 
@@ -88,17 +85,16 @@ AnalyzeResult analyze(const Snapshot& history_tree,
     std::ranges::sort(physical);
     physical.erase(std::ranges::unique(physical).begin(), physical.end());
 
-    std::vector<std::string> orphan_identifiers;
-    std::vector<std::string> unknown_identifiers;
+    Inventory inventory;
     for (const auto& identifier : physical) {
         auto decoded = hash_from_hex(identifier);
         if (!decoded || hash_hex(*decoded) != identifier) {
-            unknown_identifiers.push_back(identifier);
+            inventory.unknown_identifiers.push_back(identifier);
             continue;
         }
         auto reference = references.find(identifier);
         if (reference == references.end()) {
-            orphan_identifiers.push_back(identifier);
+            inventory.orphan_identifiers.push_back(identifier);
             continue;
         }
         reference->second.physically_present = true;
@@ -106,18 +102,12 @@ AnalyzeResult analyze(const Snapshot& history_tree,
 
     for (auto& [identifier, reference] : references) {
         std::ranges::sort(reference.referenced_paths, {}, path_text);
-        auto source = local_sources.find({identifier, reference.size});
-        if (source != local_sources.end()) {
-            reference.local_source = source->second;
+        if (auto source = local_sources.find({identifier, reference.size});
+            source != local_sources.end()) {
+            reference.local_source = platform::path::from_utf8(source->second);
         }
-    }
-
-    Inventory inventory;
-    for (auto& [identifier, reference] : references) {
         inventory.referenced_objects.push_back(std::move(reference));
     }
-    inventory.orphan_identifiers = std::move(orphan_identifiers);
-    inventory.unknown_identifiers = std::move(unknown_identifiers);
 
     return inventory;
 }

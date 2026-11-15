@@ -12,7 +12,6 @@
 #include <new>
 #include <optional>
 #include <set>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -27,14 +26,10 @@ namespace {
 using Index = std::unordered_map<std::string, const LoadedCommit*>;
 using PathSet = std::unordered_set<std::string>;
 
-bool valid_tree_name(std::string_view name) noexcept {
-    return valid_logical_path_component(name);
-}
-
-std::vector<std::uint8_t> serialize_tree(const Snapshot& snapshot,
-                                         std::uint64_t height) {
+std::vector<std::byte> serialize_tree(const Snapshot& snapshot,
+                                      std::uint64_t height) {
     wire::Writer writer;
-    writer.buffer.reserve(1024 * 1024);
+    writer.buffer.reserve(12 + snapshot.rows.size() * 64);
 
     const char magic[] = "KASU";
     wire::write_bytes(writer, std::as_bytes(std::span{magic, 4}));
@@ -87,24 +82,25 @@ std::vector<std::uint8_t> serialize_tree(const Snapshot& snapshot,
         close();
     }
 
-    std::vector<std::uint8_t> result(writer.buffer.size());
-    std::memcpy(result.data(), writer.buffer.data(), writer.buffer.size());
-    return result;
+    return writer.buffer;
 }
 
-Snapshot deserialize_tree(const std::vector<std::uint8_t>& bytes,
-                          std::uint64_t& height) {
-    if (bytes.size() < 4 ||
-        !std::equal(bytes.begin(), bytes.begin() + 4, "KASU")) {
-        throw std::runtime_error("invalid tree encoding");
+std::expected<Snapshot, Error> deserialize_tree(std::span<const std::byte> data,
+                                                std::uint64_t& height) {
+    const auto fail = [](const char* message) {
+        return std::unexpected(Error{ErrorCode::InvalidEncoding, message});
+    };
+    constexpr std::array magic{
+        std::byte{'K'}, std::byte{'A'}, std::byte{'S'}, std::byte{'U'}};
+    if (data.size() < magic.size() ||
+        !std::ranges::equal(data.subspan(0, magic.size()), magic)) {
+        return fail("invalid tree encoding");
     }
 
-    std::span<const std::byte> data(
-        reinterpret_cast<const std::byte*>(bytes.data()), bytes.size());
-    wire::Reader reader{data.subspan(4)};
+    wire::Reader reader{data.subspan(magic.size())};
     auto decoded_height = wire::read<std::uint64_t>(reader);
     if (!decoded_height) {
-        throw std::runtime_error("truncated tree root");
+        return fail("truncated tree root");
     }
     height = *decoded_height;
 
@@ -116,46 +112,47 @@ Snapshot deserialize_tree(const std::vector<std::uint8_t>& bytes,
     std::uint32_t root_children = 0;
     Snapshot snapshot;
 
-    auto read_row = [&reader](std::string path,
-                              std::uint32_t& child_count) -> NodeRow {
+    auto read_row =
+        [&](std::string path,
+            std::uint32_t& child_count) -> std::expected<NodeRow, Error> {
         auto hash = wire::read_array<32>(reader);
-        if (!hash) {
-            throw std::runtime_error("truncated tree row");
-        }
-        NodeRow row{.path = std::move(path), .hash = *hash};
         auto size = wire::read<std::uint64_t>(reader);
         auto nanos = wire::read<std::int64_t>(reader);
         auto is_directory = wire::read<std::uint8_t>(reader);
         auto children = wire::read<std::uint32_t>(reader);
-        if (!size || !nanos || !is_directory || !children) {
-            throw std::runtime_error("truncated tree row");
+        if (!hash || !size || !nanos || !is_directory || !children) {
+            return fail("truncated tree row");
         }
-        row.size = *size;
         if (*is_directory > 1) {
-            throw std::runtime_error("invalid tree node type");
+            return fail("invalid tree node type");
         }
-        row.mtime = *nanos;
-        row.is_directory = *is_directory == 1;
         child_count = *children;
         if (static_cast<std::uint64_t>(child_count) * 29ULL >
             reader.data.size()) {
-            throw std::runtime_error("forged tree child count");
+            return fail("forged tree child count");
         }
-        if (!row.is_directory && child_count != 0) {
-            throw std::runtime_error("file has tree children");
+        if (*is_directory == 0 && child_count != 0) {
+            return fail("file has tree children");
         }
-        return row;
+        return NodeRow{.path = std::move(path),
+                       .hash = *hash,
+                       .size = *size,
+                       .mtime = *nanos,
+                       .is_directory = *is_directory == 1};
     };
 
     auto root_name = wire::read_string(reader);
     if (!root_name || !root_name->empty()) {
-        throw std::runtime_error("invalid tree root name");
+        return fail("invalid tree root name");
     }
     auto root = read_row("", root_children);
-    if (!root.is_directory) {
-        throw std::runtime_error("tree root is not a directory");
+    if (!root) {
+        return std::unexpected(root.error());
     }
-    snapshot.rows.push_back(std::move(root));
+    if (!root->is_directory) {
+        return fail("tree root is not a directory");
+    }
+    snapshot.rows.push_back(std::move(*root));
 
     std::vector<Pending> stack;
     if (root_children) {
@@ -164,27 +161,31 @@ Snapshot deserialize_tree(const std::vector<std::uint8_t>& bytes,
     while (!stack.empty()) {
         auto& parent = stack.back();
         auto name = wire::read_string(reader);
-        if (!name || !valid_tree_name(*name)) {
-            throw std::runtime_error("invalid tree path component");
+        if (!name || !valid_logical_path_component(*name)) {
+            return fail("invalid tree path component");
         }
         const auto path =
             parent.path.empty() ? *name : parent.path + '/' + *name;
         const auto depth = parent.depth + 1;
         if (depth > 256) {
-            throw std::runtime_error("tree depth exceeds limit");
+            return fail("tree depth exceeds limit");
         }
         if (--parent.remaining == 0) {
             stack.pop_back();
         }
         std::uint32_t children = 0;
-        snapshot.rows.push_back(read_row(path, children));
+        auto row = read_row(path, children);
+        if (!row) {
+            return std::unexpected(row.error());
+        }
+        snapshot.rows.push_back(std::move(*row));
         if (children) {
             stack.push_back({path, children, depth});
         }
     }
 
     if (!reader.data.empty()) {
-        throw std::runtime_error("trailing tree bytes");
+        return fail("trailing tree bytes");
     }
     std::ranges::sort(snapshot.rows, path_less, &NodeRow::path);
     const auto duplicate = std::ranges::adjacent_find(
@@ -192,20 +193,16 @@ Snapshot deserialize_tree(const std::vector<std::uint8_t>& bytes,
             return left.path == right.path;
         });
     if (duplicate != snapshot.rows.end()) {
-        throw std::runtime_error("duplicate tree path");
+        return fail("duplicate tree path");
     }
     return snapshot;
 }
 
-std::vector<std::string> ancestors_of(std::string_view path) {
-    std::vector<std::string> result;
+template <typename Fn> void for_each_ancestor(std::string_view path, Fn&& fn) {
     while (!path.empty()) {
-        const auto separator = path.rfind('/');
-        path = separator == std::string_view::npos ? std::string_view{}
-                                                   : path.substr(0, separator);
-        result.emplace_back(path);
+        path = row_parent(path);
+        fn(path);
     }
-    return result;
 }
 
 bool same_state(const NodeRow* left, const NodeRow* right) {
@@ -320,41 +317,16 @@ std::expected<std::vector<std::string>, Error> find_best_common_ancestors(
         return std::vector<std::string>{};
     }
 
-    std::unordered_set<std::string> visited;
-    std::vector<std::pair<std::string, std::size_t>> pending;
-
+    std::unordered_set<std::string_view> parent_of_common;
     for (const auto& candidate : common_ancestors) {
         for (const auto& parent : index.at(candidate)->commit.parents) {
-            pending.emplace_back(parent, 1);
-        }
-    }
-
-    while (!pending.empty()) {
-        auto [id, depth] = std::move(pending.back());
-        pending.pop_back();
-
-        if (depth > maximum_graph_depth) {
-            return std::unexpected(
-                Error{ErrorCode::LimitExceeded, "graph depth exceeded"});
-        }
-
-        if (!visited.insert(id).second) {
-            continue;
-        }
-
-        if (visited.size() > maximum_loaded_commit_count) {
-            return std::unexpected(
-                Error{ErrorCode::LimitExceeded, "ancestor count exceeded"});
-        }
-
-        for (const auto& parent : index.at(id)->commit.parents) {
-            pending.emplace_back(parent, depth + 1);
+            parent_of_common.insert(parent);
         }
     }
 
     std::vector<std::string> best;
     for (const auto& candidate : common_ancestors) {
-        if (!visited.contains(candidate)) {
+        if (!parent_of_common.contains(candidate)) {
             best.push_back(candidate);
         }
     }
@@ -377,24 +349,33 @@ HeadChanges build_head_changes(const Snapshot& base,
                         .tree = &head,
                         .directly_changed = {},
                         .changed_subtrees = {}};
-    std::set<std::string> paths;
-    for (const auto& row : base.rows) {
-        paths.insert(row.path);
-    }
-    for (const auto& row : head.rows) {
-        paths.insert(row.path);
-    }
-
-    for (const auto& path : paths) {
-        const auto* base_row = find_row(base, path);
-        const auto* head_row = find_row(head, path);
+    std::size_t base_index = 0;
+    std::size_t head_index = 0;
+    while (base_index < base.rows.size() || head_index < head.rows.size()) {
+        const NodeRow* base_row = nullptr;
+        const NodeRow* head_row = nullptr;
+        if (head_index == head.rows.size() ||
+            (base_index < base.rows.size() &&
+             path_less(base.rows[base_index].path,
+                       head.rows[head_index].path))) {
+            base_row = &base.rows[base_index++];
+        } else if (base_index == base.rows.size() ||
+                   path_less(head.rows[head_index].path,
+                             base.rows[base_index].path)) {
+            head_row = &head.rows[head_index++];
+        } else {
+            base_row = &base.rows[base_index++];
+            head_row = &head.rows[head_index++];
+        }
         if (same_state(base_row, head_row)) {
             continue;
         }
+        const std::string& path =
+            base_row != nullptr ? base_row->path : head_row->path;
         changes.directly_changed.insert(path);
-        for (const auto& ancestor : ancestors_of(path)) {
-            changes.changed_subtrees.insert(ancestor);
-        }
+        for_each_ancestor(path, [&](std::string_view ancestor) {
+            changes.changed_subtrees.emplace(ancestor);
+        });
     }
     return changes;
 }
@@ -422,9 +403,9 @@ build_merge_changes(const Index& index,
             // agreement.
             for (auto& head : changes) {
                 head.directly_changed.insert(path);
-                for (const auto& ancestor : ancestors_of(path)) {
-                    head.changed_subtrees.insert(ancestor);
-                }
+                for_each_ancestor(path, [&](std::string_view ancestor) {
+                    head.changed_subtrees.emplace(ancestor);
+                });
             }
         }
     }
@@ -556,7 +537,8 @@ merge_snapshots(const Snapshot& base,
                 })) {
                 const auto prefix = path + '/';
                 for (auto it = all_paths.lower_bound(prefix);
-                     it != all_paths.end() && it->starts_with(prefix); ++it) {
+                     it != all_paths.end() && it->starts_with(prefix);
+                     ++it) {
                     conflict_paths->insert(*it);
                 }
             }
@@ -611,34 +593,32 @@ merge_snapshots(const Snapshot& base,
     }
 
     std::vector<NodeRow> synthesized_parents;
+    bool ancestor_is_file = false;
     for (const auto& row : final_rows) {
-        for (const auto& ancestor : ancestors_of(row.path)) {
-            if (final_paths.contains(ancestor)) {
-                if (!final_directories.contains(ancestor)) {
-                    return std::unexpected(
-                        Error{ErrorCode::UnsafeMerge, "ancestor is a file"});
+        for_each_ancestor(row.path, [&](std::string_view ancestor) {
+            const std::string ancestor_str{ancestor};
+            if (final_paths.contains(ancestor_str)) {
+                if (!final_directories.contains(ancestor_str)) {
+                    ancestor_is_file = true;
                 }
-                continue;
+                return;
             }
-            final_paths.insert(ancestor);
-            final_directories.insert(ancestor);
-            synthesized_parents.push_back(NodeRow{.path = ancestor,
-                                                  .hash = {},
-                                                  .size = 0,
-                                                  .mtime = {},
-                                                  .is_directory = true});
+            final_paths.insert(ancestor_str);
+            final_directories.insert(ancestor_str);
+            synthesized_parents.push_back(
+                NodeRow{.path = ancestor_str, .is_directory = true});
+        });
+        if (ancestor_is_file) {
+            return std::unexpected(
+                Error{ErrorCode::UnsafeMerge, "ancestor is a file"});
         }
     }
     final_rows.insert(final_rows.end(),
-                      synthesized_parents.begin(),
-                      synthesized_parents.end());
+                      std::make_move_iterator(synthesized_parents.begin()),
+                      std::make_move_iterator(synthesized_parents.end()));
 
     if (!final_paths.contains("")) {
-        final_rows.push_back(NodeRow{.path = "",
-                                     .hash = {},
-                                     .size = 0,
-                                     .mtime = {},
-                                     .is_directory = true});
+        final_rows.push_back(NodeRow{.path = "", .is_directory = true});
     } else if (!final_directories.contains("")) {
         return std::unexpected(
             Error{ErrorCode::UnsafeMerge, "root is not a directory"});
@@ -731,15 +711,28 @@ reconcile_merge_bases(const Index& index, std::vector<std::string> bases) {
 } // namespace
 
 bool valid_commit_id(std::string_view id) noexcept {
-    if (id.size() != 64) {
-        return false;
+    return id.size() == HASH_HEX_SIZE && is_lowercase_hex(id);
+}
+
+std::expected<void, Error>
+validate_parent_ids(std::span<const std::string> parents, bool require_sorted) {
+    if (parents.size() > maximum_parent_count) {
+        return std::unexpected(
+            Error{ErrorCode::LimitExceeded, "too many parents"});
     }
-    for (const char c : id) {
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
-            return false;
+    std::string_view previous;
+    for (const auto& parent : parents) {
+        if (!valid_commit_id(parent)) {
+            return std::unexpected(
+                Error{ErrorCode::InvalidParent, "invalid parent id"});
         }
+        if (require_sorted && !previous.empty() && parent <= previous) {
+            return std::unexpected(Error{ErrorCode::InvalidParent,
+                                         "parents not sorted or duplicate"});
+        }
+        previous = parent;
     }
-    return true;
+    return {};
 }
 
 CommitResult make_commit(std::uint64_t height,
@@ -747,15 +740,8 @@ CommitResult make_commit(std::uint64_t height,
                          Snapshot tree,
                          std::int64_t created_at) {
     try {
-        if (parents.size() > maximum_parent_count) {
-            return std::unexpected(
-                Error{ErrorCode::LimitExceeded, "too many parents"});
-        }
-        for (const auto& parent : parents) {
-            if (!valid_commit_id(parent)) {
-                return std::unexpected(
-                    Error{ErrorCode::InvalidParent, "invalid parent id"});
-            }
+        if (auto valid = validate_parent_ids(parents, false); !valid) {
+            return std::unexpected(valid.error());
         }
         std::ranges::sort(parents);
         if (std::ranges::adjacent_find(parents) != parents.end()) {
@@ -786,11 +772,7 @@ make_bootstrap(Snapshot tree, std::uint64_t height, std::int64_t created_at) {
 
 CommitResult make_empty_bootstrap(std::int64_t created_at) {
     try {
-        Snapshot tree{.rows = {NodeRow{.path = "",
-                                       .hash = {},
-                                       .size = 0,
-                                       .mtime = {},
-                                       .is_directory = true}}};
+        Snapshot tree{.rows = {NodeRow{.path = "", .is_directory = true}}};
         finalize_snapshot(tree);
         return make_bootstrap(std::move(tree), 0, created_at);
     } catch (const std::bad_alloc&) {
@@ -808,36 +790,12 @@ BytesResult serialize(const Commit& commit) {
         if (!valid) {
             return std::unexpected(valid.error());
         }
-        if (commit.parents.size() > maximum_parent_count) {
-            return std::unexpected(
-                Error{ErrorCode::LimitExceeded, "too many parents"});
+        if (auto parents_valid = validate_parent_ids(commit.parents, true);
+            !parents_valid) {
+            return std::unexpected(parents_valid.error());
         }
 
-        std::string previous;
-        for (const auto& parent : commit.parents) {
-            if (!valid_commit_id(parent)) {
-                return std::unexpected(
-                    Error{ErrorCode::InvalidParent, "invalid parent id"});
-            }
-            if (!previous.empty() && parent <= previous) {
-                return std::unexpected(
-                    Error{ErrorCode::InvalidParent,
-                          "parents not sorted or duplicate"});
-            }
-            previous = parent;
-        }
-
-        std::vector<uint8_t> tree_bytes;
-        try {
-            tree_bytes = serialize_tree(commit.tree, commit.height);
-        } catch (const std::exception& e) {
-            return std::unexpected(
-                Error{ErrorCode::InvalidEncoding,
-                      std::string("tree serialization failed: ") + e.what()});
-        } catch (...) {
-            return std::unexpected(
-                Error{ErrorCode::InvalidEncoding, "tree serialization failed"});
-        }
+        auto tree_bytes = serialize_tree(commit.tree, commit.height);
         if (tree_bytes.size() > maximum_commit_plaintext_size) {
             return std::unexpected(Error{ErrorCode::LimitExceeded,
                                          "tree size exceeds maximum size"});
@@ -859,23 +817,17 @@ BytesResult serialize(const Commit& commit) {
                 return std::unexpected(
                     Error{ErrorCode::InvalidParent, "invalid parent hex"});
             }
-            std::array<std::byte, 32> parent_bytes;
-            for (std::size_t i = 0; i < parent_bytes.size(); ++i) {
-                parent_bytes[i] = (*hash)[i];
-            }
-            wire::write_array(writer, parent_bytes);
+            wire::write_array(writer, *hash);
         }
         wire::write(writer, static_cast<uint64_t>(tree_bytes.size()));
-        wire::write_bytes(writer, std::as_bytes(std::span{tree_bytes}));
+        wire::write_bytes(writer, tree_bytes);
         if (writer.buffer.size() > maximum_commit_plaintext_size) {
             return std::unexpected(
                 Error{ErrorCode::LimitExceeded, "commit exceeds maximum size"});
         }
 
         std::vector<uint8_t> result(writer.buffer.size());
-        for (std::size_t i = 0; i < writer.buffer.size(); ++i) {
-            result[i] = static_cast<uint8_t>(writer.buffer[i]);
-        }
+        std::memcpy(result.data(), writer.buffer.data(), writer.buffer.size());
         return result;
     } catch (const std::bad_alloc&) {
         return std::unexpected(
@@ -887,110 +839,88 @@ BytesResult serialize(const Commit& commit) {
 }
 
 CommitResult deserialize(std::span<const std::uint8_t> bytes) {
+    const auto fail = [](ErrorCode code, const char* msg) {
+        return std::unexpected(Error{code, msg});
+    };
     if (bytes.size() > maximum_commit_plaintext_size) {
-        return std::unexpected(
-            Error{ErrorCode::LimitExceeded, "commit exceeds maximum size"});
+        return fail(ErrorCode::LimitExceeded, "commit exceeds maximum size");
     }
     try {
-        std::span<const std::byte> data(
-            reinterpret_cast<const std::byte*>(bytes.data()), bytes.size());
-        wire::Reader reader{data};
+        wire::Reader reader{
+            {reinterpret_cast<const std::byte*>(bytes.data()), bytes.size()}};
         auto magic = wire::read_array<4>(reader);
-        if (!magic)
-            return std::unexpected(
-                Error{ErrorCode::InvalidEncoding, "truncated magic"});
-        if ((*magic)[0] != std::byte{'K'} || (*magic)[1] != std::byte{'C'} ||
-            (*magic)[2] != std::byte{'O'} || (*magic)[3] != std::byte{'M'}) {
-            return std::unexpected(
-                Error{ErrorCode::InvalidEncoding, "invalid magic"});
+        if (!magic || *magic != std::array<std::byte, 4>{std::byte{'K'},
+                                                         std::byte{'C'},
+                                                         std::byte{'O'},
+                                                         std::byte{'M'}}) {
+            return fail(ErrorCode::InvalidEncoding,
+                        magic ? "invalid magic" : "truncated magic");
         }
         auto version = wire::read<uint8_t>(reader);
-        if (!version)
-            return std::unexpected(
-                Error{ErrorCode::InvalidEncoding, "truncated version"});
-        if (*version != 2)
-            return std::unexpected(
-                Error{ErrorCode::UnsupportedVersion, "unsupported version"});
+        if (!version || *version != 2) {
+            return fail(version ? ErrorCode::UnsupportedVersion
+                                : ErrorCode::InvalidEncoding,
+                        version ? "unsupported version" : "truncated version");
+        }
         auto height = wire::read<uint64_t>(reader);
-        if (!height)
-            return std::unexpected(
-                Error{ErrorCode::InvalidEncoding, "truncated height"});
         auto created_at = wire::read<int64_t>(reader);
-        if (!created_at)
-            return std::unexpected(
-                Error{ErrorCode::InvalidEncoding, "truncated created_at"});
         auto parent_count = wire::read<uint32_t>(reader);
-        if (!parent_count)
-            return std::unexpected(
-                Error{ErrorCode::InvalidEncoding, "truncated parent count"});
-        if (*parent_count > maximum_parent_count)
-            return std::unexpected(
-                Error{ErrorCode::LimitExceeded, "too many parents"});
+        if (!height || !created_at || !parent_count) {
+            return fail(ErrorCode::InvalidEncoding, "truncated header");
+        }
+        if (*parent_count > maximum_parent_count) {
+            return fail(ErrorCode::LimitExceeded, "too many parents");
+        }
 
         std::vector<std::string> parents;
-        std::string previous;
+        parents.reserve(*parent_count);
         for (uint32_t i = 0; i < *parent_count; ++i) {
             auto parent_bytes = wire::read_array<32>(reader);
-            if (!parent_bytes)
-                return std::unexpected(
-                    Error{ErrorCode::InvalidEncoding, "truncated parent"});
-            Hash hash;
-            for (std::size_t j = 0; j < hash.size(); ++j)
-                hash[j] = (*parent_bytes)[j];
-            auto parent = hash_hex(hash);
-            if (!previous.empty() && parent <= previous)
-                return std::unexpected(
-                    Error{ErrorCode::InvalidParent,
-                          "parents not strictly increasing"});
-            parents.push_back(parent);
-            previous = std::move(parent);
+            if (!parent_bytes) {
+                return fail(ErrorCode::InvalidEncoding, "truncated parent");
+            }
+            auto parent = hash_hex(*parent_bytes);
+            if (!parents.empty() && parent <= parents.back()) {
+                return fail(ErrorCode::InvalidParent,
+                            "parents not strictly increasing");
+            }
+            parents.push_back(std::move(parent));
         }
 
         auto tree_size = wire::read<uint64_t>(reader);
-        if (!tree_size)
-            return std::unexpected(
-                Error{ErrorCode::InvalidEncoding, "truncated tree size"});
+        if (!tree_size) {
+            return fail(ErrorCode::InvalidEncoding, "truncated tree size");
+        }
         if (*tree_size > maximum_commit_plaintext_size) {
-            return std::unexpected(
-                Error{ErrorCode::LimitExceeded, "tree size exceeds limits"});
+            return fail(ErrorCode::LimitExceeded, "tree size exceeds limits");
         }
         auto tree_bytes =
             wire::read_bytes(reader, static_cast<std::size_t>(*tree_size));
-        if (!tree_bytes)
-            return std::unexpected(
-                Error{ErrorCode::InvalidEncoding, "truncated tree"});
-        if (!reader.data.empty())
-            return std::unexpected(
-                Error{ErrorCode::InvalidEncoding, "trailing bytes"});
-
-        std::vector<uint8_t> tree_vector(tree_bytes->size());
-        for (std::size_t i = 0; i < tree_bytes->size(); ++i)
-            tree_vector[i] = static_cast<uint8_t>((*tree_bytes)[i]);
-        uint64_t generation = 0;
-        Snapshot tree;
-        try {
-            tree = deserialize_tree(tree_vector, generation);
-        } catch (...) {
-            return std::unexpected(Error{ErrorCode::InvalidEncoding,
-                                         "tree deserialization failed"});
+        if (!tree_bytes || !reader.data.empty()) {
+            return fail(ErrorCode::InvalidEncoding,
+                        tree_bytes ? "trailing bytes" : "truncated tree");
         }
-        if (generation != *height)
-            return std::unexpected(
-                Error{ErrorCode::InvalidEncoding,
-                      "tree height does not match commit height"});
-        auto valid = validate_snapshot_structure(tree);
-        if (!valid)
+
+        uint64_t generation = 0;
+        auto tree = deserialize_tree(*tree_bytes, generation);
+        if (!tree) {
+            return std::unexpected(tree.error());
+        }
+        if (generation != *height) {
+            return fail(ErrorCode::InvalidEncoding,
+                        "tree height does not match commit height");
+        }
+        if (auto valid = validate_snapshot_structure(*tree); !valid) {
             return std::unexpected(valid.error());
+        }
         return Commit{.height = *height,
                       .created_at = *created_at,
                       .parents = std::move(parents),
-                      .tree = std::move(tree)};
+                      .tree = std::move(*tree)};
     } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            Error{ErrorCode::LimitExceeded, "allocation failed"});
+        return fail(ErrorCode::LimitExceeded, "allocation failed");
     } catch (...) {
-        return std::unexpected(
-            Error{ErrorCode::InvalidEncoding, "exception in deserialize"});
+        return fail(ErrorCode::InvalidEncoding, "exception in deserialize");
     }
 }
 
@@ -1012,18 +942,10 @@ StringResult compute_id(std::span<const std::uint8_t> canonical_bytes) {
 }
 
 StringResult compute_id(const Commit& commit) {
-    try {
-        auto bytes = serialize(commit);
-        if (!bytes)
-            return std::unexpected(bytes.error());
-        return compute_id(*bytes);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            Error{ErrorCode::LimitExceeded, "allocation failed"});
-    } catch (...) {
-        return std::unexpected(
-            Error{ErrorCode::InvalidEncoding, "exception in compute_id"});
-    }
+    auto bytes = serialize(commit);
+    if (!bytes)
+        return std::unexpected(bytes.error());
+    return compute_id(*bytes);
 }
 
 static ResolutionResult
@@ -1184,13 +1106,9 @@ resolve_impl(std::span<const LoadedCommit> commits,
             ancestor_sets.at(logical_heads.front());
         for (std::size_t i = 1; i < logical_heads.size(); ++i) {
             const auto& ancestors = ancestor_sets.at(logical_heads[i]);
-            for (auto it = common_ancestors.begin();
-                 it != common_ancestors.end();) {
-                if (!ancestors.contains(*it))
-                    it = common_ancestors.erase(it);
-                else
-                    ++it;
-            }
+            std::erase_if(common_ancestors, [&](const auto& id) {
+                return !ancestors.contains(id);
+            });
         }
         if (common_ancestors.empty())
             return std::unexpected(
@@ -1255,27 +1173,32 @@ resolve_authenticated(std::span<const LoadedCommit> commits,
     return resolve_impl(commits, marked_heads, {}, true);
 }
 
-ResolutionResult resolve_from_anchor(std::span<const LoadedCommit> commits,
-                                     std::span<const std::string> marked_heads,
-                                     std::string_view trusted_anchor_id) {
+ResolutionResult
+resolve_single_anchor(std::span<const LoadedCommit> commits,
+                      std::span<const std::string> marked_heads,
+                      std::string_view trusted_anchor_id,
+                      bool authenticate) {
     if (trusted_anchor_id.empty()) {
         return std::unexpected(
             Error{ErrorCode::InvalidCommitId, "trusted anchor is empty"});
     }
     const std::array anchors{std::string{trusted_anchor_id}};
-    return resolve_impl(commits, marked_heads, anchors, false);
+    return resolve_impl(commits, marked_heads, anchors, authenticate);
+}
+
+ResolutionResult resolve_from_anchor(std::span<const LoadedCommit> commits,
+                                     std::span<const std::string> marked_heads,
+                                     std::string_view trusted_anchor_id) {
+    return resolve_single_anchor(
+        commits, marked_heads, trusted_anchor_id, false);
 }
 
 ResolutionResult
 resolve_from_anchor_authenticated(std::span<const LoadedCommit> commits,
                                   std::span<const std::string> marked_heads,
                                   std::string_view trusted_anchor_id) {
-    if (trusted_anchor_id.empty()) {
-        return std::unexpected(
-            Error{ErrorCode::InvalidCommitId, "trusted anchor is empty"});
-    }
-    const std::array anchors{std::string{trusted_anchor_id}};
-    return resolve_impl(commits, marked_heads, anchors, true);
+    return resolve_single_anchor(
+        commits, marked_heads, trusted_anchor_id, true);
 }
 
 ResolutionResult resolve_from_frontier_authenticated(

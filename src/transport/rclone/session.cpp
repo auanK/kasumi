@@ -1,6 +1,5 @@
 #include "detail.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/random.hpp"
 
 #if defined(_WIN32)
@@ -37,11 +36,7 @@ extern char** environ;
 namespace kasumi::transport::rclone_detail {
 namespace {
 
-Error make_error(ErrorCode code, std::string message, int native_code = 0) {
-    return Error{.code = code,
-                 .message = std::move(message),
-                 .native_code = native_code};
-}
+using detail::make_error;
 
 bool environment_name_equal(std::string_view left,
                             std::string_view right) noexcept {
@@ -143,24 +138,8 @@ std::filesystem::path executable_name(std::filesystem::path value) {
 }
 
 std::filesystem::path::string_type executable_search_path() {
-#if defined(_WIN32)
-    std::wstring result;
-    auto required = GetEnvironmentVariableW(L"PATH", nullptr, 0);
-    while (required != 0) {
-        result.resize(required);
-        const auto length =
-            GetEnvironmentVariableW(L"PATH", result.data(), required);
-        if (length < required) {
-            result.resize(length);
-            return result;
-        }
-        required = length;
-    }
-    return {};
-#else
-    const char* value = std::getenv("PATH");
-    return value != nullptr ? value : "";
-#endif
+    auto value = platform::path::environment_value("PATH");
+    return value ? value->native() : std::filesystem::path::string_type{};
 }
 
 ChildEnvironment controlled_environment(const State& state) {
@@ -251,78 +230,64 @@ validate_configuration(const detail::RcloneConfiguration& configuration) {
 std::expected<std::uint16_t, Error> find_available_loopback_port() {
 #if defined(_WIN32)
     WSADATA data{};
-    const int startup = WSAStartup(MAKEWORD(2, 2), &data);
-    if (startup != 0) {
+    if (const int startup = WSAStartup(MAKEWORD(2, 2), &data); startup != 0) {
         return std::unexpected(make_error(
             ErrorCode::ProcessFailure, "WSAStartup failed", startup));
     }
-    const SOCKET socket_handle = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (socket_handle == INVALID_SOCKET) {
-        const int error = WSAGetLastError();
-        WSACleanup();
+    struct WinsockScope {
+        SOCKET handle{INVALID_SOCKET};
+        ~WinsockScope() {
+            if (handle != INVALID_SOCKET) {
+                closesocket(handle);
+            }
+            WSACleanup();
+        }
+    } guard{::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)};
+    using AddrLen = int;
+    const auto last_err = [] {
+        return WSAGetLastError();
+    };
+    if (guard.handle == INVALID_SOCKET) {
         return std::unexpected(
-            make_error(ErrorCode::ProcessFailure, "socket failed", error));
+            make_error(ErrorCode::ProcessFailure, "socket failed", last_err()));
     }
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    address.sin_port = htons(0);
-    if (::bind(socket_handle,
-               reinterpret_cast<const sockaddr*>(&address),
-               sizeof(address)) == SOCKET_ERROR) {
-        const int error = WSAGetLastError();
-        closesocket(socket_handle);
-        WSACleanup();
-        return std::unexpected(make_error(
-            ErrorCode::ProcessFailure, "loopback bind failed", error));
-    }
-    int address_length = sizeof(address);
-    if (::getsockname(socket_handle,
-                      reinterpret_cast<sockaddr*>(&address),
-                      &address_length) == SOCKET_ERROR ||
-        address.sin_port == 0) {
-        const int error = WSAGetLastError();
-        closesocket(socket_handle);
-        WSACleanup();
-        return std::unexpected(
-            make_error(ErrorCode::ProcessFailure, "getsockname failed", error));
-    }
-    const auto port = ntohs(address.sin_port);
-    closesocket(socket_handle);
-    WSACleanup();
-    return port;
 #else
-    const int socket_handle = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (socket_handle < 0) {
+    struct SocketScope {
+        int handle{-1};
+        ~SocketScope() {
+            if (handle >= 0) {
+                ::close(handle);
+            }
+        }
+    } guard{::socket(AF_INET, SOCK_STREAM, 0)};
+    using AddrLen = socklen_t;
+    const auto last_err = [] {
+        return errno;
+    };
+    if (guard.handle < 0) {
         return std::unexpected(
-            make_error(ErrorCode::ProcessFailure, "socket failed", errno));
+            make_error(ErrorCode::ProcessFailure, "socket failed", last_err()));
     }
+#endif
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     address.sin_port = htons(0);
-    if (::bind(socket_handle,
+    if (::bind(guard.handle,
                reinterpret_cast<const sockaddr*>(&address),
                sizeof(address)) != 0) {
-        const int error = errno;
-        ::close(socket_handle);
         return std::unexpected(make_error(
-            ErrorCode::ProcessFailure, "loopback bind failed", error));
+            ErrorCode::ProcessFailure, "loopback bind failed", last_err()));
     }
-    socklen_t address_length = sizeof(address);
-    if (::getsockname(socket_handle,
+    AddrLen address_length = sizeof(address);
+    if (::getsockname(guard.handle,
                       reinterpret_cast<sockaddr*>(&address),
                       &address_length) != 0 ||
         address.sin_port == 0) {
-        const int error = errno;
-        ::close(socket_handle);
-        return std::unexpected(
-            make_error(ErrorCode::ProcessFailure, "getsockname failed", error));
+        return std::unexpected(make_error(
+            ErrorCode::ProcessFailure, "getsockname failed", last_err()));
     }
-    const auto port = ntohs(address.sin_port);
-    ::close(socket_handle);
-    return port;
-#endif
+    return ntohs(address.sin_port);
 }
 
 std::error_code drain_process_output(State& state) {
@@ -417,6 +382,7 @@ void clear_secrets(State& state) noexcept {
     std::fill(state.password.begin(), state.password.end(), '\0');
     state.username.clear();
     state.password.clear();
+    state.base_url.clear();
 }
 
 bool reset_failed_attempt(State& state) noexcept {
@@ -425,12 +391,10 @@ bool reset_failed_attempt(State& state) noexcept {
     state.port = 0;
     state.ready = false;
     clear_secrets(state);
-    state.base_url.clear();
     return stopped;
 }
 
 std::expected<int, Error> start_process(State& state) {
-    const auto trace = platform::perf_trace::begin();
     auto environment = make_child_environment(state);
     if (!environment) {
         return std::unexpected(environment.error());
@@ -444,7 +408,6 @@ std::expected<int, Error> start_process(State& state) {
     const std::vector<std::string> arguments{
         platform::path::to_utf8(state.configuration.executable), "rcd"};
     const auto result = state.process.start(arguments, options);
-    platform::perf_trace::finish("rclone process startup", trace);
     if (result) {
         return std::unexpected(make_error(
             ErrorCode::ProcessFailure,
@@ -492,9 +455,7 @@ std::expected<void, Error> prepare_attempt(State& state) {
     if (!started) {
         return std::unexpected(started.error());
     }
-    const auto readiness_trace = platform::perf_trace::begin();
     const auto connected = establish_rc_connection(state, *started);
-    platform::perf_trace::finish("RC readiness", readiness_trace);
     if (!connected) {
         return std::unexpected(connected.error());
     }
@@ -705,28 +666,35 @@ void destroy_state(void* context) noexcept {
     if (state == nullptr) {
         return;
     }
-    const auto trace = platform::perf_trace::begin();
-    const auto drain_trace = platform::perf_trace::begin();
     state->stop_drain.store(true);
     wait_for_drain(*state);
-    platform::perf_trace::finish("rclone output drain", drain_trace);
-    const auto stop_trace = platform::perf_trace::begin();
     if (request_core_quit_best_effort(*state)) {
-        const auto kill_trace = platform::perf_trace::begin();
         try {
             std::lock_guard process_lock(state->process_mutex);
             (void)state->process.kill();
         } catch (...) {
         }
-        platform::perf_trace::finish("rclone acknowledged quit kill",
-                                     kill_trace);
     }
     (void)stop_process(*state);
-    platform::perf_trace::finish("rclone process stop", stop_trace);
     clear_secrets(*state);
     state->base_url.clear();
     delete state;
-    platform::perf_trace::finish("rclone shutdown", trace);
 }
 
 } // namespace kasumi::transport::rclone_detail
+
+namespace kasumi::transport::detail {
+
+std::expected<Transport, Error>
+open_rclone_backend(RcloneConfiguration configuration) {
+    auto state = rclone_detail::start_state(std::move(configuration));
+    if (!state) {
+        return std::unexpected(state.error());
+    }
+    return Transport{
+        .state = TransportStateHandle{*state, rclone_detail::destroy_state},
+        .storage = rclone_detail::make_storage_operations(),
+    };
+}
+
+} // namespace kasumi::transport::detail

@@ -1,3 +1,4 @@
+#include "application/concurrency.hpp"
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/history_storage.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
@@ -10,7 +11,6 @@
 #include "application/sync/publication.hpp"
 #include "coordinator_detail.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "state_storage/database.hpp"
 
 #include <algorithm>
@@ -21,13 +21,6 @@
 
 namespace kasumi::application::sync::coordinator {
 namespace {
-
-std::expected<std::optional<platform::Workspace>, Error>
-open_workspace(const std::filesystem::path& profile,
-               std::string_view id,
-               std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
-    return detail::open_transaction_workspace(profile, id, key);
-}
 
 std::expected<void, Error>
 save_phase(const journal::Paths& paths,
@@ -70,21 +63,6 @@ std::expected<RecoveryResult, Error> rollback_before_publication(
     return RecoveryResult::RolledBack;
 }
 
-bool same_tree(const Snapshot& left, const Snapshot& right) noexcept {
-    if (left.rows.size() != right.rows.size()) {
-        return false;
-    }
-    for (std::size_t index = 0; index < left.rows.size(); ++index) {
-        const auto& a = left.rows[index];
-        const auto& b = right.rows[index];
-        if (a.path != b.path || a.hash != b.hash || a.size != b.size ||
-            a.mtime != b.mtime || a.is_directory != b.is_directory) {
-            return false;
-        }
-    }
-    return true;
-}
-
 bool same_pending_paths(std::span<const NodeRow> rows,
                         std::span<const std::string> paths) noexcept {
     if (rows.size() != paths.size()) {
@@ -113,6 +91,18 @@ resolve_pending_paths(const Snapshot& tree,
         rows.push_back(*row);
     }
     return rows;
+}
+
+bool matches_observed_base_state(
+    const std::optional<state_storage::StoredState>& current,
+    const transaction::Record& record) noexcept {
+    return current ? !record.observed_base_id.empty() &&
+                         current->commit_id == record.observed_base_id &&
+                         current->height == record.local_generation &&
+                         same_pending_paths(current->pending_materializations,
+                                            record.observed_pending_paths)
+                   : record.observed_base_id.empty() &&
+                         record.observed_pending_paths.empty();
 }
 
 std::expected<void, Error>
@@ -146,44 +136,31 @@ ensure_state(const runtime::RuntimeData& runtime_data,
     }
     if (*current && (*current)->commit_id == commit.id &&
         (*current)->height == commit.commit.height &&
-        same_tree((*current)->tree, commit.commit.tree) &&
+        (*current)->tree == commit.commit.tree &&
         same_pending_paths((*current)->pending_materializations,
                            record.pending_paths) &&
         (epoch_id.empty() || (*current)->epoch_id == epoch_id)) {
         return {};
     }
-    const bool matches_old =
-        *current ? !record.observed_base_id.empty() &&
-                       (*current)->commit_id == record.observed_base_id &&
-                       (*current)->height == record.local_generation &&
-                       same_pending_paths((*current)->pending_materializations,
-                                          record.observed_pending_paths)
-                 : record.observed_base_id.empty() &&
-                       record.observed_pending_paths.empty();
-    if (!matches_old) {
+    if (!matches_observed_base_state(*current, record)) {
         return std::unexpected(detail::make_error(
             ErrorCode::RecoveryConflict,
             "state.db does not match the pending publication transition"));
     }
-    if (!state_storage::save_state(
-            runtime_data.database_path,
-            state_storage::StoredState{.tree = commit.commit.tree,
-                                       .height = commit.commit.height,
-                                       .commit_id = commit.id,
-                                       .ciphertext_id = ciphertext_id,
-                                       .epoch_id = epoch_id,
-                                       .epoch_sequence = epoch_sequence,
-                                       .pending_materializations =
-                                           std::move(*target_pending)})) {
-        return std::unexpected(detail::make_error(ErrorCode::DatabaseFailure,
-                                                  "failed to save state.db"));
-    }
-    return {};
+    return detail::save_state_checked(
+        runtime_data.database_path,
+        state_storage::StoredState{.tree = commit.commit.tree,
+                                   .height = commit.commit.height,
+                                   .commit_id = commit.id,
+                                   .ciphertext_id = ciphertext_id,
+                                   .epoch_id = epoch_id,
+                                   .epoch_sequence = epoch_sequence,
+                                   .pending_materializations =
+                                       std::move(*target_pending)});
 }
 
 std::expected<history::LoadedCommit, Error>
-load_published_commit(const journal::Paths& paths,
-                      transaction::Record& record,
+load_published_commit(const transaction::Record& record,
                       const runtime::RuntimeData& runtime_data,
                       transport::Transport& storage,
                       std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
@@ -220,7 +197,6 @@ load_published_commit(const journal::Paths& paths,
         return std::unexpected(detail::indeterminate_publication(
             verified.error(), "published commit verification"));
     }
-    static_cast<void>(paths);
     return **reachable;
 }
 
@@ -241,18 +217,9 @@ roll_forward_local_only(const journal::Paths& paths,
             (*current)->height == record.storage_generation &&
             same_pending_paths((*current)->pending_materializations,
                                record.pending_paths);
-        const bool old_state =
-            *current
-                ? !record.observed_base_id.empty() &&
-                      (*current)->commit_id == record.observed_base_id &&
-                      (*current)->height == record.local_generation &&
-                      same_pending_paths((*current)->pending_materializations,
-                                         record.observed_pending_paths)
-                : record.observed_base_id.empty() &&
-                      record.observed_pending_paths.empty();
         if (target_committed) {
             // Database advanced before the journal phase was saved.
-        } else if (old_state) {
+        } else if (matches_observed_base_state(*current, record)) {
             return rollback_before_publication(
                 paths, record, workspace, runtime_data, key);
         } else {
@@ -301,21 +268,6 @@ bool has_pending_storage_repair(const transaction::Record& record) noexcept {
     return false;
 }
 
-bool has_applied_local_mutation(const transaction::Record& record) noexcept {
-    for (std::size_t index = 0; index < record.plan.operations.size();
-         ++index) {
-        if (is_local_mutation(record.plan.operations[index].action) &&
-            (record.progress[index].state >=
-                 transaction::OperationState::BackupCreated ||
-             (record.plan.operations[index].action == Action::CopyLocal &&
-              record.progress[index].state ==
-                  transaction::OperationState::Prepared))) {
-            return true;
-        }
-    }
-    return false;
-}
-
 bool is_publication_transaction_resumable(
     const journal::Paths& paths,
     const transaction::Record& record,
@@ -326,10 +278,10 @@ bool is_publication_transaction_resumable(
     if (!record.publication_required || !workspace) {
         return false;
     }
-    if (record.phase > transaction::Phase::CommitPrepared) {
+    if (record.phase >= transaction::Phase::CommitPrepared) {
         return false;
     }
-    if (has_applied_local_mutation(record)) {
+    if (detail::has_local_rollback_work(record)) {
         return false;
     }
     bool has_applied_uploads = false;
@@ -381,12 +333,16 @@ bool is_publication_transaction_resumable(
     if (!remote_heads) {
         return false;
     }
-    auto expected_heads = record.parent_ids;
-    std::ranges::sort(expected_heads);
-    expected_heads.erase(std::ranges::unique(expected_heads).begin(),
-                         expected_heads.end());
-
-    if (*remote_heads != expected_heads) {
+    if (!record.observed_head_id.empty()) {
+        if (remote_heads->size() != 1 ||
+            remote_heads->front() != record.observed_head_id) {
+            return false;
+        }
+    } else if (record.storage_generation > 0) {
+        if (remote_heads->empty()) {
+            return false;
+        }
+    } else if (!remote_heads->empty()) {
         return false;
     }
 
@@ -518,29 +474,14 @@ std::expected<void, Error> resume_pending_storage_repairs(
         return {};
     }
 
-    const auto parallelism = detail::content_concurrency();
+    const auto parallelism = application::content_concurrency();
 
     for (std::size_t chunk_start = 0; chunk_start < pending_uploads.size();) {
-        std::vector<std::size_t> chunk;
-        std::uint64_t chunk_bytes = 0;
-        while (chunk_start + chunk.size() < pending_uploads.size() &&
-               chunk.size() < detail::upload_batch_max_items &&
-               (chunk.empty() ||
-                chunk_bytes + record.plan
-                                  .operations[pending_uploads[chunk_start +
-                                                              chunk.size()]]
-                                  .size <=
-                    detail::upload_batch_max_bytes)) {
-            const auto op_index = pending_uploads[chunk_start + chunk.size()];
-            chunk_bytes += record.plan.operations[op_index].size;
-            chunk.push_back(op_index);
-        }
-        chunk_start += chunk.size();
+        const auto chunk = detail::next_upload_batch_chunk(
+            pending_uploads, chunk_start, record.plan.operations);
 
-        const auto stage_trace = platform::perf_trace::begin();
         auto staged_batch = mutation::stage_upload_batch(
             chunk, record, runtime_data.local_dir, key, *workspace);
-        platform::perf_trace::finish("content stage", stage_trace);
 
         if (!staged_batch) {
             return std::unexpected(
@@ -549,10 +490,10 @@ std::expected<void, Error> resume_pending_storage_repairs(
                                    staged_batch.error().operation_index));
         }
 
+        detail::ScopedUploadBatchCleanup batch_cleanup{*staged_batch};
+
         mutation::StagedUploadBatch missing_batch{.root = staged_batch->root};
-        const auto listing_trace = platform::perf_trace::begin();
         auto listing = transport::list(storage);
-        platform::perf_trace::finish("repair availability LIST", listing_trace);
         if (!listing) {
             return std::unexpected(detail::make_error(
                 ErrorCode::ObservationFailure,
@@ -603,44 +544,23 @@ std::expected<void, Error> resume_pending_storage_repairs(
         }
 
         if (!missing_batch.objects.empty()) {
-            const auto transfer_trace = platform::perf_trace::begin();
-            auto transferred = mutation::transfer_upload_batch(
-                missing_batch, storage, parallelism);
-            platform::perf_trace::finish("content transfer", transfer_trace);
-
-            const bool transfer_unknown =
-                !transferred &&
-                transferred.error().code ==
-                    mutation::MutationErrorCode::RemoteResultUnknown;
-            if (!transferred && !transfer_unknown) {
+            if (auto batch_ok = detail::transfer_and_verify_upload_batch(
+                    missing_batch, storage, key, *workspace, parallelism);
+                !batch_ok) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::MutationFailure,
-                    "failed to transfer pending repairs batch",
-                    transferred.error().operation_index));
-            }
-
-            const auto verification_trace = platform::perf_trace::begin();
-            auto verified = mutation::verify_upload_batch(
-                missing_batch, storage, key, *workspace, parallelism);
-            platform::perf_trace::finish("content verification wall",
-                                         verification_trace);
-
-            if (!verified) {
-                return std::unexpected(
-                    detail::make_error(ErrorCode::MutationFailure,
-                                       "failed to verify pending repairs batch",
-                                       verified.error().operation_index));
+                    "failed to repair pending repairs batch",
+                    batch_ok.error().mutation.operation_index));
             }
         }
 
-        const auto checkpoint_trace = platform::perf_trace::begin();
         auto checkpointed =
             detail::checkpoint_upload_batch(paths, record, *staged_batch, key);
-        platform::perf_trace::finish("batch checkpoint", checkpoint_trace);
 
         if (!checkpointed) {
             return std::unexpected(checkpointed.error());
         }
+        batch_cleanup.dismissed = true;
 
         auto cleaned = mutation::cleanup_upload_batch(*staged_batch);
 
@@ -722,8 +642,7 @@ roll_forward(const journal::Paths& paths,
 
     const history_storage::HeadReference reference{
         .commit_id = record.commit_id, .ciphertext_id = record.ciphertext_id};
-    auto commit =
-        load_published_commit(paths, record, runtime_data, storage, key);
+    auto commit = load_published_commit(record, runtime_data, storage, key);
     if (!commit) {
         return std::unexpected(commit.error());
     }
@@ -776,44 +695,19 @@ roll_forward(const journal::Paths& paths,
                 return std::unexpected(saved.error());
             }
         }
-        if (record.phase < transaction::Phase::EpochUploaded) {
-            auto published = history_storage::epoch::publish(
-                storage, key, *epoch, runtime_data.database_path.parent_path());
-            if (!published) {
-                auto visible = history_storage::epoch::verify(
-                    storage,
-                    detail::genesis_epoch(record),
-                    epoch->reference,
-                    key,
-                    runtime_data.database_path.parent_path());
-                if (!visible) {
-                    return std::unexpected(
-                        detail::make_error(ErrorCode::RecoveryIndeterminate,
-                                           "failed to publish genesis Epoch: " +
-                                               published.error().detail));
-                }
-            }
-            if (auto saved = save_phase(
-                    paths, record, transaction::Phase::EpochUploaded, key);
-                !saved) {
-                return std::unexpected(saved.error());
-            }
-        }
-        auto verified = history_storage::epoch::verify(
-            storage,
-            detail::genesis_epoch(record),
-            epoch->reference,
-            key,
-            runtime_data.database_path.parent_path());
-        if (!verified) {
-            return std::unexpected(detail::make_error(
-                ErrorCode::RecoveryConflict,
-                "failed to verify genesis Epoch: " + verified.error().detail));
-        }
-        if (auto saved = save_phase(
-                paths, record, transaction::Phase::EpochVerified, key);
-            !saved) {
-            return std::unexpected(saved.error());
+        if (auto ok = detail::publish_and_verify_epoch(
+                storage,
+                key,
+                runtime_data.database_path.parent_path(),
+                paths,
+                record,
+                detail::genesis_epoch(record),
+                *epoch,
+                "genesis",
+                ErrorCode::RecoveryIndeterminate,
+                ErrorCode::RecoveryConflict);
+            !ok) {
+            return std::unexpected(ok.error());
         }
         recovered_epoch_reference = history_storage::epoch::Reference{
             .sequence = 0, .epoch_id = record.epoch_id};
@@ -880,7 +774,7 @@ roll_forward(const journal::Paths& paths,
     auto current = state_storage::load_state(runtime_data.database_path);
     if (!current || !*current || (*current)->commit_id != commit->id ||
         (*current)->height != commit->commit.height ||
-        !same_tree((*current)->tree, commit->commit.tree) ||
+        (*current)->tree != commit->commit.tree ||
         !same_pending_paths((*current)->pending_materializations,
                             record.pending_paths)) {
         return std::unexpected(detail::make_error(
@@ -901,6 +795,15 @@ roll_forward(const journal::Paths& paths,
         }
     }
     return cleanup_completed(paths, workspace, key);
+}
+
+Error protocol_error(
+    const history_storage::maintenance_protocol::Error& error) {
+    return detail::make_error(
+        error.code == history_storage::maintenance_protocol::ErrorCode::Blocked
+            ? ErrorCode::ConcurrentModification
+            : ErrorCode::ObservationFailure,
+        error.detail);
 }
 
 } // namespace
@@ -929,7 +832,8 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
     auto profile = detail::profile_directory(runtime_data);
     if (!profile)
         return std::unexpected(profile.error());
-    auto workspace = open_workspace(*profile, (*record)->operation_id, key);
+    auto workspace = detail::open_transaction_workspace(
+        *profile, (*record)->operation_id, key);
     if (!workspace)
         return std::unexpected(workspace.error());
     if ((*record)->phase == transaction::Phase::CleanupCompleted) {
@@ -947,13 +851,7 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
             history_storage::maintenance_protocol::register_writer(
                 storage, layout, runtime_data.database_path.parent_path());
         if (!registered) {
-            return std::unexpected(detail::make_error(
-                registered.error().code ==
-                        history_storage::maintenance_protocol::ErrorCode::
-                            Blocked
-                    ? ErrorCode::ConcurrentModification
-                    : ErrorCode::ObservationFailure,
-                registered.error().detail));
+            return std::unexpected(protocol_error(registered.error()));
         }
         writer = std::move(*registered);
     }
@@ -964,13 +862,7 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
                 auto admission = history_storage::maintenance_protocol::
                     verify_writer_admission(writer, layout);
                 if (!admission) {
-                    return std::unexpected(detail::make_error(
-                        admission.error().code ==
-                                history_storage::maintenance_protocol::
-                                    ErrorCode::Blocked
-                            ? ErrorCode::ConcurrentModification
-                            : ErrorCode::ObservationFailure,
-                        admission.error().detail));
+                    return std::unexpected(protocol_error(admission.error()));
                 }
             }
             if (!(*record)->publication_required) {
@@ -982,7 +874,7 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
                                                                   storage,
                                                                   key);
                     if (!resumed) {
-                        if (has_applied_local_mutation(**record)) {
+                        if (detail::has_local_rollback_work(**record)) {
                             auto rolled = detail::rollback_local_mutations(
                                 **record, *workspace, runtime_data.local_dir);
                             if (!rolled) {

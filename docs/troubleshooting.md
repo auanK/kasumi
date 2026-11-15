@@ -267,56 +267,7 @@ strong fingerprints, but never save cache deltas. New or changed files,
 insufficient native identity, and cache misses require hashing. An authenticated
 ignore projection differing from local rules uses full hashing.
 
-Enable `KASUMI_PERF_TRACE=1` for a normal sync you intend to apply. These examples
-write diagnostics to `kasumi-perf.log`; normal output remains on the terminal.
-Use your own profile name instead of `work`.
-
-PowerShell (restore the previous setting afterwards):
-
-```powershell
-$previousTrace = $env:KASUMI_PERF_TRACE
-try {
-    $env:KASUMI_PERF_TRACE = '1'
-    kasumi sync work 2> kasumi-perf.log
-} finally {
-    $env:KASUMI_PERF_TRACE = $previousTrace
-}
-```
-
-CMD (unset the diagnostic variable afterwards):
-
-```bat
-set "KASUMI_PERF_TRACE=1"
-kasumi sync work 2> kasumi-perf.log
-set "KASUMI_PERF_TRACE="
-```
-
-POSIX shells (the setting applies only to this command):
-
-```sh
-KASUMI_PERF_TRACE=1 kasumi sync work 2> kasumi-perf.log
-```
-
-Trace records begin with `KASUMI_PERF` and contain `name`, `calls`, and `total_us`.
-`calls` is the metric's counter (including byte counts for byte metrics);
-`total_us` is accumulated wall-clock microseconds, not CPU time. Instrumented
-stages can overlap, so do not sum them as total run duration.
-
-- Compare `local hash cache hits`, `local hash cache misses`, and
-  `local hash cache unsupported` across completed syncs. Fingerprint changes,
-  unsupported native identity, or a cold cache require content hashing.
-- Compare `local filesystem scan wall`, `local content hashing wall`, and
-  `local hash bytes` to distinguish enumeration/metadata cost from scanner
-  content reads. Directed destructive checks and other verification can still
-  read content separately.
-- Check `initial observation`, remote history/transport metrics, and
-  `transaction execution` for provider latency, history loading, or transfer cost.
-- `KASUMI_PERF_TRACE_LIVE=1` adds live fsck audit-completion and checkpoint-write
-  counters when tracing is enabled; it is not a live counter for every operation.
-
-For a read-only diagnostic, trace `kasumi status work`, accounting for cache
-misses and any required full hashing. Trace output is diagnostic instrumentation, not a stable machine
-protocol. Check the command's [exit code](configuration-and-usage.md#exit-codes)
+For a slow operation, inspect `status --full`, `fsck`, or `remote health` diagnostics and check whether native file identity triggers full content hashing. Check the command's [exit code](configuration-and-usage.md#exit-codes)
 as well as the timing report. See [Local Observation](architecture/local-observation.md).
 
 ---
@@ -420,26 +371,9 @@ Partial failures preserve acknowledgements from completed batches, including suc
 4. **Use Fsck for Integrity**: `kasumi fsck <profile>` audits referenced content and verifies payload integrity; GC relies strictly on reachability and does not certify or download orphan payloads.
 5. **Investigate Before Retrying**: Treat `Uncertain` mutation state and barrier-cleanup errors as reasons to inspect the remote namespace and retry only after the state is understood. Do not substitute ad-hoc provider deletion for GC. See [Garbage Collection Architecture](architecture/garbage-collection.md).
 
-For a slow GC, enable `KASUMI_PERF_TRACE=1` and compare `gc.analysis_list_us`,
-`gc.content_classification_us`, plan build/validation, `gc.pre_apply_ownership_us`,
-`gc.remove_us` and `gc.barrier_cleanup_us` against the four phase timers.
-`gc.candidate_remove_attempts` can exceed acknowledgements on failure;
-`gc.confirmed_removed` retains only acknowledged operations. These timers nest:
-do not add DELETE time to Apply time or control subtimers to total time.
-Measure with [disposable benchmark fixtures](build-and-test.md#gc-performance),
-never an existing vault. Slow cloud DELETEs do not justify increasing the fixed concurrency limit or
+Slow cloud DELETEs do not justify increasing the fixed concurrency limit or
 running concurrent Sync. There are deliberately no periodic
 ownership checkpoints or distributed CAS.
-
-If a benchmark fails or times out, preserve its output directory, `result.json`,
-`owned-objects.json`, private test key and reported namespace. Missing metrics
-are unavailable, not zero. Stop all writers for that disposable vault and inspect
-the exact namespace and recorded ownership before manual recovery. Do not run
-`gc remove-barrier`, cleanup, purge or a new GC automatically after an uncertain
-result. A fresh run uses a new child; it never reuses the failed run's decision.
-An ambiguous fixture-write error is not a GC measurement or proof that no write
-occurred. A later listing does not turn a rejected operation into an acknowledgement;
-a new run uses a fresh isolated child and preserves the uncertain namespace.
 
 ### Related Documentation
 * [Garbage Collection Architecture](architecture/garbage-collection.md)
@@ -514,13 +448,10 @@ The table below clarifies the purpose and operational behavior of Kasumi's diagn
 | `kasumi remote contents <profile> --audit` | Audit all physical payloads | Yes (all present) | No | None | Point-in-time observation |
 | `kasumi remote summary <profile>` | Overview of vault state | No | No | None | Point-in-time observation |
 
-The exclusive lock prevents another normal application command using the same profile on this machine from running concurrently. Remote inspection does not take that lock; it can observe changing remote state. Fsck and GC run pending Sync transaction recovery first, which may change local files or complete remote publication. Manual writer removal takes the local lock but does not run recovery or acquire a remote barrier; the operator must verify that the associated process is inactive. Fsck's audit itself does not intentionally modify remote objects. GC modifies remote objects only after its barrier, probe, single authenticated observation, and global plan validation pass.
+The exclusive lock prevents another normal application command using the same profile on this machine from running concurrently. Remote inspection does not take that lock; it can observe changing remote state. Fsck and GC run pending Sync transaction recovery first, which may change local files or complete remote publication. Manual writer or barrier removal takes the local lock but does not run recovery or acquire a remote barrier; the operator must verify that the associated process is inactive. Fsck's audit itself does not intentionally modify remote objects. GC modifies remote objects only after its barrier, probe, single authenticated observation, and global plan validation pass.
 
 Fsck counts distinct payloads referenced by the effective current tree; physical
 content inspection can include retained historical versions. Neither count is
-the total number of protocol objects. `remote summary` missing/orphan counters
-can also reflect the initial observation before the private history cache adds
-older Commits; use `remote contents`, `remote health`, and `remote orphans` for
-their respective inventories. A cached head can display zero parents/time in
+the total number of protocol objects. A cached head can display zero parents/time in
 `remote heads` without being genesis; `remote commit <profile> <id>` inspects
 complete retained metadata. See [History Inspection](architecture/remote-history-inspection.md).

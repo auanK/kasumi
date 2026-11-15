@@ -71,18 +71,18 @@ The protected set includes:
 - valid Epoch objects and retained orphan Epoch objects;
 - all protocol/control objects by construction.
 
-Before the first DELETE the collector verifies:
+Before the first DELETE the collector enforces:
 
 ```text
 DELETE_SET ∩ PROTECTED_SET = ∅
 ```
 
-It also verifies that candidates are sorted and unique, that every candidate is
-a classified Content or valid reachable Commit variant, that no control object
-is a candidate, that every reachable Commit retains at least one valid variant
-outside the deletion set, and that every HEAD-selected variant is outside the
-deletion set. Removing all variants of a Commit with multiple individually
-redundant variants is rejected before mutation.
+During candidate selection, the collector constructs a deterministically ordered,
+deduplicated deletion list (valid redundant reachable Commit variants followed
+by orphan Content identifiers) while excluding every identifier in
+`PROTECTED_SET` (which retains all HEAD-selected variants and at least one
+valid variant per unmarked reachable Commit) and failing closed if any
+candidate is empty, is a control object, or intersects `PROTECTED_SET`.
 
 Unreachable Commit variants remain out of scope: the collector does not delete
 whole unreachable Commits. Unknown, invalid, or ambiguously classified objects
@@ -138,61 +138,6 @@ finish when release is ambiguous. Absence is checked after acknowledged barrier
 release. Cleanup exceptions leave release unconfirmed, and the destructor never
 opens a second release path. Ownership checks cannot eliminate the TOCTOU window
 between verification and DELETE without conditional deletion/CAS.
-
-## Tracing
-
-Performance tracing records phase timings, history counters, and candidate traffic:
-
-```text
-gc.analysis_get_calls
-gc.analysis_list_calls
-gc.analysis_presence_calls
-
-gc.apply_get_calls
-gc.apply_list_calls
-gc.apply_presence_calls
-
-gc.candidate_remove_attempts
-gc.candidate_remove_acknowledged
-gc.history_reconstructions
-```
-
-Apply counters for `GET`, `LIST`, and `PRESENCE` stay at zero. Analysis reads
-depend exclusively on distinct authenticated history objects (markers, commits, epochs);
-`gc.analysis_get_calls` reflects necessary history downloads, while `GET` calls for
-orphan Content payloads remain strictly zero (`GET(orphan content) == 0`).
-Barrier/probe operations are separate from candidate traffic.
-
-Additional measurements separate listing (`gc.analysis_list_us`), Content
-classification (`gc.content_classification_us`), plan construction
-(`gc.plan_build_us`), global validation (`gc.plan_validation_us`) and the single
-pre-Apply revalidation (`gc.pre_apply_ownership_us`). The latter is also part of
-the aggregate `gc.barrier_ownership_check_us`; phase and nested timers overlap
-and must not be summed as independent elapsed time.
-
-`gc.physical_object_count` is the authenticated observation's physical listing,
-including the active barrier. `gc.physical_content_count` counts classified
-Content, and `gc.protected_content_count` counts distinct reachable Content IDs.
-`gc.protected_object_count` is the explicit plan-protected set of required
-variants, Content and Epochs; HEAD and control objects are additionally excluded
-by construction. `gc.content_get_calls` measures actual reads in Content
-classification, including zero; Apply's read counters exclude pre-Apply control
-verification. No extra remote queries are issued to collect these metrics.
-
-After barrier acquisition, zero-valued candidate attempt/acknowledgement/error
-counters are emitted explicitly. `gc.candidate_remove_errors` counts rejected
-or throwing candidate attempts; `gc.barrier_cleanup_errors` separately counts
-failed cleanup. `gc.errors` counts a failed GC outcome (zero or one), preserving
-the distinction between its primary and secondary errors. Earlier admission
-failures can leave these metrics unavailable. A missing metric in a benchmark
-report is `null`, not zero. Counts never reinterpret a failed DELETE as success.
-
-Use the [GC benchmark harness](../build-and-test.md#gc-performance) for isolated
-fixtures and separate fixture/GC/FSCK/cleanup timings. Apply throughput includes
-batch DELETE latency, loop overhead and the fixed pre-Apply check. Small
-encrypted payloads do not model large payload transfer workloads. Cloud latency,
-throttling and provider retries must be measured rather than extrapolated from
-local storage; Kasumi's lack of retries does not prove the provider made none.
 
 ## Operational contract
 

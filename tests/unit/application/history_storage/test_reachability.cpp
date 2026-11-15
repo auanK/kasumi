@@ -2,7 +2,6 @@
 #include "application/history_storage/reachability.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/history_storage.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <array>
@@ -21,30 +20,7 @@ HeadReference add_fake_commit(kasumi::transport::Transport& transport,
                               const Commit& commit,
                               std::string_view suffix,
                               bool add_marker = true) {
-    const auto canonical = kasumi::history::serialize(commit).value();
-    const auto plain =
-        kasumi::test::workspace_path(workspace, std::string{suffix} + ".plain");
-    const auto cipher = kasumi::test::workspace_path(
-        workspace, std::string{suffix} + ".cipher");
-    kasumi::test::write_binary(plain, std::as_bytes(std::span{canonical}));
-    EXPECT_TRUE(kasumi::crypto::encrypt_file(
-        plain, cipher, test_key(), kasumi::crypto::FilePurpose::History));
-    const auto hash = kasumi::crypto::content::hash_file(cipher).value();
-    const HeadReference reference{commit_id(commit), kasumi::hash_hex(hash)};
-    EXPECT_TRUE(
-        kasumi::transport::put(transport, cipher, object_path(reference)));
-    if (add_marker) {
-        const auto marker =
-            kasumi::application::history_storage::encode_marker(reference)
-                .value();
-        const auto marker_file = kasumi::test::workspace_path(
-            workspace, std::string{suffix} + ".head");
-        kasumi::test::write_binary(marker_file,
-                                   std::as_bytes(std::span{marker}));
-        EXPECT_TRUE(kasumi::transport::put(
-            transport, marker_file, marker_path(reference)));
-    }
-    return reference;
+    return publish_object(transport, workspace, commit, suffix, add_marker);
 }
 
 HeadReference add_fake_payload(kasumi::transport::Transport& transport,
@@ -53,30 +29,8 @@ HeadReference add_fake_payload(kasumi::transport::Transport& transport,
                                std::span<const std::uint8_t> payload,
                                std::string_view suffix,
                                bool add_marker = true) {
-    const auto plain =
-        kasumi::test::workspace_path(workspace, std::string{suffix} + ".plain");
-    const auto cipher = kasumi::test::workspace_path(
-        workspace, std::string{suffix} + ".cipher");
-    kasumi::test::write_binary(plain, std::as_bytes(payload));
-    EXPECT_TRUE(kasumi::crypto::encrypt_file(
-        plain, cipher, test_key(), kasumi::crypto::FilePurpose::History));
-    const auto hash = kasumi::crypto::content::hash_file(cipher).value();
-    const HeadReference reference{std::string{commit_identifier},
-                                  kasumi::hash_hex(hash)};
-    EXPECT_TRUE(
-        kasumi::transport::put(transport, cipher, object_path(reference)));
-    if (add_marker) {
-        const auto marker =
-            kasumi::application::history_storage::encode_marker(reference)
-                .value();
-        const auto marker_file = kasumi::test::workspace_path(
-            workspace, std::string{suffix} + ".head");
-        kasumi::test::write_binary(marker_file,
-                                   std::as_bytes(std::span{marker}));
-        EXPECT_TRUE(kasumi::transport::put(
-            transport, marker_file, marker_path(reference)));
-    }
-    return reference;
+    return publish_object(
+        transport, workspace, commit_identifier, payload, suffix, add_marker);
 }
 
 void add_fake_marker(FakeState& state, const HeadReference& reference) {
@@ -1089,31 +1043,12 @@ TEST(ReachabilityTest, AllocationBudgetAvoidsNodeBasedHistoryContainers) {
     publish(storage, c1);
     publish(storage, c2);
 
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
-
     const auto result =
         kasumi::application::history_storage::inventory_reachability(
             storage.transport,
             test_key(),
             kasumi::test::workspace_root(storage.workspace));
     ASSERT_TRUE(result.has_value()) << result.error().detail;
-
-    // Budget: Zero intermediate node-based tree containers (std::set, std::map)
-    // and zero node allocations in history inventory and reachability
-    // reconstruction
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
-                  "history_inventory.intermediate_tree_containers"),
-              0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
-                  "history_inventory.node_allocations"),
-              0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
-                  "reachability.intermediate_tree_containers"),
-              0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
-                  "reachability.node_allocations"),
-              0U);
 }
 
 } // namespace

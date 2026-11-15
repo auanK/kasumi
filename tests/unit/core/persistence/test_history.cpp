@@ -130,6 +130,11 @@ const kasumi::NodeRow* row_at(const kasumi::Snapshot& tree,
     return kasumi::find_row(tree, path);
 }
 
+LoadedCommit make_loaded_empty_bootstrap() {
+    const auto commit = make_empty_bootstrap().value();
+    return load_commit(commit);
+}
+
 void expect_same_snapshot(const kasumi::Snapshot& left,
                           const kasumi::Snapshot& right) {
     ASSERT_EQ(left.rows.size(), right.rows.size());
@@ -667,9 +672,7 @@ TEST(HistoryMultiBaseTest, CombinesIndependentChangesAndKeepsRealParents) {
                                           first,
                                           second);
     const auto result = resolve(history.graph, history.heads);
-    if (!result) {
-        FAIL() << result.error().detail;
-    }
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
     expect_file_contents(result->tree, {"A", "B", "first", "second"});
     EXPECT_FALSE(result->has_conflicts);
     auto parents =
@@ -689,9 +692,7 @@ TEST(HistoryMultiBaseTest, IncomparableBasesAtDifferentHeights) {
                                           tree,
                                           true);
     const auto result = resolve(history.graph, history.heads);
-    if (!result) {
-        FAIL() << result.error().detail;
-    }
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
     expect_file_contents(result->tree, {"A", "B"});
     EXPECT_EQ(result->height, 3U);
     EXPECT_FALSE(result->has_conflicts);
@@ -709,9 +710,7 @@ TEST(HistoryMultiBaseTest, PreservesConcurrentFileVariants) {
                                     make_file("b", "B"),
                                     make_file("same", "right")}));
     const auto result = resolve(history.graph, history.heads);
-    if (!result) {
-        FAIL() << result.error().detail;
-    }
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
     expect_file_contents(result->tree, {"A", "B", "left", "right"});
     EXPECT_TRUE(result->has_conflicts);
     const auto& loser = *std::ranges::max_element(history.heads);
@@ -730,9 +729,7 @@ TEST(HistoryMultiBaseTest, DeleteModifyKeepsConfirmedModification) {
                    make_file("b", "B"),
                    make_file("same", "new")}));
     const auto result = resolve(history.graph, history.heads);
-    if (!result) {
-        FAIL() << result.error().detail;
-    }
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
     expect_file_contents(result->tree, {"A", "B", "new"});
     EXPECT_TRUE(result->has_conflicts);
     ASSERT_NE(row_at(result->tree, "same"), nullptr);
@@ -759,9 +756,7 @@ TEST(HistoryMultiBaseTest, DoesNotResurrectDeletedFileOrUnchangedDescendant) {
                                     make_directory("dir"),
                                     make_file("dir/new", "new")}));
     const auto result = resolve(history.graph, history.heads);
-    if (!result) {
-        FAIL() << result.error().detail;
-    }
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
     expect_file_contents(result->tree, {"B", "new"});
     EXPECT_EQ(row_at(result->tree, "gone"), nullptr);
     EXPECT_EQ(row_at(result->tree, "dir/old"), nullptr);
@@ -785,9 +780,7 @@ TEST(HistoryMultiBaseTest,
     const auto m1 = append_history(graph, {a, b}, previous->tree);
     const auto m2 = append_history(graph, {a, b}, previous->tree);
     const auto result = resolve(graph, std::array{m1, m2});
-    if (!result) {
-        FAIL() << result.error().detail;
-    }
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
     expect_file_contents(result->tree, {"A", "B"});
     expect_same_snapshot(result->tree, previous->tree);
     EXPECT_FALSE(result->has_conflicts);
@@ -818,9 +811,7 @@ TEST(HistoryMultiBaseTest, StructuralFileDirectoryConflictPreservesBoth) {
                                     make_directory("node"),
                                     make_file("node/child", "child")}));
     const auto result = resolve(history.graph, history.heads);
-    if (!result) {
-        FAIL() << result.error().detail;
-    }
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
     expect_file_contents(result->tree, {"A", "B", "file", "child"});
     EXPECT_TRUE(result->has_conflicts);
     ASSERT_NE(row_at(result->tree, "node"), nullptr);
@@ -845,9 +836,7 @@ TEST(HistoryMultiBaseTest, NestedCrissCrossAndPermutationsAreCanonical) {
         make_tree(
             {make_file("a", "A"), make_file("b", "B"), make_file("y", "Y")}));
     const auto baseline = resolve(history.graph, std::array{first, second});
-    if (!baseline) {
-        FAIL() << baseline.error().detail;
-    }
+    ASSERT_TRUE(baseline.has_value()) << baseline.error().detail;
     expect_file_contents(baseline->tree, {"A", "B", "X", "Y"});
     const auto canonical =
         serialize(make_commit(4, baseline->heads, baseline->tree).value())
@@ -1031,9 +1020,7 @@ TEST(HistoryMultiBaseTest,
     const auto history =
         crossing_history(make_tree({}), file, directory, file, directory);
     const auto result = resolve(history.graph, history.heads);
-    if (!result) {
-        FAIL() << result.error().detail;
-    }
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
     expect_file_contents(result->tree, {"file", "child"});
     EXPECT_TRUE(result->has_conflicts);
 }
@@ -1944,9 +1931,7 @@ TEST(HistoryTest, RejectsUnicodeCaseEquivalentSnapshotInCommit) {
 }
 
 TEST(HistoryTest, StructuralMissingDirectParentRejected) {
-    const auto c0 = make_empty_bootstrap().value();
-    const auto c0_id = compute_id(c0).value();
-    const LoadedCommit lc0{c0_id, c0};
+    const auto lc0 = make_loaded_empty_bootstrap();
 
     const std::string missing_id =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";

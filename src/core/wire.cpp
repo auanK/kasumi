@@ -1,5 +1,8 @@
 #include "core/wire.hpp"
 
+#include <limits>
+#include <stdexcept>
+
 namespace wire {
 
 void write_bytes(Writer& writer, std::span<const std::byte> bytes) {
@@ -7,13 +10,16 @@ void write_bytes(Writer& writer, std::span<const std::byte> bytes) {
 }
 
 void write_string(Writer& writer, std::string_view str) {
-    write(writer, static_cast<uint32_t>(str.size()));
+    if (str.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::length_error("wire string exceeds uint32_t length");
+    }
+    write(writer, static_cast<std::uint32_t>(str.size()));
     auto bytes = std::as_bytes(std::span{str});
     write_bytes(writer, bytes);
 }
 
 std::expected<std::span<const std::byte>, Error> read_bytes(Reader& reader,
-                                                            size_t n) {
+                                                            std::size_t n) {
     if (reader.data.size() < n) {
         return std::unexpected(Error::BufferUnderflow);
     }
@@ -23,8 +29,8 @@ std::expected<std::span<const std::byte>, Error> read_bytes(Reader& reader,
 }
 
 std::expected<std::string, Error> read_string(Reader& reader,
-                                              size_t max_length) {
-    auto len = read<uint32_t>(reader);
+                                              std::size_t max_length) {
+    auto len = read<std::uint32_t>(reader);
     if (!len) {
         return std::unexpected(len.error());
     }
@@ -44,6 +50,40 @@ std::expected<std::string, Error> read_string(Reader& reader,
         std::memcpy(result.data(), bytes->data(), *len);
     }
     return result;
+}
+
+void write_strings(Writer& writer, std::span<const std::string> values) {
+    write(writer, static_cast<std::uint32_t>(values.size()));
+    for (const auto& value : values) {
+        write_string(writer, value);
+    }
+}
+
+bool read_strings(Reader& reader,
+                  std::vector<std::string>& out,
+                  std::size_t max_count,
+                  bool* overflow) {
+    auto count = read<std::uint32_t>(reader);
+    if (!count) {
+        return false;
+    }
+    if (*count > max_count ||
+        *count > reader.data.size() / sizeof(std::uint32_t)) {
+        if (overflow != nullptr) {
+            *overflow = true;
+        }
+        return false;
+    }
+    out.clear();
+    out.reserve(*count);
+    for (std::uint32_t index = 0; index < *count; ++index) {
+        auto item = read_string(reader);
+        if (!item) {
+            return false;
+        }
+        out.push_back(std::move(*item));
+    }
+    return true;
 }
 
 } // namespace wire

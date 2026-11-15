@@ -80,9 +80,6 @@ struct Session {
     std::uint64_t confirmed_count() const noexcept {
         return tip_count;
     }
-    std::uint64_t estimated_memory_bytes() const noexcept {
-        return memory_bytes;
-    }
     bool is_valid() const noexcept {
         return state == SessionState::Confirmed && confirmed_record.has_value();
     }
@@ -96,7 +93,6 @@ struct Session {
         tip_snapshot.fill(std::byte{});
         snapshot_fingerprint.reset();
         log_fingerprint.reset();
-        memory_bytes = 0;
     }
 
 private:
@@ -109,8 +105,6 @@ private:
     SessionState state = SessionState::Uninitialized;
     Paths paths{};
     std::string operation_id{};
-    std::uint64_t local_generation = 0;
-    std::uint64_t storage_generation = 0;
     std::array<std::byte, 32> key_identity{};
     std::optional<transaction::Record> confirmed_record{};
     std::array<std::byte, 32> tip_chain{};
@@ -120,7 +114,6 @@ private:
     std::optional<platform::FileFingerprint> snapshot_fingerprint{};
     std::optional<platform::FileFingerprint> log_fingerprint{};
     std::uint64_t snapshot_bytes = 0;
-    std::uint64_t memory_bytes = 0;
 
     friend std::expected<void, std::string>
     save(const Paths&,
@@ -136,6 +129,7 @@ private:
     clear(const Paths&,
           std::span<const std::uint8_t, crypto::KEY_SIZE>,
           Session*);
+    friend struct SessionAccess;
 };
 
 // Confirms an authenticated snapshot or incremental delta.
@@ -162,7 +156,6 @@ clear(const Paths& paths,
       std::span<const std::uint8_t, crypto::KEY_SIZE> key,
       Session* session = nullptr);
 
-
 enum class InspectionResult : std::uint8_t {
     Absent,
     Active,
@@ -172,9 +165,8 @@ enum class InspectionResult : std::uint8_t {
 
 // Passively inspects the journal artifacts without modifying files,
 // performing recovery, clearing, or creating sidecars.
-InspectionResult
-inspect(const Paths& paths,
-        std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+InspectionResult inspect(const Paths& paths,
+                         std::span<const std::uint8_t, crypto::KEY_SIZE> key);
 
 } // namespace kasumi::application::sync::journal
 

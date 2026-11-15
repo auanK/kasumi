@@ -1,14 +1,14 @@
 #include "application/observation/history.hpp"
 
 #include "application/history_storage/history_storage.hpp"
+#include "application/history_storage/remote_layout.hpp"
 #include "core/hasher.hpp"
 #include "core/history.hpp"
 #include "crypto/key_derivation.hpp"
 #include "history_detail.hpp"
-#include "platform/perf_trace.hpp"
+#include "state_storage/database.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <exception>
 #include <iterator>
 #include <limits>
@@ -19,19 +19,39 @@
 #include <utility>
 
 namespace kasumi::application::observation::history {
+ObservationHints
+make_observation_hints(state_storage::StoredState state,
+                       const history_storage::RemoteLayout& layout,
+                       bool use_frontier) {
+    ObservationHints hints;
+    if (use_frontier) {
+        hints.frontier.emplace();
+        hints.frontier->anchors.push_back(
+            history_storage::KnownHistoryAnchor{.commit_id = state.commit_id,
+                                                .height = state.height,
+                                                .tree = std::move(state.tree)});
+        if (!state.epoch_id.empty()) {
+            hints.frontier->accepted_epoch = history_storage::epoch::Reference{
+                .sequence = state.epoch_sequence,
+                .epoch_id = std::move(state.epoch_id)};
+        }
+    }
+    const history_storage::HeadReference reference{
+        .commit_id = std::move(state.commit_id),
+        .ciphertext_id = std::move(state.ciphertext_id)};
+    if (!reference.ciphertext_id.empty() && history_storage::valid(reference)) {
+        hints.trusted_marker_identifiers.push_back(
+            history_storage::marker_object(layout, reference));
+    }
+    return hints;
+}
+
 namespace {
 
 constexpr std::size_t maximum_audited_content_object_count = 1'000'000;
 
 bool valid_content_identifier(std::string_view identifier) noexcept {
-    if (identifier.size() != 64 ||
-        !std::ranges::all_of(identifier, [](unsigned char value) {
-            return std::isdigit(value) || (value >= 'a' && value <= 'f');
-        })) {
-        return false;
-    }
-    const auto decoded = hash_from_hex(identifier);
-    return decoded && hash_hex(*decoded) == identifier;
+    return kasumi::history::valid_commit_id(identifier);
 }
 
 Error storage_error(const kasumi::application::history_storage::Error& source) {
@@ -87,34 +107,26 @@ validate_workspace_root(const std::filesystem::path& root) {
         return std::unexpected(Error{.code = ErrorCode::InvalidInput,
                                      .detail = "workspace root is empty"});
     }
-
+    const auto fail = [](std::string detail) {
+        return std::unexpected(Error{.code = ErrorCode::WorkspaceFailure,
+                                     .detail = std::move(detail)});
+    };
     std::error_code filesystem_error;
     const auto status = std::filesystem::symlink_status(root, filesystem_error);
     if (filesystem_error) {
-        if (filesystem_error == std::errc::no_such_file_or_directory) {
-            return std::unexpected(
-                Error{.code = ErrorCode::WorkspaceFailure,
-                      .detail = "workspace root does not exist"});
-        }
-        return std::unexpected(
-            Error{.code = ErrorCode::WorkspaceFailure,
-                  .detail = "could not inspect workspace root: " +
-                            filesystem_error.message()});
+        return fail(filesystem_error == std::errc::no_such_file_or_directory
+                        ? "workspace root does not exist"
+                        : "could not inspect workspace root: " +
+                              filesystem_error.message());
     }
     if (std::filesystem::is_symlink(status)) {
-        return std::unexpected(
-            Error{.code = ErrorCode::WorkspaceFailure,
-                  .detail = "workspace root is a symbolic link"});
+        return fail("workspace root is a symbolic link");
     }
     if (!std::filesystem::exists(status)) {
-        return std::unexpected(
-            Error{.code = ErrorCode::WorkspaceFailure,
-                  .detail = "workspace root does not exist"});
+        return fail("workspace root does not exist");
     }
     if (!std::filesystem::is_directory(status)) {
-        return std::unexpected(
-            Error{.code = ErrorCode::WorkspaceFailure,
-                  .detail = "workspace root is not a directory"});
+        return fail("workspace root is not a directory");
     }
     return {};
 }
@@ -145,7 +157,7 @@ ancestral_heads(const std::vector<std::string>& marked,
     return result;
 }
 
-std::expected<void, Error>
+std::expected<std::vector<std::string>, Error>
 validate_resolution(const kasumi::history::Resolution& resolution,
                     const std::vector<std::string>& marked) {
     if (!kasumi::valid_snapshot(resolution.tree, false) ||
@@ -157,11 +169,7 @@ validate_resolution(const kasumi::history::Resolution& resolution,
                               : ErrorCode::ResolutionFailure,
                   .detail = "resolution produces an invalid tree or height"});
     }
-    auto ancestors = ancestral_heads(marked, resolution.heads);
-    if (!ancestors) {
-        return std::unexpected(ancestors.error());
-    }
-    return {};
+    return ancestral_heads(marked, resolution.heads);
 }
 
 } // namespace
@@ -202,11 +210,7 @@ ObserveResult observe(transport::Transport& storage,
 
         std::optional<std::vector<std::string>> remote_inventory;
         if (audit_content_objects_requested || complete_history) {
-            platform::perf_trace::count("history.full_list_calls", 1);
-            const auto content_trace = platform::perf_trace::begin();
             auto listing = transport::list(storage);
-            platform::perf_trace::finish("content listing/audit",
-                                         content_trace);
             if (!listing) {
                 if (listing.error().code ==
                     transport::ErrorCode::StorageNotFound) {
@@ -223,7 +227,6 @@ ObserveResult observe(transport::Transport& storage,
         }
 
         StorageView result;
-        const auto history_trace = platform::perf_trace::begin();
         auto loaded = remote_inventory && frontier
                           ? history_storage::load_history(storage,
                                                           key,
@@ -233,32 +236,22 @@ ObserveResult observe(transport::Transport& storage,
                       : remote_inventory
                           ? history_storage::load_history(
                                 storage, key, workspace_root, *remote_inventory)
-                      : frontier ? history_storage::load_history_scoped(
-                                       storage,
-                                       key,
-                                       workspace_root,
-                                       frontier,
-                                       trusted_marker_identifiers)
-                                 : history_storage::load_history_scoped(
-                                       storage,
-                                       key,
-                                       workspace_root,
-                                       nullptr,
-                                       trusted_marker_identifiers);
-        platform::perf_trace::finish("history loading", history_trace);
+                          : history_storage::load_history_scoped(
+                                storage,
+                                key,
+                                workspace_root,
+                                frontier,
+                                trusted_marker_identifiers);
         if (!loaded) {
             return std::unexpected(storage_error(loaded.error()));
         }
         std::unordered_set<std::string> remote_content_identifiers;
         std::unordered_set<std::string> referenced_content_identifiers;
         if (audit_content_objects_requested) {
-            const auto content_inv_trace = platform::perf_trace::begin();
             if (!collect_content_identifiers_into(
                     *remote_inventory,
                     maximum_audited_content_object_count,
                     remote_content_identifiers)) {
-                platform::perf_trace::finish("content inventory derivation",
-                                             content_inv_trace);
                 return std::unexpected(Error{
                     .code = ErrorCode::LimitExceeded,
                     .detail = "too many content identifiers",
@@ -268,8 +261,6 @@ ObserveResult observe(transport::Transport& storage,
                 remote_content_identifiers.begin(),
                 remote_content_identifiers.end());
             std::ranges::sort(result.content_object_identifiers);
-            platform::perf_trace::finish("content inventory derivation",
-                                         content_inv_trace);
         }
         if (remote_inventory) {
             result.physical_identifiers = std::move(*remote_inventory);
@@ -279,7 +270,6 @@ ObserveResult observe(transport::Transport& storage,
             return result;
         }
         if (audit_content_objects_requested) {
-            const auto content_inv_trace = platform::perf_trace::begin();
             for (const auto& loaded_commit : loaded->commits) {
                 for (const auto& row : loaded_commit.commit.tree.rows) {
                     if (row.is_directory) {
@@ -290,8 +280,6 @@ ObserveResult observe(transport::Transport& storage,
                     if (referenced_content_identifiers.size() >=
                             maximum_audited_content_object_count &&
                         !referenced_content_identifiers.contains(identifier)) {
-                        platform::perf_trace::finish(
-                            "content inventory derivation", content_inv_trace);
                         return std::unexpected(Error{
                             .code = ErrorCode::LimitExceeded,
                             .detail = "too many referenced content identifiers",
@@ -315,15 +303,7 @@ ObserveResult observe(transport::Transport& storage,
                         return !referenced_content_identifiers.contains(
                             identifier);
                     }));
-            platform::perf_trace::finish("content inventory derivation",
-                                         content_inv_trace);
-            platform::perf_trace::count(
-                "content.physical_objects",
-                result.content_object_identifiers.size());
-            platform::perf_trace::count("content.referenced_ids",
-                                        referenced_content_identifiers.size());
         }
-        const auto resolution_trace = platform::perf_trace::begin();
         auto resolved =
             loaded->trusted_anchor_ids.empty()
                 ? kasumi::history::resolve_authenticated(loaded->commits,
@@ -332,23 +312,13 @@ ObserveResult observe(transport::Transport& storage,
                       loaded->commits,
                       loaded->marked_heads,
                       loaded->trusted_anchor_ids);
-        platform::perf_trace::finish("history resolution", resolution_trace);
         if (!resolved) {
             return std::unexpected(resolution_error(resolved.error()));
         }
-        const auto validation_trace = platform::perf_trace::begin();
-        auto valid = validate_resolution(*resolved, loaded->marked_heads);
-        platform::perf_trace::finish("history validation", validation_trace);
-        if (!valid) {
-            return std::unexpected(valid.error());
+        auto ancestors = validate_resolution(*resolved, loaded->marked_heads);
+        if (!ancestors) {
+            return std::unexpected(ancestors.error());
         }
-
-        platform::perf_trace::count("history.reachable_commits",
-                                    loaded->commits.size());
-        platform::perf_trace::count("history.logical_heads",
-                                    resolved->heads.size());
-        platform::perf_trace::count("history.anchors_used",
-                                    loaded->trusted_anchor_ids.size());
 
         result.reachable_commits = std::move(loaded->commits);
         result.authenticated_commit_variants =
@@ -363,8 +333,7 @@ ObserveResult observe(transport::Transport& storage,
         result.marked_head_identifiers =
             std::move(loaded->marked_head_identifiers);
         result.logical_heads = std::move(resolved->heads);
-        result.ancestral_marked_heads =
-            *ancestral_heads(result.marked_heads, result.logical_heads);
+        result.ancestral_marked_heads = std::move(*ancestors);
         result.history_present = true;
         result.has_conflicts = resolved->has_conflicts;
         result.epoch = std::move(loaded->epoch);

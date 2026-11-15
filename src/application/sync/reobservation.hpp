@@ -37,7 +37,8 @@ refresh_content_availability(
     std::span<const Hash> confirmed_missing = {},
     bool allow_unreferenced_content_reuse = false,
     bool trust_existing_content = false,
-    const std::unordered_set<std::string>* initial_content_identifiers = nullptr);
+    const std::unordered_set<std::string>* initial_content_identifiers =
+        nullptr);
 
 // Re-observes until the plan stabilizes or fails. When
 // content_availability_is_current is true, the initial availability probe and
@@ -53,7 +54,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
           bool content_availability_is_current = false,
           bool allow_unreferenced_content_reuse = false,
           bool trust_existing_content = false,
-          const std::unordered_set<std::string>* initial_content_identifiers = nullptr);
+          const std::unordered_set<std::string>* initial_content_identifiers =
+              nullptr);
 
 } // namespace kasumi::application::sync::coordinator::reobservation
 

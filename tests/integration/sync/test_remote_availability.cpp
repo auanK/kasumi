@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <functional>
 #include <gtest/gtest.h>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -601,6 +602,53 @@ private:
     bool valid_ = true;
 };
 
+std::optional<kasumi::state_storage::StoredState>
+require_loaded_state(SyncHarness& harness) {
+    const auto loaded = kasumi::state_storage::load_state(harness.database());
+    if (!loaded.has_value() || !*loaded) {
+        ADD_FAILURE() << "failed to load state from harness database";
+        return std::nullopt;
+    }
+    return *loaded;
+}
+
+std::optional<kasumi::application::SyncCompleted>
+sync_completed(SyncHarness& harness) {
+    const auto response = harness.sync();
+    if (!response.has_value()) {
+        ADD_FAILURE() << response.error().detail;
+        return std::nullopt;
+    }
+    const auto* summary =
+        std::get_if<kasumi::application::SyncCompleted>(&response->data);
+    if (summary == nullptr) {
+        ADD_FAILURE() << "expected SyncCompleted response";
+        return std::nullopt;
+    }
+    return *summary;
+}
+
+void expect_refresh_observation_failure(
+    kasumi::reconciliation::Input& input,
+    const kasumi::reconciliation::Result& result,
+    kasumi::transport::Transport& storage,
+    std::span<const std::uint8_t, 32> key) {
+    const auto refreshed =
+        kasumi::application::sync::coordinator::reobservation::
+            refresh_content_availability(input, result, storage, key);
+    ASSERT_FALSE(refreshed.has_value());
+    EXPECT_EQ(
+        refreshed.error().code,
+        kasumi::application::sync::coordinator::ErrorCode::ObservationFailure);
+}
+
+void expect_zero_transfers(const SyncHarness& harness) {
+    EXPECT_EQ(harness.content_puts(), 0U);
+    EXPECT_EQ(harness.content_gets(), 0U);
+    EXPECT_EQ(harness.presence_checks(), 0U);
+    EXPECT_EQ(harness.full_list_calls(), 0U);
+}
+
 TEST(SyncRemoteAvailabilityTest, NoOpSyncSkipsContentAvailabilityChecks) {
     SyncHarness harness("sync-no-op-content-availability");
     ASSERT_TRUE(harness.valid());
@@ -609,20 +657,14 @@ TEST(SyncRemoteAvailabilityTest, NoOpSyncSkipsContentAvailabilityChecks) {
     ASSERT_TRUE(harness.sync().has_value());
     harness.reset_transfer_counts();
 
-    const auto no_op = harness.sync();
-    ASSERT_TRUE(no_op.has_value()) << no_op.error().detail;
-    const auto* summary =
-        std::get_if<kasumi::application::SyncCompleted>(&no_op->data);
-    ASSERT_NE(summary, nullptr);
+    const auto summary = sync_completed(harness);
+    ASSERT_TRUE(summary.has_value());
     EXPECT_EQ(summary->total, 0U);
     EXPECT_EQ(summary->uploaded, 0U);
     EXPECT_EQ(summary->downloaded, 0U);
     EXPECT_FALSE(summary->published);
     EXPECT_FALSE(summary->partial);
-    EXPECT_EQ(harness.content_puts(), 0U);
-    EXPECT_EQ(harness.content_gets(), 0U);
-    EXPECT_EQ(harness.presence_checks(), 0U);
-    EXPECT_EQ(harness.full_list_calls(), 0U);
+    expect_zero_transfers(harness);
 }
 
 TEST(SyncRemoteAvailabilityTest,
@@ -880,8 +922,8 @@ TEST(SyncRemoteAvailabilityTest, NoOpFastPathRecoversPendingJournalFirst) {
     ASSERT_TRUE(harness.valid());
     harness.write("base.txt", "base contents");
     ASSERT_TRUE(harness.sync().has_value());
-    const auto state = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(state.has_value() && *state);
+    const auto state = require_loaded_state(harness);
+    ASSERT_TRUE(state.has_value());
 
     const auto profile = harness.database().parent_path();
     const auto transaction_root = profile / ".transactions";
@@ -889,9 +931,9 @@ TEST(SyncRemoteAvailabilityTest, NoOpFastPathRecoversPendingJournalFirst) {
     std::filesystem::create_directories(transaction_root, directory_error);
     ASSERT_FALSE(directory_error);
     ASSERT_TRUE(std::filesystem::is_directory(transaction_root));
-    const auto plan = kasumi::make_sync_plan({}, (*state)->height);
+    const auto plan = kasumi::make_sync_plan({}, state->height);
     auto record = kasumi::application::sync::journal::create_record(
-        (*state)->height, (*state)->height, plan, false, (*state)->commit_id);
+        state->height, state->height, plan, false, state->commit_id);
     ASSERT_TRUE(record.has_value()) << record.error();
     const auto paths = kasumi::application::sync::journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
@@ -990,11 +1032,8 @@ TEST(SyncRemoteAvailabilityTest,
     harness.write("beta.txt", "beta contents");
     harness.write("gamma.txt", "gamma contents");
 
-    const auto first = harness.sync();
-    ASSERT_TRUE(first.has_value()) << first.error().detail;
-    const auto* first_summary =
-        std::get_if<kasumi::application::SyncCompleted>(&first->data);
-    ASSERT_NE(first_summary, nullptr);
+    const auto first_summary = sync_completed(harness);
+    ASSERT_TRUE(first_summary.has_value());
     EXPECT_TRUE(first_summary->published);
     EXPECT_GE(first_summary->uploaded, 3U);
     EXPECT_TRUE(std::filesystem::is_regular_file(
@@ -1002,11 +1041,10 @@ TEST(SyncRemoteAvailabilityTest,
     EXPECT_TRUE(std::filesystem::is_regular_file(
         harness.content_path(kasumi::hasher::hash_string("gamma contents"))));
 
-    const auto before_state =
-        kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(before_state.has_value() && *before_state);
-    ASSERT_FALSE((*before_state)->commit_id.empty());
-    ASSERT_EQ((*before_state)->pending_materializations.size(), 0U);
+    const auto before_state = require_loaded_state(harness);
+    ASSERT_TRUE(before_state.has_value());
+    ASSERT_FALSE(before_state->commit_id.empty());
+    ASSERT_EQ(before_state->pending_materializations.size(), 0U);
     harness.reset_transfer_counts();
 
     const auto beta_hash = kasumi::hasher::hash_string("beta contents");
@@ -1018,34 +1056,27 @@ TEST(SyncRemoteAvailabilityTest,
     ASSERT_FALSE(remove_error);
     ASSERT_FALSE(std::filesystem::exists(beta_path));
 
-    const auto no_op = harness.sync();
-    ASSERT_TRUE(no_op.has_value()) << no_op.error().detail;
-    const auto* no_op_summary =
-        std::get_if<kasumi::application::SyncCompleted>(&no_op->data);
-    ASSERT_NE(no_op_summary, nullptr);
+    const auto no_op_summary = sync_completed(harness);
+    ASSERT_TRUE(no_op_summary.has_value());
     EXPECT_EQ(no_op_summary->total, 0U);
     EXPECT_EQ(no_op_summary->uploaded, 0U);
     EXPECT_EQ(no_op_summary->downloaded, 0U);
     EXPECT_FALSE(no_op_summary->published);
     EXPECT_FALSE(no_op_summary->partial);
     EXPECT_EQ(no_op_summary->pending, 0U);
-    EXPECT_EQ(harness.content_puts(), 0U);
-    EXPECT_EQ(harness.content_gets(), 0U);
-    EXPECT_EQ(harness.presence_checks(), 0U);
-    EXPECT_EQ(harness.full_list_calls(), 0U);
+    expect_zero_transfers(harness);
 
     EXPECT_FALSE(std::filesystem::exists(beta_path));
     EXPECT_EQ(harness.read("alpha.txt"), "alpha contents");
     EXPECT_EQ(harness.read("beta.txt"), "beta contents");
     EXPECT_EQ(harness.read("gamma.txt"), "gamma contents");
 
-    const auto after_state =
-        kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(after_state.has_value() && *after_state);
-    EXPECT_EQ((*after_state)->commit_id, (*before_state)->commit_id);
-    EXPECT_EQ((*after_state)->ciphertext_id, (*before_state)->ciphertext_id);
-    EXPECT_EQ((*after_state)->tree, (*before_state)->tree);
-    EXPECT_EQ((*after_state)->pending_materializations.size(), 0U);
+    const auto after_state = require_loaded_state(harness);
+    ASSERT_TRUE(after_state.has_value());
+    EXPECT_EQ(after_state->commit_id, before_state->commit_id);
+    EXPECT_EQ(after_state->ciphertext_id, before_state->ciphertext_id);
+    EXPECT_EQ(after_state->tree, before_state->tree);
+    EXPECT_EQ(after_state->pending_materializations.size(), 0U);
 }
 
 TEST(SyncRemoteAvailabilityTest, CorruptLocalRepairSourceIsRejected) {
@@ -1061,9 +1092,8 @@ TEST(SyncRemoteAvailabilityTest, CorruptLocalRepairSourceIsRejected) {
     ASSERT_TRUE(metadata_before.has_value() && metadata_before->has_value());
     ASSERT_TRUE((**metadata_before).identity.has_value());
     const auto hash = kasumi::hasher::hash_string("alpha contents");
-    const auto accepted_before =
-        kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(accepted_before.has_value() && *accepted_before);
+    const auto accepted_before = require_loaded_state(harness);
+    ASSERT_TRUE(accepted_before.has_value());
     const auto cached =
         kasumi::state_storage::load_file_cache(harness.database());
     ASSERT_TRUE(cached.has_value());
@@ -1097,13 +1127,12 @@ TEST(SyncRemoteAvailabilityTest, CorruptLocalRepairSourceIsRejected) {
     EXPECT_EQ(harness.content_puts(), 0U);
     EXPECT_FALSE(std::filesystem::exists(path));
     EXPECT_EQ(harness.read("alpha.txt"), "omega contents");
-    const auto accepted_after =
-        kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(accepted_after.has_value() && *accepted_after);
-    EXPECT_EQ((*accepted_after)->commit_id, (*accepted_before)->commit_id);
-    EXPECT_EQ((*accepted_after)->tree, (*accepted_before)->tree);
-    EXPECT_EQ((*accepted_after)->pending_materializations,
-              (*accepted_before)->pending_materializations);
+    const auto accepted_after = require_loaded_state(harness);
+    ASSERT_TRUE(accepted_after.has_value());
+    EXPECT_EQ(accepted_after->commit_id, accepted_before->commit_id);
+    EXPECT_EQ(accepted_after->tree, accepted_before->tree);
+    EXPECT_EQ(accepted_after->pending_materializations,
+              accepted_before->pending_materializations);
 
     harness.write("alpha.txt", "alpha contents");
     harness.reset_transfer_counts();
@@ -1209,8 +1238,8 @@ TEST(SyncRemoteAvailabilityTest,
     harness.write("c.txt", "content c");
     ASSERT_TRUE(harness.sync().has_value());
 
-    const auto before = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(before.has_value() && *before);
+    const auto before = require_loaded_state(harness);
+    ASSERT_TRUE(before.has_value());
     harness.reset_transfer_counts();
 
     const auto hash_a = kasumi::hasher::hash_string("content a");
@@ -1221,11 +1250,8 @@ TEST(SyncRemoteAvailabilityTest,
     ASSERT_TRUE(std::filesystem::exists(harness.content_path(hash_b)));
     harness.write("b.txt", "updated content b");
 
-    const auto repaired = harness.sync();
-    ASSERT_TRUE(repaired.has_value()) << repaired.error().detail;
-    const auto* summary =
-        std::get_if<kasumi::application::SyncCompleted>(&repaired->data);
-    ASSERT_NE(summary, nullptr);
+    const auto summary = sync_completed(harness);
+    ASSERT_TRUE(summary.has_value());
     EXPECT_EQ(summary->total, 1U);
     EXPECT_EQ(summary->uploaded, 1U);
     EXPECT_TRUE(summary->published);
@@ -1240,14 +1266,14 @@ TEST(SyncRemoteAvailabilityTest,
     EXPECT_EQ(harness.read("b.txt"), "updated content b");
     EXPECT_EQ(harness.read("c.txt"), "content c");
 
-    const auto after = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(after.has_value() && *after);
-    EXPECT_NE((*after)->commit_id, (*before)->commit_id);
-    const auto* updated = kasumi::find_row((*after)->tree, "b.txt");
+    const auto after = require_loaded_state(harness);
+    ASSERT_TRUE(after.has_value());
+    EXPECT_NE(after->commit_id, before->commit_id);
+    const auto* updated = kasumi::find_row(after->tree, "b.txt");
     ASSERT_NE(updated, nullptr);
     EXPECT_EQ(updated->hash,
               kasumi::hasher::hash_string("updated content b"));
-    EXPECT_TRUE((*after)->pending_materializations.empty());
+    EXPECT_TRUE(after->pending_materializations.empty());
     const auto audited = harness.fsck();
     ASSERT_FALSE(audited.has_value());
 }
@@ -1258,26 +1284,20 @@ TEST(SyncRemoteAvailabilityTest, DuplicateContentIsProbedAndRepairedOnce) {
     harness.write("one.txt", "shared bytes");
     harness.write("two.txt", "shared bytes");
 
-    const auto first = harness.sync();
-    ASSERT_TRUE(first.has_value()) << first.error().detail;
-    const auto* first_summary =
-        std::get_if<kasumi::application::SyncCompleted>(&first->data);
-    ASSERT_NE(first_summary, nullptr);
+    const auto first_summary = sync_completed(harness);
+    ASSERT_TRUE(first_summary.has_value());
     EXPECT_TRUE(first_summary->published);
     EXPECT_EQ(harness.content_puts(), 1U);
 
-    const auto before = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(before.has_value() && *before);
+    const auto before = require_loaded_state(harness);
+    ASSERT_TRUE(before.has_value());
     harness.reset_transfer_counts();
     const auto shared_hash = kasumi::hasher::hash_string("shared bytes");
     ASSERT_TRUE(std::filesystem::remove(harness.content_path(shared_hash)));
     harness.write("three.txt", "shared bytes");
 
-    const auto repaired = harness.sync();
-    ASSERT_TRUE(repaired.has_value()) << repaired.error().detail;
-    const auto* summary =
-        std::get_if<kasumi::application::SyncCompleted>(&repaired->data);
-    ASSERT_NE(summary, nullptr);
+    const auto summary = sync_completed(harness);
+    ASSERT_TRUE(summary.has_value());
     EXPECT_TRUE(summary->published);
     EXPECT_FALSE(summary->partial);
     // The plan keeps one logical upload per path; the physical Content
@@ -1292,9 +1312,9 @@ TEST(SyncRemoteAvailabilityTest, DuplicateContentIsProbedAndRepairedOnce) {
     EXPECT_EQ(harness.read("two.txt"), "shared bytes");
     EXPECT_EQ(harness.read("three.txt"), "shared bytes");
 
-    const auto after = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(after.has_value() && *after);
-    EXPECT_NE((*after)->commit_id, (*before)->commit_id);
+    const auto after = require_loaded_state(harness);
+    ASSERT_TRUE(after.has_value());
+    EXPECT_NE(after->commit_id, before->commit_id);
 }
 
 TEST(SyncRemoteAvailabilityTest,
@@ -1304,19 +1324,16 @@ TEST(SyncRemoteAvailabilityTest,
     harness.write("file.txt", "original");
     ASSERT_TRUE(harness.sync().has_value());
 
-    const auto before = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(before.has_value() && *before);
+    const auto before = require_loaded_state(harness);
+    ASSERT_TRUE(before.has_value());
     harness.reset_transfer_counts();
     const auto old_hash = kasumi::hasher::hash_string("original");
     const auto new_hash = kasumi::hasher::hash_string("replacement");
     ASSERT_TRUE(std::filesystem::remove(harness.content_path(old_hash)));
 
     harness.write("file.txt", "replacement");
-    const auto synchronized = harness.sync();
-    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
-    const auto* summary =
-        std::get_if<kasumi::application::SyncCompleted>(&synchronized->data);
-    ASSERT_NE(summary, nullptr);
+    const auto summary = sync_completed(harness);
+    ASSERT_TRUE(summary.has_value());
     EXPECT_TRUE(summary->published);
     EXPECT_FALSE(summary->partial);
     EXPECT_EQ(summary->uploaded, 1U);
@@ -1324,13 +1341,13 @@ TEST(SyncRemoteAvailabilityTest,
     EXPECT_FALSE(std::filesystem::exists(harness.content_path(old_hash)));
     EXPECT_TRUE(std::filesystem::exists(harness.content_path(new_hash)));
 
-    const auto after = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(after.has_value() && *after);
-    EXPECT_NE((*after)->commit_id, (*before)->commit_id);
-    const auto* row = kasumi::find_row((*after)->tree, "file.txt");
+    const auto after = require_loaded_state(harness);
+    ASSERT_TRUE(after.has_value());
+    EXPECT_NE(after->commit_id, before->commit_id);
+    const auto* row = kasumi::find_row(after->tree, "file.txt");
     ASSERT_NE(row, nullptr);
     EXPECT_EQ(row->hash, new_hash);
-    EXPECT_TRUE((*after)->pending_materializations.empty());
+    EXPECT_TRUE(after->pending_materializations.empty());
 }
 
 TEST(SyncRemoteAvailabilityTest,
@@ -1377,8 +1394,8 @@ TEST(SyncRemoteAvailabilityTest, ActiveGcBarrierBlocksRepairBeforeContentPut) {
     harness.write("file.txt", "barrier protected");
     ASSERT_TRUE(harness.sync().has_value());
 
-    const auto before = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(before.has_value() && *before);
+    const auto before = require_loaded_state(harness);
+    ASSERT_TRUE(before.has_value());
     harness.reset_transfer_counts();
     const auto hash = kasumi::hasher::hash_string("barrier protected");
     ASSERT_TRUE(std::filesystem::remove(harness.content_path(hash)));
@@ -1393,10 +1410,10 @@ TEST(SyncRemoteAvailabilityTest, ActiveGcBarrierBlocksRepairBeforeContentPut) {
     ASSERT_FALSE(blocked.has_value());
     EXPECT_EQ(harness.content_puts(), 0U);
     EXPECT_FALSE(std::filesystem::exists(harness.content_path(hash)));
-    const auto after = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(after.has_value() && *after);
-    EXPECT_EQ((*after)->commit_id, (*before)->commit_id);
-    EXPECT_EQ((*after)->tree, (*before)->tree);
+    const auto after = require_loaded_state(harness);
+    ASSERT_TRUE(after.has_value());
+    EXPECT_EQ(after->commit_id, before->commit_id);
+    EXPECT_EQ(after->tree, before->tree);
 }
 
 TEST(SyncGcCertificationTest, AmbiguousRepairPutAfterRemoteEffect) {
@@ -1404,8 +1421,8 @@ TEST(SyncGcCertificationTest, AmbiguousRepairPutAfterRemoteEffect) {
     ASSERT_TRUE(harness.valid());
     harness.write("file.txt", "repair me");
     ASSERT_TRUE(harness.sync().has_value());
-    const auto before = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(before.has_value() && *before);
+    const auto before = require_loaded_state(harness);
+    ASSERT_TRUE(before.has_value());
 
     const auto hash = kasumi::hasher::hash_string("repair me");
     const auto path = harness.content_path(hash);
@@ -1419,10 +1436,10 @@ TEST(SyncGcCertificationTest, AmbiguousRepairPutAfterRemoteEffect) {
     EXPECT_EQ(harness.content_puts(), 1U);
     EXPECT_TRUE(std::filesystem::is_regular_file(path));
 
-    const auto after = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(after.has_value() && *after);
-    EXPECT_NE((*after)->commit_id, (*before)->commit_id);
-    EXPECT_NE(kasumi::find_row((*after)->tree, "new-repair.txt"), nullptr);
+    const auto after = require_loaded_state(harness);
+    ASSERT_TRUE(after.has_value());
+    EXPECT_NE(after->commit_id, before->commit_id);
+    EXPECT_NE(kasumi::find_row(after->tree, "new-repair.txt"), nullptr);
 
     harness.reset_transfer_counts();
     const auto no_op = harness.sync();
@@ -1436,8 +1453,8 @@ TEST(SyncGcCertificationTest,
     ASSERT_TRUE(harness.valid());
     harness.write("file.txt", "repair me");
     ASSERT_TRUE(harness.sync().has_value());
-    const auto before = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(before.has_value() && *before);
+    const auto before = require_loaded_state(harness);
+    ASSERT_TRUE(before.has_value());
 
     const auto hash = kasumi::hasher::hash_string("repair me");
     const auto path = harness.content_path(hash);
@@ -1453,19 +1470,18 @@ TEST(SyncGcCertificationTest,
     EXPECT_TRUE(std::filesystem::is_regular_file(path));
     auto after_failure = kasumi::state_storage::load_state(harness.database());
     ASSERT_TRUE(after_failure.has_value() && *after_failure);
-    EXPECT_EQ((*after_failure)->commit_id, (*before)->commit_id);
-    EXPECT_EQ((*after_failure)->tree, (*before)->tree);
+    EXPECT_EQ((*after_failure)->commit_id, before->commit_id);
+    EXPECT_EQ((*after_failure)->tree, before->tree);
 
     harness.reset_transfer_counts();
     const auto recovered = harness.sync();
     ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
     EXPECT_EQ(harness.content_puts(), 0U);
     EXPECT_TRUE(std::filesystem::is_regular_file(path));
-    const auto after_recovery =
-        kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(after_recovery.has_value() && *after_recovery);
-    EXPECT_NE((*after_recovery)->commit_id, (*before)->commit_id);
-    EXPECT_NE(kasumi::find_row((*after_recovery)->tree, "new-repair.txt"),
+    const auto after_recovery = require_loaded_state(harness);
+    ASSERT_TRUE(after_recovery.has_value());
+    EXPECT_NE(after_recovery->commit_id, before->commit_id);
+    EXPECT_NE(kasumi::find_row(after_recovery->tree, "new-repair.txt"),
               nullptr);
 
     const auto orphan = harness.add_orphan_content("post-recovery orphan");
@@ -1484,8 +1500,8 @@ TEST(SyncGcCertificationTest, PendingRecoveryPublishesBeforeNoOpEligibility) {
     ASSERT_TRUE(harness.valid());
     harness.write("file.txt", "repair me");
     ASSERT_TRUE(harness.sync().has_value());
-    const auto before = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(before.has_value() && *before);
+    const auto before = require_loaded_state(harness);
+    ASSERT_TRUE(before.has_value());
 
     const auto hash = kasumi::hasher::hash_string("repair me");
     const auto path = harness.content_path(hash);
@@ -1504,10 +1520,10 @@ TEST(SyncGcCertificationTest, PendingRecoveryPublishesBeforeNoOpEligibility) {
     EXPECT_EQ(harness.content_puts(), 0U);
     EXPECT_EQ(harness.full_list_calls(), 0U);
     EXPECT_TRUE(std::filesystem::is_regular_file(path));
-    const auto after = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(after.has_value() && *after);
-    EXPECT_NE((*after)->commit_id, (*before)->commit_id);
-    EXPECT_NE(kasumi::find_row((*after)->tree, "new-repair.txt"), nullptr);
+    const auto after = require_loaded_state(harness);
+    ASSERT_TRUE(after.has_value());
+    EXPECT_NE(after->commit_id, before->commit_id);
+    EXPECT_NE(kasumi::find_row(after->tree, "new-repair.txt"), nullptr);
 }
 
 TEST(SyncGcCertificationTest, SyncWriterRegisteredFirstBlocksGc) {
@@ -1548,20 +1564,14 @@ TEST(SyncGcCertificationTest, GcBarrierFirstBlocksSyncAndThenConverges) {
     EXPECT_TRUE(std::filesystem::is_regular_file(
         harness.content_path(kasumi::hasher::hash_string("protected content"))));
 
-    const auto synchronized = harness.sync();
-    ASSERT_TRUE(synchronized.has_value()) << synchronized.error().detail;
-    const auto* summary =
-        std::get_if<kasumi::application::SyncCompleted>(&synchronized->data);
-    ASSERT_NE(summary, nullptr);
+    const auto summary = sync_completed(harness);
+    ASSERT_TRUE(summary.has_value());
     EXPECT_TRUE(summary->published);
     EXPECT_EQ(harness.content_puts(), 1U);
 
     harness.reset_transfer_counts();
-    const auto no_op = harness.sync();
-    ASSERT_TRUE(no_op.has_value()) << no_op.error().detail;
-    const auto* no_op_summary =
-        std::get_if<kasumi::application::SyncCompleted>(&no_op->data);
-    ASSERT_NE(no_op_summary, nullptr);
+    const auto no_op_summary = sync_completed(harness);
+    ASSERT_TRUE(no_op_summary.has_value());
     EXPECT_FALSE(no_op_summary->published);
     EXPECT_EQ(harness.content_puts(), 0U);
 }
@@ -1572,8 +1582,8 @@ TEST(SyncGcCertificationTest,
     ASSERT_TRUE(harness.valid());
     harness.write("kept.txt", "protected content");
     ASSERT_TRUE(harness.sync().has_value());
-    const auto before = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(before.has_value() && *before);
+    const auto before = require_loaded_state(harness);
+    ASSERT_TRUE(before.has_value());
 
     const auto orphan = harness.add_orphan_content("discardable orphan");
     ASSERT_TRUE(orphan.has_value());
@@ -1583,19 +1593,15 @@ TEST(SyncGcCertificationTest,
     EXPECT_FALSE(std::filesystem::exists(harness.remote_path(*orphan)));
 
     harness.reset_transfer_counts();
-    const auto no_op = harness.sync();
-    ASSERT_TRUE(no_op.has_value()) << no_op.error().detail;
-    const auto* no_op_summary =
-        std::get_if<kasumi::application::SyncCompleted>(&no_op->data);
-    ASSERT_NE(no_op_summary, nullptr);
+    const auto no_op_summary = sync_completed(harness);
+    ASSERT_TRUE(no_op_summary.has_value());
     EXPECT_FALSE(no_op_summary->published);
     EXPECT_EQ(harness.content_puts(), 0U);
     EXPECT_FALSE(std::filesystem::exists(harness.remote_path(*orphan)));
-    const auto after_no_op =
-        kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(after_no_op.has_value() && *after_no_op);
-    EXPECT_EQ((*after_no_op)->commit_id, (*before)->commit_id);
-    EXPECT_EQ((*after_no_op)->tree, (*before)->tree);
+    const auto after_no_op = require_loaded_state(harness);
+    ASSERT_TRUE(after_no_op.has_value());
+    EXPECT_EQ(after_no_op->commit_id, before->commit_id);
+    EXPECT_EQ(after_no_op->tree, before->tree);
 
     const auto hash = kasumi::hasher::hash_string("protected content");
     const auto content = harness.content_path(hash);
@@ -1611,10 +1617,10 @@ TEST(SyncGcCertificationTest,
     ASSERT_NE(summary, nullptr);
     EXPECT_TRUE(summary->published);
 
-    const auto after = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(after.has_value() && *after);
-    EXPECT_NE((*after)->commit_id, (*before)->commit_id);
-    EXPECT_NE(kasumi::find_row((*after)->tree, "trigger.txt"), nullptr);
+    const auto after = require_loaded_state(harness);
+    ASSERT_TRUE(after.has_value());
+    EXPECT_NE(after->commit_id, before->commit_id);
+    EXPECT_NE(kasumi::find_row(after->tree, "trigger.txt"), nullptr);
     const auto audited = harness.fsck();
     ASSERT_TRUE(audited.has_value()) << audited.error().detail;
 }
@@ -1633,27 +1639,22 @@ TEST(SyncGcCertificationTest,
         std::get_if<kasumi::application::SyncCompleted>(&deleted->data);
     ASSERT_NE(deleted_summary, nullptr);
     EXPECT_TRUE(deleted_summary->published);
-    const auto deleted_state =
-        kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(deleted_state.has_value() && *deleted_state);
+    const auto deleted_state = require_loaded_state(harness);
+    ASSERT_TRUE(deleted_state.has_value());
 
     const auto collected = harness.collect_garbage();
     ASSERT_TRUE(collected.has_value()) << collected.error().detail;
     const auto audited = harness.fsck();
     ASSERT_TRUE(audited.has_value()) << audited.error().detail;
     harness.reset_transfer_counts();
-    const auto no_op = harness.sync();
-    ASSERT_TRUE(no_op.has_value()) << no_op.error().detail;
-    const auto* no_op_summary =
-        std::get_if<kasumi::application::SyncCompleted>(&no_op->data);
-    ASSERT_NE(no_op_summary, nullptr);
+    const auto no_op_summary = sync_completed(harness);
+    ASSERT_TRUE(no_op_summary.has_value());
     EXPECT_FALSE(no_op_summary->published);
     EXPECT_EQ(harness.content_puts(), 0U);
     EXPECT_FALSE(std::filesystem::exists(harness.local() / "deleted.txt"));
-    const auto final_state =
-        kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(final_state.has_value() && *final_state);
-    EXPECT_EQ((*final_state)->commit_id, (*deleted_state)->commit_id);
+    const auto final_state = require_loaded_state(harness);
+    ASSERT_TRUE(final_state.has_value());
+    EXPECT_EQ(final_state->commit_id, deleted_state->commit_id);
 }
 
 TEST(SyncGcCertificationTest,
@@ -1662,12 +1663,12 @@ TEST(SyncGcCertificationTest,
     ASSERT_TRUE(harness.valid());
     harness.write("lost.txt", "unrecoverable content");
     ASSERT_TRUE(harness.sync().has_value());
-    const auto before = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(before.has_value() && *before);
+    const auto before = require_loaded_state(harness);
+    ASSERT_TRUE(before.has_value());
     const auto hash = kasumi::hasher::hash_string("unrecoverable content");
     const auto content_id =
         kasumi::crypto::content_identifier(harness.key(), hash);
-    const auto* required = kasumi::find_row((*before)->tree, "lost.txt");
+    const auto* required = kasumi::find_row(before->tree, "lost.txt");
     ASSERT_NE(required, nullptr);
     EXPECT_EQ(required->hash, hash);
     const auto content = harness.content_path(hash);
@@ -1686,30 +1687,26 @@ TEST(SyncGcCertificationTest,
     EXPECT_EQ(summary->pending, 0U);
     EXPECT_EQ(harness.content_puts(), 0U);
     EXPECT_EQ(harness.presence_checks(), 0U);
-    const auto after = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(after.has_value() && *after);
-    EXPECT_NE((*after)->commit_id, (*before)->commit_id);
-    EXPECT_EQ(kasumi::find_row((*after)->tree, "lost.txt"), nullptr);
-    EXPECT_TRUE((*after)->pending_materializations.empty());
+    const auto after = require_loaded_state(harness);
+    ASSERT_TRUE(after.has_value());
+    EXPECT_NE(after->commit_id, before->commit_id);
+    EXPECT_EQ(kasumi::find_row(after->tree, "lost.txt"), nullptr);
+    EXPECT_TRUE(after->pending_materializations.empty());
     EXPECT_FALSE(std::filesystem::exists(content));
     EXPECT_FALSE(std::filesystem::exists(harness.remote_path(content_id)));
     EXPECT_FALSE(std::filesystem::exists(harness.local() / "lost.txt"));
 
     harness.reset_transfer_counts();
-    const auto repeated = harness.sync();
-    ASSERT_TRUE(repeated.has_value()) << repeated.error().detail;
-    const auto* repeated_summary =
-        std::get_if<kasumi::application::SyncCompleted>(&repeated->data);
-    ASSERT_NE(repeated_summary, nullptr);
+    const auto repeated_summary = sync_completed(harness);
+    ASSERT_TRUE(repeated_summary.has_value());
     EXPECT_FALSE(repeated_summary->published);
     EXPECT_FALSE(repeated_summary->partial);
     EXPECT_EQ(repeated_summary->pending, 0U);
     EXPECT_EQ(harness.content_puts(), 0U);
-    const auto after_repeat =
-        kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(after_repeat.has_value() && *after_repeat);
-    EXPECT_EQ((*after_repeat)->commit_id, (*after)->commit_id);
-    EXPECT_TRUE((*after_repeat)->pending_materializations.empty());
+    const auto after_repeat = require_loaded_state(harness);
+    ASSERT_TRUE(after_repeat.has_value());
+    EXPECT_EQ(after_repeat->commit_id, after->commit_id);
+    EXPECT_TRUE(after_repeat->pending_materializations.empty());
 }
 
 TEST(SyncGcCertificationTest,
@@ -1737,8 +1734,8 @@ TEST(SyncGcCertificationTest, BarrierAppearingAfterWriterAdmissionBlocksRepair) 
     ASSERT_TRUE(harness.valid());
     harness.write("file.txt", "barrier protected repair");
     ASSERT_TRUE(harness.sync().has_value());
-    const auto before = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(before.has_value() && *before);
+    const auto before = require_loaded_state(harness);
+    ASSERT_TRUE(before.has_value());
 
     const auto hash = kasumi::hasher::hash_string("barrier protected repair");
     const auto path = harness.content_path(hash);
@@ -1752,10 +1749,10 @@ TEST(SyncGcCertificationTest, BarrierAppearingAfterWriterAdmissionBlocksRepair) 
     EXPECT_TRUE(harness.barrier_injected());
     EXPECT_EQ(harness.content_puts(), 0U);
     EXPECT_FALSE(std::filesystem::exists(path));
-    const auto after = kasumi::state_storage::load_state(harness.database());
-    ASSERT_TRUE(after.has_value() && *after);
-    EXPECT_EQ((*after)->commit_id, (*before)->commit_id);
-    EXPECT_EQ((*after)->tree, (*before)->tree);
+    const auto after = require_loaded_state(harness);
+    ASSERT_TRUE(after.has_value());
+    EXPECT_EQ(after->commit_id, before->commit_id);
+    EXPECT_EQ(after->tree, before->tree);
 }
 
 TEST(SyncGcCertificationTest,
@@ -1979,13 +1976,7 @@ TEST(SyncRemoteAvailabilityTest, MissingProbeCapabilityFailsClosed) {
     auto storage = make_fake_transport(state);
     storage.storage.presence = nullptr;
     storage.storage.control_read_batch = nullptr;
-    const auto refreshed = kasumi::application::sync::coordinator::
-        reobservation::refresh_content_availability(
-            input, result, storage, key);
-    ASSERT_FALSE(refreshed.has_value());
-    EXPECT_EQ(
-        refreshed.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::ObservationFailure);
+    expect_refresh_observation_failure(input, result, storage, key);
     EXPECT_TRUE(input.known_missing_content_objects.empty());
 }
 
@@ -2003,13 +1994,7 @@ TEST(SyncRemoteAvailabilityTest, PresenceFailureIsNotClassifiedAsMissing) {
     FakeState* state = nullptr;
     auto storage = make_fake_transport(state);
     state->fail_presence_after_removal_identifier = identifier;
-    const auto refreshed = kasumi::application::sync::coordinator::
-        reobservation::refresh_content_availability(
-            input, result, storage, key);
-    ASSERT_FALSE(refreshed.has_value());
-    EXPECT_EQ(
-        refreshed.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::ObservationFailure);
+    expect_refresh_observation_failure(input, result, storage, key);
     EXPECT_TRUE(input.known_missing_content_objects.contains(prior_missing));
     EXPECT_FALSE(input.known_missing_content_objects.contains(hash));
 }
@@ -2024,13 +2009,7 @@ TEST(SyncRemoteAvailabilityTest, CancelledPresenceBatchDoesNotBecomeMissing) {
     FakeState* state = nullptr;
     auto storage = make_fake_transport(state);
     state->control_read_batch_failure = kasumi::transport::ErrorCode::Cancelled;
-    const auto refreshed = kasumi::application::sync::coordinator::
-        reobservation::refresh_content_availability(
-            input, result, storage, key);
-    ASSERT_FALSE(refreshed.has_value());
-    EXPECT_EQ(
-        refreshed.error().code,
-        kasumi::application::sync::coordinator::ErrorCode::ObservationFailure);
+    expect_refresh_observation_failure(input, result, storage, key);
     EXPECT_TRUE(input.known_missing_content_objects.empty());
 }
 

@@ -704,6 +704,20 @@ std::size_t history_put_events(const FixtureData& fixture,
         }));
 }
 
+[[nodiscard]] ::testing::AssertionResult
+reconcile_and_execute(FixtureData& fixture) {
+    const auto input = publication_input(fixture);
+    const auto result = kasumi::reconciliation::reconcile(input);
+    if (!result.has_value()) {
+        return ::testing::AssertionFailure() << result.error().detail;
+    }
+    const auto executed = execute_with(fixture, input, *result);
+    if (!executed.has_value()) {
+        return ::testing::AssertionFailure() << executed.error().detail;
+    }
+    return ::testing::AssertionSuccess();
+}
+
 TEST(SyncContentWindowTest,
      UniqueDownloadsUseBoundedWindowAndRollbackDrainedPeersOnFailure) {
     auto concurrency = kasumi::test::scoped_environment_variable(
@@ -784,12 +798,7 @@ TEST(SyncContentBatchTest, VerificationAtThresholdUsesBulkAndSinglePutBatch) {
     attach_probe(*fixture, probe);
     add_content_files(*fixture, 6);
 
-    const auto input = publication_input(*fixture);
-    const auto result = kasumi::reconciliation::reconcile(input);
-    ASSERT_TRUE(result.has_value()) << result.error().detail;
-
-    const auto executed = execute_with(*fixture, input, *result);
-    ASSERT_TRUE(executed.has_value()) << executed.error().detail;
+    ASSERT_TRUE(reconcile_and_execute(*fixture));
 
     EXPECT_EQ(probe.content_put_batch_count, 1U);
     EXPECT_EQ(probe.content_put_batch_objects, 6U);
@@ -812,12 +821,7 @@ TEST(SyncContentBatchTest, SingleContentObjectUsesIndividualPhysicalHash) {
     attach_probe(*fixture, probe);
     add_content_files(*fixture, 1);
 
-    const auto input = publication_input(*fixture);
-    const auto result = kasumi::reconciliation::reconcile(input);
-    ASSERT_TRUE(result.has_value()) << result.error().detail;
-
-    const auto executed = execute_with(*fixture, input, *result);
-    ASSERT_TRUE(executed.has_value()) << executed.error().detail;
+    ASSERT_TRUE(reconcile_and_execute(*fixture));
 
     EXPECT_EQ(probe.physical_hash_batch_calls, 0U);
     EXPECT_EQ(probe.content_physical_hash_calls, 1U);
@@ -832,11 +836,7 @@ TEST(SyncContentBatchTest, VerificationBelowThresholdUsesIndividualHashes) {
     attach_probe(*fixture, probe);
     add_content_files(*fixture, 5);
 
-    const auto input = publication_input(*fixture);
-    const auto result = kasumi::reconciliation::reconcile(input);
-    ASSERT_TRUE(result.has_value()) << result.error().detail;
-    const auto executed = execute_with(*fixture, input, *result);
-    ASSERT_TRUE(executed.has_value()) << executed.error().detail;
+    ASSERT_TRUE(reconcile_and_execute(*fixture));
 
     EXPECT_EQ(probe.physical_hash_batch_calls, 0U);
     EXPECT_EQ(probe.content_physical_hash_calls, 5U);
@@ -849,11 +849,7 @@ TEST(SyncContentBatchTest, VerificationAboveThresholdUsesBulk) {
     attach_probe(*fixture, probe);
     add_content_files(*fixture, 7);
 
-    const auto input = publication_input(*fixture);
-    const auto result = kasumi::reconciliation::reconcile(input);
-    ASSERT_TRUE(result.has_value()) << result.error().detail;
-    const auto executed = execute_with(*fixture, input, *result);
-    ASSERT_TRUE(executed.has_value()) << executed.error().detail;
+    ASSERT_TRUE(reconcile_and_execute(*fixture));
 
     EXPECT_EQ(probe.physical_hash_batch_calls, 1U);
     EXPECT_EQ(probe.physical_hash_batch_objects, 7U);
@@ -928,12 +924,7 @@ TEST(SyncContentBatchTest,
     attach_probe(*fixture, probe);
     add_content_files(*fixture, 6);
 
-    const auto input = publication_input(*fixture);
-    const auto result = kasumi::reconciliation::reconcile(input);
-    ASSERT_TRUE(result.has_value()) << result.error().detail;
-
-    const auto executed = execute_with(*fixture, input, *result);
-    ASSERT_TRUE(executed.has_value()) << executed.error().detail;
+    ASSERT_TRUE(reconcile_and_execute(*fixture));
     EXPECT_EQ(probe.content_put_batch_count, 1U);
     EXPECT_EQ(probe.physical_hash_batch_calls, 1U);
     EXPECT_EQ(probe.content_physical_hash_calls, 0U);
@@ -1013,12 +1004,7 @@ TEST(SyncContentBatchTest, BulkVerificationPreservesContentDeduplication) {
     attach_probe(*fixture, probe);
     add_repeated_content_files(*fixture, 10);
 
-    const auto input = publication_input(*fixture);
-    const auto result = kasumi::reconciliation::reconcile(input);
-    ASSERT_TRUE(result.has_value()) << result.error().detail;
-
-    const auto executed = execute_with(*fixture, input, *result);
-    ASSERT_TRUE(executed.has_value()) << executed.error().detail;
+    ASSERT_TRUE(reconcile_and_execute(*fixture));
     EXPECT_EQ(probe.content_put_batch_count, 1U);
     EXPECT_EQ(probe.content_put_batch_objects, 4U);
     EXPECT_EQ(probe.physical_hash_batch_calls, 0U);

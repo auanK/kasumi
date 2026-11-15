@@ -2,7 +2,7 @@
 
 The CLI handles profile management, binary update, application operations, and
 remote inspection. Application operations include Sync, Preview, Status, Fsck,
-Garbage Collection, Resolve Missing, and manual writer removal. Preview and
+Garbage Collection, Resolve Missing, and manual writer/barrier removal. Preview and
 Status share a planner; remote inspection and binary update have separate
 flows. The CLI selects language from a global `--lang <code>` prefix, recognizes
 `--full` only in Sync/Status command options,
@@ -20,12 +20,12 @@ Before an application operation, runtime resolution validates the profile and pa
 
 ## Local Persistent State
 
-The private profile directory contains distinct credential, accepted-state, cache, checkpoint, and recovery artifacts. [Local Persistent State](local-state.md) owns their exact roles, failure/fallback rules, and write ordering; [Security](../security.md) owns filesystem and cryptographic protection limits. In particular, SQLite `StoredState` is the accepted **local reconciliation base**, not remote truth, while the [transaction journal](transactions-and-recovery.md) governs an unfinished Sync.
+The private profile directory contains distinct credential, accepted-state, cache, and recovery artifacts. [Local Persistent State](local-state.md) owns their exact roles, failure/fallback rules, and write ordering; [Security](../security.md) owns filesystem and cryptographic protection limits. In particular, SQLite `StoredState` is the accepted **local reconciliation base**, not remote truth, while the [transaction journal](transactions-and-recovery.md) governs an unfinished Sync.
 
-`sync` alone owns normal file-hash cache updates and accepted-state commits. [Preview and Status](planning-and-status.md) report a plan without execution or recovery. [Fsck](fsck.md) and [Garbage Collection](garbage-collection.md) first run transaction recovery, which may have local or remote effects; GC then deletes only stable authenticated candidates. [Remote Inspection](remote-inspection.md) may update its private history cache, and `remote get` writes the chosen destination.
+`sync` alone owns normal file-hash cache updates and accepted-state commits. [Preview and Status](planning-and-status.md) report a plan without execution or recovery. [Fsck](fsck.md) and [Garbage Collection](garbage-collection.md) first run transaction recovery, which may have local or remote effects; GC then deletes only stable authenticated candidates. [Remote Inspection](remote-inspection.md) reads authenticated remote state without modifying accepted history or the local workspace, and `remote get` writes the chosen destination.
 
 `resolve-missing` also runs recovery, then uses the synchronization coordinator
 to publish validated logical deletions and accept their state. It is an explicit
-data-loss decision, not a repair. Manual writer removal uses its own maintenance
-path; see the
+data-loss decision, not a repair. Manual writer and barrier removal use their own
+maintenance paths; see the
 [command reference](../configuration-and-usage.md#partial-synchronization-and-explicit-data-loss-operations).

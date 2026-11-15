@@ -38,8 +38,8 @@ CLI/profile → local observation + authenticated remote history + StoredState
 | `config` list/create/edit/rename/delete | Reads or changes `config.toml` and private profile paths; delete preserves the synchronized directory | None |
 | Preview (`sync --dry-run`), Status | Reads local/SQLite state; profile lock and permission normalization are possible | Observation only; no recovery or publication |
 | Sync | May change synchronized files, file-hash cache, transaction journal, and accepted `StoredState` | May upload content and publish/prune history; registers a writer for active work |
-| Fsck | Checkpoint/workspace; preceding recovery can change local state | Audit reads only, **except** effects of preceding transaction recovery |
+| Fsck | Workspace; preceding recovery can change local state | Audit reads only, **except** effects of preceding transaction recovery |
 | GC | Workspace; preceding recovery can change local state | Direct deletion of eligible orphan Content and redundant CommitVariants under cooperative maintenance controls and a globally validated plan; preceding recovery may publish |
-| `remote ...` | Temporary workspace and possible private history cache; `remote get` writes its chosen destination | Inspection reads only; no normal transaction recovery |
+| `remote ...` | Temporary workspace; `remote get` writes its chosen destination | Inspection reads only; no normal transaction recovery |
 
-Read the linked owners for exact invariants. The [README](../README.md) is a short entry point, and [Provider Certification](provider-certification.md) describes provider requirements, the reproducible runner, and its limits.
+Read the linked owners for exact invariants. The [README](../README.md) is a short entry point.

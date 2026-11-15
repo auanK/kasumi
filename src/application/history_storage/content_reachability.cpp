@@ -3,7 +3,6 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <map>
@@ -22,96 +21,123 @@ struct ReferencedContent {
     std::vector<ContentReference> references;
 };
 
-struct RawReference {
-    std::string remote_id;
-    std::string plaintext_hash;
-    ContentReference reference;
-};
+} // namespace
 
-bool valid_content_id(std::string_view identifier) noexcept {
-    const auto decoded = hash_from_hex(identifier);
-    return decoded && hash_hex(*decoded) == identifier;
+namespace {
+
+std::unexpected<Error> ws_fail(std::string detail) {
+    return std::unexpected(
+        detail::error(ErrorCode::WorkspaceFailure, std::move(detail)));
 }
 
-void sort_unique(std::vector<std::string>& values) {
-    std::ranges::sort(values);
-    values.erase(std::ranges::unique(values).begin(), values.end());
+std::expected<void, Error> check_temp_file(const std::filesystem::path& path,
+                                           bool remove_if_present,
+                                           std::string_view detail) {
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(path, error);
+    if ((remove_if_present && error == std::errc::no_such_file_or_directory) ||
+        status.type() == std::filesystem::file_type::not_found) {
+        return remove_if_present ? std::expected<void, Error>{}
+                                 : ws_fail(std::string{detail});
+    }
+    if (error || std::filesystem::is_symlink(status) ||
+        !std::filesystem::is_regular_file(status)) {
+        return ws_fail(error ? std::string{detail} + ": " + error.message()
+                             : std::string{detail});
+    }
+    if (remove_if_present && !std::filesystem::remove(path, error) && error) {
+        return ws_fail("failed to remove temporary file: " + error.message());
+    }
+    return {};
 }
 
-std::expected<ContentObjectState, Error>
-audit_object(transport::Transport& storage,
-             std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-             std::string_view content_id,
-             std::optional<std::string_view> expected_plaintext_hash,
-             std::optional<std::uint64_t> expected_size,
-             const std::filesystem::path& workspace,
-             std::size_t sequence) {
+std::expected<void, Error>
+remove_temp_pair(const std::filesystem::path& enc,
+                 const std::filesystem::path& plain) {
+    for (const auto& path : {enc, plain}) {
+        std::error_code error;
+        std::filesystem::remove(path, error);
+        if (error) {
+            return ws_fail("failed to remove temporary file: " +
+                           error.message());
+        }
+    }
+    return {};
+}
+
+} // namespace
+
+std::expected<ContentAuditResult, Error>
+audit_content_object(transport::Transport& storage,
+                     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                     std::string_view content_id,
+                     std::optional<std::string_view> expected_plaintext_hash,
+                     std::optional<std::uint64_t> expected_size,
+                     const std::filesystem::path& workspace,
+                     std::size_t sequence) {
     const auto encrypted =
         workspace / ("content-" + std::to_string(sequence) + ".enc");
     const auto plaintext =
         workspace / ("content-" + std::to_string(sequence) + ".plain");
-    const auto cleanup = [&] {
-        detail::remove_file(encrypted);
-        detail::remove_file(plaintext);
-    };
-    cleanup();
+    for (const auto& path : {encrypted, plaintext}) {
+        if (auto ok =
+                check_temp_file(path, true, "temporary file has invalid type");
+            !ok) {
+            return std::unexpected(ok.error());
+        }
+    }
 
-    platform::perf_trace::count("reachability.audit_objects");
-    platform::perf_trace::count("reachability.audit_get_calls");
-    const auto get_token = platform::perf_trace::begin();
     const auto downloaded = transport::get(storage, content_id, encrypted);
-    platform::perf_trace::finish("reachability.audit_get_duration_us",
-                                 get_token);
     if (!downloaded) {
-        cleanup();
+        if (auto cleaned = remove_temp_pair(encrypted, plaintext); !cleaned) {
+            return std::unexpected(cleaned.error());
+        }
         if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
-            return ContentObjectState::Missing;
+            return ContentAuditResult{.state = ContentObjectState::Missing};
         }
         return std::unexpected(detail::transport_error(downloaded.error()));
     }
-
-    std::error_code enc_size_error;
-    const auto enc_size = std::filesystem::file_size(encrypted, enc_size_error);
-    if (!enc_size_error) {
-        platform::perf_trace::count("reachability.encrypted_bytes_downloaded",
-                                    enc_size);
+    if (auto ok =
+            check_temp_file(encrypted, false, "invalid temporary download");
+        !ok) {
+        return std::unexpected(ok.error());
     }
 
-    ContentObjectState state = ContentObjectState::Corrupt;
-    platform::perf_trace::count("reachability.audit_decrypt_calls");
-    const auto decrypt_token = platform::perf_trace::begin();
-    const bool decrypted = crypto::decrypt_file(encrypted, plaintext, key);
-    platform::perf_trace::finish("reachability.audit_decrypt_duration_us",
-                                 decrypt_token);
-    if (decrypted) {
+    ContentAuditResult result{.state = ContentObjectState::Corrupt};
+    if (crypto::decrypt_file(encrypted, plaintext, key)) {
+        if (auto ok = check_temp_file(
+                plaintext, false, "file is not regular for verification");
+            !ok) {
+            return std::unexpected(ok.error());
+        }
         std::error_code plain_size_error;
         const auto plain_size =
             std::filesystem::file_size(plaintext, plain_size_error);
-        if (!plain_size_error) {
-            platform::perf_trace::count("reachability.plaintext_bytes_verified",
-                                        plain_size);
+        if (plain_size_error) {
+            return ws_fail("could not read file size: " +
+                           plain_size_error.message());
         }
-        platform::perf_trace::count("reachability.audit_verify_calls");
-        const auto verify_token = platform::perf_trace::begin();
         const auto actual_hash = crypto::content::hash_file(plaintext);
-        std::error_code size_error;
-        const auto actual_size =
-            std::filesystem::file_size(plaintext, size_error);
-        if (actual_hash && !size_error &&
-            (!expected_size || actual_size == *expected_size) &&
-            (!expected_plaintext_hash ||
-             hash_hex(*actual_hash) == *expected_plaintext_hash) &&
-            crypto::content_identifier(key, *actual_hash) == content_id) {
-            state = ContentObjectState::Present;
+        if (!actual_hash) {
+            return ws_fail(actual_hash.error());
         }
-        platform::perf_trace::finish("reachability.audit_verify_duration_us",
-                                     verify_token);
+        const auto actual_hex = hash_hex(*actual_hash);
+        if ((!expected_size || plain_size == *expected_size) &&
+            (!expected_plaintext_hash ||
+             actual_hex == *expected_plaintext_hash) &&
+            crypto::content_identifier(key, *actual_hash) == content_id) {
+            result.state = ContentObjectState::Present;
+            result.plaintext_hash = actual_hex;
+            result.size = plain_size;
+        }
     }
-    cleanup();
-    return state;
+    if (auto cleaned = remove_temp_pair(encrypted, plaintext); !cleaned) {
+        return std::unexpected(cleaned.error());
+    }
+    return result;
 }
 
-} // namespace
+namespace {} // namespace
 
 ContentReachabilityResult
 inventory_impl(transport::Transport& storage,
@@ -120,7 +146,7 @@ inventory_impl(transport::Transport& storage,
                const ReachabilityInventory& history_inventory,
                const std::filesystem::path& workspace_root,
                bool audit_payloads) {
-    try {
+    return detail::guard_alloc([&]() -> ContentReachabilityResult {
         if (!transport::valid(storage)) {
             return std::unexpected(
                 detail::error(ErrorCode::InvalidInput, "invalid transport"));
@@ -134,8 +160,7 @@ inventory_impl(transport::Transport& storage,
             temporary = std::move(*ws);
         }
 
-        std::vector<RawReference> raw_references;
-        const bool measure_capacity_growth = platform::perf_trace::enabled();
+        std::map<std::string, ReferencedContent> by_remote_id;
         std::size_t reference_count = 0;
         for (const auto& commit : history_inventory.commits) {
             if (!commit.valid || !commit.reachable) {
@@ -151,77 +176,50 @@ inventory_impl(transport::Transport& storage,
                 if (row.is_directory) {
                     continue;
                 }
-                const auto plaintext_hash = hash_hex(row.hash);
-                const auto remote_id =
-                    crypto::content_identifier(key, row.hash);
                 if (++reference_count > maximum_content_object_count) {
                     return std::unexpected(
                         detail::error(ErrorCode::LimitExceeded,
                                       "too many content references"));
                 }
-                const auto capacity_before_push =
-                    measure_capacity_growth ? raw_references.capacity() : 0;
-                raw_references.push_back(RawReference{
-                    .remote_id = remote_id,
-                    .plaintext_hash = plaintext_hash,
-                    .reference =
-                        ContentReference{
-                            .commit_id = commit.commit_id,
-                            .path = row.path,
-                            .size = row.size,
-                        },
-                });
-                if (measure_capacity_growth &&
-                    raw_references.capacity() != capacity_before_push) {
-                    platform::perf_trace::count(
-                        "rc/content_reference_capacity_growth_events");
-                }
-            }
-        }
-
-        std::ranges::sort(raw_references, {}, &RawReference::remote_id);
-
-        std::vector<ReferencedContent> references;
-        references.reserve(raw_references.size());
-        for (auto& item : raw_references) {
-            if (references.empty() ||
-                references.back().remote_id != item.remote_id) {
-                references.push_back(ReferencedContent{
-                    .remote_id = std::move(item.remote_id),
-                    .plaintext_hash = std::move(item.plaintext_hash),
-                    .references = {},
-                });
-                references.back().references.push_back(
-                    std::move(item.reference));
-            } else {
-                auto& current = references.back();
-                if (!current.references.empty() &&
-                    current.references.front().size != item.reference.size) {
+                const auto remote_id =
+                    crypto::content_identifier(key, row.hash);
+                auto [it, inserted] = by_remote_id.try_emplace(
+                    remote_id,
+                    ReferencedContent{.remote_id = remote_id,
+                                      .plaintext_hash = hash_hex(row.hash),
+                                      .references = {}});
+                if (!inserted && !it->second.references.empty() &&
+                    it->second.references.front().size != row.size) {
                     return std::unexpected(
                         detail::error(ErrorCode::VerificationFailure,
                                       "content reference sizes conflict"));
                 }
-                current.references.push_back(std::move(item.reference));
+                it->second.references.push_back(ContentReference{
+                    .commit_id = commit.commit_id,
+                    .path = row.path,
+                    .size = row.size,
+                });
             }
         }
 
-        std::span<const std::string> listing_span;
-        std::vector<std::string> fallback_listing;
-        if (identifiers) {
-            listing_span = *identifiers;
-        } else {
-            auto listing = transport::list(storage);
-            if (!listing) {
-                if (listing.error().code !=
-                    transport::ErrorCode::StorageNotFound) {
-                    return std::unexpected(
-                        detail::transport_error(listing.error()));
-                }
-            } else {
-                fallback_listing = std::move(*listing);
-                listing_span = fallback_listing;
-            }
+        std::vector<ReferencedContent> references;
+        references.reserve(by_remote_id.size());
+        for (auto& [unused, entry] : by_remote_id) {
+            static_cast<void>(unused);
+            references.push_back(std::move(entry));
         }
+
+        std::vector<std::string> fallback_listing;
+        if (!identifiers) {
+            auto listing = detail::list_identifiers(storage);
+            if (!listing) {
+                return std::unexpected(listing.error());
+            }
+            fallback_listing = std::move(*listing);
+        }
+        const std::span<const std::string> listing_span =
+            identifiers ? *identifiers
+                        : std::span<const std::string>{fallback_listing};
 
         std::vector<std::string> physical;
         std::vector<std::string> unknown;
@@ -238,14 +236,14 @@ inventory_impl(transport::Transport& storage,
                         detail::error(ErrorCode::LimitExceeded,
                                       "too many content storage objects"));
                 }
-                if (valid_content_id(identifier)) {
+                if (detail::valid_hex_id(identifier)) {
                     physical.push_back(identifier);
                 } else {
                     unknown.push_back(identifier);
                 }
             }
         }
-        sort_unique(physical);
+        detail::sort_unique(physical);
 
         const auto is_referenced = [&](std::string_view id) {
             const auto it = std::ranges::lower_bound(
@@ -258,27 +256,37 @@ inventory_impl(transport::Transport& storage,
         result.contents.reserve(references.size() + physical.size());
 
         std::size_t sequence = 0;
-        for (auto& content : references) {
-            std::ranges::sort(content.references);
-            const bool found =
-                std::ranges::binary_search(physical, content.remote_id);
-            ContentObjectState state = ContentObjectState::Missing;
-            if (found) {
-                if (audit_payloads) {
-                    auto audited = audit_object(storage,
+        auto audit = [&](std::string_view id,
+                         std::optional<std::string_view> plaintext_hash,
+                         std::optional<std::uint64_t> expected_size)
+            -> std::expected<ContentObjectState, Error> {
+            if (!audit_payloads) {
+                return ContentObjectState::Present;
+            }
+            auto audited = audit_content_object(storage,
                                                 key,
-                                                content.remote_id,
-                                                content.plaintext_hash,
-                                                content.references.front().size,
+                                                id,
+                                                plaintext_hash,
+                                                expected_size,
                                                 temporary->workspace.root,
                                                 sequence++);
-                    if (!audited) {
-                        return std::unexpected(audited.error());
-                    }
-                    state = *audited;
-                } else {
-                    state = ContentObjectState::Present;
+            if (!audited) {
+                return std::unexpected(audited.error());
+            }
+            return audited->state;
+        };
+
+        for (auto& content : references) {
+            std::ranges::sort(content.references);
+            auto state = ContentObjectState::Missing;
+            if (std::ranges::binary_search(physical, content.remote_id)) {
+                auto audited = audit(content.remote_id,
+                                     content.plaintext_hash,
+                                     content.references.front().size);
+                if (!audited) {
+                    return std::unexpected(audited.error());
                 }
+                state = *audited;
             }
             result.reachable_content_ids.push_back(content.remote_id);
             if (state == ContentObjectState::Missing) {
@@ -298,41 +306,28 @@ inventory_impl(transport::Transport& storage,
                 continue;
             }
             result.orphan_content_ids.push_back(content_id);
-            ContentObjectState state = ContentObjectState::Present;
-            if (audit_payloads) {
-                auto audited = audit_object(storage,
-                                            key,
-                                            content_id,
-                                            std::nullopt,
-                                            std::nullopt,
-                                            temporary->workspace.root,
-                                            sequence++);
-                if (!audited) {
-                    return std::unexpected(audited.error());
-                }
-                state = *audited;
-                if (state == ContentObjectState::Corrupt) {
-                    result.corrupt_content_ids.push_back(content_id);
-                }
+            auto audited = audit(content_id, std::nullopt, std::nullopt);
+            if (!audited) {
+                return std::unexpected(audited.error());
+            }
+            if (*audited == ContentObjectState::Corrupt) {
+                result.corrupt_content_ids.push_back(content_id);
             }
             result.contents.push_back(ContentEntry{.content_id = content_id,
-                                                   .state = state,
+                                                   .state = *audited,
                                                    .reachable = false,
                                                    .references = {}});
         }
 
-        sort_unique(unknown);
-        sort_unique(result.reachable_content_ids);
-        sort_unique(result.missing_content_ids);
-        sort_unique(result.corrupt_content_ids);
-        sort_unique(result.orphan_content_ids);
+        detail::sort_unique(unknown);
+        detail::sort_unique(result.reachable_content_ids);
+        detail::sort_unique(result.missing_content_ids);
+        detail::sort_unique(result.corrupt_content_ids);
+        detail::sort_unique(result.orphan_content_ids);
         result.unknown_storage_objects = std::move(unknown);
         std::ranges::sort(result.contents, {}, &ContentEntry::content_id);
         return result;
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 ContentReachabilityResult inventory_content_reachability(

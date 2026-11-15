@@ -23,26 +23,6 @@ option(
     "Build Kasumi system tests that require external executables"
     OFF
 )
-option(
-    KASUMI_BUILD_BENCHMARKS
-    "Build Kasumi operational benchmark executables"
-    OFF
-)
-option(
-    KASUMI_BUILD_REMOTE_COPY_SMOKE
-    "Build the opt-in real-rclone-remote copy smoke test"
-    OFF
-)
-option(
-    KASUMI_BUILD_GC_LIVE_PREFLIGHT
-    "Build the read-only GC live namespace preflight diagnostic"
-    OFF
-)
-option(
-    KASUMI_BUILD_PROVIDER_CERTIFICATION
-    "Build the multi-target provider certification runner"
-    OFF
-)
 
 add_library(kasumi_warnings INTERFACE)
 if(WIN32)
@@ -188,9 +168,7 @@ target_link_libraries(
 add_library(kasumi_transport STATIC
     src/transport/types.cpp
     src/transport/transport.cpp
-    src/transport/local.cpp
     src/transport/local/storage.cpp
-    src/transport/rclone.cpp
     src/transport/rclone/storage.cpp
     src/transport/rclone/session.cpp
     src/transport/rclone/rc_client.cpp
@@ -368,7 +346,6 @@ add_library(kasumi_platform STATIC
     src/platform/clock.cpp
     src/platform/durability.cpp
     src/platform/file_fingerprint.cpp
-    src/platform/identity.cpp
     src/platform/metadata.cpp
     src/platform/perf_trace.cpp
     src/platform/private_storage.cpp
@@ -481,14 +458,12 @@ add_library(kasumi_application STATIC
     src/application/sync/coordinator_recovery.cpp
     src/application/integrity/maintenance.cpp
     src/application/integrity/garbage_collection.cpp
-    src/application/integrity/fsck_checkpoint.cpp
     src/application/inspection/inspect.cpp
     src/application/credentials.cpp
     src/application/concurrency.cpp
     src/application/environment.cpp
     src/application/execute.cpp
     src/application/profile.cpp
-    src/application/use_cases/error_mapping.cpp
     src/application/use_cases/context.cpp
     src/application/use_cases/maintenance.cpp
     src/application/use_cases/plan.cpp
@@ -541,20 +516,6 @@ target_link_libraries(kasumi_runtime
     kasumi_hardening
 )
 
-add_library(kasumi_operational_provider_target_config STATIC
-    tests/operational/provider_target_config.cpp
-)
-target_include_directories(
-    kasumi_operational_provider_target_config
-    PUBLIC
-    ${PROJECT_SOURCE_DIR}/tests/operational
-)
-target_link_libraries(
-    kasumi_operational_provider_target_config
-    PUBLIC kasumi_transport
-    PRIVATE tomlplusplus::tomlplusplus kasumi_warnings
-)
-
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(NOT Python3_Interpreter_FOUND)
     find_program(Python3_EXECUTABLE NAMES python3 python py REQUIRED)
@@ -562,20 +523,19 @@ endif()
 
 set(I18N_GENERATOR "${PROJECT_SOURCE_DIR}/scripts/generate_i18n_embedded.py")
 set(I18N_EMBEDDED_HEADER "${PROJECT_BINARY_DIR}/generated/cli/i18n_embedded.hpp")
-set(I18N_COLLISION_FIXTURE "${PROJECT_SOURCE_DIR}/tests/unit/cli/data/i18n_delimiter_collision.json")
-set(I18N_COLLISION_HEADER "${PROJECT_BINARY_DIR}/generated/cli/i18n_collision.hpp")
 
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${PROJECT_SOURCE_DIR}/locales/en.json"
     "${PROJECT_SOURCE_DIR}/locales/pt-BR.json"
+    "${PROJECT_SOURCE_DIR}/src/cli/i18n.hpp"
     "${I18N_GENERATOR}"
-    "${I18N_COLLISION_FIXTURE}"
 )
 
 execute_process(
     COMMAND "${Python3_EXECUTABLE}" "${I18N_GENERATOR}"
             "--en" "${PROJECT_SOURCE_DIR}/locales/en.json"
             "--pt" "${PROJECT_SOURCE_DIR}/locales/pt-BR.json"
+            "--header" "${PROJECT_SOURCE_DIR}/src/cli/i18n.hpp"
             "--output" "${I18N_EMBEDDED_HEADER}"
     RESULT_VARIABLE I18N_GEN_RESULT
 )
@@ -588,26 +548,16 @@ add_custom_command(
     COMMAND "${Python3_EXECUTABLE}" "${I18N_GENERATOR}"
             "--en" "${PROJECT_SOURCE_DIR}/locales/en.json"
             "--pt" "${PROJECT_SOURCE_DIR}/locales/pt-BR.json"
+            "--header" "${PROJECT_SOURCE_DIR}/src/cli/i18n.hpp"
             "--output" "${I18N_EMBEDDED_HEADER}"
     DEPENDS
         "${I18N_GENERATOR}"
         "${PROJECT_SOURCE_DIR}/locales/en.json"
         "${PROJECT_SOURCE_DIR}/locales/pt-BR.json"
+        "${PROJECT_SOURCE_DIR}/src/cli/i18n.hpp"
     COMMENT "Generating embedded locale header"
     VERBATIM
 )
-
-add_custom_command(
-    OUTPUT "${I18N_COLLISION_HEADER}"
-    COMMAND "${Python3_EXECUTABLE}" "${I18N_GENERATOR}"
-            "--en" "${I18N_COLLISION_FIXTURE}"
-            "--pt" "${I18N_COLLISION_FIXTURE}"
-            "--output" "${I18N_COLLISION_HEADER}"
-    DEPENDS "${I18N_GENERATOR}" "${I18N_COLLISION_FIXTURE}"
-    COMMENT "Generating i18n delimiter-collision regression header"
-    VERBATIM
-)
-add_custom_target(kasumi_i18n_collision_header DEPENDS "${I18N_COLLISION_HEADER}")
 
 add_library(kasumi_cli STATIC
     src/cli/app.cpp
@@ -634,6 +584,7 @@ target_link_libraries(
     PUBLIC
     kasumi_application
     PRIVATE
+    kasumi_crypto
     kasumi_warnings
     kasumi_release_optimizations
     kasumi_hardening
@@ -641,7 +592,7 @@ target_link_libraries(
     reproc++
 )
 if(WIN32)
-    target_link_libraries(kasumi_cli PRIVATE advapi32 winhttp bcrypt shell32 version)
+    target_link_libraries(kasumi_cli PRIVATE advapi32 winhttp shell32 version)
 endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
     target_link_libraries(kasumi_cli PRIVATE stdc++exp)
@@ -664,41 +615,6 @@ endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
     target_link_options(kasumi PRIVATE
         $<$<OR:$<CONFIG:Release>,$<CONFIG:MinSizeRel>>:-static>
-    )
-endif()
-
-if(KASUMI_BUILD_REMOTE_COPY_SMOKE)
-    add_executable(
-        kasumi_remote_copy_smoke
-        tests/operational/remote_copy_smoke.cpp
-        tests/operational/remote_copy_smoke_support.cpp
-    )
-    target_link_libraries(
-        kasumi_remote_copy_smoke
-        PRIVATE
-        kasumi_transport
-        kasumi_platform
-        nlohmann_json::nlohmann_json
-        reproc++
-        kasumi_warnings
-    )
-endif()
-
-if(KASUMI_BUILD_GC_LIVE_PREFLIGHT)
-    add_executable(
-        kasumi_gc_live_preflight
-        tests/operational/gc_live_preflight.cpp
-        tests/operational/gc_live_preflight_support.cpp
-        tests/operational/remote_copy_smoke_support.cpp
-    )
-    target_link_libraries(
-        kasumi_gc_live_preflight
-        PRIVATE
-        kasumi_transport
-        kasumi_platform
-        nlohmann_json::nlohmann_json
-        reproc++
-        kasumi_warnings
     )
 endif()
 
@@ -743,54 +659,4 @@ if(BUILD_TESTING)
         endif()
     endif()
     add_subdirectory(tests)
-endif()
-
-if(KASUMI_BUILD_PROVIDER_CERTIFICATION)
-    if(NOT BUILD_TESTING)
-        message(FATAL_ERROR
-            "KASUMI_BUILD_PROVIDER_CERTIFICATION requires BUILD_TESTING=ON")
-    endif()
-    add_executable(
-        kasumi_provider_certification
-        tests/operational/provider_certification.cpp
-        tests/operational/provider_certification_support.cpp
-        tests/operational/gc_live_preflight_support.cpp
-        tests/operational/remote_copy_smoke_support.cpp
-        tests/support/src/provider_scenarios.cpp
-        tests/support/src/transport_scenarios.cpp
-    )
-    target_include_directories(
-        kasumi_provider_certification
-        PRIVATE
-        ${PROJECT_SOURCE_DIR}/tests/operational
-        ${PROJECT_SOURCE_DIR}/src
-    )
-    target_link_libraries(
-        kasumi_provider_certification
-        PRIVATE
-        kasumi_application
-        kasumi_transport
-        kasumi_operational_provider_target_config
-        reproc++
-        kasumi_platform
-        kasumi_crypto
-        kasumi_test_support
-        httplib::httplib
-        nlohmann_json::nlohmann_json
-        kasumi_warnings
-    )
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
-        target_link_options(kasumi_provider_certification PRIVATE
-            -static-libgcc
-            -static-libstdc++
-            -Wl,--allow-multiple-definition
-        )
-    endif()
-    add_test(
-        NAME kasumi_provider_certification_startup
-        COMMAND
-            ${CMAKE_COMMAND}
-            "-DKASUMI_PROVIDER_CERTIFICATION_EXECUTABLE=$<TARGET_FILE:kasumi_provider_certification>"
-            -P ${PROJECT_SOURCE_DIR}/tests/operational/check_provider_certification_startup.cmake
-    )
 endif()

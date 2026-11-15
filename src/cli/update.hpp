@@ -96,8 +96,6 @@ fetch_releases(const ApiGet& get);
 std::optional<PackageNames> package_names_for_this_platform();
 std::optional<std::string> parse_checksum(std::string_view body,
                                           std::string_view expected_name);
-bool valid_archive_listing(std::string_view listing,
-                           const PackageNames& package);
 bool valid_verbose_archive_listing(std::string_view listing,
                                    const PackageNames& package);
 bool official_asset_url(std::string_view tag,

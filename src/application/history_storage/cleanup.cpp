@@ -1,6 +1,5 @@
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/remote_layout.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <new>
@@ -16,16 +15,14 @@ RemoveMarkersResult remove_marker_variants_impl(
     const RemoteLayout& layout,
     std::span<const std::string> commit_ids,
     std::optional<std::span<const std::string>> identifiers) {
-    try {
+    return guard_alloc([&]() -> RemoveMarkersResult {
         std::vector<std::string> requested(commit_ids.begin(),
                                            commit_ids.end());
         if (!std::ranges::all_of(requested, history::valid_commit_id)) {
             return std::unexpected(
                 error(ErrorCode::InvalidIdentifier, "invalid commit ID"));
         }
-        std::ranges::sort(requested);
-        requested.erase(std::ranges::unique(requested).begin(),
-                        requested.end());
+        sort_unique(requested);
         if (requested.empty()) {
             return RemovedMarkers{};
         }
@@ -34,27 +31,19 @@ RemoveMarkersResult remove_marker_variants_impl(
         if (identifiers) {
             listing.assign(identifiers->begin(), identifiers->end());
         } else {
-            const auto heads_dir = layout.heads_prefix.ends_with('/')
-                                       ? layout.heads_prefix.substr(
-                                             0, layout.heads_prefix.size() - 1)
-                                       : layout.heads_prefix;
-            auto observed = transport::list(storage, heads_dir);
+            auto observed = list_identifiers(storage, layout.heads_prefix);
             if (!observed) {
-                if (observed.error().code !=
-                    transport::ErrorCode::StorageNotFound) {
-                    return std::unexpected(transport_error(observed.error()));
+                return std::unexpected(observed.error());
+            }
+            listing.reserve(observed->size());
+            for (const auto& child : *observed) {
+                if (child.empty() || child.find('/') != std::string::npos ||
+                    child.find('\\') != std::string::npos) {
+                    return std::unexpected(
+                        error(ErrorCode::InvalidIdentifier,
+                              "scoped listing returned a non-direct child"));
                 }
-            } else {
-                listing.reserve(observed->size());
-                for (const auto& child : *observed) {
-                    if (child.empty() || child.find('/') != std::string::npos ||
-                        child.find('\\') != std::string::npos) {
-                        return std::unexpected(error(
-                            ErrorCode::InvalidIdentifier,
-                            "scoped listing returned a non-direct child"));
-                    }
-                    listing.push_back(layout.heads_prefix + child);
-                }
+                listing.push_back(layout.heads_prefix + child);
             }
         }
 
@@ -70,9 +59,7 @@ RemoveMarkersResult remove_marker_variants_impl(
 
         RemovedMarkers result;
         for (const auto& marker : markers) {
-            const auto remove_trace = platform::perf_trace::begin();
             auto removed = transport::remove(storage, marker);
-            platform::perf_trace::finish("rc/delete_marker", remove_trace);
             if (!removed) {
                 return std::unexpected(transport_error(removed.error()));
             }
@@ -81,10 +68,7 @@ RemoveMarkersResult remove_marker_variants_impl(
             }
         }
         return result;
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 } // namespace

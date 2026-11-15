@@ -53,17 +53,10 @@ struct FileMetadata {
     bool is_valid = false;
 };
 
-// Pure decision function: evaluates whether cached entry can be reused for current file.
-CacheReuseResult evaluate_cache_reuse(
-    const FileMetadata& cached,
-    const FileMetadata& current) noexcept;
-
-// Convenience boolean predicate.
-inline bool can_reuse_cached_hash(
-    const FileMetadata& cached,
-    const FileMetadata& current) noexcept {
-    return evaluate_cache_reuse(cached, current) == CacheReuseResult::Reusable;
-}
+// Pure decision function: evaluates whether cached entry can be reused for
+// current file.
+CacheReuseResult evaluate_cache_reuse(const FileMetadata& cached,
+                                      const FileMetadata& current) noexcept;
 
 } // namespace kasumi::application::observation::cache
 

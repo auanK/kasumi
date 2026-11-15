@@ -109,8 +109,7 @@ struct ScopedNativeHandle {
                          &written,
                          nullptr) &&
                written == static_cast<DWORD>(data.size()) &&
-               SetEndOfFile(handle) &&
-               FlushFileBuffers(handle);
+               SetEndOfFile(handle) && FlushFileBuffers(handle);
     }
     void close() {
         if (handle != INVALID_HANDLE_VALUE) {
@@ -164,8 +163,8 @@ struct ScopedNativeHandle {
             return false;
         std::size_t written = 0;
         while (written < data.size()) {
-            const auto result = ::write(fd, data.data() + written,
-                                        data.size() - written);
+            const auto result =
+                ::write(fd, data.data() + written, data.size() - written);
             if (result < 0 && errno == EINTR)
                 continue;
             if (result <= 0)
@@ -279,36 +278,78 @@ bool create_test_junction(const std::filesystem::path& link,
 }
 #endif
 
-} // namespace
+struct MutationWorkspace {
+    test::TempWorkspace workspace;
+    std::filesystem::path root;
+    std::filesystem::path local;
+    std::filesystem::path storage_dir;
+    platform::Workspace transaction;
+    std::array<std::uint8_t, crypto::KEY_SIZE> key{};
+};
 
-// Download with an edit after preparation.
-TEST(MutationRaceCharacterizationTest, LateEditDuringDownloadHasConsistentOutcome) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
+MutationWorkspace
+make_mutation_workspace(std::string_view label = "mutation-race-test",
+                        std::string_view tx_name = "tx") {
+    auto workspace = test::make_temp_workspace(label);
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
     const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
+    const platform::Workspace transaction{root / tx_name};
     std::filesystem::create_directories(local);
     std::filesystem::create_directories(storage_dir);
     std::filesystem::create_directories(transaction.root);
+    return {.workspace = std::move(workspace),
+            .root = root,
+            .local = local,
+            .storage_dir = storage_dir,
+            .transaction = transaction};
+}
+
+std::optional<transport::Transport>
+open_initialized_storage(const std::filesystem::path& storage_dir) {
+    auto storage = transport::open_transport(storage_dir.string());
+    if (!storage || !transport::initialize(*storage)) {
+        return std::nullopt;
+    }
+    return std::move(*storage);
+}
+
+Operation make_download_op(std::string_view path,
+                           const Hash& hash,
+                           std::size_t size = 8) {
+    return {.action = Action::Download,
+            .path = std::string(path),
+            .hash = hash_hex(hash),
+            .size = size};
+}
+
+auto prepare_slot0(const Operation& op,
+                   const std::filesystem::path& local,
+                   const platform::Workspace& transaction) {
+    return mutation::prepare_operation(
+        op, 0, local, transaction, {.backup_slot = 0});
+}
+
+} // namespace
+
+// Download with an edit after preparation.
+TEST(MutationRaceCharacterizationTest,
+     LateEditDuringDownloadHasConsistentOutcome) {
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
     test::write_text(root / "remote_src", "REMOTE_R");
 
     const auto r_hash = hasher::hash_string("REMOTE_R");
-    const Operation op{.action = Action::Download,
-                       .path = "file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
+    const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
     bool hook_hit = false;
@@ -320,7 +361,6 @@ TEST(MutationRaceCharacterizationTest, LateEditDuringDownloadHasConsistentOutcom
             }
         });
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     auto res = mutation::apply_operation(
         op, 0, local, *storage, key, transaction, *prepared);
 
@@ -329,39 +369,30 @@ TEST(MutationRaceCharacterizationTest, LateEditDuringDownloadHasConsistentOutcom
     if (res) {
         EXPECT_EQ(test::read_text(target), "REMOTE_R");
     } else {
-        EXPECT_EQ(res.error().code, mutation::MutationErrorCode::DestinationConflict);
+        EXPECT_EQ(res.error().code,
+                  mutation::MutationErrorCode::DestinationConflict);
         EXPECT_TRUE(is_content_preserved(root, "EXTERNAL_U"));
     }
 }
 
 // Download after the destination inode changes.
-TEST(MutationRaceCharacterizationTest, InodeReplacementDuringDownloadHasConsistentOutcome) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
+TEST(MutationRaceCharacterizationTest,
+     InodeReplacementDuringDownloadHasConsistentOutcome) {
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
     test::write_text(root / "remote_src", "REMOTE_R");
 
     const auto r_hash = hasher::hash_string("REMOTE_R");
-    const Operation op{.action = Action::Download,
-                       .path = "file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
+    const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
     bool hook_hit = false;
@@ -374,7 +405,6 @@ TEST(MutationRaceCharacterizationTest, InodeReplacementDuringDownloadHasConsiste
             }
         });
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     auto res = mutation::apply_operation(
         op, 0, local, *storage, key, transaction, *prepared);
 
@@ -383,38 +413,28 @@ TEST(MutationRaceCharacterizationTest, InodeReplacementDuringDownloadHasConsiste
     if (res) {
         EXPECT_EQ(test::read_text(target), "REMOTE_R");
     } else {
-        EXPECT_EQ(res.error().code, mutation::MutationErrorCode::DestinationConflict);
+        EXPECT_EQ(res.error().code,
+                  mutation::MutationErrorCode::DestinationConflict);
         EXPECT_TRUE(is_content_preserved(root, "EXTERNAL_U_NEW_INODE"));
     }
 }
 
 // Download when another writer creates an absent destination.
 TEST(LocalMutationContractTest, ConditionalInstallPreservesLateCreation) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     test::write_text(root / "remote_src", "REMOTE_R");
 
     const auto r_hash = hasher::hash_string("REMOTE_R");
-    const Operation op{.action = Action::Download,
-                       .path = "file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
+    const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
     bool hook_hit = false;
@@ -426,7 +446,6 @@ TEST(LocalMutationContractTest, ConditionalInstallPreservesLateCreation) {
             }
         });
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     auto res = mutation::apply_operation(
         op, 0, local, *storage, key, transaction, *prepared);
 
@@ -437,21 +456,17 @@ TEST(LocalMutationContractTest, ConditionalInstallPreservesLateCreation) {
 }
 
 // DeleteLocal with an edit after preparation.
-TEST(MutationRaceCharacterizationTest, LateEditDuringDeleteHasConsistentOutcome) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(transaction.root);
+TEST(MutationRaceCharacterizationTest,
+     LateEditDuringDeleteHasConsistentOutcome) {
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
 
     const Operation op{.action = Action::DeleteLocal, .path = "file.txt"};
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     bool hook_hit = false;
@@ -463,7 +478,6 @@ TEST(MutationRaceCharacterizationTest, LateEditDuringDeleteHasConsistentOutcome)
             }
         });
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     transport::Transport unavailable;
     auto res = mutation::apply_operation(
         op, 0, local, unavailable, key, transaction, *prepared);
@@ -473,19 +487,17 @@ TEST(MutationRaceCharacterizationTest, LateEditDuringDeleteHasConsistentOutcome)
     if (res) {
         EXPECT_FALSE(std::filesystem::exists(target));
     } else {
-        EXPECT_EQ(res.error().code, mutation::MutationErrorCode::DestinationConflict);
+        EXPECT_EQ(res.error().code,
+                  mutation::MutationErrorCode::DestinationConflict);
         EXPECT_TRUE(is_content_preserved(root, "EXTERNAL_U_EDIT"));
     }
 }
 
 // DeleteLocal after the destination is recreated with same-size contents.
-TEST(MutationRaceCharacterizationTest, AbaReplacementDuringDeleteHasConsistentOutcome) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(transaction.root);
+TEST(MutationRaceCharacterizationTest,
+     AbaReplacementDuringDeleteHasConsistentOutcome) {
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     const std::string original_content = "ORIGINAL_O"; // exactly 10 bytes
@@ -495,8 +507,7 @@ TEST(MutationRaceCharacterizationTest, AbaReplacementDuringDeleteHasConsistentOu
 
     const Operation op{.action = Action::DeleteLocal, .path = "file.txt"};
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     bool hook_hit = false;
@@ -509,7 +520,6 @@ TEST(MutationRaceCharacterizationTest, AbaReplacementDuringDeleteHasConsistentOu
             }
         });
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     transport::Transport unavailable;
     auto res = mutation::apply_operation(
         op, 0, local, unavailable, key, transaction, *prepared);
@@ -519,19 +529,17 @@ TEST(MutationRaceCharacterizationTest, AbaReplacementDuringDeleteHasConsistentOu
     if (res) {
         EXPECT_FALSE(std::filesystem::exists(target));
     } else {
-        EXPECT_EQ(res.error().code, mutation::MutationErrorCode::DestinationConflict);
+        EXPECT_EQ(res.error().code,
+                  mutation::MutationErrorCode::DestinationConflict);
         EXPECT_TRUE(is_content_preserved(root, aba_content));
     }
 }
 
 // RenameLocal with a source edit after preparation.
-TEST(MutationRaceCharacterizationTest, LateSourceEditHasConsistentRenameOutcome) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(transaction.root);
+TEST(MutationRaceCharacterizationTest,
+     LateSourceEditHasConsistentRenameOutcome) {
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto source = local / "source.txt";
     const auto destination = local / "conflict.txt";
@@ -541,8 +549,7 @@ TEST(MutationRaceCharacterizationTest, LateSourceEditHasConsistentRenameOutcome)
                        .path = "source.txt",
                        .alt_path = "conflict.txt"};
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     bool hook_hit = false;
@@ -554,7 +561,6 @@ TEST(MutationRaceCharacterizationTest, LateSourceEditHasConsistentRenameOutcome)
             }
         });
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     transport::Transport unavailable;
     auto res = mutation::apply_operation(
         op, 0, local, unavailable, key, transaction, *prepared);
@@ -565,42 +571,32 @@ TEST(MutationRaceCharacterizationTest, LateSourceEditHasConsistentRenameOutcome)
         EXPECT_FALSE(std::filesystem::exists(source));
         EXPECT_EQ(test::read_text(destination), "EXTERNAL_U_RENAME");
     } else {
-        EXPECT_EQ(res.error().code, mutation::MutationErrorCode::DestinationConflict);
+        EXPECT_EQ(res.error().code,
+                  mutation::MutationErrorCode::DestinationConflict);
         EXPECT_TRUE(is_content_preserved(root, "EXTERNAL_U_RENAME"));
     }
 }
 
 // Rollback with an edit after preparation.
-TEST(MutationRaceCharacterizationTest, LateEditDuringRollbackHasConsistentOutcome) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
+TEST(MutationRaceCharacterizationTest,
+     LateEditDuringRollbackHasConsistentOutcome) {
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
     test::write_text(root / "remote_src", "REMOTE_R");
 
     const auto r_hash = hasher::hash_string("REMOTE_R");
-    const Operation op{.action = Action::Download,
-                       .path = "file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
+    const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     auto res = mutation::apply_operation(
         op, 0, local, *storage, key, transaction, *prepared);
     ASSERT_TRUE(res.has_value());
@@ -633,36 +629,25 @@ TEST(MutationRaceCharacterizationTest, LateEditDuringRollbackHasConsistentOutcom
 }
 
 // RestoreBackup with a destination edit after preparation.
-TEST(MutationRaceCharacterizationTest, LateEditDuringRestoreHasConsistentOutcome) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
+TEST(MutationRaceCharacterizationTest,
+     LateEditDuringRestoreHasConsistentOutcome) {
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
     test::write_text(root / "remote_src", "REMOTE_R");
 
     const auto r_hash = hasher::hash_string("REMOTE_R");
-    const Operation op{.action = Action::Download,
-                       .path = "file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
+    const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     auto res = mutation::apply_operation(
         op, 0, local, *storage, key, transaction, *prepared);
     ASSERT_TRUE(res.has_value());
@@ -695,13 +680,10 @@ TEST(MutationRaceCharacterizationTest, LateEditDuringRestoreHasConsistentOutcome
 }
 
 // RenameLocal rollback with an edit after preparation.
-TEST(MutationRaceCharacterizationTest, LateEditDuringRollbackRemovalHasConsistentOutcome) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(transaction.root);
+TEST(MutationRaceCharacterizationTest,
+     LateEditDuringRollbackRemovalHasConsistentOutcome) {
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto source = local / "source.txt";
     const auto destination = local / "conflict.txt";
@@ -711,11 +693,9 @@ TEST(MutationRaceCharacterizationTest, LateEditDuringRollbackRemovalHasConsisten
                        .path = "source.txt",
                        .alt_path = "conflict.txt"};
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     transport::Transport unavailable;
     auto res = mutation::apply_operation(
         op, 0, local, unavailable, key, transaction, *prepared);
@@ -763,17 +743,13 @@ TEST(LocalMutationContractTest, DownloadIntoTrailingSlashSymlinkRoot) {
     const std::filesystem::path configured_root{link.string() + "/"};
     test::write_text(root / "remote_src", "REMOTE_R");
     const auto hash = hasher::hash_string("REMOTE_R");
-    const Operation operation{.action = Action::Download,
-                              .path = "file.txt",
-                              .hash = hash_hex(hash),
-                              .size = 8};
-    const auto prepared = mutation::prepare_operation(
-        operation, 0, configured_root, transaction, {.backup_slot = 0});
+    const auto operation = make_download_op("file.txt", hash);
+    const auto prepared =
+        prepare_slot0(operation, configured_root, transaction);
     ASSERT_TRUE(prepared.has_value());
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", hash);
 
     const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
@@ -782,7 +758,8 @@ TEST(LocalMutationContractTest, DownloadIntoTrailingSlashSymlinkRoot) {
     ASSERT_TRUE(applied.has_value())
         << (applied ? "" : mutation::describe(applied.error()));
     EXPECT_EQ(test::read_text(real_root / "file.txt"), "REMOTE_R");
-    EXPECT_TRUE(std::filesystem::is_symlink(std::filesystem::symlink_status(link)));
+    EXPECT_TRUE(
+        std::filesystem::is_symlink(std::filesystem::symlink_status(link)));
 }
 
 TEST(LocalMutationContractTest, InternalSymlinkStillRejectedWithLinkedRoot) {
@@ -801,14 +778,15 @@ TEST(LocalMutationContractTest, InternalSymlinkStillRejectedWithLinkedRoot) {
     const std::filesystem::path configured_root{link.string() + "/"};
     const Operation operation{.action = Action::Download,
                               .path = "child/file.txt"};
-    const auto prepared = mutation::prepare_operation(
-        operation, 0, configured_root, transaction, {.backup_slot = 0});
+    const auto prepared =
+        prepare_slot0(operation, configured_root, transaction);
     ASSERT_FALSE(prepared.has_value());
     EXPECT_EQ(prepared.error().code, mutation::MutationErrorCode::UnsafePath);
     EXPECT_FALSE(std::filesystem::exists(outside / "file.txt"));
 }
 
-TEST(LocalMutationContractTest, SymlinkRootWithoutTrailingSlashRemainsRejected) {
+TEST(LocalMutationContractTest,
+     SymlinkRootWithoutTrailingSlashRemainsRejected) {
     auto workspace = test::make_temp_workspace("root-symlink-no-slash");
     const auto root = test::workspace_root(workspace);
     const auto real_root = root / "real";
@@ -817,10 +795,8 @@ TEST(LocalMutationContractTest, SymlinkRootWithoutTrailingSlashRemainsRejected) 
     std::filesystem::create_directories(real_root);
     std::filesystem::create_directories(transaction.root);
     std::filesystem::create_directory_symlink(real_root, link);
-    const Operation operation{.action = Action::Download,
-                              .path = "file.txt"};
-    const auto prepared = mutation::prepare_operation(
-        operation, 0, link, transaction, {.backup_slot = 0});
+    const Operation operation{.action = Action::Download, .path = "file.txt"};
+    const auto prepared = prepare_slot0(operation, link, transaction);
     ASSERT_FALSE(prepared.has_value());
     EXPECT_EQ(prepared.error().code, mutation::MutationErrorCode::UnsafePath);
 }
@@ -828,14 +804,8 @@ TEST(LocalMutationContractTest, SymlinkRootWithoutTrailingSlashRemainsRejected) 
 
 // Download after confirmed RenameLocal
 TEST(LocalMutationContractTest, DownloadAfterConfirmedRenameLocal) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto source = local / "file.txt";
     const auto conflict = local / "file.conflict";
@@ -851,16 +821,13 @@ TEST(LocalMutationContractTest, DownloadAfterConfirmedRenameLocal) {
                                 .hash = hash_hex(r_hash),
                                 .size = 8};
 
-    const auto prep_rename = mutation::prepare_operation(
-        rename_op, 0, local, transaction, {.backup_slot = 0});
+    const auto prep_rename = prepare_slot0(rename_op, local, transaction);
     ASSERT_TRUE(prep_rename.has_value());
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     auto res_rename = mutation::apply_operation(
         rename_op, 0, local, *storage, key, transaction, *prep_rename);
     ASSERT_TRUE(res_rename.has_value());
@@ -888,14 +855,8 @@ TEST(LocalMutationContractTest, DownloadAfterConfirmedRenameLocal) {
 
 // RenameLocal filling conflict destination
 TEST(LocalMutationContractTest, RenameLocalFillingConflictDestination) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto node = local / "node";
     test::write_text(node, "ORIGINAL_FILE");
@@ -912,15 +873,11 @@ TEST(LocalMutationContractTest, RenameLocalFillingConflictDestination) {
                                 .hash = hash_hex(child_hash),
                                 .size = 10};
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_child", child_hash);
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
-
-    const auto prep_rename = mutation::prepare_operation(
-        rename_op, 0, local, transaction, {.backup_slot = 0});
+    const auto prep_rename = prepare_slot0(rename_op, local, transaction);
     ASSERT_TRUE(prep_rename.has_value());
     const auto rename_result = mutation::apply_operation(
         rename_op, 0, local, *storage, key, transaction, *prep_rename);
@@ -946,19 +903,14 @@ TEST(LocalMutationContractTest, RenameLocalFillingConflictDestination) {
 
 // Corrupted backup B with conflict
 TEST(LocalMutationContractTest, CorruptedBackupWithConflict) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(transaction.root);
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
 
     const Operation op{.action = Action::DeleteLocal, .path = "file.txt"};
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     // Corrupt the backup
@@ -981,32 +933,21 @@ TEST(LocalMutationContractTest, CorruptedBackupWithConflict) {
 // Open file during replace/rename
 TEST(MutationRaceCharacterizationTest,
      OpenHandleDuringDownloadHasConsistentResult) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
     test::write_text(root / "remote_src", "REMOTE_R");
 
     const auto r_hash = hasher::hash_string("REMOTE_R");
-    const Operation op{.action = Action::Download,
-                       .path = "file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
+    const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
 #if defined(_WIN32)
@@ -1020,7 +961,6 @@ TEST(MutationRaceCharacterizationTest,
                            nullptr);
     ASSERT_NE(h, INVALID_HANDLE_VALUE);
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     auto res = mutation::apply_operation(
         op, 0, local, *storage, key, transaction, *prepared);
 
@@ -1032,7 +972,6 @@ TEST(MutationRaceCharacterizationTest,
     int fd = ::open(target.c_str(), O_RDWR);
     ASSERT_GE(fd, 0);
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     auto res = mutation::apply_operation(
         op, 0, local, *storage, key, transaction, *prepared);
 
@@ -1053,12 +992,8 @@ TEST(MutationRaceCharacterizationTest,
 
 // Hardlink alias modification
 TEST(LocalMutationContractTest, HardlinkAliasEditBeforeApplyIsRejected) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(transaction.root);
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     const auto alias = local / "alias.txt";
@@ -1071,14 +1006,12 @@ TEST(LocalMutationContractTest, HardlinkAliasEditBeforeApplyIsRejected) {
     }
 
     const Operation op{.action = Action::DeleteLocal, .path = "file.txt"};
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     // Modify via alias
     test::write_text(alias, "MODIFIED_VIA_ALIAS");
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     transport::Transport unavailable;
     auto res = mutation::apply_operation(
         op, 0, local, unavailable, key, transaction, *prepared);
@@ -1107,8 +1040,7 @@ TEST(LocalMutationContractTest, SymlinkReparsePointInCriticalWindow) {
     test::write_text(target, "ORIGINAL_O");
 
     const Operation op{.action = Action::DeleteLocal, .path = "file.txt"};
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     bool hook_hit = false;
@@ -1150,7 +1082,8 @@ TEST(LocalMutationContractTest, SymlinkReparsePointInCriticalWindow) {
 }
 
 // Ancestor directory modification
-TEST(MutationRaceCharacterizationTest, MovedDestinationParentLeavesOriginalFileIntact) {
+TEST(MutationRaceCharacterizationTest,
+     MovedDestinationParentLeavesOriginalFileIntact) {
     auto workspace = test::make_temp_workspace("mutation-race-test");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
@@ -1166,18 +1099,13 @@ TEST(MutationRaceCharacterizationTest, MovedDestinationParentLeavesOriginalFileI
     test::write_text(root / "remote_src", "REMOTE_R");
 
     const auto r_hash = hasher::hash_string("REMOTE_R");
-    const Operation op{.action = Action::Download,
-                       .path = "subdir/file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
+    const auto op = make_download_op("subdir/file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
     bool hook_hit = false;
@@ -1202,19 +1130,14 @@ TEST(MutationRaceCharacterizationTest, MovedDestinationParentLeavesOriginalFileI
 
 // Unexpected object type (directory at target)
 TEST(LocalMutationContractTest, UnexpectedObjectType) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(transaction.root);
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
 
     const Operation op{.action = Action::DeleteLocal, .path = "file.txt"};
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     HookGuard guard(
@@ -1225,7 +1148,6 @@ TEST(LocalMutationContractTest, UnexpectedObjectType) {
             }
         });
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     transport::Transport unavailable;
     auto res = mutation::apply_operation(
         op, 0, local, unavailable, key, transaction, *prepared);
@@ -1237,22 +1159,15 @@ TEST(LocalMutationContractTest, UnexpectedObjectType) {
 // Independent parallel downloads with 1 conflict
 TEST(MutationRaceCharacterizationTest,
      ParallelDownloadsHandleLateEditConsistently) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     constexpr int kFiles = 3;
     std::vector<Operation> ops;
     std::vector<transaction::OperationProgress> preps;
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
 
     for (int i = 0; i < kFiles; ++i) {
         const std::string name = "file" + std::to_string(i) + ".txt";
@@ -1288,7 +1203,6 @@ TEST(MutationRaceCharacterizationTest,
         }
     });
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     std::vector<std::future<mutation::MutationResult>> futures;
     for (std::size_t i = 0; i < ops.size(); ++i) {
         futures.push_back(std::async(std::launch::async, [&, i] {
@@ -1306,9 +1220,9 @@ TEST(MutationRaceCharacterizationTest,
 
     for (const auto index : {0U, 2U}) {
         ASSERT_TRUE(results[index].has_value());
-        EXPECT_EQ(test::read_text(local / ("file" + std::to_string(index) +
-                                           ".txt")),
-                  "REMOTE_" + std::to_string(index));
+        EXPECT_EQ(
+            test::read_text(local / ("file" + std::to_string(index) + ".txt")),
+            "REMOTE_" + std::to_string(index));
     }
     const auto conflict = local / "file1.txt";
     if (results[1]) {
@@ -1343,32 +1257,21 @@ TEST(LocalMutationContractTest, TwoDependentOperationsOnSamePath) {
 // Download with an open-handle write during cleanup.
 TEST(MutationRaceCharacterizationTest,
      OpenHandleWriteAllowsDownloadOrPreservesRefusal) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
     test::write_text(root / "remote_src", "REMOTE_R");
 
     const auto r_hash = hasher::hash_string("REMOTE_R");
-    const Operation op{.action = Action::Download,
-                       .path = "file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
+    const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
     auto h = open_native_write_handle(target);
@@ -1382,7 +1285,6 @@ TEST(MutationRaceCharacterizationTest,
         }
     });
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     auto res = mutation::apply_operation(
         op, 0, local, *storage, key, transaction, *prepared);
 
@@ -1403,35 +1305,23 @@ TEST(MutationRaceCharacterizationTest,
 // Rollback removal with an open-handle write.
 TEST(MutationRaceCharacterizationTest,
      OpenHandleWriteDuringRollbackRemovalHasConsistentResult) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     test::write_text(root / "remote_src", "REMOTE_R");
     const auto r_hash = hasher::hash_string("REMOTE_R");
 
-    const Operation op{.action = Action::Download,
-                       .path = "file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
+    const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
     EXPECT_FALSE(prepared->had_original);
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     auto res = mutation::apply_operation(
         op, 0, local, *storage, key, transaction, *prepared);
     ASSERT_TRUE(res.has_value());
@@ -1454,9 +1344,8 @@ TEST(MutationRaceCharacterizationTest,
         mutation::rollback_operation(op, 0, local, transaction, progress);
 
     h.close();
-    ASSERT_TRUE(hook_hit)
-        << "Hook before_remove_file_if_hash was not reached: "
-        << (rolled ? "" : rolled.error().detail);
+    ASSERT_TRUE(hook_hit) << "Hook before_remove_file_if_hash was not reached: "
+                          << (rolled ? "" : rolled.error().detail);
     if (rolled) {
         EXPECT_FALSE(std::filesystem::exists(target));
     } else {
@@ -1469,36 +1358,24 @@ TEST(MutationRaceCharacterizationTest,
 // Restore backup with an open-handle write.
 TEST(MutationRaceCharacterizationTest,
      OpenHandleWriteAllowsRestoreOrPreservesRefusal) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
     test::write_text(root / "remote_src", "REMOTE_R");
     const auto r_hash = hasher::hash_string("REMOTE_R");
 
-    const Operation op{.action = Action::Download,
-                       .path = "file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
+    const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
     EXPECT_TRUE(prepared->had_original);
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     auto res = mutation::apply_operation(
         op, 0, local, *storage, key, transaction, *prepared);
     ASSERT_TRUE(res.has_value());
@@ -1528,7 +1405,8 @@ TEST(MutationRaceCharacterizationTest,
     } else {
         EXPECT_TRUE(rolled.error().code ==
                         mutation::MutationErrorCode::DestinationConflict ||
-                    rolled.error().code == mutation::MutationErrorCode::LocalIo);
+                    rolled.error().code ==
+                        mutation::MutationErrorCode::LocalIo);
         EXPECT_EQ(final, "OPEN_HANDLE_RESTORE_EDIT");
         EXPECT_EQ(test::read_text(transaction.root / "0.backup"), "ORIGINAL_O");
     }
@@ -1537,12 +1415,8 @@ TEST(MutationRaceCharacterizationTest,
 // RenameLocal with a write through the moved open handle.
 TEST(MutationRaceCharacterizationTest,
      OpenHandleWriteAfterRenameMoveRemainsAtDestination) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(transaction.root);
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto source = local / "source.txt";
     const auto destination = local / "renamed.txt";
@@ -1552,8 +1426,7 @@ TEST(MutationRaceCharacterizationTest,
                        .path = "source.txt",
                        .alt_path = "renamed.txt"};
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
     auto h = open_native_write_handle(source);
@@ -1567,7 +1440,6 @@ TEST(MutationRaceCharacterizationTest,
         }
     });
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     transport::Transport unavailable;
     auto res = mutation::apply_operation(
         op, 0, local, unavailable, key, transaction, *prepared);
@@ -1584,44 +1456,31 @@ TEST(MutationRaceCharacterizationTest,
 
 // A failure before install leaves the original and backup intact.
 TEST(LocalMutationContractTest, InterruptedBeforeInstallKeepsOriginal) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
     test::write_text(root / "remote_src", "REMOTE_R");
     const auto r_hash = hasher::hash_string("REMOTE_R");
 
-    const Operation op{.action = Action::Download,
-                       .path = "file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
+    const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
     bool hook_hit = false;
-    HookGuard guard(
-        [&](std::string_view point, const std::filesystem::path&) {
-            if (point == "before_download_replace") {
-                hook_hit = true;
-                throw std::runtime_error("simulated_crash_before_install");
-            }
-        });
+    HookGuard guard([&](std::string_view point, const std::filesystem::path&) {
+        if (point == "before_download_replace") {
+            hook_hit = true;
+            throw std::runtime_error("simulated_crash_before_install");
+        }
+    });
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     try {
         (void)mutation::apply_operation(
             op, 0, local, *storage, key, transaction, *prepared);
@@ -1639,45 +1498,33 @@ TEST(LocalMutationContractTest, InterruptedBeforeInstallKeepsOriginal) {
 }
 
 // Recovery reverses an installed download before its checkpoint.
-TEST(LocalMutationContractTest, RecoveryReversesDownloadBeforeAppliedCheckpoint) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
+TEST(LocalMutationContractTest,
+     RecoveryReversesDownloadBeforeAppliedCheckpoint) {
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
     test::write_text(root / "remote_src", "REMOTE_R");
     const auto r_hash = hasher::hash_string("REMOTE_R");
 
-    const Operation op{.action = Action::Download,
-                       .path = "file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
+    const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
     bool hook_hit = false;
-    HookGuard guard([&](std::string_view point,
-                        const std::filesystem::path&) {
+    HookGuard guard([&](std::string_view point, const std::filesystem::path&) {
         if (point == "after_download_replace") {
             hook_hit = true;
             throw std::runtime_error("simulated_crash_after_candidate_install");
         }
     });
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     try {
         (void)mutation::apply_operation(
             op, 0, local, *storage, key, transaction, *prepared);
@@ -1694,35 +1541,23 @@ TEST(LocalMutationContractTest, RecoveryReversesDownloadBeforeAppliedCheckpoint)
 }
 
 TEST(LocalMutationContractTest, RollbackCandidateIsDeterministicAndReusable) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx_deterministic_id"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace("mutation-race-test", "tx_deterministic_id");
 
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
     test::write_text(root / "remote_src", "REMOTE_R");
     const auto r_hash = hasher::hash_string("REMOTE_R");
 
-    const Operation op{.action = Action::Download,
-                       .path = "file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
+    const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     auto res = mutation::apply_operation(
         op, 0, local, *storage, key, transaction, *prepared);
     ASSERT_TRUE(res.has_value());
@@ -1744,8 +1579,7 @@ TEST(LocalMutationContractTest, RollbackCandidateIsDeterministicAndReusable) {
 
     test::write_text(candidate, "ORIGINAL_O");
     bool copied_candidate = false;
-    HookGuard guard([&](std::string_view point,
-                        const std::filesystem::path&) {
+    HookGuard guard([&](std::string_view point, const std::filesystem::path&) {
         copied_candidate |= point == "after_rollback_candidate_copy";
     });
     const auto rolled =
@@ -1758,47 +1592,36 @@ TEST(LocalMutationContractTest, RollbackCandidateIsDeterministicAndReusable) {
 }
 
 TEST(LocalMutationContractTest, NewlyCopiedRollbackCandidateIsValidated) {
-    auto workspace = test::make_temp_workspace("rollback-candidate-corrupt");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx_candidate_corrupt"};
-    ASSERT_TRUE(std::filesystem::create_directories(local));
-    ASSERT_TRUE(std::filesystem::create_directories(storage_dir));
-    ASSERT_TRUE(std::filesystem::create_directories(transaction.root));
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace("rollback-candidate-corrupt",
+                                "tx_candidate_corrupt");
 
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
     test::write_text(root / "remote_src", "REMOTE_R");
     const auto remote_hash = hasher::hash_string("REMOTE_R");
-    const Operation operation{.action = Action::Download,
-                              .path = "file.txt",
-                              .hash = hash_hex(remote_hash),
-                              .size = 8};
-    const auto prepared = mutation::prepare_operation(
-        operation, 0, local, transaction, {.backup_slot = 0});
+    const auto operation = make_download_op("file.txt", remote_hash);
+    const auto prepared = prepare_slot0(operation, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", remote_hash);
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     ASSERT_TRUE(mutation::apply_operation(
         operation, 0, local, *storage, key, transaction, *prepared));
     auto applied = *prepared;
     applied.state = transaction::OperationState::Applied;
 
     std::filesystem::path candidate;
-    HookGuard guard([&](std::string_view point,
-                        const std::filesystem::path& path) {
-        if (point == "after_rollback_candidate_copy") {
-            candidate = path;
-            test::write_text(path, "CORRUPTED_CANDIDATE");
-        }
-    });
-    const auto rolled = mutation::rollback_operation(
-        operation, 0, local, transaction, applied);
+    HookGuard guard(
+        [&](std::string_view point, const std::filesystem::path& path) {
+            if (point == "after_rollback_candidate_copy") {
+                candidate = path;
+                test::write_text(path, "CORRUPTED_CANDIDATE");
+            }
+        });
+    const auto rolled =
+        mutation::rollback_operation(operation, 0, local, transaction, applied);
 
     EXPECT_FALSE(rolled.has_value());
     if (!rolled) {
@@ -1814,41 +1637,30 @@ TEST(LocalMutationContractTest, NewlyCopiedRollbackCandidateIsValidated) {
 
 // Unknown artifacts from earlier builds remain untouched.
 TEST(LocalMutationContractTest, UnknownReservedArtifactIsNotAdoptedByDownload) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace tx_b{root / "tx_b"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(tx_b.root);
+    auto [workspace, root, local, storage_dir, tx_b, key] =
+        make_mutation_workspace("mutation-race-test", "tx_b");
 
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
     test::write_text(root / "remote_src", "REMOTE_R");
     const auto r_hash = hasher::hash_string("REMOTE_R");
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
-    const Operation op{.action = Action::Download,
-                       .path = "file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
+    const auto op = make_download_op("file.txt", r_hash);
 
     // A previous transaction left this unrelated file beside the destination.
     const auto artifact = platform::path::temporary_sibling_path(
         target, ".", ".kasumi-custody-0");
     test::write_text(artifact, "UNKNOWN_ARTIFACT_DATA");
 
-    // The current transaction uses its own backup and leaves that file untouched.
-    const auto prep_b =
-        mutation::prepare_operation(op, 0, local, tx_b, {.backup_slot = 0});
+    // The current transaction uses its own backup and leaves that file
+    // untouched.
+    const auto prep_b = prepare_slot0(op, local, tx_b);
     ASSERT_TRUE(prep_b.has_value());
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     auto res_b =
         mutation::apply_operation(op, 0, local, *storage, key, tx_b, *prep_b);
 
@@ -1876,32 +1688,21 @@ TEST(LocalMutationContractTest, FormerMutationArtifactsRemainReserved) {
 
 TEST(MutationRaceCharacterizationTest,
      WriteAfterInstallRemainsAtTheDestination) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
     test::write_text(root / "remote_src", "REMOTE_R");
     const auto r_hash = hasher::hash_string("REMOTE_R");
 
-    const Operation op{.action = Action::Download,
-                       .path = "file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
+    const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
     bool hook_hit = false;
@@ -1913,7 +1714,6 @@ TEST(MutationRaceCharacterizationTest,
             }
         });
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     auto res = mutation::apply_operation(
         op, 0, local, *storage, key, transaction, *prepared);
 
@@ -1925,15 +1725,10 @@ TEST(MutationRaceCharacterizationTest,
     }
 }
 
-TEST(MutationRaceCharacterizationTest, HardlinkAliasKeepsPreReplaceEditAccessible) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
+TEST(MutationRaceCharacterizationTest,
+     HardlinkAliasKeepsPreReplaceEditAccessible) {
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     const auto alias = local / "alias.txt";
@@ -1947,30 +1742,23 @@ TEST(MutationRaceCharacterizationTest, HardlinkAliasKeepsPreReplaceEditAccessibl
     test::write_text(root / "remote_src", "REMOTE_R");
     const auto r_hash = hasher::hash_string("REMOTE_R");
 
-    const Operation op{.action = Action::Download,
-                       .path = "file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
+    const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
     bool hook_hit = false;
-    HookGuard guard(
-        [&](std::string_view point, const std::filesystem::path&) {
-            if (point == "before_download_replace") {
-                hook_hit = true;
-                test::write_text(alias, "EXTERNAL_U_HARDLINK");
-            }
-        });
+    HookGuard guard([&](std::string_view point, const std::filesystem::path&) {
+        if (point == "before_download_replace") {
+            hook_hit = true;
+            test::write_text(alias, "EXTERNAL_U_HARDLINK");
+        }
+    });
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     auto res = mutation::apply_operation(
         op, 0, local, *storage, key, transaction, *prepared);
 
@@ -1985,37 +1773,25 @@ TEST(MutationRaceCharacterizationTest, HardlinkAliasKeepsPreReplaceEditAccessibl
 }
 
 TEST(LocalMutationContractTest, ChangedDestinationBeforeApplyIsRejected) {
-    auto workspace = test::make_temp_workspace("mutation-race-test");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    std::filesystem::create_directories(local);
-    std::filesystem::create_directories(storage_dir);
-    std::filesystem::create_directories(transaction.root);
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace();
 
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
     test::write_text(root / "remote_src", "REMOTE_R");
     const auto r_hash = hasher::hash_string("REMOTE_R");
 
-    const Operation op{.action = Action::Download,
-                       .path = "file.txt",
-                       .hash = hash_hex(r_hash),
-                       .size = 8};
+    const auto op = make_download_op("file.txt", r_hash);
 
-    const auto prepared = mutation::prepare_operation(
-        op, 0, local, transaction, {.backup_slot = 0});
+    const auto prepared = prepare_slot0(op, local, transaction);
     ASSERT_TRUE(prepared.has_value());
 
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", r_hash);
 
     test::write_text(target, "EXTERNAL_CONFLICTING_TARGET");
 
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     auto res = mutation::apply_operation(
         op, 0, local, *storage, key, transaction, *prepared);
 
@@ -2027,31 +1803,19 @@ TEST(LocalMutationContractTest, ChangedDestinationBeforeApplyIsRejected) {
 }
 
 TEST(LocalMutationContractTest, RollbackLeavesUnknownArtifactUntouched) {
-    auto workspace = test::make_temp_workspace("rollback-unknown-artifact");
-    const auto root = test::workspace_root(workspace);
-    const auto local = root / "local";
-    const auto storage_dir = root / "storage";
-    const platform::Workspace transaction{root / "tx"};
-    ASSERT_TRUE(std::filesystem::create_directories(local));
-    ASSERT_TRUE(std::filesystem::create_directories(storage_dir));
-    ASSERT_TRUE(std::filesystem::create_directories(transaction.root));
+    auto [workspace, root, local, storage_dir, transaction, key] =
+        make_mutation_workspace("rollback-unknown-artifact");
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL_O");
     test::write_text(root / "remote_src", "REMOTE_R");
 
     const auto remote_hash = hasher::hash_string("REMOTE_R");
-    const Operation operation{.action = Action::Download,
-                              .path = "file.txt",
-                              .hash = hash_hex(remote_hash),
-                              .size = 8};
-    const auto prepared = mutation::prepare_operation(
-        operation, 0, local, transaction, {.backup_slot = 0});
+    const auto operation = make_download_op("file.txt", remote_hash);
+    const auto prepared = prepare_slot0(operation, local, transaction);
     ASSERT_TRUE(prepared.has_value());
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote_src", remote_hash);
-    const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
     ASSERT_TRUE(mutation::apply_operation(
         operation, 0, local, *storage, key, transaction, *prepared));
 
@@ -2085,15 +1849,13 @@ TEST(LocalMutationContractTest, ExistingDestructiveMutationsRemainAvailable) {
                              .path = "download.txt",
                              .hash = hash_hex(hasher::hash_string("REMOTE")),
                              .size = 6};
-    const Operation remove{.action = Action::DeleteLocal,
-                           .path = "delete.txt"};
+    const Operation remove{.action = Action::DeleteLocal, .path = "delete.txt"};
     const Operation rename{.action = Action::RenameLocal,
                            .path = "rename.txt",
                            .alt_path = "renamed.txt"};
     const Operation remove_directory{.action = Action::DeleteLocalDirectory,
                                      .path = "empty"};
-    const auto download_progress = mutation::prepare_operation(
-        download, 0, local, transaction, {.backup_slot = 0});
+    const auto download_progress = prepare_slot0(download, local, transaction);
     const auto delete_progress = mutation::prepare_operation(
         remove, 1, local, transaction, {.backup_slot = 1});
     const auto rename_progress = mutation::prepare_operation(
@@ -2109,36 +1871,34 @@ TEST(LocalMutationContractTest, ExistingDestructiveMutationsRemainAvailable) {
     const auto remote_hash = hasher::hash_string("REMOTE");
     const auto storage_dir = root / "storage";
     ASSERT_TRUE(std::filesystem::create_directory(storage_dir));
-    auto storage = transport::open_transport(storage_dir.string());
+    auto storage = open_initialized_storage(storage_dir);
     ASSERT_TRUE(storage.has_value());
-    ASSERT_TRUE(transport::initialize(*storage));
     stage_remote_object(*storage, root / "remote", remote_hash);
-    const Operation download_with_content{
-        .action = Action::Download,
-        .path = "download.txt",
-        .hash = hash_hex(remote_hash),
-        .size = 6};
+    const Operation download_with_content{.action = Action::Download,
+                                          .path = "download.txt",
+                                          .hash = hash_hex(remote_hash),
+                                          .size = 6};
     const std::array<std::uint8_t, crypto::KEY_SIZE> key{};
-    const auto download_result = mutation::apply_operation(
-        download_with_content,
-        0,
-        local,
-        *storage,
-        key,
-        transaction,
-        *download_progress);
+    const auto download_result =
+        mutation::apply_operation(download_with_content,
+                                  0,
+                                  local,
+                                  *storage,
+                                  key,
+                                  transaction,
+                                  *download_progress);
     const auto delete_result = mutation::apply_operation(
         remove, 1, local, *storage, key, transaction, *delete_progress);
     const auto rename_result = mutation::apply_operation(
         rename, 2, local, *storage, key, transaction, *rename_progress);
-    const auto directory_result = mutation::apply_operation(
-        remove_directory,
-        3,
-        local,
-        *storage,
-        key,
-        transaction,
-        *directory_progress);
+    const auto directory_result =
+        mutation::apply_operation(remove_directory,
+                                  3,
+                                  local,
+                                  *storage,
+                                  key,
+                                  transaction,
+                                  *directory_progress);
 
     for (const auto* result : {&download_result,
                                &delete_result,
@@ -2154,8 +1914,7 @@ TEST(LocalMutationContractTest, ExistingDestructiveMutationsRemainAvailable) {
     EXPECT_FALSE(std::filesystem::exists(local / "empty"));
 }
 
-TEST(LocalMutationContractTest,
-     RollbackRestoresExpectedFileAndRetainsBackup) {
+TEST(LocalMutationContractTest, RollbackRestoresExpectedFileAndRetainsBackup) {
     auto workspace = test::make_temp_workspace("linux-rollback-restores");
     const auto root = test::workspace_root(workspace);
     const auto local = root / "local";
@@ -2165,24 +1924,21 @@ TEST(LocalMutationContractTest,
     const auto target = local / "file.txt";
     test::write_text(target, "ORIGINAL");
 
-    const Operation operation{
-        .action = Action::Download,
-        .path = "file.txt",
-        .hash = hash_hex(hasher::hash_string("REMOTE")),
-        .size = 6};
-    const auto prepared = mutation::prepare_operation(
-        operation, 0, local, transaction, {.backup_slot = 0});
+    const Operation operation{.action = Action::Download,
+                              .path = "file.txt",
+                              .hash = hash_hex(hasher::hash_string("REMOTE")),
+                              .size = 6};
+    const auto prepared = prepare_slot0(operation, local, transaction);
     ASSERT_TRUE(prepared.has_value());
     test::write_text(target, "REMOTE");
     auto applied = *prepared;
     applied.state = transaction::OperationState::Applied;
 
-    const auto rolled = mutation::rollback_operation(
-        operation, 0, local, transaction, applied);
+    const auto rolled =
+        mutation::rollback_operation(operation, 0, local, transaction, applied);
     ASSERT_TRUE(rolled.has_value()) << rolled.error().detail;
     EXPECT_EQ(test::read_text(target), "ORIGINAL");
     EXPECT_EQ(test::read_text(transaction.root / "0.backup"), "ORIGINAL");
 }
-
 
 #endif

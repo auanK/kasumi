@@ -3,21 +3,34 @@
 #include "platform/durability.hpp"
 #include "platform/private_storage.hpp"
 
-#include <cstdlib>
+#include <algorithm>
+#include <array>
 #include <cstring>
-#include <fstream>
-#include <limits>
 #include <monocypher.h>
+#include <string_view>
 
 namespace kasumi::runtime::vault {
 
-constexpr const char* MAGIC = "KASUMI_EDGE_SYNC_V1_MASK";
+namespace {
+
+template <typename T> struct WipeGuard {
+    T& value;
+    bool* skip = nullptr;
+    ~WipeGuard() noexcept {
+        if (skip == nullptr || !*skip) {
+            crypto_wipe(value.data(), value.size());
+        }
+    }
+};
+
+} // namespace
+
+constexpr std::string_view MAGIC = "KASUMI_EDGE_SYNC_V1_MASK";
 
 std::expected<KeyBytes, runtime::Error> decode_hex(std::string_view text) {
     if (text.size() != KEY_SIZE * 2) {
-        return std::unexpected(Error{
-            .code = ErrorCode::KeyInvalid,
-            .detail = "KASUMI_MASTER_KEY must be 64 hexadecimal characters"});
+        return fail(ErrorCode::KeyInvalid,
+                    "KASUMI_MASTER_KEY must be 64 hexadecimal characters");
     }
     const auto digit = [](char value) -> int {
         if (value >= '0' && value <= '9')
@@ -29,34 +42,33 @@ std::expected<KeyBytes, runtime::Error> decode_hex(std::string_view text) {
         return -1;
     };
     KeyBytes key{};
+    bool success = false;
+    WipeGuard guard{key, &success};
     for (std::size_t index = 0; index < key.size(); ++index) {
         const int high = digit(text[index * 2]);
         const int low = digit(text[index * 2 + 1]);
         if (high < 0 || low < 0) {
-            return std::unexpected(Error{
-                .code = ErrorCode::KeyInvalid,
-                .detail =
-                    "KASUMI_MASTER_KEY contains non-hexadecimal character"});
+            return fail(ErrorCode::KeyInvalid,
+                        "KASUMI_MASTER_KEY contains non-hexadecimal character");
         }
         key[index] = static_cast<uint8_t>((high << 4) | low);
     }
+    success = true;
     return key;
 }
 
 void obscure(std::span<std::uint8_t, KEY_SIZE> key) {
-    size_t magic_len = std::strlen(MAGIC);
-    for (size_t i = 0; i < KEY_SIZE; ++i) {
-        key[i] ^= static_cast<uint8_t>(MAGIC[i % magic_len]);
+    for (std::size_t i = 0; i < KEY_SIZE; ++i) {
+        key[i] ^= static_cast<uint8_t>(MAGIC[i % MAGIC.size()]);
     }
 }
 
 std::expected<KeyBytes, runtime::Error>
 read_impl(const std::filesystem::path& path, bool protect) {
     if (protect) {
-        auto secured = platform::private_storage::protect_file(path);
-        if (!secured) {
-            return std::unexpected(Error{.code = ErrorCode::KeyNotFound,
-                                         .detail = secured.error()});
+        if (auto secured = platform::private_storage::protect_file(path);
+            !secured) {
+            return fail(ErrorCode::KeyNotFound, secured.error());
         }
     } else {
         std::error_code filesystem_error;
@@ -66,25 +78,40 @@ read_impl(const std::filesystem::path& path, bool protect) {
             status.type() == std::filesystem::file_type::not_found ||
             std::filesystem::is_symlink(status) ||
             !std::filesystem::is_regular_file(status)) {
-            return std::unexpected(
-                Error{.code = ErrorCode::KeyNotFound,
-                      .detail = "key.bin file is missing or invalid"});
+            return fail(ErrorCode::KeyNotFound,
+                        "key.bin file is missing or invalid");
         }
     }
-    std::ifstream input(path, std::ios::binary);
     KeyBytes key{};
-    if (!input.read(reinterpret_cast<char*>(key.data()),
-                    static_cast<std::streamsize>(key.size()))) {
-        return std::unexpected(
-            Error{.code = ErrorCode::KeyNotFound,
-                  .detail = "key.bin file is missing or corrupted"});
+    bool success = false;
+    WipeGuard key_guard{key, &success};
+    std::array<std::uint8_t, KEY_SIZE + 1> buf{};
+    WipeGuard buf_guard{buf};
+    std::size_t total = 0;
+
+    auto streamed = platform::private_storage::stream_regular_file(
+        path, buf, [&](std::span<const std::uint8_t> chunk) -> bool {
+            const std::size_t copy = std::min(chunk.size(), key.size() - total);
+            if (copy > 0) {
+                std::memcpy(key.data() + total, chunk.data(), copy);
+            }
+            total += chunk.size();
+            return total <= key.size();
+        });
+    if (!streamed) {
+        if (streamed.error().kind ==
+            platform::private_storage::StreamErrorKind::Aborted) {
+            return fail(ErrorCode::KeyInvalid, "key.bin file has invalid size");
+        }
+        return fail(ErrorCode::KeyNotFound,
+                    "key.bin file is missing or corrupted");
     }
-    if (input.peek() != std::ifstream::traits_type::eof()) {
-        return std::unexpected(
-            Error{.code = ErrorCode::KeyInvalid,
-                  .detail = "key.bin file has invalid size"});
+    if (total != key.size()) {
+        return fail(ErrorCode::KeyNotFound,
+                    "key.bin file is missing or corrupted");
     }
     obscure(key);
+    success = true;
     return key;
 }
 
@@ -98,23 +125,35 @@ read_only(const std::filesystem::path& path) {
     return read_impl(path, false);
 }
 
-std::expected<void, runtime::Error> write(const std::filesystem::path& path,
-                                          const KeyBytes& clear_key) {
-    auto parent =
-        platform::private_storage::ensure_directory(path.parent_path());
-    if (!parent) {
-        return std::unexpected(
-            Error{.code = ErrorCode::IoFailure, .detail = parent.error()});
+namespace {
+
+std::expected<KeyBytes, Error>
+prepare_write_key(const std::filesystem::path& path,
+                  const KeyBytes& clear_key) {
+    if (auto parent =
+            platform::private_storage::ensure_directory(path.parent_path());
+        !parent) {
+        return fail(ErrorCode::IoFailure, parent.error());
     }
     KeyBytes stored = clear_key;
     obscure(stored);
-    const std::string_view bytes{reinterpret_cast<const char*>(stored.data()),
-                                 stored.size()};
-    auto saved = platform::private_storage::write_atomically(path, bytes);
-    crypto_wipe(stored.data(), stored.size());
-    if (!saved) {
-        return std::unexpected(
-            Error{.code = ErrorCode::KeyWriteFailure, .detail = saved.error()});
+    return stored;
+}
+
+} // namespace
+
+std::expected<void, runtime::Error> write(const std::filesystem::path& path,
+                                          const KeyBytes& clear_key) {
+    auto stored = prepare_write_key(path, clear_key);
+    if (!stored) {
+        return std::unexpected(stored.error());
+    }
+    WipeGuard guard{*stored};
+    const std::string_view bytes{reinterpret_cast<const char*>(stored->data()),
+                                 stored->size()};
+    if (auto saved = platform::private_storage::write_atomically(path, bytes);
+        !saved) {
+        return fail(ErrorCode::KeyWriteFailure, saved.error());
     }
     return {};
 }
@@ -124,39 +163,29 @@ write_new(const std::filesystem::path& path,
           const KeyBytes& clear_key,
           platform::private_storage::FileIdentity& identity) {
     identity = {};
-    auto parent =
-        platform::private_storage::ensure_directory(path.parent_path());
-    if (!parent) {
-        return std::unexpected(
-            Error{.code = ErrorCode::IoFailure, .detail = parent.error()});
+    auto stored = prepare_write_key(path, clear_key);
+    if (!stored) {
+        return std::unexpected(stored.error());
     }
+    WipeGuard guard{*stored};
     auto file = platform::private_storage::create_private_file(path);
     if (!file) {
-        return std::unexpected(Error{
-            .code = ErrorCode::KeyWriteFailure,
-            .detail = file.error().message,
-        });
+        return fail(ErrorCode::KeyWriteFailure, file.error().message);
     }
     identity = file->identity;
-    KeyBytes stored = clear_key;
-    obscure(stored);
-    const auto written = platform::private_storage::write_private_file(
-        *file, stored.data(), stored.size());
-    crypto_wipe(stored.data(), stored.size());
-    if (!written) {
-        return std::unexpected(Error{.code = ErrorCode::KeyWriteFailure,
-                                     .detail = written.error()});
+    if (auto written = platform::private_storage::write_private_file(
+            *file, stored->data(), stored->size());
+        !written) {
+        return fail(ErrorCode::KeyWriteFailure, written.error());
     }
-    auto flushed =
-        platform::private_storage::flush_and_close_private_file(*file);
-    if (!flushed) {
-        return std::unexpected(
-            Error{.code = ErrorCode::KeyWriteFailure, .detail = flushed.error()});
+    if (auto flushed =
+            platform::private_storage::flush_and_close_private_file(*file);
+        !flushed) {
+        return fail(ErrorCode::KeyWriteFailure, flushed.error());
     }
-    auto synced = platform::durability::sync_parent_directory(path);
-    if (!synced) {
-        return std::unexpected(
-            Error{.code = ErrorCode::KeyWriteFailure, .detail = synced.error()});
+    if (auto synced = platform::durability::sync_parent_directory(path);
+        !synced) {
+        return fail(ErrorCode::KeyWriteFailure, synced.error());
     }
     return {};
 }

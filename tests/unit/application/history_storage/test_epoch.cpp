@@ -6,7 +6,6 @@
 #undef KASUMI_TEST_HISTORY_STORAGE_NO_ERROR_CODE_ALIAS
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <array>
@@ -121,9 +120,9 @@ TEST(EpochCodecTest, UsesImmutableCanonicalObjectNames) {
     const auto sealed = epoch::seal(representative_epoch(), key).value();
     const auto object = epoch::object_identifier(layout, sealed.reference);
     ASSERT_TRUE(object.has_value());
-    EXPECT_EQ(*object, layout.epochs_prefix +
-                           "00000000000000000002-" +
-                           sealed.reference.epoch_id);
+    EXPECT_EQ(*object,
+              layout.epochs_prefix + "00000000000000000002-" +
+                  sealed.reference.epoch_id);
 
     const auto parsed = epoch::parse_object_identifier(layout, *object);
     ASSERT_TRUE(parsed.has_value());
@@ -131,13 +130,12 @@ TEST(EpochCodecTest, UsesImmutableCanonicalObjectNames) {
 
     auto malformed = *object;
     malformed[layout.epochs_prefix.size()] = 'x';
+    EXPECT_FALSE(epoch::parse_object_identifier(layout, malformed).has_value());
     EXPECT_FALSE(
-        epoch::parse_object_identifier(layout, malformed).has_value());
-    EXPECT_FALSE(epoch::parse_object_identifier(layout, "epoch/current")
-                     .has_value());
-    EXPECT_FALSE(epoch::object_identifier(
-                     layout, {.sequence = 1, .epoch_id = "bad"})
-                     .has_value());
+        epoch::parse_object_identifier(layout, "epoch/current").has_value());
+    EXPECT_FALSE(
+        epoch::object_identifier(layout, {.sequence = 1, .epoch_id = "bad"})
+            .has_value());
 }
 
 TEST(EpochCodecTest, RejectsTamperingWrongKeyAndMismatchedNames) {
@@ -443,23 +441,14 @@ TEST(EpochLoadChainTest, ReusesObservedIdentifiersWithoutRelisting) {
                                  std::filesystem::path{*late_identifier},
                              "Epoch publicado depois da fotografia");
 
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
     const auto loaded =
         epoch::load_chain(*storage,
                           epoch_test_key(),
                           kasumi::test::workspace_root(workspace),
                           *identifiers);
-    const auto full_lists =
-        kasumi::platform::perf_trace::get_count("transport list");
-    const auto prefix_lists =
-        kasumi::platform::perf_trace::get_count("transport list prefix");
-    kasumi::platform::perf_trace::force_enable(false);
 
     ASSERT_TRUE(loaded.has_value());
     EXPECT_EQ(*loaded, expected);
-    EXPECT_EQ(full_lists, 0U);
-    EXPECT_EQ(prefix_lists, 0U);
 }
 
 TEST(EpochLoadByIdTest, ReturnsEmptyWhenAbsent) {

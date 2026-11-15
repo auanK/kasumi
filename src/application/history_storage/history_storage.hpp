@@ -14,7 +14,6 @@
 #include <optional>
 #include <span>
 #include <string>
-#include <tuple>
 #include <vector>
 
 namespace kasumi::application::history_storage {
@@ -27,21 +26,12 @@ struct HeadReference {
     std::string commit_id;
     // BLAKE3 of the encrypted object.
     std::string ciphertext_id;
+
+    friend bool operator==(const HeadReference&,
+                           const HeadReference&) noexcept = default;
+    friend auto operator<=>(const HeadReference&,
+                            const HeadReference&) noexcept = default;
 };
-
-// Compares the two identifiers.
-inline bool operator==(const HeadReference& left,
-                       const HeadReference& right) noexcept {
-    return std::tie(left.commit_id, left.ciphertext_id) ==
-           std::tie(right.commit_id, right.ciphertext_id);
-}
-
-// Orders by commit, then by encrypted variant.
-inline std::strong_ordering operator<=>(const HeadReference& left,
-                                        const HeadReference& right) noexcept {
-    return std::tie(left.commit_id, left.ciphertext_id) <=>
-           std::tie(right.commit_id, right.ciphertext_id);
-}
 
 // Validates both hexadecimal identifiers.
 bool valid(const HeadReference& reference) noexcept;

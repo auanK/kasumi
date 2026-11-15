@@ -51,6 +51,15 @@ std::expected<Hash, std::string> hash_from_hex(std::string_view text) {
     return result;
 }
 
+bool is_lowercase_hex(std::string_view text) noexcept {
+    for (const char c : text) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 namespace hasher {
 
 Hash hash_bytes(const void* data, std::size_t size) {

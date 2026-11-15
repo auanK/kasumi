@@ -32,10 +32,12 @@ struct FileMetadataError {
 // Formats error code as human-readable string.
 const char* describe_metadata_error(FileMetadataErrorCode code) noexcept;
 
-// Pure conversion functions for native timestamp formats to canonical Unix nanoseconds UTC.
-// Returns std::nullopt on overflow, underflow, or invalid subsecond fraction.
+// Pure conversion functions for native timestamp formats to canonical Unix
+// nanoseconds UTC. Returns std::nullopt on overflow, underflow, or invalid
+// subsecond fraction.
 std::optional<std::int64_t>
-posix_timespec_to_unix_nanoseconds(std::int64_t sec, std::int64_t nsec) noexcept;
+posix_timespec_to_unix_nanoseconds(std::int64_t sec,
+                                   std::int64_t nsec) noexcept;
 
 std::optional<std::int64_t>
 windows_filetime_to_unix_nanoseconds(std::uint64_t filetime_ticks) noexcept;
@@ -43,10 +45,12 @@ windows_filetime_to_unix_nanoseconds(std::uint64_t filetime_ticks) noexcept;
 // Queries native filesystem metadata for a file.
 //
 // Semantics:
-// - Valid regular file with complete, supported attributes: returns valid FileMetadata (is_valid = true).
+// - Valid regular file with complete, supported attributes: returns valid
+// FileMetadata (is_valid = true).
 // - Ineligible for hash cache (directory, symlink/reparse point, special file,
 //   unsupported file ID, or invalid timestamp): returns std::nullopt.
-// - Real filesystem error (file not found, access denied, I/O error): returns std::unexpected(FileMetadataError).
+// - Real filesystem error (file not found, access denied, I/O error): returns
+// std::unexpected(FileMetadataError).
 //
 // Lifetime contract:
 // The `logical_path` view must outlive the returned `FileMetadata`.
@@ -66,4 +70,3 @@ using cache::windows_filetime_to_unix_nanoseconds;
 } // namespace kasumi::application::observation
 
 #endif
-

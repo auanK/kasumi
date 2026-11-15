@@ -2,11 +2,9 @@
 
 #include "detail.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <cctype>
-#include <fstream>
 #include <unordered_set>
 #include <utility>
 #include <variant>
@@ -15,9 +13,7 @@ namespace kasumi::transport {
 
 namespace {
 
-Error make_error(ErrorCode code, std::string message) {
-    return Error{.code = code, .message = std::move(message), .native_code = 0};
-}
+using detail::make_error;
 
 bool forbidden_character(char character) noexcept {
     const auto byte = static_cast<unsigned char>(character);
@@ -86,34 +82,14 @@ std::expected<void, Error> validate_location_text(std::string_view location) {
 }
 
 Error invalid_transport_error() {
-    return Error{
-        .code = ErrorCode::InvalidContext,
-        .message = "incomplete transport operations table",
-        .native_code = 0,
-    };
+    return make_error(ErrorCode::InvalidContext,
+                      "incomplete transport operations table");
 }
 
 bool valid_storage_operations(const StorageOperations& operations) noexcept {
     return operations.initialize != nullptr && operations.put != nullptr &&
            operations.get != nullptr && operations.presence != nullptr &&
            operations.list != nullptr && operations.remove != nullptr;
-}
-
-bool valid_list_prefix(std::string_view prefix) noexcept {
-    if (prefix.empty() || prefix.find('\\') != std::string_view::npos) {
-        return false;
-    }
-    const auto path = platform::path::from_utf8(prefix);
-    if (path.is_absolute() || path.has_root_name() ||
-        path.has_root_directory()) {
-        return false;
-    }
-    for (const auto& component : path) {
-        if (component == "." || component == "..") {
-            return false;
-        }
-    }
-    return path.lexically_normal() == path;
 }
 
 using BackendConfiguration =
@@ -174,72 +150,23 @@ std::expected<Transport, Error> accept_backend_transport(Transport transport) {
     return transport;
 }
 
-bool valid_batch_identifier(std::string_view identifier) noexcept {
-    if (identifier.empty() || identifier.find('\\') != std::string_view::npos) {
-        return false;
-    }
-    const auto path = platform::path::from_utf8(identifier);
-    if (path.is_absolute() || path.has_root_name() ||
-        path.has_root_directory()) {
-        return false;
-    }
-    for (const auto& component : path) {
-        if (component == "." || component == "..") {
-            return false;
+template <typename Range, typename Proj>
+std::expected<std::unordered_set<std::string>, Error>
+validate_unique_identifiers(const Range& items,
+                            Proj proj,
+                            std::string_view error_message,
+                            bool check_forbidden = false) {
+    std::unordered_set<std::string> seen;
+    for (const auto& item : items) {
+        const auto& id = proj(item);
+        if (!detail::valid_relative_identifier(id, true) ||
+            (check_forbidden && std::ranges::any_of(id, forbidden_character)) ||
+            !seen.insert(std::string{id}).second) {
+            return std::unexpected(make_error(ErrorCode::InvalidIdentifier,
+                                              std::string{error_message}));
         }
     }
-    return path.lexically_normal() == path;
-}
-
-bool valid_object_identifier(std::string_view identifier) {
-    if (identifier.empty() || identifier.find('\\') != std::string_view::npos) {
-        return false;
-    }
-    const auto path = platform::path::from_utf8(identifier);
-    if (path.empty() || path.is_absolute() || path.has_root_name() ||
-        path.has_root_directory()) {
-        return false;
-    }
-    for (const auto& component : path) {
-        if (component == "." || component == "..") {
-            return false;
-        }
-    }
-    const auto normalized = path.lexically_normal();
-    return !normalized.empty() && normalized != "." &&
-           !normalized.is_absolute() && !normalized.has_root_name() &&
-           !normalized.has_root_directory();
-}
-
-std::expected<void, Error> validate_copy_batch(const CopyBatch& batch) {
-    if (batch.concurrency == 0) {
-        return std::unexpected(
-            make_error(ErrorCode::InvalidContext,
-                       "copy batch concurrency must be positive"));
-    }
-
-    std::unordered_set<std::string> destinations;
-    for (const auto& item : batch.items) {
-        const auto safe = [](std::string_view identifier) {
-            if (!valid_object_identifier(identifier) ||
-                std::any_of(identifier.begin(),
-                            identifier.end(),
-                            forbidden_character)) {
-                return false;
-            }
-            const auto path = platform::path::from_utf8(identifier);
-            return path.lexically_normal() == path;
-        };
-        if (!safe(item.source_identifier) ||
-            !safe(item.destination_identifier) ||
-            item.source_identifier == item.destination_identifier ||
-            !destinations.insert(item.destination_identifier).second) {
-            return std::unexpected(make_error(
-                ErrorCode::InvalidIdentifier,
-                "invalid, identical, or duplicate copy batch identifier"));
-        }
-    }
-    return {};
+    return seen;
 }
 
 std::expected<void, Error> validate_batch(const PutBatch& batch) {
@@ -253,18 +180,16 @@ std::expected<void, Error> validate_batch(const PutBatch& batch) {
                                           "source_root cannot be a symlink"));
     }
 
-    std::unordered_set<std::string> unique_identifiers;
+    const auto unique_identifiers = validate_unique_identifiers(
+        batch.identifiers,
+        [](const std::string& id) -> const std::string& {
+            return id;
+        },
+        "duplicate or invalid identifier in batch");
+    if (!unique_identifiers) {
+        return std::unexpected(unique_identifiers.error());
+    }
     for (const auto& identifier : batch.identifiers) {
-        if (!valid_batch_identifier(identifier)) {
-            return std::unexpected(make_error(ErrorCode::InvalidIdentifier,
-                                              "invalid identifier in batch"));
-        }
-        if (!unique_identifiers.insert(identifier).second) {
-            return std::unexpected(
-                make_error(ErrorCode::InvalidIdentifier,
-                           "duplicate identifiers in batch"));
-        }
-
         auto path = batch.source_root / platform::path::from_utf8(identifier);
         if (std::filesystem::is_symlink(path, error)) {
             return std::unexpected(make_error(
@@ -284,8 +209,9 @@ std::expected<void, Error> validate_batch(const PutBatch& batch) {
             make_error(ErrorCode::Io, "failed to access source_root"));
     }
 
-    const std::filesystem::recursive_directory_iterator end;
-    for (; iterator != end; iterator.increment(error)) {
+    for (const std::filesystem::recursive_directory_iterator end;
+         iterator != end;
+         iterator.increment(error)) {
         if (error) {
             return std::unexpected(
                 make_error(ErrorCode::Io, "failed to iterate source_root"));
@@ -302,7 +228,7 @@ std::expected<void, Error> validate_batch(const PutBatch& batch) {
                     make_error(ErrorCode::Io,
                                "failed to compute relative path in staging"));
             }
-            if (!unique_identifiers.contains(
+            if (!unique_identifiers->contains(
                     platform::path::to_logical_utf8(relative))) {
                 return std::unexpected(make_error(
                     ErrorCode::InvalidContext,
@@ -311,49 +237,6 @@ std::expected<void, Error> validate_batch(const PutBatch& batch) {
         }
     }
 
-    return {};
-}
-
-std::expected<void, Error>
-validate_put_files_batch(const PutFilesBatch& batch) {
-    if (batch.items.empty()) {
-        return {};
-    }
-    if (batch.concurrency == 0) {
-        return std::unexpected(
-            make_error(ErrorCode::InvalidContext,
-                       "put files batch concurrency must be positive"));
-    }
-
-    std::unordered_set<std::string> destinations;
-    for (const auto& item : batch.items) {
-        if (!valid_batch_identifier(item.destination_identifier) ||
-            !destinations.insert(item.destination_identifier).second) {
-            return std::unexpected(
-                make_error(ErrorCode::InvalidIdentifier,
-                           "invalid or duplicate put files batch destination"));
-        }
-
-        std::error_code error;
-        const auto absolute = std::filesystem::absolute(item.source, error);
-        if (error) {
-            return std::unexpected(
-                make_error(ErrorCode::Io, "failed to resolve batch source"));
-        }
-        const auto status = std::filesystem::symlink_status(absolute, error);
-        if (error || std::filesystem::is_symlink(status) ||
-            !std::filesystem::is_regular_file(status)) {
-            return std::unexpected(make_error(
-                error ? ErrorCode::Io : ErrorCode::ObjectNotFound,
-                "put files batch source must be a regular non-symlink file"));
-        }
-        std::ifstream readable(absolute, std::ios::binary);
-        if (!readable) {
-            return std::unexpected(
-                make_error(ErrorCode::PermissionDenied,
-                           "put files batch source is not readable"));
-        }
-    }
     return {};
 }
 
@@ -366,27 +249,20 @@ std::expected<void, Error> validate_remove_batch(const RemoveBatch& batch) {
             make_error(ErrorCode::InvalidContext,
                        "remove batch concurrency must be positive"));
     }
-
-    std::unordered_set<std::string> identifiers;
-    for (const auto& item : batch.items) {
-        if (!valid_batch_identifier(item.identifier) ||
-            std::any_of(item.identifier.begin(),
-                        item.identifier.end(),
-                        forbidden_character) ||
-            !identifiers.insert(item.identifier).second) {
-            return std::unexpected(
-                make_error(ErrorCode::InvalidIdentifier,
-                           "invalid or duplicate remove batch identifier"));
-        }
-    }
-
-    return {};
+    const auto ids = validate_unique_identifiers(
+        batch.items,
+        [](const RemoveBatchItem& item) -> const std::string& {
+            return item.identifier;
+        },
+        "invalid or duplicate remove batch identifier",
+        true);
+    return ids ? std::expected<void, Error>{} : std::unexpected(ids.error());
 }
 
 std::expected<void, Error> validate_batch(const GetBatch& batch) {
     std::error_code error;
     if (!batch.source_prefix.empty() &&
-        !valid_list_prefix(batch.source_prefix)) {
+        !detail::valid_relative_identifier(batch.source_prefix, true)) {
         return std::unexpected(make_error(ErrorCode::InvalidIdentifier,
                                           "invalid prefix in batch"));
     }
@@ -396,17 +272,13 @@ std::expected<void, Error> validate_batch(const GetBatch& batch) {
             make_error(ErrorCode::InvalidContext,
                        "destination_root is not a valid directory"));
     }
-
-    std::unordered_set<std::string> unique_identifiers;
-    for (const auto& identifier : batch.identifiers) {
-        if (!valid_batch_identifier(identifier) ||
-            !unique_identifiers.insert(identifier).second) {
-            return std::unexpected(
-                make_error(ErrorCode::InvalidIdentifier,
-                           "duplicate or invalid identifier in batch"));
-        }
-    }
-    return {};
+    const auto ids = validate_unique_identifiers(
+        batch.identifiers,
+        [](const std::string& id) -> const std::string& {
+            return id;
+        },
+        "duplicate or invalid identifier in batch");
+    return ids ? std::expected<void, Error>{} : std::unexpected(ids.error());
 }
 
 std::expected<void, Error>
@@ -420,24 +292,21 @@ validate_physical_hash_batch_request(const PhysicalHashBatchRequest& request) {
         return std::unexpected(make_error(ErrorCode::InvalidIdentifier,
                                           "empty batch physical hash request"));
     }
-
-    std::unordered_set<std::string> identifiers;
+    const auto ids = validate_unique_identifiers(
+        request.objects,
+        [](const PhysicalHashExpectation& object) -> const std::string& {
+            return object.identifier;
+        },
+        "invalid or duplicate identifier in physical hash request",
+        true);
+    if (!ids) {
+        return std::unexpected(ids.error());
+    }
     for (const auto& object : request.objects) {
-        if (!valid_batch_identifier(object.identifier) ||
-            object.identifier.find_first_of("\r\n") != std::string_view::npos) {
-            return std::unexpected(
-                make_error(ErrorCode::InvalidIdentifier,
-                           "invalid identifier in physical hash request"));
-        }
         if (object.expected_hash.empty()) {
             return std::unexpected(
                 make_error(ErrorCode::InvalidIdentifier,
                            "empty expected hash in physical hash request"));
-        }
-        if (!identifiers.insert(object.identifier).second) {
-            return std::unexpected(
-                make_error(ErrorCode::InvalidIdentifier,
-                           "duplicate identifiers in physical hash request"));
         }
     }
     return {};
@@ -498,24 +367,49 @@ validate_control_read_batch_request(const ControlReadBatchRequest& request) {
         return std::unexpected(
             make_error(ErrorCode::InvalidContext, "empty control read batch"));
     }
-    std::unordered_set<std::string> prefixes;
-    for (const auto& prefix : request.list_prefixes) {
-        if (!valid_list_prefix(prefix) || !prefixes.insert(prefix).second) {
-            return std::unexpected(
-                make_error(ErrorCode::InvalidIdentifier,
-                           "duplicate or invalid prefix in control batch"));
-        }
+    const auto prefixes = validate_unique_identifiers(
+        request.list_prefixes,
+        [](const std::string& p) -> const std::string& {
+            return p;
+        },
+        "duplicate or invalid prefix in control batch");
+    if (!prefixes) {
+        return std::unexpected(prefixes.error());
     }
-    std::unordered_set<std::string> identifiers;
-    for (const auto& identifier : request.presence_identifiers) {
-        if (!valid_batch_identifier(identifier) ||
-            !identifiers.insert(identifier).second) {
-            return std::unexpected(
-                make_error(ErrorCode::InvalidIdentifier,
-                           "duplicate or invalid identifier in control batch"));
-        }
+    const auto ids = validate_unique_identifiers(
+        request.presence_identifiers,
+        [](const std::string& id) -> const std::string& {
+            return id;
+        },
+        "duplicate or invalid identifier in control batch");
+    return ids ? std::expected<void, Error>{} : std::unexpected(ids.error());
+}
+
+template <typename Fn, typename... Args>
+auto call_required(Transport& transport, Fn fn, Args&&... args)
+    -> decltype(fn(state_pointer(transport), std::forward<Args>(args)...)) {
+    auto* state = state_pointer(transport);
+    if (state == nullptr || fn == nullptr) {
+        return std::unexpected(invalid_transport_error());
     }
-    return {};
+    return fn(state, std::forward<Args>(args)...);
+}
+
+template <typename Fn, typename... Args>
+auto call_optional(Transport& transport,
+                   Fn fn,
+                   std::string_view unsupported_message,
+                   Args&&... args)
+    -> decltype(fn(state_pointer(transport), std::forward<Args>(args)...)) {
+    auto* state = state_pointer(transport);
+    if (state == nullptr) {
+        return std::unexpected(invalid_transport_error());
+    }
+    if (fn == nullptr) {
+        return std::unexpected(make_error(ErrorCode::Unsupported,
+                                          std::string{unsupported_message}));
+    }
+    return fn(state, std::forward<Args>(args)...);
 }
 
 } // namespace
@@ -537,26 +431,16 @@ open_transport(std::string_view location,
         return std::unexpected(configuration.error());
     }
 
-    if (const auto* local =
-            std::get_if<detail::LocalConfiguration>(&*configuration)) {
-        auto transport = detail::open_local_backend(*local);
-        if (!transport) {
-            return std::unexpected(transport.error());
-        }
-        return accept_backend_transport(std::move(*transport));
+    auto transport =
+        std::holds_alternative<detail::LocalConfiguration>(*configuration)
+            ? detail::open_local_backend(
+                  std::get<detail::LocalConfiguration>(*configuration))
+            : detail::open_rclone_backend(
+                  std::get<detail::RcloneConfiguration>(*configuration));
+    if (!transport) {
+        return std::unexpected(transport.error());
     }
-
-    if (const auto* rclone =
-            std::get_if<detail::RcloneConfiguration>(&*configuration)) {
-        auto transport = detail::open_rclone_backend(*rclone);
-        if (!transport) {
-            return std::unexpected(transport.error());
-        }
-        return accept_backend_transport(std::move(*transport));
-    }
-
-    return std::unexpected(
-        make_error(ErrorCode::InvalidContext, "unrecognized backend"));
+    return accept_backend_transport(std::move(*transport));
 }
 
 bool valid(const Transport& transport) noexcept {
@@ -566,212 +450,93 @@ bool valid(const Transport& transport) noexcept {
 }
 
 Result initialize(Transport& transport) {
-    const auto trace = platform::perf_trace::begin();
-    auto* state = state_pointer(transport);
-    if (state == nullptr || transport.storage.initialize == nullptr) {
-        platform::perf_trace::finish("transport initialize", trace);
-        return std::unexpected(invalid_transport_error());
-    }
-    auto result = transport.storage.initialize(state);
-    platform::perf_trace::finish("transport initialize", trace);
-    return result;
+    return call_required(transport, transport.storage.initialize);
 }
 
 Result put(Transport& transport,
            const std::filesystem::path& source,
            std::string_view identifier) {
-    auto* state = state_pointer(transport);
-    if (state == nullptr || transport.storage.put == nullptr) {
-        return std::unexpected(invalid_transport_error());
-    }
-
-    platform::perf_trace::count("transport put");
-    return transport.storage.put(state, source, identifier);
+    return call_required(transport, transport.storage.put, source, identifier);
 }
 
-Result put_batch(Transport& transport, const PutBatch& batch) {
-    auto validation = validate_batch(batch);
-    if (!validation) {
-        return std::unexpected(validation.error());
+template <typename Batch, typename BatchFn, typename SingleFn>
+Result run_transfer_batch(Transport& transport,
+                          const Batch& batch,
+                          BatchFn batch_fn,
+                          SingleFn single_fn) {
+    if (auto v = validate_batch(batch); !v) {
+        return v;
     }
-
     if (batch.identifiers.empty()) {
         return {};
     }
-
     auto* state = state_pointer(transport);
     if (state == nullptr) {
         return std::unexpected(invalid_transport_error());
     }
-
-    if (transport.storage.put_batch != nullptr) {
-        return transport.storage.put_batch(state, batch);
+    if (batch_fn != nullptr) {
+        return batch_fn(state, batch);
     }
-
     for (const auto& identifier : batch.identifiers) {
-        auto result =
-            put(transport,
-                batch.source_root / platform::path::from_utf8(identifier),
-                identifier);
-        if (!result) {
-            return result;
+        if (auto res = single_fn(identifier); !res) {
+            return res;
         }
     }
-
     return {};
 }
 
-Result put_files_batch(Transport& transport, const PutFilesBatch& batch) {
-    auto validation = validate_put_files_batch(batch);
-    if (!validation) {
-        return std::unexpected(validation.error());
-    }
-    if (batch.items.empty()) {
-        return {};
-    }
-
-    auto* state = state_pointer(transport);
-    if (state == nullptr) {
-        return std::unexpected(invalid_transport_error());
-    }
-    if (transport.storage.put_files_batch == nullptr) {
-        return std::unexpected(
-            make_error(ErrorCode::Unsupported,
-                       "transport does not support explicit put files batch"));
-    }
-    return transport.storage.put_files_batch(state, batch);
+Result put_batch(Transport& transport, const PutBatch& batch) {
+    return run_transfer_batch(
+        transport, batch, transport.storage.put_batch, [&](const auto& id) {
+            return put(transport,
+                       batch.source_root / platform::path::from_utf8(id),
+                       id);
+        });
 }
 
 Result get(Transport& transport,
            std::string_view identifier,
            const std::filesystem::path& destination) {
-    auto* state = state_pointer(transport);
-    if (state == nullptr || transport.storage.get == nullptr) {
-        return std::unexpected(invalid_transport_error());
-    }
-
-    platform::perf_trace::count("transport get");
-    return transport.storage.get(state, identifier, destination);
-}
-
-Result copy(Transport& transport,
-            std::string_view source_identifier,
-            std::string_view destination_identifier) {
-    auto* state = state_pointer(transport);
-    if (state == nullptr) {
-        return std::unexpected(invalid_transport_error());
-    }
-    if (!valid_object_identifier(source_identifier) ||
-        !valid_object_identifier(destination_identifier) ||
-        source_identifier == destination_identifier) {
-        return std::unexpected(
-            make_error(ErrorCode::InvalidIdentifier,
-                       "invalid or identical copy identifiers"));
-    }
-    if (transport.storage.copy == nullptr) {
-        return std::unexpected(
-            make_error(ErrorCode::Unsupported,
-                       "transport does not support remote object copy"));
-    }
-    return transport.storage.copy(
-        state, source_identifier, destination_identifier);
-}
-
-Result copy_batch(Transport& transport, const CopyBatch& batch) {
-    if (batch.items.empty()) {
-        return {};
-    }
-    const auto validation = validate_copy_batch(batch);
-    if (!validation) {
-        return std::unexpected(validation.error());
-    }
-    auto* state = state_pointer(transport);
-    if (state == nullptr) {
-        return std::unexpected(invalid_transport_error());
-    }
-    if (transport.storage.copy_batch == nullptr) {
-        return std::unexpected(
-            make_error(ErrorCode::Unsupported,
-                       "transport does not support remote copy batch"));
-    }
-    return transport.storage.copy_batch(state, batch);
+    return call_required(
+        transport, transport.storage.get, identifier, destination);
 }
 
 Result get_batch(Transport& transport, const GetBatch& batch) {
-    auto validation = validate_batch(batch);
-    if (!validation) {
-        return std::unexpected(validation.error());
-    }
-    if (batch.identifiers.empty()) {
-        return {};
-    }
-
-    auto* state = state_pointer(transport);
-    if (state == nullptr) {
-        return std::unexpected(invalid_transport_error());
-    }
-    if (transport.storage.get_batch != nullptr) {
-        return transport.storage.get_batch(state, batch);
-    }
-    for (const auto& identifier : batch.identifiers) {
-        const auto source = batch.source_prefix.empty()
-                                ? identifier
-                                : batch.source_prefix + "/" + identifier;
-        auto result =
-            get(transport,
-                source,
-                batch.destination_root / platform::path::from_utf8(identifier));
-        if (!result) {
-            return result;
-        }
-    }
-    return {};
+    return run_transfer_batch(
+        transport, batch, transport.storage.get_batch, [&](const auto& id) {
+            const auto source = batch.source_prefix.empty()
+                                    ? id
+                                    : batch.source_prefix + "/" + id;
+            return get(transport,
+                       source,
+                       batch.destination_root / platform::path::from_utf8(id));
+        });
 }
 
 PresenceResult presence(Transport& transport, std::string_view identifier) {
-    auto* state = state_pointer(transport);
-    if (state == nullptr || transport.storage.presence == nullptr) {
-        return std::unexpected(invalid_transport_error());
-    }
-
-    platform::perf_trace::count("transport presence");
-    return transport.storage.presence(state, identifier);
+    return call_required(transport, transport.storage.presence, identifier);
 }
 
 ListingResult list(Transport& transport) {
-    auto* state = state_pointer(transport);
-    if (state == nullptr || transport.storage.list == nullptr) {
-        return std::unexpected(invalid_transport_error());
-    }
-
-    platform::perf_trace::count("transport list");
-    return transport.storage.list(state);
+    return call_required(transport, transport.storage.list);
 }
 
 ListingResult list(Transport& transport, std::string_view prefix) {
-    auto* state = state_pointer(transport);
-    if (state == nullptr || transport.storage.list_prefix == nullptr) {
-        return std::unexpected(invalid_transport_error());
-    }
-    if (!valid_list_prefix(prefix)) {
+    if (!detail::valid_relative_identifier(prefix, true)) {
         return std::unexpected(
             make_error(ErrorCode::InvalidIdentifier, "invalid listing prefix"));
     }
-
-    platform::perf_trace::count("transport list prefix");
-    return transport.storage.list_prefix(state, prefix);
+    return call_required(transport, transport.storage.list_prefix, prefix);
 }
 
 std::expected<std::string, Error> physical_hash(Transport& transport,
                                                 std::string_view identifier,
                                                 std::string_view algorithm) {
-    auto* state = state_pointer(transport);
-    if (state == nullptr || transport.storage.physical_hash == nullptr) {
-        return std::unexpected(
-            make_error(ErrorCode::Unsupported,
-                       "transport does not support remote physical hash"));
-    }
-    return transport.storage.physical_hash(state, identifier, algorithm);
+    return call_optional(transport,
+                         transport.storage.physical_hash,
+                         "transport does not support remote physical hash",
+                         identifier,
+                         algorithm);
 }
 
 PhysicalHashBatchResult
@@ -780,24 +545,19 @@ physical_hash_batch(Transport& transport,
     if (!valid(transport)) {
         return std::unexpected(invalid_transport_error());
     }
-    auto validation = validate_physical_hash_batch_request(request);
-    if (!validation) {
-        return std::unexpected(validation.error());
-    }
-    if (transport.storage.physical_hash_batch == nullptr) {
-        return std::unexpected(make_error(
-            ErrorCode::Unsupported,
-            "transport does not support batch remote physical hash"));
+    if (auto v = validate_physical_hash_batch_request(request); !v) {
+        return std::unexpected(v.error());
     }
     auto result =
-        transport.storage.physical_hash_batch(transport.state.get(), request);
+        call_optional(transport,
+                      transport.storage.physical_hash_batch,
+                      "transport does not support batch remote physical hash",
+                      request);
     if (!result) {
         return result;
     }
-    auto report_validation =
-        validate_physical_hash_batch_report(*result, request);
-    if (!report_validation) {
-        return std::unexpected(report_validation.error());
+    if (auto v = validate_physical_hash_batch_report(*result, request); !v) {
+        return std::unexpected(v.error());
     }
     return result;
 }
@@ -816,51 +576,64 @@ control_read_batch(Transport& transport,
     if (!valid(transport)) {
         return std::unexpected(invalid_transport_error());
     }
-    auto validation = validate_control_read_batch_request(request);
-    if (!validation) {
-        return std::unexpected(validation.error());
+    if (auto v = validate_control_read_batch_request(request); !v) {
+        return std::unexpected(v.error());
     }
-    if (transport.storage.control_read_batch == nullptr) {
-        return std::unexpected(
-            make_error(ErrorCode::Unsupported,
-                       "transport does not support control read batch"));
-    }
-    return transport.storage.control_read_batch(transport.state.get(), request);
+    return call_optional(transport,
+                         transport.storage.control_read_batch,
+                         "transport does not support control read batch",
+                         request);
 }
 
 RemovalResult remove(Transport& transport, std::string_view identifier) {
-    auto* state = state_pointer(transport);
-    if (state == nullptr || transport.storage.remove == nullptr) {
-        return std::unexpected(invalid_transport_error());
-    }
-
     // A removal failure is ambiguous: the backend may have applied the effect
     // before reporting an error. Do not probe and reinterpret it as success,
     // because callers must stop on uncertain mutation. Exactly one REMOVE
     // attempt is made and the original error (including native_code) is kept.
-    platform::perf_trace::count("transport remove");
-    return transport.storage.remove(state, identifier);
+    return call_required(transport, transport.storage.remove, identifier);
 }
 
 RemoveBatchResult remove_batch(Transport& transport, const RemoveBatch& batch) {
-    auto validation = validate_remove_batch(batch);
-    if (!validation) {
-        return std::unexpected(validation.error());
+    if (auto v = validate_remove_batch(batch); !v) {
+        return std::unexpected(v.error());
     }
     if (batch.items.empty()) {
         return RemoveBatchReport{};
     }
-
-    auto* state = state_pointer(transport);
-    if (state == nullptr) {
-        return std::unexpected(invalid_transport_error());
-    }
-    if (transport.storage.remove_batch == nullptr) {
-        return std::unexpected(
-            make_error(ErrorCode::Unsupported,
-                       "transport does not support explicit remove batch"));
-    }
-    return transport.storage.remove_batch(state, batch);
+    return call_optional(transport,
+                         transport.storage.remove_batch,
+                         "transport does not support explicit remove batch",
+                         batch);
 }
+
+namespace detail {
+
+bool valid_relative_identifier(std::string_view identifier,
+                               bool require_normal) noexcept {
+    if (identifier.empty() || identifier.find('\\') != std::string_view::npos ||
+        std::any_of(
+            identifier.begin(), identifier.end(), forbidden_character)) {
+        return false;
+    }
+    const auto path = platform::path::from_utf8(identifier);
+    if (path.empty() || path.is_absolute() || path.has_root_name() ||
+        path.has_root_directory()) {
+        return false;
+    }
+    for (const auto& component : path) {
+        if (component == "." || component == "..") {
+            return false;
+        }
+    }
+    const auto normalized = path.lexically_normal();
+    if (require_normal) {
+        return normalized == path;
+    }
+    return !normalized.empty() && normalized != "." &&
+           !normalized.is_absolute() && !normalized.has_root_name() &&
+           !normalized.has_root_directory();
+}
+
+} // namespace detail
 
 } // namespace kasumi::transport

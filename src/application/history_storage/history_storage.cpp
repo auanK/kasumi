@@ -72,14 +72,8 @@ decode_marker(std::span<const std::uint8_t> bytes) {
             error(ErrorCode::InvalidMarker, "marker payload is invalid"));
     }
 
-    Hash commit_hash;
-    Hash ciphertext_hash;
-    for (std::size_t index = 0; index < HASH_SIZE; ++index) {
-        commit_hash[index] = (*commit_bytes)[index];
-        ciphertext_hash[index] = (*ciphertext_bytes)[index];
-    }
-    HeadReference result{.commit_id = hash_hex(commit_hash),
-                         .ciphertext_id = hash_hex(ciphertext_hash)};
+    HeadReference result{.commit_id = hash_hex(*commit_bytes),
+                         .ciphertext_id = hash_hex(*ciphertext_bytes)};
     if (!valid(result)) {
         return std::unexpected(
             error(ErrorCode::InvalidMarker, "marker IDs are invalid"));
@@ -93,7 +87,7 @@ inspect_commit_variants(transport::Transport& storage,
                         std::string_view commit_id,
                         const std::filesystem::path& workspace_root,
                         std::optional<HeadReference> authenticated_variant) {
-    try {
+    return guard_alloc([&]() -> InspectCommitVariantsResult {
         if (!transport::valid(storage) || !valid_hex_id(commit_id) ||
             (authenticated_variant &&
              (!valid(*authenticated_variant) ||
@@ -108,12 +102,12 @@ inspect_commit_variants(transport::Transport& storage,
 
         const auto layout = derive_remote_layout(key);
         const auto prefix = layout.commits_prefix + std::string{commit_id};
-        auto listed = transport::list(storage, prefix);
+        auto listed = list_identifiers(storage, prefix);
         if (!listed) {
-            if (listed.error().code == transport::ErrorCode::StorageNotFound) {
-                return std::vector<PhysicalCommitVariant>{};
-            }
-            return std::unexpected(transport_error(listed.error()));
+            return std::unexpected(listed.error());
+        }
+        if (listed->empty()) {
+            return std::vector<PhysicalCommitVariant>{};
         }
 
         std::vector<HeadReference> references;
@@ -167,10 +161,7 @@ inspect_commit_variants(transport::Transport& storage,
             });
         }
         return result;
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 PublishResult
@@ -178,48 +169,36 @@ publish_commit(transport::Transport& storage,
                std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                const history::Commit& commit,
                const std::filesystem::path& workspace_root) {
-    try {
+    return guard_alloc([&] {
         return publish_impl(storage, key, commit, workspace_root);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 LoadResult load_history(transport::Transport& storage,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                         const std::filesystem::path& workspace_root) {
-    try {
+    return guard_alloc([&] {
         return load_impl(storage, key, workspace_root);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 LoadResult load_history(transport::Transport& storage,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                         const std::filesystem::path& workspace_root,
                         const KnownHistoryFrontier& frontier) {
-    try {
+    return guard_alloc([&] {
         return detail::load_impl(
             storage, key, workspace_root, std::nullopt, &frontier);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 LoadResult load_history(transport::Transport& storage,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                         const std::filesystem::path& workspace_root,
                         std::span<const std::string> identifiers) {
-    try {
+    return guard_alloc([&] {
         return detail::load_impl(storage, key, workspace_root, identifiers);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 LoadResult load_history(transport::Transport& storage,
@@ -227,13 +206,10 @@ LoadResult load_history(transport::Transport& storage,
                         const std::filesystem::path& workspace_root,
                         std::span<const std::string> identifiers,
                         const KnownHistoryFrontier& frontier) {
-    try {
+    return guard_alloc([&] {
         return detail::load_impl(
             storage, key, workspace_root, identifiers, &frontier);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 LoadResult
@@ -242,7 +218,7 @@ load_history_scoped(transport::Transport& storage,
                     const std::filesystem::path& workspace_root,
                     const KnownHistoryFrontier* frontier,
                     std::span<const std::string> trusted_marker_identifiers) {
-    try {
+    return guard_alloc([&] {
         return detail::load_impl(storage,
                                  key,
                                  workspace_root,
@@ -250,10 +226,7 @@ load_history_scoped(transport::Transport& storage,
                                  frontier,
                                  true,
                                  trusted_marker_identifiers);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 } // namespace kasumi::application::history_storage

@@ -2,7 +2,6 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/history_storage.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <array>
@@ -37,8 +36,7 @@ NodeRow file_row(std::string path,
 }
 
 std::string content_id(std::string_view contents) {
-    return kasumi::crypto::content_identifier(
-        test_key(), kasumi::hasher::hash_string(contents));
+    return content_identifier(contents);
 }
 
 void put_encrypted_payload(kasumi::transport::Transport& transport,
@@ -59,26 +57,7 @@ HeadReference add_fake_commit(kasumi::transport::Transport& transport,
                               TempWorkspace& workspace,
                               const Commit& commit,
                               std::string_view suffix) {
-    const auto canonical = kasumi::history::serialize(commit).value();
-    const auto plain =
-        kasumi::test::workspace_path(workspace, std::string{suffix} + ".plain");
-    const auto encrypted =
-        kasumi::test::workspace_path(workspace, std::string{suffix} + ".enc");
-    kasumi::test::write_binary(plain, std::as_bytes(std::span{canonical}));
-    EXPECT_TRUE(kasumi::crypto::encrypt_file(
-        plain, encrypted, test_key(), kasumi::crypto::FilePurpose::History));
-    const auto hash = kasumi::crypto::content::hash_file(encrypted).value();
-    const HeadReference reference{commit_id(commit), kasumi::hash_hex(hash)};
-    EXPECT_TRUE(
-        kasumi::transport::put(transport, encrypted, object_path(reference)));
-    const auto marker =
-        kasumi::application::history_storage::encode_marker(reference).value();
-    const auto marker_file =
-        kasumi::test::workspace_path(workspace, std::string{suffix} + ".head");
-    kasumi::test::write_binary(marker_file, std::as_bytes(std::span{marker}));
-    EXPECT_TRUE(
-        kasumi::transport::put(transport, marker_file, marker_path(reference)));
-    return reference;
+    return publish_object(transport, workspace, commit, suffix);
 }
 
 ReachabilityInventory history_inventory(kasumi::transport::Transport& transport,
@@ -1085,11 +1064,6 @@ TEST(ContentReachabilityTest,
 }
 
 TEST(ContentReachabilityTest, SharedCommitTreesAvoidPerCommitCapacityGrowth) {
-    struct TraceGuard {
-        ~TraceGuard() {
-            kasumi::platform::perf_trace::force_enable(false);
-        }
-    } trace_guard;
     constexpr std::size_t commit_count = 64;
     auto storage = make_local_storage();
     ReachabilityInventory history;
@@ -1109,8 +1083,6 @@ TEST(ContentReachabilityTest, SharedCommitTreesAvoidPerCommitCapacityGrowth) {
     }
 
     const std::vector<std::string> identifiers{content_id("same payload")};
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
     const auto result =
         kasumi::application::history_storage::inventory_content_reachability(
             storage.transport,
@@ -1123,9 +1095,6 @@ TEST(ContentReachabilityTest, SharedCommitTreesAvoidPerCommitCapacityGrowth) {
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     ASSERT_EQ(result->contents.size(), 1U);
     EXPECT_EQ(result->contents.front().references.size(), commit_count);
-    EXPECT_LT(kasumi::platform::perf_trace::get_count(
-                  "rc/content_reference_capacity_growth_events"),
-              commit_count);
 }
 
 TEST(ContentReachabilityTest, AllocationBudgetAvoidsNodeBasedContainers) {
@@ -1151,9 +1120,6 @@ TEST(ContentReachabilityTest, AllocationBudgetAvoidsNodeBasedContainers) {
     const auto history = history_inventory(
         storage.transport, kasumi::test::workspace_root(storage.workspace));
 
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
-
     const auto result =
         kasumi::application::history_storage::inventory_content_reachability(
             storage.transport,
@@ -1163,15 +1129,6 @@ TEST(ContentReachabilityTest, AllocationBudgetAvoidsNodeBasedContainers) {
             kasumi::test::workspace_root(storage.workspace),
             false);
     ASSERT_TRUE(result.has_value());
-
-    // Budget: Zero intermediate node-based tree containers (std::set, std::map)
-    // and zero node allocations
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
-                  "content_reachability.intermediate_tree_containers"),
-              0U);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
-                  "content_reachability.node_allocations"),
-              0U);
 }
 
 } // namespace

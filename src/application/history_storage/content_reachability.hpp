@@ -7,9 +7,9 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
-#include <tuple>
 #include <vector>
 
 namespace kasumi::application::history_storage {
@@ -26,22 +26,12 @@ struct ContentReference {
     std::string commit_id;
     std::string path;
     std::uint64_t size = 0;
+
+    friend bool operator==(const ContentReference&,
+                           const ContentReference&) noexcept = default;
+    friend auto operator<=>(const ContentReference&,
+                            const ContentReference&) noexcept = default;
 };
-
-// Compares commit, path, and size.
-inline bool operator==(const ContentReference& left,
-                       const ContentReference& right) noexcept {
-    return std::tie(left.commit_id, left.path, left.size) ==
-           std::tie(right.commit_id, right.path, right.size);
-}
-
-// Orders by commit, path, and size.
-inline std::strong_ordering
-operator<=>(const ContentReference& left,
-            const ContentReference& right) noexcept {
-    return std::tie(left.commit_id, left.path, left.size) <=>
-           std::tie(right.commit_id, right.path, right.size);
-}
 
 // State and references of a content object.
 struct ContentEntry {
@@ -65,6 +55,23 @@ struct ContentReachabilityInventory {
 // Result of content reachability inventory.
 using ContentReachabilityResult =
     std::expected<ContentReachabilityInventory, Error>;
+
+// Outcome of downloading, decrypting, and verifying a remote content object.
+struct ContentAuditResult {
+    ContentObjectState state = ContentObjectState::Missing;
+    std::string plaintext_hash;
+    std::uint64_t size = 0;
+};
+
+// Downloads, decrypts, and cryptographically verifies a remote content object.
+std::expected<ContentAuditResult, Error>
+audit_content_object(transport::Transport& storage,
+                     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                     std::string_view content_id,
+                     std::optional<std::string_view> expected_plaintext_hash,
+                     std::optional<std::uint64_t> expected_size,
+                     const std::filesystem::path& workspace,
+                     std::size_t sequence);
 
 // Audits referenced and orphan objects without removing them.
 ContentReachabilityResult inventory_content_reachability(

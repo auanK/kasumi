@@ -18,8 +18,7 @@ Repository CI exercises:
 * Clang on Ubuntu (Debug and Release).
 
 This lists workflow coverage, not the result for an arbitrary commit. Consult
-the Actions runs for the exact revision; provider-specific operational checks
-can be run with the procedure in [Provider Certification](provider-certification.md).
+the Actions runs for the exact revision.
 
 ### Windows Long Paths
 
@@ -44,7 +43,7 @@ clang-format --dry-run --Werror @files
 
 ## Embedded Locale Generation
 
-The build generates `generated/cli/i18n_embedded.hpp` from `locales/en.json` and `locales/pt-BR.json` using `scripts/generate_i18n_embedded.py`. The generated header is a build artifact, not a checked-in source file. The generator emits bounded raw C++ string fragments to remain compatible with MSVC limits while preserving source bytes, including line endings. Keep the generated file under the build tree; do not hand-edit it.
+The build generates `generated/cli/i18n_embedded.hpp` from `locales/en.json`, `locales/pt-BR.json`, and `src/cli/i18n.hpp` using `scripts/generate_i18n_embedded.py`. The generated header is a build artifact, not a checked-in source file. The generator emits compile-time `std::string_view` tables indexed directly by `Key`. Keep the generated file under the build tree; do not hand-edit it.
 
 ## CMake Presets
 
@@ -166,15 +165,6 @@ Specific test labels include:
 
 The `kasumi_architecture_dag` test validates internal architectural dependency rules enforced by the dependency DAG checker script.
 
-## Operational Performance Trace
-
-Use [performance tracing](troubleshooting.md#slow-synchronization-or-preview)
-for PowerShell, CMD, and POSIX command examples and interpretation of scanner,
-hash-cache, and remote-observation metrics. `KASUMI_PERF_TRACE=1` writes counters
-and accumulated wall-clock microseconds for instrumented operations to `stderr`.
-Audit-style inspection commands may fetch and validate content objects rather
-than relying only on structural metadata.
-
 ## Rclone System Tests
 
 System tests exercise integration with an active rclone installation:
@@ -186,123 +176,3 @@ ctest --test-dir build-system -L system.rclone --output-on-failure
 ```
 
 Place `rclone` on `PATH` or specify the executable path explicitly using `-DKASUMI_RCLONE_EXECUTABLE=<path-to-rclone>`.
-
-## Operational Benchmarks
-
-Benchmark harnesses are repository tools for measuring operational performance characteristics:
-
-```powershell
-cmake -S . -B build-bench -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DKASUMI_BUILD_BENCHMARKS=ON
-cmake --build build-bench --parallel
-```
-
-Benchmark executables and scripts are located in `tests/operational/`.
-
-### GC performance
-
-Build `kasumi_benchmark_gc` with `KASUMI_BUILD_BENCHMARKS=ON`, then run:
-
-```powershell
-New-Item -ItemType Directory -Force benchmark-results | Out-Null
-python tests/operational/benchmark_gc.py --binary build-bench/tests/kasumi_benchmark_gc.exe --output benchmark-results/gc-local --candidates 0 100 1000 5000 20000 --samples 2
-python tests/unit/operational/test_gc_benchmark.py
-```
-
-The output directory must be new. Each sample creates a fresh, isolated vault,
-random test key and authenticated history with one protected Content object.
-Orphan payloads are encrypted small files; fixture creation, the direct GC call
-on an already-open transport, post-GC FSCK and fixture cleanup have separate
-timings. These are not end-to-end CLI startup/recovery measurements. Tracing is
-enabled only for GC by the executable; `KASUMI_PERF_TRACE=1` enables the same
-instrumentation for normal commands. Peak RSS is the benchmark process only:
-it excludes rclone children, includes fixture memory and is not a GC-only
-allocation measurement.
-
-`results.json` retains each sample, raw metrics, binary SHA-256, and median/min/max
-for successful samples. A missing metric is `null`, never an invented zero.
-Malformed/truncated output, a missing result, process failure, uncertain cleanup
-or timeout stops the campaign without retry. The workspace, private test key,
-owned-object inventory and available diagnostics remain for investigation.
-Successful fixture cleanup removes only known objects; empty directories and
-local evidence may remain. Timings have no fixed pass/fail budget.
-During rclone GC, `GC_PROGRESS` lines expose the existing progress callback in
-the sample's live stderr log. They add no remote observation or ownership check.
-
-For a real rclone backend, obtain explicit permission for a dedicated parent
-outside any existing vault, inspect that exact path read-only, and start small:
-
-```powershell
-rclone lsf "test-remote:disposable-parent" --max-depth 1
-python tests/operational/benchmark_gc.py --binary build-bench/tests/kasumi_benchmark_gc.exe --output benchmark-results/gc-remote-100 --remote-parent "test-remote:disposable-parent" --confirm-disposable-parent --candidates 100 --samples 1
-```
-
-Pass the parent as `remote:path` without a trailing slash. The harness creates a
-random child below it and never writes to the parent directly. If the parent is
-new, `lsf` reports `directory not found`; the preflight still proves the random
-child unused from transport and raw-RC missing-directory evidence before the
-first write creates the prefix.
-`--confirm-disposable-parent` records previously obtained authorization; it does
-not make an existing vault disposable. The harness rejects a remote root,
-placeholders, traversal and any `Programming` path component. It uses the
-existing GC-live preflight to prove a random child unused, checks its empty
-listing, verifies a separate owner marker, and puts the vault below that child.
-No production profile, credentials database or SQLite state is used. Configure
-`RCLONE_CONFIG` separately if needed; do not put credentials in command arguments.
-
-Inspect the 100-object result before scheduling 1,000 or 5,000 objects in another
-new output directory. A 20,000-object remote run additionally requires
-`--confirm-large-remote` after reviewing provider costs and limits. The default
-local candidate list includes 20,000, so always specify remote sizes explicitly.
-Each run performs bounded batches of at most eight candidate DELETEs and may be slow or rate limited.
-The report keeps Kasumi transport/RC metrics separate from unavailable internal
-provider retries (`null`); successful local/rclone-local tests do not certify a
-cloud provider. Never use purge/delete commands or automatic barrier recovery
-to clean an uncertain run. See [GC](architecture/garbage-collection.md#tracing).
-
-The journal E2E campaign uses the real CLI, official Publisher/Receiver profiles,
-physical SQLite databases, and real rclone local/cloud storage. Keep all output
-outside the repository; each run preserves its exclusive namespace and artifacts:
-
-```powershell
-python tests/operational/benchmark_journal_e2e.py --binary build-clang64-release/kasumi.exe --rclone-config C:/private/rclone.conf --output <external-output-directory> --group-commit
-python tests/operational/test_journal_preparation_e2e.py --binary build-clang64-release/kasumi.exe --rclone "C:/Program Files/rclone/rclone.exe" --rclone-config C:/private/rclone.conf --output <external-output-directory>
-```
-
-The preparation regression checks two file counts after verifying all ten real
-syncs. It measures the Started-to-FilesStaged interval, including both durable
-barriers, separately from later completion checkpoints.
-
-For deterministic abrupt-process recovery tests, use a **separate test build**:
-
-```powershell
-cmake -S . -B build-journal-fault -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DKASUMI_BUILD_JOURNAL_FAULT_TESTS=ON
-cmake --build build-journal-fault --target kasumi
-python tests/operational/test_journal_recovery_e2e.py --binary build-journal-fault/kasumi.exe --rclone "C:/Program Files/rclone/rclone.exe" --output <external-output-directory> --expect-grouped
-```
-
-This runner creates its own rclone `type=local` configuration and does not read
-global credentials. Hooks terminate without destructors at observed transaction
-boundaries or inject persistence errors. They are compiled out unless explicitly
-enabled; production and performance builds must keep the option **OFF**.
-
-The [current journal contract](architecture/transaction-journal.md) documents
-authenticated confirmation, retirement, rollback and format incompatibility.
-The process runner preserves journal artifacts and checks repeated recovery;
-these process exits do not simulate physical power loss.
-
-### Remote Inspection Benchmark
-
-The `benchmark_remote_inspection.py` harness measures remote history inspection across multiple phases:
-
-```powershell
-python tests/operational/benchmark_remote_inspection.py `
-  --kasumi build/kasumi.exe `
-  --output build/remote-inspection.json `
-  --commits 64 `
-  --delta 3 `
-  --repetitions 1 `
-  --remote remote:dedicated-folder `
-  --rclone-config C:/path/to/rclone.conf
-```
-
-The harness records `cold`, `warm`, `delta`, `re_warm`, and `corrupted_cache` execution phases. Recorded timings provide comparative evaluation data across configurations, rather than serving as absolute performance limits. Omitting `--remote` and `--rclone-config` causes the benchmark to use a temporary local transport directory.

@@ -11,45 +11,48 @@ namespace {
 constexpr std::size_t HASH_HEX_SIZE = 64;
 constexpr std::size_t SEQUENCE_WIDTH = 20;
 
-bool valid_hex_hash(std::string_view value) noexcept {
-    return value.size() == HASH_HEX_SIZE &&
-           std::ranges::all_of(value, [](char character) {
-               return (character >= '0' && character <= '9') ||
-                      (character >= 'a' && character <= 'f');
-           });
+bool valid_lower_hex(std::string_view value) noexcept {
+    return std::ranges::all_of(value, [](char character) {
+        return (character >= '0' && character <= '9') ||
+               (character >= 'a' && character <= 'f');
+    });
+}
+
+std::optional<HeadReference> parse_head_reference(std::string_view identifier,
+                                                  std::string_view prefix,
+                                                  char separator) {
+    if (!identifier.starts_with(prefix)) {
+        return std::nullopt;
+    }
+    const auto body = identifier.substr(prefix.size());
+    if (body.size() != 129 || body[64] != separator) {
+        return std::nullopt;
+    }
+    HeadReference result{
+        .commit_id = std::string{body.substr(0, 64)},
+        .ciphertext_id = std::string{body.substr(65)},
+    };
+    return valid(result) ? std::optional{std::move(result)} : std::nullopt;
 }
 
 } // namespace
 
 RemoteLayout derive_remote_layout(
     std::span<const std::uint8_t, crypto::KEY_SIZE> master_key) {
-    const auto history_hash =
-        crypto::namespace_identifier(master_key, "history", 8);
-    const auto commits_hash =
-        crypto::namespace_identifier(master_key, "commits", 8);
-    const auto heads_hash =
-        crypto::namespace_identifier(master_key, "heads", 8);
-    const auto epochs_hash =
-        crypto::namespace_identifier(master_key, "epochs", 8);
-    const auto v1_hash = crypto::namespace_identifier(master_key, "v1", 4);
-    const auto gc_hash = crypto::namespace_identifier(master_key, "gc", 8);
-    const auto barrier_hash =
-        crypto::namespace_identifier(master_key, "barrier", 8);
-    const auto writers_hash =
-        crypto::namespace_identifier(master_key, "writers", 8);
-    const auto probes_hash =
-        crypto::namespace_identifier(master_key, "probes", 8);
-
+    auto ns = [&](std::string_view label, std::size_t bytes = 8) {
+        return crypto::namespace_identifier(master_key, label, bytes);
+    };
+    const auto v1_hash = ns("v1", 4);
     RemoteLayout layout;
-    layout.history_prefix = history_hash + "/";
-    layout.commits_prefix = layout.history_prefix + commits_hash + "/";
-    layout.heads_prefix = layout.history_prefix + heads_hash + "/";
+    layout.history_prefix = ns("history") + "/";
+    layout.commits_prefix = layout.history_prefix + ns("commits") + "/";
+    layout.heads_prefix = layout.history_prefix + ns("heads") + "/";
     layout.epochs_prefix =
-        layout.history_prefix + epochs_hash + "/" + v1_hash + "/";
-    layout.gc_prefix = layout.history_prefix + gc_hash + "/" + v1_hash + "/";
-    layout.barrier_identifier = layout.gc_prefix + barrier_hash;
-    layout.writers_prefix = layout.gc_prefix + writers_hash + "/";
-    layout.probes_prefix = layout.gc_prefix + probes_hash + "/";
+        layout.history_prefix + ns("epochs") + "/" + v1_hash + "/";
+    layout.gc_prefix = layout.history_prefix + ns("gc") + "/" + v1_hash + "/";
+    layout.barrier_identifier = layout.gc_prefix + ns("barrier");
+    layout.writers_prefix = layout.gc_prefix + ns("writers") + "/";
+    layout.probes_prefix = layout.gc_prefix + ns("probes") + "/";
     return layout;
 }
 
@@ -61,19 +64,7 @@ std::string marker_object(const RemoteLayout& layout,
 
 std::optional<HeadReference> parse_marker_object(const RemoteLayout& layout,
                                                  std::string_view identifier) {
-    if (!identifier.starts_with(layout.heads_prefix)) {
-        return std::nullopt;
-    }
-    const auto body = identifier.substr(layout.heads_prefix.size());
-    if (body.size() != 129 || body[64] != '-') {
-        return std::nullopt;
-    }
-
-    HeadReference result{
-        .commit_id = std::string{body.substr(0, 64)},
-        .ciphertext_id = std::string{body.substr(65)},
-    };
-    return valid(result) ? std::optional{std::move(result)} : std::nullopt;
+    return parse_head_reference(identifier, layout.heads_prefix, '-');
 }
 
 std::string commit_object(const RemoteLayout& layout,
@@ -84,22 +75,7 @@ std::string commit_object(const RemoteLayout& layout,
 
 std::optional<HeadReference> parse_commit_object(const RemoteLayout& layout,
                                                  std::string_view identifier) {
-    if (!identifier.starts_with(layout.commits_prefix)) {
-        return std::nullopt;
-    }
-    const auto body = identifier.substr(layout.commits_prefix.size());
-    const auto separator = body.find('/');
-    if (separator != 64 ||
-        body.find('/', separator + 1) != std::string_view::npos ||
-        body.size() != 129) {
-        return std::nullopt;
-    }
-
-    HeadReference result{
-        .commit_id = std::string{body.substr(0, separator)},
-        .ciphertext_id = std::string{body.substr(separator + 1)},
-    };
-    return valid(result) ? std::optional{std::move(result)} : std::nullopt;
+    return parse_head_reference(identifier, layout.commits_prefix, '/');
 }
 
 std::string epoch_object(const RemoteLayout& layout,
@@ -165,6 +141,10 @@ bool is_history_object(const RemoteLayout& layout,
     return identifier.starts_with(layout.history_prefix);
 }
 
+bool valid_hex_hash(std::string_view value) noexcept {
+    return value.size() == HASH_HEX_SIZE && valid_lower_hex(value);
+}
+
 bool valid_writer_identifier(std::string_view identifier) noexcept {
     constexpr std::array<std::size_t, 5> component_sizes{8, 8, 4, 8, 32};
     std::size_t offset = 0;
@@ -172,10 +152,7 @@ bool valid_writer_identifier(std::string_view identifier) noexcept {
         const auto component =
             identifier.substr(offset, component_sizes[index]);
         if (component.size() != component_sizes[index] ||
-            !std::ranges::all_of(component, [](char character) {
-                return (character >= '0' && character <= '9') ||
-                       (character >= 'a' && character <= 'f');
-            })) {
+            !valid_lower_hex(component)) {
             return false;
         }
         offset += component_sizes[index];
@@ -195,10 +172,7 @@ bool valid_writer_identifier(const RemoteLayout& layout,
         return false;
     }
     const auto token = identifier.substr(layout.writers_prefix.size());
-    return token.size() == 32 && std::ranges::all_of(token, [](char character) {
-               return (character >= '0' && character <= '9') ||
-                      (character >= 'a' && character <= 'f');
-           });
+    return token.size() == 32 && valid_lower_hex(token);
 }
 
 } // namespace kasumi::application::history_storage

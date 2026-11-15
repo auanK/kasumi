@@ -1,22 +1,22 @@
 #include "application/integrity/maintenance.hpp"
 
+#include "application/concurrency.hpp"
+#include "application/detail.hpp"
 #include "application/history_storage/content_reachability.hpp"
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/remote_layout.hpp"
-#include "application/integrity/fsck_checkpoint.hpp"
 #include "application/integrity/maintenance_test.hpp"
 #include "application/observation/state.hpp"
 #include "core/maintenance.hpp"
 #include "crypto/content.hpp"
-#include "crypto/physical_hash.hpp"
 #include "platform/cancellation.hpp"
 #include "platform/clock.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/workspace.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <exception>
 #include <filesystem>
@@ -38,21 +38,6 @@ namespace {
 
 using KeySpan = std::span<const std::uint8_t, crypto::KEY_SIZE>;
 
-struct TraceGuard {
-    std::string_view name;
-    platform::perf_trace::Token token;
-    bool active = true;
-    void stop() noexcept {
-        if (active) {
-            platform::perf_trace::finish(name, token);
-            active = false;
-        }
-    }
-    ~TraceGuard() noexcept {
-        stop();
-    }
-};
-
 enum class AuditState {
     Healthy,
     Missing,
@@ -67,19 +52,6 @@ Error make_error(ErrorCode code,
         .detail = std::move(detail),
         .object_identifier = std::move(object),
     };
-}
-
-Error transport_error(const transport::Error& error,
-                      std::string identifier = {}) {
-    return make_error(ErrorCode::TransportFailure,
-                      transport::describe(error),
-                      identifier.empty()
-                          ? std::nullopt
-                          : std::optional<std::string>{std::move(identifier)});
-}
-
-bool not_found(const std::error_code& error) noexcept {
-    return error == std::errc::no_such_file_or_directory;
 }
 
 std::vector<std::string>
@@ -119,135 +91,23 @@ std::string list_detail(std::string_view prefix,
 }
 
 std::string path_detail(const std::vector<std::filesystem::path>& paths) {
-    constexpr std::size_t limit = 20;
-    const auto displayed = std::min(paths.size(), limit);
-    std::string result = "referenced objects missing or corrupted; fsck repair "
-                         "unavailable at this stage (paths: ";
-    for (std::size_t index = 0; index < displayed; ++index) {
-        if (index != 0) {
-            result += ", ";
-        }
-        result += platform::path::to_utf8(paths[index]);
+    std::vector<std::string> utf8_paths;
+    utf8_paths.reserve(paths.size());
+    for (const auto& path : paths) {
+        utf8_paths.push_back(platform::path::to_utf8(path));
     }
-    if (paths.size() > limit) {
-        result += "; and ";
-        result += std::to_string(paths.size() - limit);
-        result += " more";
-    }
-    result += ')';
-    return result;
+    return list_detail("referenced objects missing or corrupted; fsck repair "
+                       "unavailable at this stage (paths: ",
+                       utf8_paths) +
+           ')';
 }
 
-std::filesystem::path
-maintenance_workspace_root(const runtime::RuntimeData& runtime_data) {
-    auto root = runtime_data.database_path.parent_path();
-    std::error_code error;
-    if (root.empty() || !std::filesystem::exists(root, error)) {
-        root = runtime_data.local_dir.parent_path();
-    }
-    return root;
-}
-
-std::expected<void, Error>
-prepare_workspace_file(const std::filesystem::path& path) {
-    std::error_code error;
-    const auto status = std::filesystem::symlink_status(path, error);
-    if (not_found(error) ||
-        status.type() == std::filesystem::file_type::not_found) {
-        return {};
-    }
-    if (error) {
-        return std::unexpected(
-            make_error(ErrorCode::WorkspaceFailure,
-                       "could not inspect temporary file: " + error.message()));
-    }
-    if (std::filesystem::is_symlink(status) ||
-        !std::filesystem::is_regular_file(status)) {
-        return std::unexpected(make_error(ErrorCode::WorkspaceFailure,
-                                          "temporary file has invalid type"));
-    }
-    std::filesystem::remove(path, error);
-    if (error) {
-        return std::unexpected(
-            make_error(ErrorCode::WorkspaceFailure,
-                       "could not clean temporary file: " + error.message()));
-    }
-    return {};
-}
-
-std::expected<void, Error>
-require_regular_file(const std::filesystem::path& path,
-                     ErrorCode failure_code,
-                     std::string detail) {
-    std::error_code error;
-    const auto status = std::filesystem::symlink_status(path, error);
-    if (error) {
-        return std::unexpected(make_error(
-            failure_code, std::move(detail) + ": " + error.message()));
-    }
-    if (status.type() == std::filesystem::file_type::not_found ||
-        std::filesystem::is_symlink(status) ||
-        !std::filesystem::is_regular_file(status)) {
-        return std::unexpected(make_error(failure_code, std::move(detail)));
-    }
-    return {};
-}
-
-std::expected<void, Error>
-remove_temporary_file(const std::filesystem::path& path) {
-    std::error_code error;
-    std::filesystem::remove(path, error);
-    if (error) {
-        return std::unexpected(
-            make_error(ErrorCode::WorkspaceFailure,
-                       "failed to remove temporary file: " + error.message()));
-    }
-    return {};
-}
-
-std::expected<void, Error> verify_content(const std::filesystem::path& path,
-                                          std::string_view identifier,
-                                          std::uint64_t expected_size,
-                                          ErrorCode io_failure) {
-    auto regular = require_regular_file(
-        path, io_failure, "file is not regular for verification");
-    if (!regular) {
-        return regular;
-    }
-    std::error_code error;
-    const auto actual_size = std::filesystem::file_size(path, error);
-    if (error) {
-        return std::unexpected(make_error(
-            io_failure, "could not read file size: " + error.message()));
-    }
-    if (actual_size != expected_size) {
-        return std::unexpected(make_error(
-            ErrorCode::IntegrityFailure, "object size does not match history"));
-    }
-    auto actual_hash = crypto::content::hash_file(path);
-    if (!actual_hash) {
-        return std::unexpected(make_error(io_failure, actual_hash.error()));
-    }
-    if (hash_hex(*actual_hash) != identifier) {
-        return std::unexpected(make_error(
-            ErrorCode::IntegrityFailure, "object hash does not match history"));
-    }
-    return {};
-}
-
-struct AuditObjectResult {
-    AuditState state = AuditState::Healthy;
-    std::string remote_content_id;
-    std::string physical_sha256;
-};
-
-std::expected<AuditObjectResult, Error>
+std::expected<AuditState, Error>
 audit_object(transport::Transport& storage,
              KeySpan key,
              const kasumi::maintenance::ObjectReference& reference,
              const platform::Workspace& workspace,
              std::size_t index) {
-    platform::perf_trace::count("fsck.audit_objects");
     const auto plaintext_hash = hash_from_hex(reference.identifier);
     if (!plaintext_hash) {
         return std::unexpected(make_error(ErrorCode::IntegrityFailure,
@@ -255,236 +115,54 @@ audit_object(transport::Transport& storage,
     }
     const auto remote_identifier =
         crypto::content_identifier(key, *plaintext_hash);
-    const auto encrypted =
-        platform::workspace_file(workspace, index, ".audit.enc");
-    const auto plaintext =
-        platform::workspace_file(workspace, index, ".audit.plain");
-    auto prepared = prepare_workspace_file(encrypted);
-    if (!prepared)
-        return std::unexpected(prepared.error());
-    prepared = prepare_workspace_file(plaintext);
-    if (!prepared)
-        return std::unexpected(prepared.error());
-
-    platform::perf_trace::count("fsck.audit_get_calls");
-    const auto get_token = platform::perf_trace::begin();
-    auto downloaded = transport::get(storage, remote_identifier, encrypted);
-    platform::perf_trace::finish("fsck.audit_get_duration_us", get_token);
-    if (!downloaded) {
-        auto removed = remove_temporary_file(encrypted);
-        if (!removed)
-            return std::unexpected(removed.error());
-        removed = remove_temporary_file(plaintext);
-        if (!removed)
-            return std::unexpected(removed.error());
-        if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
-            return AuditObjectResult{.state = AuditState::Missing};
-        }
+    auto audited = history_storage::audit_content_object(storage,
+                                                         key,
+                                                         remote_identifier,
+                                                         reference.identifier,
+                                                         reference.size,
+                                                         workspace.root,
+                                                         index);
+    if (!audited) {
+        const auto code =
+            audited.error().code == history_storage::ErrorCode::TransportFailure
+                ? ErrorCode::TransportFailure
+                : ErrorCode::WorkspaceFailure;
         return std::unexpected(
-            transport_error(downloaded.error(), reference.identifier));
+            make_error(code,
+                       audited.error().detail,
+                       code == ErrorCode::TransportFailure
+                           ? std::optional<std::string>{reference.identifier}
+                           : std::nullopt));
     }
-
-    std::error_code enc_size_error;
-    const auto enc_size = std::filesystem::file_size(encrypted, enc_size_error);
-    if (!enc_size_error) {
-        platform::perf_trace::count("fsck.encrypted_bytes_downloaded",
-                                    enc_size);
+    if (audited->state == history_storage::ContentObjectState::Missing) {
+        return AuditState::Missing;
     }
-
-    auto regular = require_regular_file(
-        encrypted, ErrorCode::WorkspaceFailure, "invalid temporary download");
-    if (!regular)
-        return std::unexpected(regular.error());
-
-    AuditState result = AuditState::Healthy;
-    platform::perf_trace::count("fsck.audit_decrypt_calls");
-    const auto decrypt_token = platform::perf_trace::begin();
-    const bool decrypted = crypto::decrypt_file(encrypted, plaintext, key);
-    platform::perf_trace::finish("fsck.audit_decrypt_duration_us",
-                                 decrypt_token);
-    if (!decrypted) {
-        result = AuditState::Corrupt;
-    } else {
-        std::error_code plain_size_error;
-        const auto plain_size =
-            std::filesystem::file_size(plaintext, plain_size_error);
-        if (!plain_size_error) {
-            platform::perf_trace::count("fsck.plaintext_bytes_verified",
-                                        plain_size);
-        }
-        platform::perf_trace::count("fsck.audit_verify_calls");
-        const auto verify_token = platform::perf_trace::begin();
-        auto verified = verify_content(plaintext,
-                                       reference.identifier,
-                                       reference.size,
-                                       ErrorCode::WorkspaceFailure);
-        platform::perf_trace::finish("fsck.audit_verify_duration_us",
-                                     verify_token);
-        if (!verified) {
-            if (verified.error().code != ErrorCode::IntegrityFailure) {
-                return std::unexpected(verified.error());
-            }
-            result = AuditState::Corrupt;
-        }
+    if (audited->state == history_storage::ContentObjectState::Corrupt) {
+        return AuditState::Corrupt;
     }
-
-    std::string physical_sha256;
-    if (result == AuditState::Healthy) {
-        auto hash_res = crypto::physical::hash_file(encrypted, "sha256");
-        if (hash_res) {
-            physical_sha256 = std::move(*hash_res);
-        }
-    }
-
-    auto removed = remove_temporary_file(encrypted);
-    if (!removed)
-        return std::unexpected(removed.error());
-    removed = remove_temporary_file(plaintext);
-    if (!removed)
-        return std::unexpected(removed.error());
-    return AuditObjectResult{.state = result,
-                             .remote_content_id = remote_identifier,
-                             .physical_sha256 = std::move(physical_sha256)};
-}
-
-struct AuditWorkResult {
-    enum class Disposition {
-        Completed,
-        HardFailure,
-        AbortedByWindowStop,
-        UserCancelled
-    };
-
-    std::size_t index = 0;
-    Disposition disposition = Disposition::Completed;
-    AuditState state = AuditState::Healthy;
-    std::optional<Error> error;
-    std::string remote_content_id;
-    std::string physical_sha256;
-};
-
-struct AuditWindowState {
-    std::mutex mutex;
-    std::condition_variable_any changed;
-    std::vector<std::optional<std::size_t>> tasks;
-    std::vector<std::optional<AuditWorkResult>> completions;
-    std::size_t in_flight = 0;
-    std::size_t peak_in_flight = 0;
-    bool stop_requested = false;
-};
-
-void run_audit_worker(
-    std::stop_token stop,
-    std::size_t slot,
-    AuditWindowState& state,
-    transport::Transport& storage,
-    KeySpan key,
-    const std::vector<kasumi::maintenance::ObjectReference>& references,
-    const platform::Workspace& workspace,
-    const testing::FsckWorkerEventCallback& on_worker_event) {
-    while (true) {
-        std::size_t index = 0;
-        {
-            std::unique_lock lock(state.mutex);
-            state.changed.wait(lock, [&] {
-                return state.tasks[slot].has_value() || state.stop_requested ||
-                       stop.stop_requested();
-            });
-            if (!state.tasks[slot].has_value()) {
-                return;
-            }
-            index = *state.tasks[slot];
-            state.tasks[slot].reset();
-            ++state.in_flight;
-            state.peak_in_flight =
-                std::max(state.peak_in_flight, state.in_flight);
-        }
-
-        AuditWorkResult result{.index = index};
-        try {
-            if (on_worker_event) {
-                try {
-                    on_worker_event(testing::FsckWorkerEvent::BeforeAudit,
-                                    index);
-                } catch (...) {
-                    // Test observation cannot alter the audit result.
-                }
-            }
-            bool window_stop_requested = false;
-            {
-                std::lock_guard lock(state.mutex);
-                window_stop_requested =
-                    state.stop_requested || stop.stop_requested();
-            }
-            if (platform::cancellation::requested()) {
-                result.disposition =
-                    AuditWorkResult::Disposition::UserCancelled;
-            } else if (window_stop_requested) {
-                result.disposition =
-                    AuditWorkResult::Disposition::AbortedByWindowStop;
-            } else {
-                auto audited = audit_object(
-                    storage, key, references[index], workspace, index);
-                if (!audited) {
-                    result.disposition =
-                        AuditWorkResult::Disposition::HardFailure;
-                    result.error = audited.error();
-                } else {
-                    result.state = audited->state;
-                    result.remote_content_id =
-                        std::move(audited->remote_content_id);
-                    result.physical_sha256 =
-                        std::move(audited->physical_sha256);
-                }
-            }
-        } catch (const std::exception& exception) {
-            result.disposition = AuditWorkResult::Disposition::HardFailure;
-            result.error =
-                make_error(ErrorCode::StateFailure, exception.what());
-        } catch (...) {
-            result.disposition = AuditWorkResult::Disposition::HardFailure;
-            result.error =
-                make_error(ErrorCode::StateFailure, "audit worker failed");
-        }
-
-        {
-            std::lock_guard lock(state.mutex);
-            --state.in_flight;
-            state.completions[slot] = std::move(result);
-        }
-        state.changed.notify_all();
-    }
+    return AuditState::Healthy;
 }
 
 } // namespace
 
 std::string describe(const Error& error) {
-    std::string result;
-    switch (error.code) {
-        case ErrorCode::InvalidInput:
-            result = "invalid_input";
+    static constexpr std::array<std::pair<ErrorCode, std::string_view>, 8>
+        labels{{
+            {ErrorCode::InvalidInput, "invalid_input"},
+            {ErrorCode::StateFailure, "state_failure"},
+            {ErrorCode::WorkspaceFailure, "workspace_failure"},
+            {ErrorCode::TransportFailure, "transport_failure"},
+            {ErrorCode::CryptoFailure, "crypto_failure"},
+            {ErrorCode::IntegrityFailure, "integrity_failure"},
+            {ErrorCode::Unrecoverable, "unrecoverable"},
+            {ErrorCode::ConcurrentChange, "concurrent_change"},
+        }};
+    std::string result{"unknown_error"};
+    for (const auto& [code, label] : labels) {
+        if (code == error.code) {
+            result = label;
             break;
-        case ErrorCode::StateFailure:
-            result = "state_failure";
-            break;
-        case ErrorCode::WorkspaceFailure:
-            result = "workspace_failure";
-            break;
-        case ErrorCode::TransportFailure:
-            result = "transport_failure";
-            break;
-        case ErrorCode::CryptoFailure:
-            result = "crypto_failure";
-            break;
-        case ErrorCode::IntegrityFailure:
-            result = "integrity_failure";
-            break;
-        case ErrorCode::Unrecoverable:
-            result = "unrecoverable";
-            break;
-        case ErrorCode::ConcurrentChange:
-            result = "concurrent_change";
-            break;
+        }
     }
     if (error.object_identifier) {
         result += " no objeto ";
@@ -527,20 +205,15 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
             // Progress is observational and must not alter the audit result.
         }
     };
-    TraceGuard total_guard{"fsck.total_duration_us",
-                           platform::perf_trace::begin()};
     if (runtime_data.local_dir.empty() || !transport::valid(storage)) {
         return std::unexpected(
             make_error(ErrorCode::InvalidInput, "invalid fsck context"));
     }
     report_progress(application::FsckStage::Observing);
-    const auto history_workspace = maintenance_workspace_root(runtime_data);
-    auto observation = [&]() {
-        TraceGuard guard{"fsck.collect_storage_state_duration_us",
-                         platform::perf_trace::begin()};
-        return observation::collect_storage_observation(
-            storage, key, history_workspace, true);
-    }();
+    const auto history_workspace =
+        application::detail::maintenance_workspace_root(runtime_data);
+    auto observation = observation::collect_storage_observation(
+        storage, key, history_workspace, true);
     if (!observation) {
         return std::unexpected(
             make_error(ErrorCode::StateFailure, observation.error()));
@@ -567,21 +240,13 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                        list_detail("unknown physical identifiers: ",
                                    unknown_storage_identifiers)));
     }
-    auto local_tree = [&]() {
-        TraceGuard guard{"fsck.local_tree_duration_us",
-                         platform::perf_trace::begin()};
-        return observation::collect_local_tree(runtime_data.local_dir);
-    }();
+    auto local_tree = observation::collect_local_tree(runtime_data.local_dir);
     if (!local_tree) {
         return std::unexpected(
             make_error(ErrorCode::StateFailure, local_tree.error()));
     }
-    auto inventory = [&]() {
-        TraceGuard guard{"fsck.inventory_analysis_duration_us",
-                         platform::perf_trace::begin()};
-        return analyze_inventory(
-            storage_state.tree, *local_tree, storage_state);
-    }();
+    auto inventory =
+        analyze_inventory(storage_state.tree, *local_tree, storage_state);
     if (!inventory)
         return std::unexpected(inventory.error());
     if (!inventory->unknown_identifiers.empty()) {
@@ -604,16 +269,12 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
         }
     }
 
-    const auto ws_token = platform::perf_trace::begin();
     auto workspace = platform::create_workspace("fsck");
-    platform::perf_trace::finish("fsck.workspace_duration_us", ws_token);
     if (!workspace) {
         return std::unexpected(
             make_error(ErrorCode::WorkspaceFailure, workspace.error()));
     }
     auto result = [&]() -> std::expected<FsckResult, Error> {
-        TraceGuard referenced_guard{"fsck.referenced_audit_duration_us",
-                                    platform::perf_trace::begin()};
         try {
             const auto total_objects = inventory->referenced_objects.size();
             if (on_progress) {
@@ -623,312 +284,188 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                 .checked_objects = total_objects,
             };
 
-            const auto effective_concurrency =
-                std::max<std::size_t>(1, audit_concurrency);
-            const auto worker_count =
-                std::min<std::size_t>(effective_concurrency, total_objects);
-
-            platform::perf_trace::count("fsck.audit_configured_concurrency",
-                                        effective_concurrency);
-            platform::perf_trace::count("fsck.audit_worker_count",
-                                        worker_count);
-
+            const auto worker_count = std::min<std::size_t>(
+                std::max<std::size_t>(1, audit_concurrency), total_objects);
             if (total_objects == 0) {
-                platform::perf_trace::count("fsck.audit_peak_in_flight", 0);
                 report_progress(application::FsckStage::Finalizing);
                 return fsck_result;
             }
 
-            const auto determine_vault_identity =
-                [](const reconciliation::StorageState& state) -> std::string {
-                if (!state.epoch_vault_id.empty()) {
-                    return state.epoch_vault_id;
-                }
-                if (!state.reachable_commit_ids.empty()) {
-                    return "genesis:" + state.reachable_commit_ids.front();
-                }
-                return {};
-            };
-
-            const auto profile_dir = runtime_data.database_path.parent_path();
-            const auto vault_identity = determine_vault_identity(storage_state);
-            std::optional<FsckCheckpoint> loaded_checkpoint;
-            if (!profile_dir.empty() && !vault_identity.empty()) {
-                const auto checkpoint_load_trace =
-                    platform::perf_trace::begin();
-                auto loaded = load_checkpoint(profile_dir, key);
-                platform::perf_trace::finish("fsck.checkpoint_load_wall_us",
-                                             checkpoint_load_trace);
-                if (loaded && loaded->has_value()) {
-                    if ((*loaded)->header.vault_id != vault_identity) {
-                        platform::perf_trace::count(
-                            "fsck.checkpoint_vault_mismatch");
-                        platform::perf_trace::count("fsck.checkpoint_rejected");
-                    } else {
-                        loaded_checkpoint = std::move(*loaded);
-                    }
-                }
-            }
-
-            std::unordered_map<std::string, const VerifiedObjectEntry*>
-                candidate_entries;
-            if (loaded_checkpoint) {
-                for (const auto& entry : loaded_checkpoint->entries) {
-                    candidate_entries[entry.logical_content_hash] = &entry;
-                }
-            }
-
-            for (const auto& ref : inventory->referenced_objects) {
-                const auto p_hash = hash_from_hex(ref.identifier);
-                if (!p_hash) {
-                    continue;
-                }
-                const auto remote_id = crypto::content_identifier(key, *p_hash);
-                auto it = candidate_entries.find(ref.identifier);
-                if (it != candidate_entries.end() &&
-                    it->second->remote_content_id == remote_id &&
-                    it->second->plaintext_size == ref.size) {
-                    platform::perf_trace::count("fsck.resume_candidates");
-                    if (storage.storage.physical_hash != nullptr) {
-                        platform::perf_trace::count(
-                            "fsck.resume_physical_hash_checks");
-                        auto hash_res = storage.storage.physical_hash(
-                            storage.state.get(), remote_id, "sha256");
-                        if (!hash_res) {
-                            if (hash_res.error().code ==
-                                transport::ErrorCode::Unsupported) {
-                                platform::perf_trace::count(
-                                    "fsck.resume_hash_unsupported");
-                            } else {
-                                platform::perf_trace::count(
-                                    "fsck.resume_hash_errors");
-                            }
-                            platform::perf_trace::count(
-                                "fsck.resume_full_audit_fallbacks");
-                        } else if (*hash_res !=
-                                   it->second->physical_ciphertext_sha256) {
-                            platform::perf_trace::count(
-                                "fsck.resume_hash_mismatches");
-                            platform::perf_trace::count(
-                                "fsck.resume_full_audit_fallbacks");
-                        } else {
-                            // Under Threat A (untrusted remote storage),
-                            // unauthenticated provider hash cannot eliminate
-                            // cryptographic verification of bytes. Fail-closed
-                            // fall back to full audit.
-                            platform::perf_trace::count(
-                                "fsck.resume_full_audit_fallbacks");
-                        }
-                    } else {
-                        platform::perf_trace::count(
-                            "fsck.resume_hash_unsupported");
-                        platform::perf_trace::count(
-                            "fsck.resume_full_audit_fallbacks");
-                    }
-                }
-            }
-
-            AuditWindowState state;
-            state.tasks.resize(worker_count);
-            state.completions.resize(worker_count);
-
-            std::vector<std::jthread> workers;
-            workers.reserve(worker_count);
-            for (std::size_t slot = 0; slot < worker_count; ++slot) {
-                workers.emplace_back(run_audit_worker,
-                                     slot,
-                                     std::ref(state),
-                                     std::ref(storage),
-                                     key,
-                                     std::cref(inventory->referenced_objects),
-                                     std::cref(*workspace),
-                                     std::cref(on_worker_event));
-            }
-
-            std::size_t next = 0;
-            std::size_t outstanding = 0;
-            const auto admit = [&](std::size_t slot) {
-                {
-                    std::lock_guard lock(state.mutex);
-                    state.tasks[slot] = next++;
-                    ++outstanding;
-                }
-                state.changed.notify_all();
-            };
-
-            for (std::size_t slot = 0; slot < worker_count; ++slot) {
-                admit(slot);
-            }
-
+            std::mutex state_mutex;
+            std::atomic<bool> stop_requested{false};
+            std::atomic<bool> stop_event_notified{false};
             std::optional<std::pair<std::size_t, Error>> lowest_hard_failure;
             std::vector<std::filesystem::path> unrecoverable;
-            std::map<std::string, VerifiedObjectEntry> verified_map;
-            std::size_t unpersisted_verified = 0;
             bool cancelled = false;
-            bool stop_event_notified = false;
+
             const auto request_window_stop = [&] {
-                {
-                    std::lock_guard lock(state.mutex);
-                    state.stop_requested = true;
-                }
-                state.changed.notify_all();
-                for (auto& worker : workers) {
-                    worker.request_stop();
-                }
-                if (!stop_event_notified) {
-                    stop_event_notified = true;
-                    if (on_worker_event) {
-                        try {
-                            on_worker_event(
-                                testing::FsckWorkerEvent::WindowStopRequested,
-                                0);
-                        } catch (...) {
-                            // Test observation cannot alter the audit result.
-                        }
+                stop_requested.store(true, std::memory_order_release);
+                if (on_worker_event && !stop_event_notified.exchange(true)) {
+                    try {
+                        on_worker_event(
+                            testing::FsckWorkerEvent::WindowStopRequested, 0);
+                    } catch (...) {
+                        // Test observation cannot alter the audit result.
                     }
                 }
             };
-
-            while (outstanding != 0) {
-                std::size_t slot = 0;
-                AuditWorkResult work_result;
+            const auto record_hard_failure = [&](std::size_t index, Error err) {
                 {
-                    std::unique_lock lock(state.mutex);
-                    state.changed.wait(lock, [&] {
-                        return std::ranges::any_of(state.completions,
-                                                   [](const auto& item) {
-                                                       return item.has_value();
-                                                   });
-                    });
-                    auto it = std::ranges::find_if(state.completions,
-                                                   [](const auto& item) {
-                                                       return item.has_value();
-                                                   });
-                    slot = static_cast<std::size_t>(it -
-                                                    state.completions.begin());
-                    work_result = std::move(**it);
-                    it->reset();
-                }
-                --outstanding;
-                platform::perf_trace::count("fsck.audit_completion_count");
-                bool object_classified = false;
-                std::uint64_t classified_size = 0;
-
-                if (platform::cancellation::requested()) {
-                    cancelled = true;
-                    request_window_stop();
-                }
-
-                using Disposition = AuditWorkResult::Disposition;
-                if (work_result.disposition == Disposition::HardFailure) {
-                    if (work_result.error &&
-                        (!lowest_hard_failure ||
-                         work_result.index < lowest_hard_failure->first)) {
-                        lowest_hard_failure = std::pair{
-                            work_result.index, std::move(*work_result.error)};
+                    std::lock_guard lock(state_mutex);
+                    if (!lowest_hard_failure ||
+                        index < lowest_hard_failure->first) {
+                        lowest_hard_failure = std::pair{index, std::move(err)};
                     }
-                    request_window_stop();
-                } else if (work_result.disposition ==
-                           Disposition::UserCancelled) {
-                    cancelled = true;
-                    request_window_stop();
-                } else if (work_result.disposition == Disposition::Completed) {
-                    const auto& reference =
-                        inventory->referenced_objects[work_result.index];
-                    classified_size = reference.size;
-                    if (work_result.state != AuditState::Healthy) {
-                        unrecoverable.insert(unrecoverable.end(),
-                                             reference.referenced_paths.begin(),
-                                             reference.referenced_paths.end());
-                    } else {
-                        verified_map[reference.identifier] =
-                            VerifiedObjectEntry{
-                                .logical_content_hash = reference.identifier,
-                                .remote_content_id =
-                                    std::move(work_result.remote_content_id),
-                                .plaintext_size = reference.size,
-                                .physical_ciphertext_sha256 =
-                                    std::move(work_result.physical_sha256),
-                            };
-                        platform::perf_trace::count(
-                            "fsck.checkpoint_verified_entries_recorded");
-                        ++unpersisted_verified;
+                }
+                request_window_stop();
+            };
 
-                        if (unpersisted_verified >= 64 &&
-                            !profile_dir.empty() && !vault_identity.empty()) {
-                            FsckCheckpoint partial_checkpoint{
-                                .header =
-                                    {
-                                        .format_version =
-                                            checkpoint_format_version_1,
-                                        .audit_semantics_version =
-                                            checkpoint_audit_semantics_version_1,
-                                        .vault_id = vault_identity,
-                                        .entry_count = verified_map.size(),
-                                    },
-                            };
-                            partial_checkpoint.entries.reserve(
-                                verified_map.size());
-                            for (const auto& [_, entry] : verified_map) {
-                                partial_checkpoint.entries.push_back(entry);
+            std::condition_variable progress_cv;
+            std::condition_variable progress_ack_cv;
+            std::vector<std::uint64_t> completed_sizes;
+            std::size_t acked_completions = 0;
+            bool workers_done = false;
+            bool progress_aborted = false;
+
+            const auto run_workers = [&] {
+                application::parallel_for_indexed(
+                    total_objects, worker_count, [&](std::size_t index) {
+                        if (stop_requested.load(std::memory_order_acquire)) {
+                            return;
+                        }
+                        try {
+                            if (on_worker_event) {
+                                try {
+                                    on_worker_event(
+                                        testing::FsckWorkerEvent::BeforeAudit,
+                                        index);
+                                } catch (...) {
+                                }
                             }
-                            (void)save_checkpoint(
-                                profile_dir, partial_checkpoint, key);
-                            unpersisted_verified = 0;
+                            if (platform::cancellation::requested()) {
+                                {
+                                    std::lock_guard lock(state_mutex);
+                                    cancelled = true;
+                                }
+                                request_window_stop();
+                                return;
+                            }
+                            if (stop_requested.load(
+                                    std::memory_order_acquire)) {
+                                return;
+                            }
+                            auto audited = audit_object(
+                                storage,
+                                key,
+                                inventory->referenced_objects[index],
+                                *workspace,
+                                index);
+                            if (!audited) {
+                                record_hard_failure(index,
+                                                    std::move(audited.error()));
+                                return;
+                            }
+                            std::size_t ticket = 0;
+                            {
+                                std::lock_guard lock(state_mutex);
+                                const auto& reference =
+                                    inventory->referenced_objects[index];
+                                if (*audited != AuditState::Healthy) {
+                                    unrecoverable.insert(
+                                        unrecoverable.end(),
+                                        reference.referenced_paths.begin(),
+                                        reference.referenced_paths.end());
+                                }
+                                if (!on_progress) {
+                                    return;
+                                }
+                                completed_sizes.push_back(reference.size);
+                                ticket = completed_sizes.size();
+                            }
+                            progress_cv.notify_one();
+                            std::unique_lock lock(state_mutex);
+                            progress_ack_cv.wait(lock, [&] {
+                                return acked_completions >= ticket ||
+                                       progress_aborted;
+                            });
+                        } catch (const std::exception& exception) {
+                            record_hard_failure(
+                                index,
+                                make_error(ErrorCode::StateFailure,
+                                           exception.what()));
+                        } catch (...) {
+                            record_hard_failure(
+                                index,
+                                make_error(ErrorCode::StateFailure,
+                                           "audit worker failed"));
                         }
-                    }
-                    object_classified = true;
-                }
+                    });
+            };
 
-                if (!state.stop_requested && !cancelled &&
-                    !lowest_hard_failure && next < total_objects) {
-                    if (platform::cancellation::requested()) {
-                        cancelled = true;
-                        request_window_stop();
-                    } else {
-                        admit(slot);
+            if (on_progress) {
+                std::jthread driver([&] {
+                    run_workers();
+                    {
+                        std::lock_guard lock(state_mutex);
+                        workers_done = true;
                     }
-                }
-                if (object_classified && on_progress) {
-                    ++completed_objects;
-                    if (completed_plaintext_bytes) {
-                        if (classified_size >
-                            std::numeric_limits<std::uint64_t>::max() -
-                                *completed_plaintext_bytes) {
-                            completed_plaintext_bytes.reset();
-                        } else {
-                            *completed_plaintext_bytes += classified_size;
+                    progress_cv.notify_one();
+                });
+                try {
+                    std::size_t cursor = 0;
+                    for (;;) {
+                        std::vector<std::uint64_t> batch;
+                        bool done = false;
+                        {
+                            std::unique_lock lock(state_mutex);
+                            progress_cv.wait(lock, [&] {
+                                return cursor < completed_sizes.size() ||
+                                       workers_done;
+                            });
+                            done = workers_done &&
+                                   cursor == completed_sizes.size();
+                            while (cursor < completed_sizes.size()) {
+                                batch.push_back(completed_sizes[cursor++]);
+                            }
+                        }
+                        for (const std::uint64_t size : batch) {
+                            ++completed_objects;
+                            if (completed_plaintext_bytes) {
+                                if (size >
+                                    std::numeric_limits<std::uint64_t>::max() -
+                                        *completed_plaintext_bytes) {
+                                    completed_plaintext_bytes.reset();
+                                } else {
+                                    *completed_plaintext_bytes += size;
+                                }
+                            }
+                            report_progress(
+                                application::FsckStage::AuditingContent);
+                            {
+                                std::lock_guard lock(state_mutex);
+                                ++acked_completions;
+                            }
+                            progress_ack_cv.notify_all();
+                        }
+                        if (done) {
+                            break;
                         }
                     }
-                    report_progress(application::FsckStage::AuditingContent);
+                } catch (...) {
+                    {
+                        std::lock_guard lock(state_mutex);
+                        progress_aborted = true;
+                    }
+                    request_window_stop();
+                    progress_ack_cv.notify_all();
+                    throw;
                 }
+            } else {
+                run_workers();
             }
 
             request_window_stop();
-            workers.clear();
             report_progress(application::FsckStage::Finalizing);
-
-            platform::perf_trace::count("fsck.audit_peak_in_flight",
-                                        state.peak_in_flight);
-
-            if (!profile_dir.empty() && !vault_identity.empty() &&
-                unrecoverable.empty() && !cancelled && !lowest_hard_failure) {
-                FsckCheckpoint final_checkpoint{
-                    .header =
-                        {
-                            .format_version = checkpoint_format_version_1,
-                            .audit_semantics_version =
-                                checkpoint_audit_semantics_version_1,
-                            .vault_id = vault_identity,
-                            .entry_count = verified_map.size(),
-                        },
-                };
-                final_checkpoint.entries.reserve(verified_map.size());
-                for (auto& [_, entry] : verified_map) {
-                    final_checkpoint.entries.push_back(std::move(entry));
-                }
-                (void)save_checkpoint(profile_dir, final_checkpoint, key);
-            }
 
             if (lowest_hard_failure) {
                 return std::unexpected(std::move(lowest_hard_failure->second));
@@ -953,10 +490,7 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                 make_error(ErrorCode::StateFailure, exception.what()));
         }
     }();
-    const auto ws_cleanup_token = platform::perf_trace::begin();
     platform::cleanup_workspace(*workspace);
-    platform::perf_trace::finish("fsck.workspace_duration_us",
-                                 ws_cleanup_token);
     return result;
 }
 

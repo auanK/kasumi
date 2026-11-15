@@ -10,6 +10,7 @@
 #include "crypto/file_crypto.hpp"
 #include "platform/workspace.hpp"
 #include "runtime/resolver.hpp"
+#include "state_storage/database.hpp"
 #include "transport/transport.hpp"
 
 #include <algorithm>
@@ -65,17 +66,17 @@ profile_directory(const runtime::RuntimeData& runtime_data);
 std::expected<std::filesystem::path, Error>
 transactions_directory(const std::filesystem::path& profile, bool create);
 // Creates an isolated temporary workspace for a transaction.
-std::expected<platform::Workspace, Error>
-create_transaction_workspace(const std::filesystem::path& profile,
-                             std::string_view id,
-                             std::span<const std::uint8_t, crypto::KEY_SIZE> key);
-// Opens a persisted workspace only when its owner marker authenticates; older
-// workspaces are returned without deletion authority for recovery compatibility.
-std::expected<std::optional<platform::Workspace>, Error>
-open_transaction_workspace(
+std::expected<platform::Workspace, Error> create_transaction_workspace(
     const std::filesystem::path& profile,
     std::string_view id,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+// Opens a persisted workspace only when its owner marker authenticates; older
+// workspaces are returned without deletion authority for recovery
+// compatibility.
+std::expected<std::optional<platform::Workspace>, Error>
+open_transaction_workspace(const std::filesystem::path& profile,
+                           std::string_view id,
+                           std::span<const std::uint8_t, crypto::KEY_SIZE> key);
 // Removes the temporary transaction workspace, if it exists.
 std::expected<void, Error> remove_transaction_workspace(
     const std::optional<platform::Workspace>& workspace,
@@ -88,9 +89,8 @@ finish_transaction_cleanup(const journal::Paths& paths,
                            journal::Session* session = nullptr);
 // Cleans up orphan workspaces without a matching transaction.
 std::expected<void, Error>
-cleanup_orphan_workspaces(
-    const std::filesystem::path& profile,
-    std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+cleanup_orphan_workspaces(const std::filesystem::path& profile,
+                          std::span<const std::uint8_t, crypto::KEY_SIZE> key);
 // Resolves transaction journal paths within the profile.
 std::expected<journal::Paths, Error>
 make_journal_paths(const runtime::RuntimeData& runtime_data);
@@ -135,6 +135,15 @@ checkpoint_upload_batch(const journal::Paths& paths,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                         journal::Session* session = nullptr);
 
+// Returns true when any local mutation requires workspace/backup rollback.
+bool has_local_rollback_work(const transaction::Record& record) noexcept;
+
+// Extracts the next upload sub-batch bounded by item count and total bytes.
+std::vector<std::size_t>
+next_upload_batch_chunk(std::span<const std::size_t> pending_uploads,
+                        std::size_t& cursor,
+                        std::span<const transaction::Operation> operations);
+
 // Rolls back the transaction and updates its persisted record.
 std::expected<void, Error>
 rollback_transaction(const journal::Paths& paths,
@@ -150,8 +159,48 @@ rollback_local_mutations(transaction::Record& record,
                          const std::optional<platform::Workspace>& workspace,
                          const std::filesystem::path& local_root);
 
-// Resolves the configured concurrency level for batch uploads.
-std::size_t content_concurrency() noexcept;
+struct ScopedUploadBatchCleanup {
+    const mutation::StagedUploadBatch& batch;
+    bool dismissed = false;
+    ~ScopedUploadBatchCleanup() noexcept {
+        if (!dismissed) {
+            static_cast<void>(mutation::cleanup_upload_batch(batch));
+        }
+    }
+};
+
+struct UploadBatchError {
+    bool transport_after_unknown_transfer = false;
+    mutation::MutationError mutation;
+};
+
+// Transfers an upload sub-batch and verifies every uploaded object on storage.
+std::expected<void, UploadBatchError> transfer_and_verify_upload_batch(
+    const mutation::StagedUploadBatch& batch,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const platform::Workspace& workspace,
+    std::size_t parallelism);
+
+// Initializes state.db (if needed) and persists the committed StoredState.
+std::expected<void, Error>
+save_state_checked(const std::filesystem::path& database_path,
+                   const state_storage::StoredState& state);
+
+// Publishes and verifies an Epoch checkpointed via EpochUploaded ->
+// EpochVerified.
+std::expected<void, Error> publish_and_verify_epoch(
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const std::filesystem::path& workspace_dir,
+    const journal::Paths& paths,
+    transaction::Record& record,
+    const history_storage::epoch::Epoch& expected_epoch,
+    const history_storage::epoch::SealedEpoch& sealed_epoch,
+    std::string_view epoch_kind,
+    ErrorCode publish_error_code,
+    ErrorCode verify_error_code,
+    journal::Session* session = nullptr);
 
 } // namespace kasumi::application::sync::coordinator::detail
 

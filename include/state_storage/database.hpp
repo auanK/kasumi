@@ -35,6 +35,8 @@ struct FileCacheRow {
     std::uint64_t volume = 0;
     std::uint64_t file_low = 0;
     std::uint64_t file_high = 0;
+
+    bool operator==(const FileCacheRow&) const = default;
 };
 
 // Creates or validates the canonical database schema.

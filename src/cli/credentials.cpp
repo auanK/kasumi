@@ -2,6 +2,7 @@
 
 #include "cli/i18n.hpp"
 #include "cli/style.hpp"
+#include "crypto/secure_memory.hpp"
 #include "platform/cancellation.hpp"
 
 #include <algorithm>
@@ -26,11 +27,10 @@ namespace {
 
 constexpr std::size_t maximum_secret_size = 4096;
 
-void wipe(std::string& value) noexcept {
-    auto* bytes = reinterpret_cast<volatile char*>(value.data());
-    for (std::size_t index = 0; index < value.size(); ++index) {
-        bytes[index] = '\0';
-    }
+template <typename String> void wipe(String& value) noexcept {
+    using Char = typename String::value_type;
+    value.resize(value.capacity(), Char{});
+    crypto::secure_memory::wipe(value.data(), value.size() * sizeof(Char));
     value.clear();
 }
 
@@ -64,6 +64,7 @@ std::string utf8(std::wstring_view text) {
                             size,
                             nullptr,
                             nullptr) != size) {
+        wipe(result);
         return {};
     }
     return result;
@@ -71,6 +72,13 @@ std::string utf8(std::wstring_view text) {
 
 std::string read_console_secret() {
     std::wstring secret;
+    secret.reserve(maximum_secret_size);
+    struct SecretGuard {
+        std::wstring& value;
+        ~SecretGuard() noexcept {
+            wipe(value);
+        }
+    } secret_guard{secret};
     while (!platform::cancellation::requested()) {
         if (_kbhit() == 0) {
             Sleep(25);
@@ -103,12 +111,7 @@ std::string read_console_secret() {
             secret.push_back(static_cast<wchar_t>(character));
         }
     }
-    auto result =
-        platform::cancellation::requested() ? std::string{} : utf8(secret);
-    if (!secret.empty()) {
-        SecureZeroMemory(secret.data(), secret.size() * sizeof(wchar_t));
-    }
-    return result;
+    return platform::cancellation::requested() ? std::string{} : utf8(secret);
 }
 
 #else
@@ -135,6 +138,7 @@ std::string read_console_secret() {
     }
 
     std::string secret;
+    secret.reserve(maximum_secret_size);
     try {
         while (!platform::cancellation::requested()) {
             pollfd input{.fd = STDIN_FILENO, .events = POLLIN, .revents = 0};
@@ -154,6 +158,7 @@ std::string read_console_secret() {
                 break;
             }
             char buffer[512]{};
+            crypto::secure_memory::WipeGuard buffer_guard{buffer};
             const auto count = ::read(STDIN_FILENO, buffer, sizeof(buffer));
             if (count <= 0) {
                 platform::cancellation::request();
@@ -171,6 +176,7 @@ std::string read_console_secret() {
             }
         }
     } catch (...) {
+        wipe(secret);
         restore_echo(original);
         throw;
     }
@@ -178,10 +184,7 @@ std::string read_console_secret() {
         secret.pop_back();
     }
     if (platform::cancellation::requested()) {
-        for (volatile char& byte : secret) {
-            byte = '\0';
-        }
-        secret.clear();
+        wipe(secret);
     }
     restore_echo(original);
     return secret;
@@ -211,12 +214,12 @@ std::string read_secret(const char* environment_name,
     }
     const bool interactive = interactive_terminal();
     std::cout << prompt << std::flush;
-    auto secret = interactive ? read_console_secret() : [&] {
-        std::string value;
-        if (!std::getline(std::cin, value))
-            platform::cancellation::request();
-        return value;
-    }();
+    std::string secret;
+    if (interactive) {
+        secret = read_console_secret();
+    } else if (!std::getline(std::cin, secret)) {
+        platform::cancellation::request();
+    }
     std::cout << "\n\n";
     return secret;
 }
@@ -239,30 +242,30 @@ application::PasswordPair read_password_pair(const SecretPrompt& prompt) {
                                const std::string& first_prompt,
                                const std::string& confirmation_prompt,
                                const std::string& mismatch) {
+        std::string accepted;
         if (const char* value = std::getenv(environment_name)) {
-            return std::string{value};
+            accepted = value;
+            return accepted;
         }
         while (!platform::cancellation::requested()) {
             auto first = prompt(first_prompt);
             if (platform::cancellation::requested()) {
                 wipe(first);
-                return std::string{};
+                return accepted;
             }
             auto confirmation = prompt(confirmation_prompt);
-            if (platform::cancellation::requested()) {
+            const bool matches =
+                !platform::cancellation::requested() && (first == confirmation);
+            wipe(confirmation);
+            if (matches) {
+                accepted = std::move(first);
                 wipe(first);
-                wipe(confirmation);
-                return std::string{};
-            }
-            if (first == confirmation) {
-                wipe(confirmation);
-                return first;
+                return accepted;
             }
             wipe(first);
-            wipe(confirmation);
             std::cout << style::red << mismatch << style::reset << '\n';
         }
-        return std::string{};
+        return accepted;
     };
 
     auto password =
@@ -271,6 +274,7 @@ application::PasswordPair read_password_pair(const SecretPrompt& prompt) {
                   std::string{i18n::tr(i18n::Key::PromptConfirmPassword)},
                   std::string{i18n::tr(i18n::Key::PasswordsDoNotMatch)});
     if (platform::cancellation::requested()) {
+        wipe(password);
         return application::PasswordPair{};
     }
     auto salt = confirmed("KASUMI_PASSWORD2",
@@ -278,7 +282,10 @@ application::PasswordPair read_password_pair(const SecretPrompt& prompt) {
                           std::string{i18n::tr(i18n::Key::PromptConfirmSalt)},
                           std::string{i18n::tr(i18n::Key::SaltsDoNotMatch)});
 
-    return application::PasswordPair{std::move(password), std::move(salt)};
+    application::PasswordPair pair{std::move(password), std::move(salt)};
+    wipe(password);
+    wipe(salt);
+    return pair;
 }
 
 } // namespace kasumi::cli::credentials

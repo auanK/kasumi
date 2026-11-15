@@ -1,15 +1,17 @@
 #include "mutation_detail.hpp"
 
 #include "core/hasher.hpp"
+#include "core/wire.hpp"
 #include "crypto/content.hpp"
+#include "mutation_fault_test.hpp"
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
-#include "mutation_fault_test.hpp"
 
 #include <algorithm>
+#include <array>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <system_error>
 #include <utility>
 
@@ -59,6 +61,149 @@ file_hash(const std::filesystem::path& path, std::size_t operation_index) {
             MutationErrorCode::LocalIo, hash.error(), path, operation_index));
     }
     return hash_hex(*hash);
+}
+
+std::expected<void, MutationError>
+sync_file_checked(const std::filesystem::path& path,
+                  std::size_t operation_index) {
+    if (auto synced = platform::durability::sync_file(path); !synced) {
+        return std::unexpected(make_error(
+            MutationErrorCode::LocalIo, synced.error(), path, operation_index));
+    }
+    return {};
+}
+
+std::expected<void, MutationError>
+sync_parent_checked(const std::filesystem::path& path,
+                    std::size_t operation_index) {
+    if (auto synced = platform::durability::sync_parent_directory(path);
+        !synced) {
+        return std::unexpected(make_error(
+            MutationErrorCode::LocalIo, synced.error(), path, operation_index));
+    }
+    return {};
+}
+
+std::expected<void, MutationError>
+validate_operation_metadata(const Operation& operation,
+                            std::size_t operation_index) {
+    if (operation_index == std::numeric_limits<std::size_t>::max() ||
+        !is_valid_action(operation.action) || !has_safe_paths(operation)) {
+        return std::unexpected(make_error(
+            operation_index == std::numeric_limits<std::size_t>::max() ||
+                    !is_valid_action(operation.action)
+                ? MutationErrorCode::InvalidOperation
+                : MutationErrorCode::UnsafePath,
+            "invalid operation or index",
+            operation.path,
+            operation_index));
+    }
+    return {};
+}
+
+std::expected<void, MutationError>
+require_regular_file(const std::filesystem::path& path,
+                     MutationErrorCode invalid_code,
+                     std::string_view invalid_message,
+                     std::size_t operation_index) {
+    auto status = read_status(path, operation_index);
+    if (!status || std::filesystem::is_symlink(*status) ||
+        !std::filesystem::is_regular_file(*status)) {
+        return std::unexpected(make_error(
+            invalid_code, std::string(invalid_message), path, operation_index));
+    }
+    return {};
+}
+
+bool identity_matches(const platform::private_storage::FileIdentity& actual,
+                      const kasumi::PhysicalFileIdentity& expected) noexcept {
+    return actual.valid && actual.volume_or_dev == expected.volume_or_dev &&
+           actual.file_id_low == expected.file_id_low &&
+           actual.file_id_high == expected.file_id_high;
+}
+
+std::expected<std::string, MutationError>
+verify_file_size_and_hash(const std::filesystem::path& path,
+                          std::uint64_t expected_size,
+                          std::string_view expected_hash,
+                          bool check_size,
+                          std::string_view size_message,
+                          std::string_view hash_message,
+                          std::size_t operation_index,
+                          MutationErrorCode mismatch_code) {
+    if (check_size) {
+        std::error_code size_error;
+        const auto actual_size = std::filesystem::file_size(path, size_error);
+        if (size_error || actual_size != expected_size) {
+            return std::unexpected(make_error(
+                size_error ? MutationErrorCode::LocalIo : mismatch_code,
+                size_error ? size_error.message() : std::string(size_message),
+                path,
+                operation_index));
+        }
+    }
+    auto actual = file_hash(path, operation_index);
+    if (!actual) {
+        return std::unexpected(actual.error());
+    }
+    if (!expected_hash.empty() && *actual != expected_hash) {
+        return std::unexpected(make_error(
+            mismatch_code, std::string(hash_message), path, operation_index));
+    }
+    return actual;
+}
+
+std::expected<void, MutationError>
+verify_disposable_source(const std::filesystem::path& path,
+                         const Operation& operation,
+                         std::size_t operation_index,
+                         std::string_view changed_message) {
+    if (auto ok = require_regular_file(
+            path,
+            MutationErrorCode::DestinationConflict,
+            "disposable source is missing or not a regular file",
+            operation_index);
+        !ok) {
+        return ok;
+    }
+    const auto before_identity =
+        platform::private_storage::query_file_identity(path);
+    std::error_code size_error;
+    const auto size = std::filesystem::file_size(path, size_error);
+    if (size_error ||
+        !identity_matches(before_identity,
+                          operation.expected_source_identity) ||
+        size != operation.size) {
+        return std::unexpected(make_error(
+            size_error ? MutationErrorCode::LocalIo
+                       : MutationErrorCode::DestinationConflict,
+            size_error ? size_error.message()
+                       : "disposable source identity or size changed",
+            path,
+            operation_index));
+    }
+    auto verified =
+        verify_file_size_and_hash(path,
+                                  operation.size,
+                                  operation.hash,
+                                  false,
+                                  {},
+                                  changed_message,
+                                  operation_index,
+                                  MutationErrorCode::DestinationConflict);
+    if (!verified) {
+        return std::unexpected(verified.error());
+    }
+    const auto after_identity =
+        platform::private_storage::query_file_identity(path);
+    if (!identity_matches(after_identity, operation.expected_source_identity)) {
+        return std::unexpected(
+            make_error(MutationErrorCode::DestinationConflict,
+                       std::string(changed_message),
+                       path,
+                       operation_index));
+    }
+    return {};
 }
 
 std::expected<std::filesystem::file_status, MutationError>
@@ -148,7 +293,8 @@ resolve_local_path(const std::filesystem::path& local_root,
         }
         if (std::filesystem::is_symlink(*link_status)) {
             std::error_code error;
-            auto physical_root = std::filesystem::canonical(normalized_root, error);
+            auto physical_root =
+                std::filesystem::canonical(normalized_root, error);
             if (error) {
                 return std::unexpected(make_error(
                     MutationErrorCode::UnsafePath,
@@ -261,27 +407,28 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
                                           operation_index));
     }
 
-    auto source_status = read_status(source, operation_index);
-    if (!source_status || std::filesystem::is_symlink(*source_status) ||
-        !std::filesystem::is_regular_file(*source_status)) {
-        return std::unexpected(
-            make_error(MutationErrorCode::IntegrityMismatch,
-                       "upload source is not a valid regular file",
-                       source,
-                       operation_index));
+    if (auto ok =
+            require_regular_file(source,
+                                 MutationErrorCode::IntegrityMismatch,
+                                 "upload source is not a valid regular file",
+                                 operation_index);
+        !ok) {
+        return std::unexpected(ok.error());
     }
 
-    const auto encryption_trace = platform::perf_trace::begin();
     std::string encryption_error;
-    auto encrypted_file = crypto::encrypt_file_with_hashes(
-        source, destination, key, crypto::FilePurpose::Content, &encryption_error);
-    platform::perf_trace::finish("content encryption", encryption_trace);
+    auto encrypted_file =
+        crypto::encrypt_file_with_hashes(source,
+                                         destination,
+                                         key,
+                                         crypto::FilePurpose::Content,
+                                         &encryption_error);
     if (!encrypted_file) {
-        return std::unexpected(make_error(MutationErrorCode::CryptoFailure,
-                                          "failed to encrypt source for upload: " +
-                                              encryption_error,
-                                          source,
-                                          operation_index));
+        return std::unexpected(make_error(
+            MutationErrorCode::CryptoFailure,
+            "failed to encrypt source for upload: " + encryption_error,
+            source,
+            operation_index));
     }
 
     if (encrypted_file->plaintext_hash != *expected_hash ||
@@ -293,15 +440,14 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
                                           operation_index));
     }
 
-    auto encrypted_status = read_status(destination, operation_index);
-    if (!encrypted_status || std::filesystem::is_symlink(*encrypted_status) ||
-        !std::filesystem::is_regular_file(*encrypted_status)) {
+    if (auto ok =
+            require_regular_file(destination,
+                                 MutationErrorCode::LocalIo,
+                                 "encrypted file was not created properly",
+                                 operation_index);
+        !ok) {
         remove_temporary_file(destination);
-        return std::unexpected(
-            make_error(MutationErrorCode::LocalIo,
-                       "encrypted file was not created properly",
-                       destination,
-                       operation_index));
+        return std::unexpected(ok.error());
     }
 
     return PreparedUploadCiphertext{.plaintext_size = operation.size,
@@ -311,73 +457,64 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
 
 namespace {
 
-#pragma pack(push, 1)
-struct DiskCopyIdentity {
-    std::uint32_t magic{0x49445043}; // 'CPDI'
-    std::uint16_t version{1};
-    std::uint16_t reserved{0};
-    std::uint64_t volume_or_dev{0};
-    std::uint64_t file_id_low{0};
-    std::uint64_t file_id_high{0};
-    std::uint32_t valid{1};
-};
-#pragma pack(pop)
+constexpr std::uint32_t copy_identity_magic = 0x49445043; // 'CPDI'
+constexpr std::uint16_t copy_identity_version = 1;
+constexpr std::size_t copy_identity_bytes = 36;
+
+std::filesystem::path
+copy_identity_marker_path(const platform::Workspace& workspace,
+                          std::size_t operation_index) {
+    return workspace.root.empty() ? std::filesystem::path{}
+                                  : platform::workspace_file(workspace,
+                                                             operation_index,
+                                                             ".copy_identity");
+}
 
 } // namespace
 
-std::expected<void, MutationError>
-record_copy_installed_identity(const platform::Workspace& workspace,
-                               std::size_t operation_index,
-                               const platform::private_storage::FileIdentity& identity) {
+std::expected<void, MutationError> record_copy_installed_identity(
+    const platform::Workspace& workspace,
+    std::size_t operation_index,
+    const platform::private_storage::FileIdentity& identity) {
     if (!identity.valid) {
         return std::unexpected(make_error(MutationErrorCode::InvalidOperation,
                                           "cannot record invalid copy identity",
                                           workspace.root,
                                           operation_index));
     }
-    if (workspace.root.empty()) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "workspace root is empty",
-                                          workspace.root,
-                                          operation_index));
-    }
     const auto marker_path =
-        platform::workspace_file(workspace, operation_index, ".copy_identity");
+        copy_identity_marker_path(workspace, operation_index);
     if (marker_path.empty()) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "marker path is empty",
+                                          "workspace or marker path is empty",
                                           workspace.root,
                                           operation_index));
     }
 
+    wire::Writer writer;
+    wire::write<std::uint32_t>(writer, copy_identity_magic);
+    wire::write<std::uint16_t>(writer, copy_identity_version);
+    wire::write<std::uint16_t>(writer, 0);
+    wire::write<std::uint64_t>(writer, identity.volume_or_dev);
+    wire::write<std::uint64_t>(writer, identity.file_id_low);
+    wire::write<std::uint64_t>(writer, identity.file_id_high);
+    wire::write<std::uint32_t>(writer, 1);
+
     std::ofstream out(marker_path, std::ios::binary | std::ios::trunc);
     if (!out) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "failed to create copy identity marker",
-                                          marker_path,
-                                          operation_index));
+        return std::unexpected(
+            make_error(MutationErrorCode::LocalIo,
+                       "failed to create copy identity marker",
+                       marker_path,
+                       operation_index));
     }
-    const DiskCopyIdentity disk{
-        .magic = 0x49445043,
-        .version = 1,
-        .reserved = 0,
-        .volume_or_dev = identity.volume_or_dev,
-        .file_id_low = identity.file_id_low,
-        .file_id_high = identity.file_id_high,
-        .valid = 1,
-    };
-    out.write(reinterpret_cast<const char*>(&disk), sizeof(disk));
+    out.write(reinterpret_cast<const char*>(writer.buffer.data()),
+              static_cast<std::streamsize>(writer.buffer.size()));
     out.flush();
-    if (out.fail()) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "failed writing copy identity marker",
-                                          marker_path,
-                                          operation_index));
-    }
     out.close();
     if (out.fail()) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "failed closing copy identity marker",
+                                          "failed writing copy identity marker",
                                           marker_path,
                                           operation_index));
     }
@@ -400,7 +537,8 @@ record_copy_installed_identity(const platform::Workspace& workspace,
     auto dir_synced = platform::durability::sync_parent_directory(marker_path);
 #ifdef KASUMI_MUTATION_FAULT_TESTS
     if (mutation_fault_test::g_fail_copy_identity_dir_sync_return) {
-        dir_synced = std::unexpected("simulated sync_parent_directory return error");
+        dir_synced =
+            std::unexpected("simulated sync_parent_directory return error");
     }
 #endif
     if (!dir_synced) {
@@ -412,37 +550,30 @@ record_copy_installed_identity(const platform::Workspace& workspace,
     return {};
 }
 
-std::expected<std::optional<platform::private_storage::FileIdentity>, MutationError>
+std::expected<std::optional<platform::private_storage::FileIdentity>,
+              MutationError>
 read_copy_installed_identity(const platform::Workspace& workspace,
                              std::size_t operation_index) {
-    if (workspace.root.empty()) {
-        return std::optional<platform::private_storage::FileIdentity>{std::nullopt};
-    }
     const auto marker_path =
-        platform::workspace_file(workspace, operation_index, ".copy_identity");
+        copy_identity_marker_path(workspace, operation_index);
     if (marker_path.empty()) {
-        return std::optional<platform::private_storage::FileIdentity>{std::nullopt};
+        return std::optional<platform::private_storage::FileIdentity>{
+            std::nullopt};
     }
     std::error_code ec;
-    const bool exists = std::filesystem::exists(marker_path, ec);
-    if (ec) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "failed checking copy marker existence: " + ec.message(),
-                                          marker_path,
-                                          operation_index));
-    }
-    if (!exists) {
-        return std::optional<platform::private_storage::FileIdentity>{std::nullopt};
-    }
-
     const auto sz = std::filesystem::file_size(marker_path, ec);
-    if (ec) {
-        return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "failed reading marker file size: " + ec.message(),
-                                          marker_path,
-                                          operation_index));
+    if (ec == std::errc::no_such_file_or_directory) {
+        return std::optional<platform::private_storage::FileIdentity>{
+            std::nullopt};
     }
-    if (sz != sizeof(DiskCopyIdentity)) {
+    if (ec) {
+        return std::unexpected(
+            make_error(MutationErrorCode::LocalIo,
+                       "failed reading marker file size: " + ec.message(),
+                       marker_path,
+                       operation_index));
+    }
+    if (sz != copy_identity_bytes) {
         return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
                                           "corrupted copy identity marker size",
                                           marker_path,
@@ -456,26 +587,40 @@ read_copy_installed_identity(const platform::Workspace& workspace,
                                           marker_path,
                                           operation_index));
     }
-    DiskCopyIdentity disk{};
-    in.read(reinterpret_cast<char*>(&disk), sizeof(disk));
-    if (in.gcount() != sizeof(disk)) {
-        return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
-                                          "incomplete read of copy identity marker",
-                                          marker_path,
-                                          operation_index));
+    std::array<std::byte, copy_identity_bytes> raw{};
+    in.read(reinterpret_cast<char*>(raw.data()),
+            static_cast<std::streamsize>(raw.size()));
+    if (in.gcount() != static_cast<std::streamsize>(raw.size())) {
+        return std::unexpected(
+            make_error(MutationErrorCode::IntegrityMismatch,
+                       "incomplete read of copy identity marker",
+                       marker_path,
+                       operation_index));
     }
-    if (disk.magic != 0x49445043 || disk.version != 1 || disk.valid != 1) {
-        return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
-                                          "invalid copy identity marker header or content",
-                                          marker_path,
-                                          operation_index));
+
+    wire::Reader reader{raw};
+    const auto magic = wire::read<std::uint32_t>(reader);
+    const auto version = wire::read<std::uint16_t>(reader);
+    const auto reserved = wire::read<std::uint16_t>(reader);
+    const auto vol = wire::read<std::uint64_t>(reader);
+    const auto low = wire::read<std::uint64_t>(reader);
+    const auto high = wire::read<std::uint64_t>(reader);
+    const auto valid = wire::read<std::uint32_t>(reader);
+    if (!magic || !version || !reserved || !vol || !low || !high || !valid ||
+        *magic != copy_identity_magic || *version != copy_identity_version ||
+        *valid != 1) {
+        return std::unexpected(
+            make_error(MutationErrorCode::IntegrityMismatch,
+                       "invalid copy identity marker header or content",
+                       marker_path,
+                       operation_index));
     }
 
     return std::optional<platform::private_storage::FileIdentity>{
         platform::private_storage::FileIdentity{
-            .volume_or_dev = disk.volume_or_dev,
-            .file_id_low = disk.file_id_low,
-            .file_id_high = disk.file_id_high,
+            .volume_or_dev = *vol,
+            .file_id_low = *low,
+            .file_id_high = *high,
             .valid = true,
         }};
 }

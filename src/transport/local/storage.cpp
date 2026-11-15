@@ -1,8 +1,10 @@
+#include "../detail.hpp"
 #include "detail.hpp"
 #include "platform/path.hpp"
 
 #include <algorithm>
 #include <filesystem>
+#include <new>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -27,20 +29,18 @@ Error make_error(const std::error_code& error, ErrorCode fallback) {
     } else if (error == std::errc::no_such_file_or_directory) {
         code = ErrorCode::ObjectNotFound;
     }
-    return Error{
-        .code = code, .message = error.message(), .native_code = error.value()};
+    return detail::make_error(code, error.message(), error.value());
 }
 
 Error invalid_context_error() {
-    return Error{.code = ErrorCode::InvalidContext,
-                 .message = "local transport state is missing or invalid",
-                 .native_code = 0};
+    return detail::make_error(ErrorCode::InvalidContext,
+                              "local transport state is missing or invalid",
+                              0);
 }
 
 Error invalid_identifier_error() {
-    return Error{.code = ErrorCode::InvalidIdentifier,
-                 .message = "invalid object identifier",
-                 .native_code = 0};
+    return detail::make_error(
+        ErrorCode::InvalidIdentifier, "invalid object identifier", 0);
 }
 
 std::filesystem::path objects_directory(const State& state) {
@@ -49,29 +49,16 @@ std::filesystem::path objects_directory(const State& state) {
 
 namespace {
 
-bool valid_identifier(std::string_view identifier) {
-    if (identifier.empty() || identifier.find('\\') != std::string_view::npos) {
-        return false;
+bool valid_identifier(std::string_view identifier) noexcept {
+    return detail::valid_relative_identifier(identifier, false);
+}
+
+std::expected<State*, Error> ready_local(void* context) {
+    auto* state = local_state(context);
+    if (state == nullptr || state->root.empty()) {
+        return std::unexpected(invalid_context_error());
     }
-
-    const auto path = platform::path::from_utf8(identifier);
-
-    if (path.empty() || path.is_absolute() || path.has_root_name() ||
-        path.has_root_directory()) {
-        return false;
-    }
-
-    for (const auto& component : path) {
-        if (component == "." || component == "..") {
-            return false;
-        }
-    }
-
-    const auto normalized = path.lexically_normal();
-
-    return !normalized.empty() && normalized != "." &&
-           !normalized.is_absolute() && !normalized.has_root_name() &&
-           !normalized.has_root_directory();
+    return state;
 }
 
 std::expected<std::filesystem::path, Error>
@@ -84,35 +71,57 @@ resolve_object_path(const State& state, std::string_view identifier) {
            platform::path::from_utf8(identifier).lexically_normal();
 }
 
+std::expected<std::filesystem::path, Error>
+resolve_ready_path(void* context, std::string_view identifier) {
+    auto state = ready_local(context);
+    if (!state) {
+        return std::unexpected(state.error());
+    }
+    return resolve_object_path(**state, identifier);
+}
+
+Error storage_not_found() {
+    return detail::make_error(
+        ErrorCode::StorageNotFound, "objects directory does not exist", 0);
+}
+
 Result ensure_parent_directory(const std::filesystem::path& path) {
     const auto parent = path.parent_path();
-
     if (parent.empty()) {
         return {};
     }
-
     std::error_code error;
     std::filesystem::create_directories(parent, error);
-
     if (error) {
         return std::unexpected(make_error(error));
     }
-
     return {};
 }
 
 Result copy_file_overwrite(const std::filesystem::path& source,
                            const std::filesystem::path& destination) {
+    std::error_code error;
+    const auto dest_status =
+        std::filesystem::symlink_status(destination, error);
+    if (error && error != std::errc::no_such_file_or_directory) {
+        return std::unexpected(make_error(error));
+    }
+    if (std::filesystem::is_symlink(dest_status) ||
+        std::filesystem::is_directory(dest_status)) {
+        return std::unexpected(
+            detail::make_error(ErrorCode::InvalidContext,
+                               "destination cannot be a symlink or directory",
+                               0));
+    }
 #if defined(_WIN32)
     if (!CopyFileW(source.c_str(), destination.c_str(), FALSE)) {
         const auto win_err = GetLastError();
-        const std::error_code error(static_cast<int>(win_err),
-                                    std::system_category());
-        return std::unexpected(make_error(error));
+        return std::unexpected(make_error(std::error_code(
+            static_cast<int>(win_err), std::system_category())));
     }
     return {};
 #else
-    std::error_code error;
+    error.clear();
     std::filesystem::copy_file(
         source,
         destination,
@@ -125,288 +134,175 @@ Result copy_file_overwrite(const std::filesystem::path& source,
 #endif
 }
 
-Result local_initialize(void* context) {
-    auto* state = local_state(context);
-
-    if (state == nullptr || state->root.empty()) {
-        return std::unexpected(invalid_context_error());
-    }
-
+template <typename Iterator>
+ListingResult scan_directory(const std::filesystem::path& base,
+                             bool use_filename_only) {
     std::error_code error;
-
-    std::filesystem::create_directories(objects_directory(*state), error);
-
+    std::vector<std::string> identifiers;
+    Iterator iterator{
+        base,
+        std::filesystem::directory_options::skip_permission_denied,
+        error};
     if (error) {
         return std::unexpected(make_error(error));
     }
+    for (const Iterator end; iterator != end; iterator.increment(error)) {
+        if (error) {
+            return std::unexpected(make_error(error));
+        }
+        const bool regular = iterator->is_regular_file(error);
+        if (error) {
+            return std::unexpected(make_error(error));
+        }
+        if (regular) {
+            auto rel =
+                use_filename_only
+                    ? iterator->path().filename()
+                    : std::filesystem::relative(iterator->path(), base, error);
+            if (error) {
+                return std::unexpected(make_error(error));
+            }
+            identifiers.push_back(platform::path::to_logical_utf8(rel));
+        }
+    }
+    std::ranges::sort(identifiers);
+    return identifiers;
+}
 
-    return {};
+Result local_initialize(void* context) {
+    auto state = ready_local(context);
+    if (!state) {
+        return std::unexpected(state.error());
+    }
+    std::error_code error;
+    std::filesystem::create_directories(objects_directory(**state), error);
+    return error ? std::unexpected(make_error(error)) : Result{};
 }
 
 Result local_put(void* context,
                  const std::filesystem::path& source,
                  std::string_view identifier) {
-    auto* state = local_state(context);
-
-    if (state == nullptr || state->root.empty()) {
-        return std::unexpected(invalid_context_error());
-    }
-
-    auto destination = resolve_object_path(*state, identifier);
-
+    auto destination = resolve_ready_path(context, identifier);
     if (!destination) {
         return std::unexpected(destination.error());
     }
-
-    auto parent_result = ensure_parent_directory(*destination);
-
-    if (!parent_result) {
-        return parent_result;
-    }
-
     std::error_code error;
-
-    const bool source_exists = std::filesystem::is_regular_file(source, error);
-
-    if (error) {
+    const auto source_status = std::filesystem::symlink_status(source, error);
+    if (error && error != std::errc::no_such_file_or_directory) {
         return std::unexpected(make_error(error));
     }
-
-    if (!source_exists) {
-        return std::unexpected(Error{
-            .code = ErrorCode::ObjectNotFound,
-            .message = "source file does not exist",
-            .native_code = 0,
-        });
+    if (std::filesystem::is_symlink(source_status) ||
+        !std::filesystem::is_regular_file(source_status)) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::ObjectNotFound, "source file does not exist", 0));
     }
-
+    if (auto parent = ensure_parent_directory(*destination); !parent) {
+        return parent;
+    }
     return copy_file_overwrite(source, *destination);
 }
 
 Result local_get(void* context,
                  std::string_view identifier,
                  const std::filesystem::path& destination) {
-    auto* state = local_state(context);
-
-    if (state == nullptr || state->root.empty()) {
-        return std::unexpected(invalid_context_error());
-    }
-
-    auto source = resolve_object_path(*state, identifier);
-
+    auto source = resolve_ready_path(context, identifier);
     if (!source) {
         return std::unexpected(source.error());
     }
-
-    auto parent_result = ensure_parent_directory(destination);
-
-    if (!parent_result) {
-        return parent_result;
+    if (auto parent = ensure_parent_directory(destination); !parent) {
+        return parent;
     }
-
     return copy_file_overwrite(*source, destination);
 }
 
-Result local_copy(void* context,
-                  std::string_view source_identifier,
-                  std::string_view destination_identifier) {
-    auto* state = local_state(context);
-
-    if (state == nullptr || state->root.empty()) {
-        return std::unexpected(invalid_context_error());
-    }
-
-    auto source = resolve_object_path(*state, source_identifier);
-    if (!source) {
-        return std::unexpected(source.error());
-    }
-    auto destination = resolve_object_path(*state, destination_identifier);
-    if (!destination) {
-        return std::unexpected(destination.error());
-    }
-
-    std::error_code error;
-    if (!std::filesystem::is_regular_file(*source, error)) {
-        if (error) {
-            return std::unexpected(make_error(error));
-        }
-        return std::unexpected(Error{
-            .code = ErrorCode::ObjectNotFound,
-            .message = "source object does not exist",
-            .native_code = 0,
-        });
-    }
-
-    auto parent_result = ensure_parent_directory(*destination);
-    if (!parent_result) {
-        return parent_result;
-    }
-
-    return copy_file_overwrite(*source, *destination);
-}
-
 PresenceResult local_presence(void* context, std::string_view identifier) {
-    auto* state = local_state(context);
-
-    if (state == nullptr || state->root.empty()) {
-        return std::unexpected(invalid_context_error());
-    }
-
-    auto path = resolve_object_path(*state, identifier);
-
+    auto path = resolve_ready_path(context, identifier);
     if (!path) {
         return std::unexpected(path.error());
     }
-
     std::error_code error;
-
     const bool present = std::filesystem::is_regular_file(*path, error);
-
     if (error && error != std::errc::no_such_file_or_directory) {
         return std::unexpected(make_error(error));
     }
-
     return present ? Presence::Present : Presence::Absent;
 }
 
 ListingResult local_list(void* context) {
-    auto* state = local_state(context);
-
-    if (state == nullptr || state->root.empty()) {
-        return std::unexpected(invalid_context_error());
+    auto state = ready_local(context);
+    if (!state) {
+        return std::unexpected(state.error());
     }
-
-    const auto base = objects_directory(*state);
-
+    const auto base = objects_directory(**state);
     std::error_code error;
-    const bool exists = std::filesystem::exists(base, error);
-
-    if (error) {
-        return std::unexpected(make_error(error));
+    if (!std::filesystem::exists(base, error)) {
+        return std::unexpected(error ? make_error(error) : storage_not_found());
     }
-
-    if (!exists) {
-        return std::unexpected(Error{
-            .code = ErrorCode::StorageNotFound,
-            .message = "objects directory does not exist",
-            .native_code = 0,
-        });
-    }
-
-    std::vector<std::string> identifiers;
-
-    std::filesystem::recursive_directory_iterator iterator{
-        base,
-        std::filesystem::directory_options::skip_permission_denied,
-        error};
-
-    if (error) {
-        return std::unexpected(make_error(error));
-    }
-
-    const std::filesystem::recursive_directory_iterator end;
-
-    while (iterator != end) {
-        const auto& entry = *iterator;
-
-        const bool regular = entry.is_regular_file(error);
-
-        if (error) {
-            return std::unexpected(make_error(error));
-        }
-
-        if (regular) {
-            auto relative =
-                std::filesystem::relative(entry.path(), base, error);
-
-            if (error) {
-                return std::unexpected(make_error(error));
-            }
-
-            identifiers.push_back(platform::path::to_logical_utf8(relative));
-        }
-
-        iterator.increment(error);
-
-        if (error) {
-            return std::unexpected(make_error(error));
-        }
-    }
-
-    std::ranges::sort(identifiers);
-
-    return identifiers;
+    return scan_directory<std::filesystem::recursive_directory_iterator>(base,
+                                                                         false);
 }
 
 ListingResult local_list_prefix(void* context, std::string_view prefix) {
-    auto* state = local_state(context);
-    if (state == nullptr || state->root.empty() || !valid_identifier(prefix)) {
+    auto state = ready_local(context);
+    if (!state || !valid_identifier(prefix)) {
         return std::unexpected(invalid_identifier_error());
     }
-
     const auto base =
-        objects_directory(*state) / platform::path::from_utf8(prefix);
+        objects_directory(**state) / platform::path::from_utf8(prefix);
     std::error_code error;
     if (!std::filesystem::is_directory(base, error)) {
-        if (error == std::errc::no_such_file_or_directory || !error) {
-            return std::unexpected(Error{
-                .code = ErrorCode::StorageNotFound,
-                .message = "objects directory does not exist",
-                .native_code = 0,
-            });
-        }
-        return std::unexpected(make_error(error));
+        return std::unexpected(
+            (error == std::errc::no_such_file_or_directory || !error)
+                ? storage_not_found()
+                : make_error(error));
     }
-
-    std::vector<std::string> identifiers;
-    std::filesystem::directory_iterator iterator{
-        base,
-        std::filesystem::directory_options::skip_permission_denied,
-        error};
-    if (error) {
-        return std::unexpected(make_error(error));
-    }
-    const std::filesystem::directory_iterator end;
-    while (iterator != end) {
-        const auto& entry = *iterator;
-        if (entry.is_regular_file(error)) {
-            identifiers.push_back(
-                platform::path::to_logical_utf8(entry.path().filename()));
-        }
-        if (error) {
-            return std::unexpected(make_error(error));
-        }
-        iterator.increment(error);
-        if (error) {
-            return std::unexpected(make_error(error));
-        }
-    }
-    std::ranges::sort(identifiers);
-    return identifiers;
+    return scan_directory<std::filesystem::directory_iterator>(base, true);
 }
 
 RemovalResult local_remove(void* context, std::string_view identifier) {
-    auto* state = local_state(context);
-
-    if (state == nullptr || state->root.empty()) {
-        return std::unexpected(invalid_context_error());
-    }
-
-    auto path = resolve_object_path(*state, identifier);
-
+    auto path = resolve_ready_path(context, identifier);
     if (!path) {
         return std::unexpected(path.error());
     }
-
     std::error_code error;
-
     const bool removed = std::filesystem::remove(*path, error);
-
     if (error) {
         return std::unexpected(make_error(error));
     }
-
     return removed ? Removal::Removed : Removal::AlreadyAbsent;
+}
+
+std::expected<void, Error>
+validate_destination(const std::filesystem::path& root) {
+    for (auto candidate = root;;) {
+        std::error_code error;
+        const auto status = std::filesystem::status(candidate, error);
+        if (error && error != std::errc::no_such_file_or_directory &&
+            error != std::errc::not_a_directory) {
+            return std::unexpected(make_error(error));
+        }
+        if (!error && std::filesystem::exists(status)) {
+            if (!std::filesystem::is_directory(status)) {
+                return std::unexpected(
+                    detail::make_error(ErrorCode::InvalidContext,
+                                       "local destination traverses a file",
+                                       0));
+            }
+            return {};
+        }
+        const auto parent = candidate.parent_path();
+        if (parent.empty() || parent == candidate) {
+            return std::unexpected(
+                detail::make_error(ErrorCode::StorageNotFound,
+                                   "local destination root is not available",
+                                   error.value()));
+        }
+        candidate = parent;
+    }
+}
+
+void destroy_local_state(void* context) noexcept {
+    delete static_cast<State*>(context);
 }
 
 } // namespace
@@ -416,7 +312,6 @@ StorageOperations make_storage_operations() noexcept {
         .initialize = local_initialize,
         .put = local_put,
         .get = local_get,
-        .copy = local_copy,
         .presence = local_presence,
         .list = local_list,
         .list_prefix = local_list_prefix,
@@ -425,3 +320,29 @@ StorageOperations make_storage_operations() noexcept {
 }
 
 } // namespace kasumi::transport::local_detail
+
+namespace kasumi::transport {
+
+std::expected<Transport, Error>
+detail::open_local_backend(detail::LocalConfiguration configuration) {
+    if (configuration.root.empty()) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::InvalidContext, "storage path is invalid", 0));
+    }
+    if (auto valid = local_detail::validate_destination(configuration.root);
+        !valid) {
+        return std::unexpected(valid.error());
+    }
+    auto* state = new (std::nothrow)
+        local_detail::State{.root = std::move(configuration.root)};
+    if (state == nullptr) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::Io, "could not allocate local state", 0));
+    }
+    return Transport{
+        .state = TransportStateHandle{state, local_detail::destroy_local_state},
+        .storage = local_detail::make_storage_operations(),
+    };
+}
+
+} // namespace kasumi::transport

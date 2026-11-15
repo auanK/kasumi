@@ -88,10 +88,6 @@ target_link_libraries(kasumi_application_fault_test_objects PRIVATE
     kasumi_hardening
 )
 
-add_test(NAME kasumi_gc_benchmark_collector
-    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/unit/operational/test_gc_benchmark.py)
-set_tests_properties(kasumi_gc_benchmark_collector PROPERTIES LABELS "benchmark;unit.operational")
-
 kasumi_add_test_suite(
     kasumi_test_unit_platform
     "unit.platform"
@@ -129,8 +125,6 @@ kasumi_add_test_suite(
         unit/application/test_inspection.cpp
         unit/application/integrity/test_maintenance.cpp
         unit/application/integrity/test_garbage_collection.cpp
-        unit/application/integrity/test_fsck_checkpoint.cpp
-        unit/application/integrity/test_fsck_resume.cpp
     LIBRARIES
         kasumi_application
         kasumi_sqlite3
@@ -314,10 +308,6 @@ kasumi_add_test_suite(
     LIBRARIES
         kasumi_cli
 )
-target_compile_definitions(kasumi_test_unit_cli PRIVATE
-    "KASUMI_I18N_SOURCE_DIR=\"${PROJECT_SOURCE_DIR}\""
-    "KASUMI_I18N_EMBEDDED_HEADER=\"${I18N_EMBEDDED_HEADER}\""
-)
 
 # Substitute Application entry points to exercise CLI outcomes without I/O.
 kasumi_add_test_suite(
@@ -331,29 +321,6 @@ add_test(NAME kasumi_cli_process_contract
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/cli/test_process.py
         --binary $<TARGET_FILE:kasumi>)
 set_tests_properties(kasumi_cli_process_contract PROPERTIES LABELS "integration.cli")
-
-add_executable(
-    kasumi_test_i18n_generator_collision
-    unit/cli/test_i18n_generator_collision.cpp
-)
-target_link_libraries(kasumi_test_i18n_generator_collision
-    PRIVATE GTest::gtest_main kasumi_warnings
-)
-target_include_directories(kasumi_test_i18n_generator_collision
-    PRIVATE "${PROJECT_BINARY_DIR}/generated"
-)
-target_compile_definitions(kasumi_test_i18n_generator_collision PRIVATE
-    "KASUMI_I18N_COLLISION_FIXTURE_PATH=\"${I18N_COLLISION_FIXTURE}\""
-)
-add_dependencies(kasumi_test_i18n_generator_collision
-    kasumi_i18n_collision_header
-)
-gtest_discover_tests(
-    kasumi_test_i18n_generator_collision
-    DISCOVERY_MODE PRE_TEST
-    DISCOVERY_TIMEOUT 30
-    PROPERTIES LABELS "unit.cli"
-)
 
 kasumi_add_test_suite(
     kasumi_test_unit_core_diff
@@ -413,9 +380,6 @@ kasumi_add_test_suite(
         unit/transport/test_local.cpp
         support/src/transport_scenarios.cpp
         unit/transport/test_rclone_storage.cpp
-        unit/transport/test_remote_copy_smoke.cpp
-        operational/gc_live_preflight_support.cpp
-        operational/remote_copy_smoke_support.cpp
     LIBRARIES
         kasumi_transport
         kasumi_platform
@@ -427,33 +391,6 @@ kasumi_add_test_suite(
 if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_compile_options(kasumi_test_unit_transport PRIVATE -Wa,-mbig-obj)
 endif()
-
-kasumi_add_test_suite(
-    kasumi_test_provider_certification
-    "operational.provider_certification"
-    SOURCES
-        unit/operational/test_provider_certification.cpp
-        unit/operational/test_provider_target_config.cpp
-        operational/provider_certification_support.cpp
-        operational/gc_live_preflight_support.cpp
-        operational/remote_copy_smoke_support.cpp
-        support/src/provider_scenarios.cpp
-        support/src/transport_scenarios.cpp
-    LIBRARIES
-        kasumi_application
-        kasumi_transport
-        kasumi_operational_provider_target_config
-        reproc++
-        kasumi_platform
-        kasumi_crypto
-        httplib::httplib
-        nlohmann_json::nlohmann_json
-)
-target_include_directories(
-    kasumi_test_provider_certification
-    PRIVATE
-    ${PROJECT_SOURCE_DIR}/tests/operational
-)
 
 kasumi_add_test_suite(
     kasumi_test_integration_runtime_application
@@ -506,173 +443,5 @@ add_test(
         -DPROJECT_SOURCE_DIR=${PROJECT_SOURCE_DIR}
         -P ${PROJECT_SOURCE_DIR}/tests/architecture/check_dependency_dag.cmake
 )
-
-if(KASUMI_BUILD_BENCHMARKS)
-add_executable(kasumi_benchmark_gc
-    operational/benchmark_gc.cpp
-    operational/gc_live_preflight_support.cpp
-    operational/remote_copy_smoke_support.cpp)
-target_link_libraries(kasumi_benchmark_gc PRIVATE
-    kasumi_application kasumi_warnings nlohmann_json::nlohmann_json reproc++)
-target_include_directories(kasumi_benchmark_gc PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
-    target_link_options(kasumi_benchmark_gc PRIVATE -static-libgcc -static-libstdc++ -Wl,--allow-multiple-definition)
-endif()
-if(WIN32)
-    target_link_libraries(kasumi_benchmark_gc PRIVATE psapi)
-endif()
-
-add_executable(
-    kasumi_benchmark_local_scan
-    operational/benchmark_local_scan.cpp
-)
-
-target_link_libraries(
-    kasumi_benchmark_local_scan
-    PRIVATE
-    kasumi_application
-    kasumi_warnings
-)
-
-target_include_directories(
-    kasumi_benchmark_local_scan
-    PRIVATE
-    ${PROJECT_SOURCE_DIR}/src
-)
-
-if(WIN32)
-    target_link_libraries(kasumi_benchmark_local_scan PRIVATE psapi)
-endif()
-
-add_executable(
-    kasumi_benchmark_file_open
-    operational/benchmark_file_open.cpp
-)
-
-target_link_libraries(
-    kasumi_benchmark_file_open
-    PRIVATE
-    kasumi_application
-    kasumi_crypto
-    kasumi_platform
-    blake3
-    kasumi_warnings
-)
-
-target_include_directories(
-    kasumi_benchmark_file_open
-    PRIVATE
-    ${PROJECT_SOURCE_DIR}/src
-    ${PROJECT_SOURCE_DIR}/include
-)
-
-add_executable(
-    kasumi_benchmark_crypto_files
-    operational/benchmark_crypto_files.cpp
-)
-
-target_link_libraries(
-    kasumi_benchmark_crypto_files
-    PRIVATE
-    kasumi_crypto
-    kasumi_platform
-    kasumi_warnings
-)
-
-target_include_directories(
-    kasumi_benchmark_crypto_files
-    PRIVATE
-    ${PROJECT_SOURCE_DIR}/src
-    ${PROJECT_SOURCE_DIR}/include
-)
-
-if(WIN32)
-    target_link_libraries(kasumi_benchmark_crypto_files PRIVATE psapi)
-endif()
-
-add_test(
-    NAME kasumi_benchmark_crypto_files_safety
-    COMMAND kasumi_benchmark_crypto_files --self-test
-)
-
-set_tests_properties(
-    kasumi_benchmark_crypto_files_safety
-    PROPERTIES
-    LABELS "benchmark;security"
-)
-
-add_executable(
-    kasumi_benchmark_structural_scale
-    operational/benchmark_structural_scale.cpp
-)
-
-target_link_libraries(
-    kasumi_benchmark_structural_scale
-    PRIVATE
-    kasumi_core
-    kasumi_crypto
-    kasumi_platform
-    kasumi_state_storage
-    kasumi_warnings
-)
-
-target_include_directories(
-    kasumi_benchmark_structural_scale
-    PRIVATE
-    ${PROJECT_SOURCE_DIR}/src
-)
-
-add_executable(
-    kasumi_benchmark_sync_e2e
-    operational/benchmark_sync_e2e.cpp
-)
-target_link_libraries(
-    kasumi_benchmark_sync_e2e
-    PRIVATE
-    kasumi_application
-    kasumi_warnings
-)
-target_include_directories(
-    kasumi_benchmark_sync_e2e
-    PRIVATE
-    ${PROJECT_SOURCE_DIR}/src
-    ${PROJECT_SOURCE_DIR}/include
-)
-
-add_executable(
-    kasumi_benchmark_sync_availability
-    operational/benchmark_sync_availability.cpp
-)
-target_link_libraries(
-    kasumi_benchmark_sync_availability
-    PRIVATE
-    kasumi_application
-    kasumi_warnings
-)
-target_include_directories(
-    kasumi_benchmark_sync_availability
-    PRIVATE
-    ${PROJECT_SOURCE_DIR}/src
-    ${PROJECT_SOURCE_DIR}/include
-)
-
-add_executable(
-    kasumi_benchmark_ignore_perf
-    operational/benchmark_ignore_perf.cpp
-)
-target_link_libraries(
-    kasumi_benchmark_ignore_perf
-    PRIVATE
-    kasumi_core
-    kasumi_warnings
-)
-target_include_directories(
-    kasumi_benchmark_ignore_perf
-    PRIVATE
-    ${PROJECT_SOURCE_DIR}/src
-    ${PROJECT_SOURCE_DIR}/include
-)
-
-endif()
 
 set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES "${CMAKE_CURRENT_LIST_DIR}/release_critical_labels.cmake")

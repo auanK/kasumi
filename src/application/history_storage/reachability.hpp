@@ -75,8 +75,7 @@ ReachabilityResult
 inventory_reachability(transport::Transport& storage,
                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                        std::span<const std::string> identifiers,
-                       const std::filesystem::path& workspace_root,
-                       std::string_view trace_scope = {});
+                       const std::filesystem::path& workspace_root);
 
 // Also reuses the Epoch chain already authenticated in this observation.
 ReachabilityResult

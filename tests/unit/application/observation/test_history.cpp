@@ -9,7 +9,11 @@
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
 #include "kasumi/test/filesystem.hpp"
+#define KASUMI_TEST_HISTORY_STORAGE_NO_ERROR_CODE_ALIAS
+#include "kasumi/test/history_storage.hpp"
+#undef KASUMI_TEST_HISTORY_STORAGE_NO_ERROR_CODE_ALIAS
 #include "kasumi/test/temp_workspace.hpp"
+#include "state_storage/database.hpp"
 #include "transport/transport.hpp"
 
 #include <algorithm>
@@ -38,12 +42,31 @@ using ErrorCode = kasumi::application::observation::history::ErrorCode;
 using StorageView = kasumi::application::observation::history::StorageView;
 using TempWorkspace = kasumi::test::TempWorkspace;
 
-Key test_key() {
-    Key key{};
-    for (std::size_t index = 0; index < key.size(); ++index) {
-        key[index] = static_cast<std::uint8_t>(index + 1);
-    }
-    return key;
+TEST(ObservationHints, PreservesAcceptedEpochAndRejectsInvalidMarker) {
+    using namespace kasumi::application;
+    kasumi::state_storage::StoredState state;
+    state.commit_id = std::string(64, 'a');
+    state.ciphertext_id = std::string(64, 'b');
+    state.epoch_id = std::string(64, 'c');
+    state.epoch_sequence = 7;
+    state.tree.rows.push_back({.path = "", .is_directory = true});
+    const auto* rows = state.tree.rows.data();
+    const auto layout = history_storage::derive_remote_layout(Key{});
+    const auto hints =
+        observation::history::make_observation_hints(std::move(state), layout);
+    ASSERT_TRUE(hints.frontier);
+    ASSERT_EQ(hints.frontier->anchors.size(), 1);
+    EXPECT_EQ(hints.frontier->anchors.front().commit_id, std::string(64, 'a'));
+    EXPECT_EQ(hints.frontier->anchors.front().tree.rows.data(), rows);
+    ASSERT_TRUE(hints.frontier->accepted_epoch);
+    EXPECT_EQ(hints.frontier->accepted_epoch->sequence, state.epoch_sequence);
+    EXPECT_EQ(hints.trusted_marker_identifiers.size(), 1);
+    state.commit_id = std::string(64, 'a');
+    state.ciphertext_id = "invalid";
+    const auto untrusted =
+        observation::history::make_observation_hints(state, layout, false);
+    EXPECT_FALSE(untrusted.frontier);
+    EXPECT_TRUE(untrusted.trusted_marker_identifiers.empty());
 }
 
 kasumi::Snapshot
@@ -71,297 +94,20 @@ Commit make_commit(std::uint64_t height,
     return result ? *result : Commit{};
 }
 
-std::string commit_id(const Commit& commit) {
-    const auto canonical = kasumi::history::serialize(commit).value();
-    return kasumi::crypto::commit_identifier(test_key(), canonical);
-}
-
-const auto layout =
-    kasumi::application::history_storage::derive_remote_layout(test_key());
-
-std::string
-object_path(const kasumi::application::history_storage::HeadReference& head) {
-    return kasumi::application::history_storage::commit_object(layout, head);
-}
-
-std::string
-marker_path(const kasumi::application::history_storage::HeadReference& head) {
-    return kasumi::application::history_storage::marker_object(layout, head);
-}
-
-bool same_tree(const kasumi::Snapshot& left, const kasumi::Snapshot& right) {
-    if (left.rows.size() != right.rows.size()) {
-        return false;
-    }
-    for (std::size_t index = 0; index < left.rows.size(); ++index) {
-        const auto& a = left.rows[index];
-        const auto& b = right.rows[index];
-        if (a.path != b.path || a.hash != b.hash || a.size != b.size ||
-            a.mtime != b.mtime || a.is_directory != b.is_directory) {
-            return false;
-        }
-    }
-    return true;
-}
-
-struct LocalStorage {
-    TempWorkspace workspace;
-    kasumi::transport::Transport transport;
-};
-
-LocalStorage make_local_storage() {
-    LocalStorage storage{
-        .workspace = kasumi::test::make_temp_workspace("observation-history"),
-        .transport = {}};
-    auto opened = kasumi::transport::open_transport(
-        kasumi::test::workspace_path(storage.workspace, "storage").string());
-    EXPECT_TRUE(opened.has_value());
-    if (opened) {
-        storage.transport = std::move(*opened);
-        EXPECT_TRUE(kasumi::transport::initialize(storage.transport));
-    }
-    return storage;
-}
-
-struct FakeState {
-    std::map<std::string, std::vector<std::uint8_t>> objects;
-    std::size_t list_count = 0;
-    std::size_t full_list_count = 0;
-    std::size_t prefix_list_count = 0;
-    std::size_t get_count = 0;
-    std::size_t marker_get_count = 0;
-    std::size_t commit_get_count = 0;
-    std::size_t put_count = 0;
-    std::size_t remove_count = 0;
-    bool fail_first_list = false;
-    bool fail_second_list = false;
-    bool fail_marker_get = false;
-    bool fail_commit_get = false;
-    bool reverse_listing = false;
-    bool directory_destination = false;
-    std::string disappear_on_get;
-};
-
-void destroy_fake(void*) noexcept {
-}
-
-FakeState& fake_state(void* context) {
-    return *static_cast<FakeState*>(context);
-}
-
-kasumi::transport::Error fake_error(std::string message) {
-    return kasumi::transport::Error{
-        .code = kasumi::transport::ErrorCode::Io,
-        .message = std::move(message),
-    };
-}
-
-bool is_marker(std::string_view identifier) {
-    return identifier.starts_with(layout.heads_prefix);
-}
-
-bool is_commit(std::string_view identifier) {
-    return identifier.starts_with(layout.commits_prefix);
-}
-
-kasumi::transport::Result fake_initialize(void*) {
-    return {};
-}
-
-kasumi::transport::Result fake_put(void* context,
-                                   const std::filesystem::path& source,
-                                   std::string_view identifier) {
-    auto& state = fake_state(context);
-    std::error_code error;
-    const auto size = std::filesystem::file_size(source, error);
-    if (error) {
-        return std::unexpected(fake_error("could not read source"));
-    }
-    std::ifstream input(source, std::ios::binary);
-    if (!input) {
-        return std::unexpected(fake_error("could not open source"));
-    }
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-    if (!bytes.empty()) {
-        input.read(reinterpret_cast<char*>(bytes.data()),
-                   static_cast<std::streamsize>(bytes.size()));
-    }
-    if (!input) {
-        return std::unexpected(fake_error("could not read source"));
-    }
-    ++state.put_count;
-    state.objects[std::string{identifier}] = std::move(bytes);
-    return {};
-}
-
-kasumi::transport::Result fake_get(void* context,
-                                   std::string_view identifier,
-                                   const std::filesystem::path& destination) {
-    auto& state = fake_state(context);
-    ++state.get_count;
-    if (is_marker(identifier)) {
-        ++state.marker_get_count;
-    } else if (is_commit(identifier)) {
-        ++state.commit_get_count;
-    }
-    if ((is_marker(identifier) && state.fail_marker_get) ||
-        (is_commit(identifier) && state.fail_commit_get)) {
-        return std::unexpected(fake_error("injected get failure"));
-    }
-    if (identifier == state.disappear_on_get) {
-        state.objects.erase(std::string{identifier});
-        state.disappear_on_get.clear();
-        return std::unexpected(kasumi::transport::Error{
-            .code = kasumi::transport::ErrorCode::ObjectNotFound,
-            .message = "object disappeared",
-        });
-    }
-    const auto found = state.objects.find(std::string{identifier});
-    if (found == state.objects.end()) {
-        return std::unexpected(kasumi::transport::Error{
-            .code = kasumi::transport::ErrorCode::ObjectNotFound,
-            .message = "object not found",
-        });
-    }
-    if (state.directory_destination) {
-        std::error_code error;
-        std::filesystem::create_directories(destination, error);
-        if (error) {
-            return std::unexpected(fake_error("could not create destination"));
-        }
-        return {};
-    }
-    std::ofstream output(destination, std::ios::binary | std::ios::trunc);
-    if (!output) {
-        return std::unexpected(fake_error("could not create destination"));
-    }
-    const auto& bytes = found->second;
-    if (!bytes.empty()) {
-        output.write(reinterpret_cast<const char*>(bytes.data()),
-                     static_cast<std::streamsize>(bytes.size()));
-    }
-    if (!output) {
-        return std::unexpected(fake_error("could not write destination"));
-    }
-    return {};
-}
-
-kasumi::transport::PresenceResult fake_presence(void* context,
-                                                std::string_view identifier) {
-    auto& state = fake_state(context);
-    return state.objects.contains(std::string{identifier})
-               ? kasumi::transport::Presence::Present
-               : kasumi::transport::Presence::Absent;
-}
-
-kasumi::transport::ListingResult fake_list(void* context) {
-    auto& state = fake_state(context);
-    ++state.list_count;
-    ++state.full_list_count;
-    if ((state.list_count == 1 && state.fail_first_list) ||
-        (state.list_count == 2 && state.fail_second_list)) {
-        return std::unexpected(fake_error("injected list failure"));
-    }
-    std::vector<std::string> result;
-    result.reserve(state.objects.size());
-    for (const auto& [identifier, unused] : state.objects) {
-        static_cast<void>(unused);
-        result.push_back(identifier);
-    }
-    if (state.reverse_listing) {
-        std::ranges::reverse(result);
-    }
-    return result;
-}
-
-kasumi::transport::ListingResult fake_list_prefix(void* context,
-                                                  std::string_view prefix) {
-    auto& state = fake_state(context);
-    ++state.list_count;
-    ++state.prefix_list_count;
-    if ((state.list_count == 1 && state.fail_first_list) ||
-        (state.list_count == 2 && state.fail_second_list)) {
-        return std::unexpected(fake_error("injected list failure"));
-    }
-    const auto full_prefix = std::string{prefix} + "/";
-    std::vector<std::string> result;
-    for (const auto& [identifier, unused] : state.objects) {
-        static_cast<void>(unused);
-        if (!identifier.starts_with(full_prefix)) {
-            continue;
-        }
-        const auto name = identifier.substr(full_prefix.size());
-        if (name.find('/') == std::string::npos) {
-            result.push_back(name);
-        }
-    }
-    if (state.reverse_listing) {
-        std::ranges::reverse(result);
-    }
-    return result;
-}
-
-kasumi::transport::RemovalResult fake_remove(void* context,
-                                             std::string_view identifier) {
-    auto& state = fake_state(context);
-    ++state.remove_count;
-    return state.objects.erase(std::string{identifier}) != 0
-               ? kasumi::transport::Removal::Removed
-               : kasumi::transport::Removal::AlreadyAbsent;
-}
-
-kasumi::transport::Transport make_fake_transport(FakeState& state) {
-    kasumi::transport::Transport result;
-    result.state = {&state, destroy_fake};
-    result.storage = {
-        .initialize = fake_initialize,
-        .put = fake_put,
-        .get = fake_get,
-        .presence = fake_presence,
-        .list = fake_list,
-        .list_prefix = fake_list_prefix,
-        .remove = fake_remove,
-    };
-    return result;
-}
-
 struct FakeStorage {
-    TempWorkspace workspace;
-    std::unique_ptr<FakeState> state;
-    kasumi::transport::Transport transport;
+    TempWorkspace workspace =
+        kasumi::test::make_temp_workspace("observation-history-fake");
+    FakeState* state = nullptr;
+    kasumi::transport::Transport transport = make_fake_transport(state);
 };
 
 FakeStorage make_fake_storage() {
-    FakeStorage storage{.workspace = kasumi::test::make_temp_workspace(
-                            "observation-history-fake"),
-                        .state = std::make_unique<FakeState>(),
-                        .transport = {}};
-    storage.transport = make_fake_transport(*storage.state);
-    return storage;
-}
-
-kasumi::application::history_storage::PublishedCommit
-publish(LocalStorage& storage, const Commit& commit) {
-    auto result = kasumi::application::history_storage::publish_commit(
-        storage.transport,
-        test_key(),
-        commit,
-        kasumi::test::workspace_root(storage.workspace));
-    EXPECT_TRUE(result.has_value());
-    return result ? *result
-                  : kasumi::application::history_storage::PublishedCommit{};
+    return FakeStorage{};
 }
 
 kasumi::application::history_storage::PublishedCommit
 publish(FakeStorage& storage, const Commit& commit) {
-    auto result = kasumi::application::history_storage::publish_commit(
-        storage.transport,
-        test_key(),
-        commit,
-        kasumi::test::workspace_root(storage.workspace));
-    EXPECT_TRUE(result.has_value());
-    return result ? *result
-                  : kasumi::application::history_storage::PublishedCommit{};
+    return ::publish(storage.transport, storage.workspace, commit);
 }
 
 std::expected<StorageView, kasumi::application::observation::history::Error>
@@ -408,36 +154,13 @@ observe(LocalStorage& storage,
 
 kasumi::application::history_storage::HeadReference
 add_unmarked_variant(LocalStorage& storage, const Commit& commit) {
-    const auto canonical = kasumi::history::serialize(commit).value();
-    const auto plaintext =
-        kasumi::test::workspace_path(storage.workspace, "orphan.kcom");
-    const auto ciphertext =
-        kasumi::test::workspace_path(storage.workspace, "orphan.ciphertext");
-    kasumi::test::write_binary(plaintext, std::as_bytes(std::span{canonical}));
-    EXPECT_TRUE(
-        kasumi::crypto::encrypt_file(plaintext,
-                                     ciphertext,
-                                     test_key(),
-                                     kasumi::crypto::FilePurpose::History));
-    const auto hash = kasumi::crypto::content::hash_file(ciphertext).value();
-    kasumi::application::history_storage::HeadReference reference{
-        .commit_id = commit_id(commit),
-        .ciphertext_id = kasumi::hash_hex(hash),
-    };
-    EXPECT_TRUE(kasumi::transport::put(
-        storage.transport, ciphertext, object_path(reference)));
-    return reference;
+    return publish_object(
+        storage.transport, storage.workspace, commit, "variant", false);
 }
 
 void add_marked_variant(LocalStorage& storage, const Commit& commit) {
-    const auto reference = add_unmarked_variant(storage, commit);
-    const auto marker =
-        kasumi::application::history_storage::encode_marker(reference).value();
-    const auto marker_file =
-        kasumi::test::workspace_path(storage.workspace, "variant.head");
-    kasumi::test::write_binary(marker_file, std::as_bytes(std::span{marker}));
-    EXPECT_TRUE(kasumi::transport::put(
-        storage.transport, marker_file, marker_path(reference)));
+    publish_object(
+        storage.transport, storage.workspace, commit, "variant", true);
 }
 
 kasumi::application::history_storage::epoch::SealedEpoch
@@ -536,7 +259,7 @@ TEST(HistoryObservationTest, SingleHeadIsEffectiveAndPublishable) {
     EXPECT_EQ(view->marked_heads, view->logical_heads);
     EXPECT_TRUE(view->ancestral_marked_heads.empty());
     EXPECT_FALSE(view->has_conflicts);
-    EXPECT_TRUE(same_tree(view->effective_tree, commit.tree));
+    EXPECT_EQ(view->effective_tree, commit.tree);
 
     auto convergence = kasumi::history::make_commit(
         view->observed_height + 1, view->logical_heads, view->effective_tree);
@@ -626,7 +349,7 @@ TEST(HistoryObservationTest, PreservesDeterministicConflicts) {
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(second.has_value());
     EXPECT_TRUE(first->has_conflicts);
-    EXPECT_TRUE(same_tree(first->effective_tree, second->effective_tree));
+    EXPECT_EQ(first->effective_tree, second->effective_tree);
     EXPECT_TRUE(
         std::ranges::any_of(first->effective_tree.rows, [](const auto& row) {
             return row.path.find(".kasumiconflict_") != std::string::npos;
@@ -670,10 +393,10 @@ TEST(HistoryObservationTest, ReconcilesAuthenticatedCrissCrossSnapshots) {
     EXPECT_EQ(view->logical_heads.size(), 2U);
     EXPECT_EQ(view->observed_height, 2U);
     EXPECT_FALSE(view->has_conflicts);
-    EXPECT_TRUE(same_tree(
+    EXPECT_EQ(
         view->effective_tree,
         make_tree(
-            {{"left", "L"}, {"right", "R"}, {"first", "F"}, {"second", "S"}})));
+            {{"left", "L"}, {"right", "R"}, {"first", "F"}, {"second", "S"}}));
     EXPECT_FALSE(kasumi::test::has_temporary_history_workspace(
         kasumi::test::workspace_root(storage.workspace)));
 }
@@ -706,9 +429,8 @@ TEST(HistoryObservationTest, ReconcilesCrissCrossWithLaterModification) {
     ASSERT_TRUE(view.has_value());
     EXPECT_EQ(view->logical_heads.size(), 2U);
     EXPECT_FALSE(view->has_conflicts);
-    EXPECT_TRUE(
-        same_tree(view->effective_tree,
-                  make_tree({{"left.txt", "other"}, {"right.txt", "r"}})));
+    EXPECT_EQ(view->effective_tree,
+              make_tree({{"left.txt", "other"}, {"right.txt", "r"}}));
     EXPECT_FALSE(kasumi::test::has_temporary_history_workspace(
         kasumi::test::workspace_root(storage.workspace)));
 }
@@ -824,7 +546,8 @@ TEST(HistoryObservationTest, PreservesHistoryStorageWorkspaceFailure) {
 
 TEST(HistoryObservationTest, MapsFirstListFailureToTransportFailure) {
     auto storage = make_fake_storage();
-    storage.state->fail_first_list = true;
+    storage.state->fail_list = kasumi::transport::ErrorCode::Io;
+    storage.state->fail_list_at = 1;
 
     auto result = observe(storage);
     ASSERT_FALSE(result.has_value());
@@ -861,7 +584,8 @@ TEST(HistoryObservationTest, AuditedObservationNeverRequestsASecondListing) {
     auto storage = make_fake_storage();
     publish(storage, make_commit(0, {}, make_tree({{"file.txt", "one"}})));
     storage.state->list_count = 0;
-    storage.state->fail_second_list = true;
+    storage.state->fail_list = kasumi::transport::ErrorCode::Io;
+    storage.state->fail_list_at = 2;
 
     auto audited = observe(storage, true);
     ASSERT_TRUE(audited.has_value());
@@ -870,7 +594,8 @@ TEST(HistoryObservationTest, AuditedObservationNeverRequestsASecondListing) {
         kasumi::test::workspace_root(storage.workspace)));
 
     storage.state->list_count = 0;
-    storage.state->fail_second_list = false;
+    storage.state->fail_list.reset();
+    storage.state->fail_list_at = 0;
     auto not_audited = observe(storage, false);
     ASSERT_TRUE(not_audited.has_value());
     EXPECT_EQ(storage.state->list_count, 2);
@@ -984,7 +709,7 @@ TEST(HistoryObservationTest, ObservationIsReadOnlyAndListingOrderIndependent) {
     storage.state->reverse_listing = true;
     auto reversed = observe(storage);
     ASSERT_TRUE(reversed.has_value());
-    EXPECT_TRUE(same_tree(normal->effective_tree, reversed->effective_tree));
+    EXPECT_EQ(normal->effective_tree, reversed->effective_tree);
     EXPECT_EQ(normal->observed_height, reversed->observed_height);
     EXPECT_EQ(normal->marked_heads, reversed->marked_heads);
     EXPECT_EQ(normal->logical_heads, reversed->logical_heads);
@@ -1003,7 +728,7 @@ TEST(HistoryObservationTest, MapsWrongKeyAndCorruptionToStorageFailure) {
     auto published_obj =
         kasumi::application::history_storage::publish_commit_object(
             storage.transport,
-            layout,
+            test_layout(),
             test_key(),
             commit,
             kasumi::test::workspace_root(storage.workspace));
@@ -1011,7 +736,7 @@ TEST(HistoryObservationTest, MapsWrongKeyAndCorruptionToStorageFailure) {
     auto published_head =
         kasumi::application::history_storage::publish_head_marker(
             storage.transport,
-            layout,
+            test_layout(),
             published_obj->head,
             kasumi::test::workspace_root(storage.workspace));
     ASSERT_TRUE(published_head.has_value());
@@ -1022,9 +747,7 @@ TEST(HistoryObservationTest, MapsWrongKeyAndCorruptionToStorageFailure) {
         kasumi::application::history_storage::derive_remote_layout(wrong_key);
     const auto remote_storage =
         kasumi::test::workspace_path(storage.workspace, "storage");
-    const auto source_path =
-        remote_storage / kasumi::application::history_storage::marker_object(
-                             layout, published_obj->head);
+    const auto source_path = remote_storage / marker_path(published_obj->head);
     const auto target_path =
         remote_storage / kasumi::application::history_storage::marker_object(
                              wrong_layout, published_obj->head);
@@ -1037,9 +760,7 @@ TEST(HistoryObservationTest, MapsWrongKeyAndCorruptionToStorageFailure) {
 
     kasumi::test::write_text(
         kasumi::test::workspace_path(storage.workspace, "storage") /
-            std::filesystem::path{
-                kasumi::application::history_storage::commit_object(
-                    layout, published_obj->head)},
+            std::filesystem::path{object_path(published_obj->head)},
         "corrupt");
     auto corrupt = observe(storage);
     ASSERT_FALSE(corrupt.has_value());
@@ -1094,7 +815,7 @@ TEST(HistoryObservationTest, AnchoredNoOpCommitGetsStayZeroAcrossHistoryDepth) {
         EXPECT_EQ(storage.state->prefix_list_count, 2);
         EXPECT_EQ(storage.state->marker_get_count, 1);
         EXPECT_EQ(storage.state->commit_get_count, 0);
-        EXPECT_TRUE(same_tree(observed->effective_tree, current.tree));
+        EXPECT_EQ(observed->effective_tree, current.tree);
     }
 }
 
@@ -1154,7 +875,7 @@ TEST(
         ASSERT_TRUE(observed->epoch.has_value());
         EXPECT_EQ(observed->epoch->reference, epoch.reference);
         EXPECT_EQ(storage.state->commit_get_count, 0);
-        EXPECT_TRUE(same_tree(observed->effective_tree, current.tree));
+        EXPECT_EQ(observed->effective_tree, current.tree);
     }
 }
 
@@ -1201,7 +922,7 @@ TEST(HistoryObservationTest,
         ASSERT_TRUE(observed->epoch.has_value());
         EXPECT_EQ(observed->epoch->reference, epoch.reference);
         EXPECT_EQ(storage.state->commit_get_count, delta);
-        EXPECT_TRUE(same_tree(observed->effective_tree, current.tree));
+        EXPECT_EQ(observed->effective_tree, current.tree);
     }
 }
 
@@ -1245,7 +966,7 @@ TEST(HistoryObservationTest, AdvancedEpochDisablesCachedAnchorShortcut) {
     ASSERT_TRUE(observed->epoch.has_value());
     EXPECT_EQ(observed->epoch->reference, latest.reference);
     EXPECT_EQ(storage.state->commit_get_count, 1);
-    EXPECT_TRUE(same_tree(observed->effective_tree, remote.tree));
+    EXPECT_EQ(observed->effective_tree, remote.tree);
 }
 
 TEST(HistoryObservationTest,
@@ -1283,7 +1004,7 @@ TEST(HistoryObservationTest,
     ASSERT_TRUE(observed->epoch.has_value());
     EXPECT_EQ(observed->epoch->reference, epoch.reference);
     EXPECT_EQ(storage.state->commit_get_count, 4);
-    EXPECT_TRUE(same_tree(observed->effective_tree, remote.tree));
+    EXPECT_EQ(observed->effective_tree, remote.tree);
 }
 
 TEST(HistoryObservationTest, AnchoredObservationLoadsOnlyNewCommits) {
@@ -1306,7 +1027,7 @@ TEST(HistoryObservationTest, AnchoredObservationLoadsOnlyNewCommits) {
     EXPECT_EQ(storage.state->marker_get_count, 1);
     EXPECT_EQ(storage.state->commit_get_count, 1);
     EXPECT_EQ(observed->reachable_commits.size(), 2);
-    EXPECT_TRUE(same_tree(observed->effective_tree, next.tree));
+    EXPECT_EQ(observed->effective_tree, next.tree);
 }
 
 TEST(HistoryObservationTest, AnchoredMultiHeadLoadsOnlyBranchesAfterAnchor) {
@@ -1351,14 +1072,12 @@ TEST(
         .commit_id = commit_id(left), .height = 1, .tree = left.tree};
     const std::array trusted_markers{marker_path(left_published.head)};
 
-    auto observed =
-        observe(storage, false, &anchor, nullptr, trusted_markers);
+    auto observed = observe(storage, false, &anchor, nullptr, trusted_markers);
     ASSERT_TRUE(observed.has_value()) << observed.error().detail;
     EXPECT_EQ(observed->logical_heads.size(), 2);
     EXPECT_TRUE(kasumi::find_row(observed->effective_tree, "left.txt"));
     EXPECT_TRUE(kasumi::find_row(observed->effective_tree, "right.txt"));
 }
-
 
 TEST(HistoryObservationTest, MissingAnchoredCommitFailsClosed) {
     auto storage = make_fake_storage();

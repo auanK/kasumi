@@ -158,7 +158,7 @@ For the recovery state transitions, see [Transactions and Recovery](architecture
 
 ## Remote Inspection
 
-These commands do not publish synchronization changes or run garbage collection. Complete-history inspection may maintain the local private `inspection-history-v1.cache`; `remote get` writes the requested destination after authenticating the payload. See [Remote Inspection](architecture/remote-inspection.md) for each family's data flow and failure behavior.
+These commands do not publish synchronization changes or run garbage collection. `remote get` writes the requested destination after authenticating the payload. See [Remote Inspection](architecture/remote-inspection.md) for each family's data flow and failure behavior.
 
 Use `kasumi remote --help` to choose a view, and
 `kasumi remote <subcommand> --help` for its required arguments. For example:
@@ -212,8 +212,7 @@ success, failure, pending results and cancellation. Sync has one duration line;
 internal operational metrics are separate. Help, version and invalid invocations
 have no operation duration.
 
-Operation messages and errors use stdout; invocation diagnostics and optional
-performance traces use stderr. Interpret the [exit code](#exit-codes) with the
+Operation messages and errors use stdout; invocation diagnostics use stderr. Interpret the [exit code](#exit-codes) with the
 output; partial results are not full success.
 
 ## Language Selection (i18n)
@@ -224,19 +223,15 @@ To switch to **Portuguese**:
 * Command line: `kasumi --lang pt-BR <command> <profile>` (or `--lang pt`)
 * Environment variable: set `KASUMI_LANG=pt-BR` (or `pt`)
 
-To add a custom community language catalog, place `<lang>.json` in `%APPDATA%/kasumi/locales/` (Windows) or `$XDG_CONFIG_HOME/kasumi/locales/` (Linux; fallback `$HOME/.config/kasumi/locales/`) and select it with `kasumi --lang <lang> <command> ...`.
-
 ## Automation & Environment Variables
 
 | Variable | Description |
 |---|---|
-| `KASUMI_LANG` | Sets CLI language (`en`, `pt-BR`, `pt`, etc.) |
+| `KASUMI_LANG` | Sets CLI language (`en`, `pt-BR`, `pt`) |
 | `KASUMI_MASTER_KEY` | Provides a 64-hex-digit master key to application/inspection operations. It does not replace the wizard's Password/Password Salt creation prompts. For an existing profile with `key.bin`, the supplied key must match the persisted key |
 | `KASUMI_PASSWORD` | Provides the Password to the profile creation credential flow (minimum 12 characters) |
 | `KASUMI_PASSWORD2` | Provides the Password Salt to the profile creation credential flow (minimum 16 characters) |
 | `KASUMI_CONTENT_CONCURRENCY` | Sets content-transfer concurrency. Default: 8. Positive values above 16 are capped at 16; invalid or zero values use the default |
-| `KASUMI_PERF_TRACE=1` | Writes operational trace metrics to `stderr` |
-| `KASUMI_PERF_TRACE_LIVE=1` | With tracing enabled, emits live fsck audit-completion and checkpoint-write counters to `stderr` |
 
 > [!NOTE]
 > Once a profile is created, the derived 32-byte master key is persisted locally in `profiles/<profile>/key.bin` using a reversible XOR mask and operating system filesystem permissions. For existing profiles, routine operations use the persisted `key.bin` when no explicit `KASUMI_MASTER_KEY` credential is supplied. `KASUMI_PASSWORD` and `KASUMI_PASSWORD2` are used by the profile-creation credential flow and are not re-verified during routine synchronization operations. For details on the security boundaries and key storage, see [Security Specification](security.md).

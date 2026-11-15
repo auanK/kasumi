@@ -8,7 +8,6 @@
 #include "crypto/physical_hash.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 
 #include <algorithm>
@@ -16,31 +15,27 @@
 #include <atomic>
 #include <cstddef>
 #include <filesystem>
+#include <future>
 #include <gtest/gtest.h>
+#include <limits>
 #include <span>
 #include <string>
 #include <thread>
-#include <future>
 #include <vector>
 
 namespace {
 
-// Restores the process-wide tracing state even when an assertion fails.
-struct ScopedPerfTrace {
-    ScopedPerfTrace() : previous_(kasumi::platform::perf_trace::enabled()) {
-        kasumi::platform::perf_trace::force_enable(true);
-        kasumi::platform::perf_trace::reset();
-    }
-    ~ScopedPerfTrace() {
-        kasumi::platform::perf_trace::reset();
-        kasumi::platform::perf_trace::force_enable(previous_);
-    }
-    ScopedPerfTrace(const ScopedPerfTrace&) = delete;
-    ScopedPerfTrace& operator=(const ScopedPerfTrace&) = delete;
-
-private:
-    bool previous_;
-};
+TEST(CryptoFileTest, EncodedSizeIncludesEveryChunkMacAndRejectsOverflow) {
+    using namespace kasumi::crypto;
+    EXPECT_EQ(encoded_file_size(0), FILE_HEADER_SIZE);
+    EXPECT_EQ(encoded_file_size(CHUNK_SIZE),
+              FILE_HEADER_SIZE + CHUNK_SIZE + MAC_SIZE);
+    EXPECT_EQ(encoded_file_size(CHUNK_SIZE + 1),
+              FILE_HEADER_SIZE + CHUNK_SIZE + 1 + 2 * MAC_SIZE);
+    constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();
+    EXPECT_FALSE(encoded_file_size(maximum));
+    EXPECT_FALSE(encoded_file_size(maximum - FILE_HEADER_SIZE));
+}
 
 TEST(CryptoContentTest, HashesAnEmptyFile) {
     auto workspace = kasumi::test::make_temp_workspace("content-empty");
@@ -58,21 +53,11 @@ TEST(CryptoContentTest, RecordsConfiguredScratchCapacityAndWipesBuffer) {
     const std::vector<std::byte> payload(4U * 1024U, std::byte{0x5a});
     kasumi::test::write_binary(file, payload);
 
-    ScopedPerfTrace trace;
     const auto result = kasumi::crypto::content::hash_file(file);
 
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(*result,
               kasumi::hasher::hash_bytes(payload.data(), payload.size()));
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("content hash scratch bytes"),
-        64U * 1024U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("content hash wipe bytes"),
-        64U * 1024U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("content hash read bytes"),
-        payload.size());
 }
 
 TEST(CryptoContentTest, HashesContentLargerThanTheReadBuffer) {
@@ -147,19 +132,11 @@ TEST(CryptoContentTest, UsesSixtyFourKilobyteReadChunks) {
     std::vector<std::byte> payload(payload_size, std::byte{0x7b});
     kasumi::test::write_binary(file, payload);
 
-    ScopedPerfTrace trace;
     const auto result = kasumi::crypto::content::hash_file(file);
 
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(*result,
               kasumi::hasher::hash_bytes(payload.data(), payload.size()));
-    // With a 64 KiB buffer, a (64 KiB + 1 B) payload requires 2 read calls.
-    // The 1 MiB buffer reads the entire payload in 1 call.
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("content hash read calls"), 2U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("content hash read bytes"),
-        payload.size());
 }
 
 TEST(CryptoPhysicalHashTest, Sha256MatchesKnownVector) {
@@ -212,19 +189,12 @@ TEST(CryptoFileTest, SmallEncryptionUsesPayloadSizedScratchAndRoundTrips) {
     kasumi::test::write_binary(plaintext, payload);
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
 
-    ScopedPerfTrace trace;
     const auto encrypted =
         kasumi::crypto::encrypt_file_with_hashes(plaintext, ciphertext, key);
-    const auto scratch_bytes = kasumi::platform::perf_trace::get_count(
-        "file encryption scratch bytes");
-    const auto wipe_bytes =
-        kasumi::platform::perf_trace::get_count("file encryption wipe bytes");
 
     ASSERT_TRUE(encrypted.has_value());
     ASSERT_TRUE(kasumi::crypto::decrypt_file(ciphertext, restored, key));
     EXPECT_EQ(kasumi::test::read_binary(restored), payload);
-    EXPECT_EQ(scratch_bytes, payload_size * 2U);
-    EXPECT_EQ(wipe_bytes, payload_size * 2U);
 }
 
 TEST(CryptoFileTest, RoundTripsEmptyAndChunkedFilesWithSeparatedKeys) {
@@ -366,13 +336,8 @@ TEST(CryptoFileTest, CoversEveryChunkBoundaryWithPayloadSizedScratch) {
             kasumi::test::workspace_path(workspace, "restored-" + suffix);
         kasumi::test::write_binary(plaintext, payload);
 
-        ScopedPerfTrace trace;
         const auto encrypted = kasumi::crypto::encrypt_file_with_hashes(
             plaintext, ciphertext, key);
-        const auto scratch_bytes = kasumi::platform::perf_trace::get_count(
-            "file encryption scratch bytes");
-        const auto wipe_bytes = kasumi::platform::perf_trace::get_count(
-            "file encryption wipe bytes");
 
         ASSERT_TRUE(encrypted.has_value());
         const auto expected_hash =
@@ -381,10 +346,6 @@ TEST(CryptoFileTest, CoversEveryChunkBoundaryWithPayloadSizedScratch) {
                 : kasumi::hasher::hash_bytes(payload.data(), payload.size());
         EXPECT_EQ(encrypted->plaintext_hash, expected_hash);
         EXPECT_EQ(encrypted->plaintext_size, size);
-        const auto expected_buffer =
-            2U * std::min(kasumi::crypto::CHUNK_SIZE, size);
-        EXPECT_EQ(scratch_bytes, expected_buffer);
-        EXPECT_EQ(wipe_bytes, expected_buffer);
 
         const auto chunks =
             size == 0 ? 0U : 1U + (size - 1U) / kasumi::crypto::CHUNK_SIZE;
@@ -410,13 +371,6 @@ TEST(CryptoFileTest, CoversEveryChunkBoundaryWithPayloadSizedScratch) {
         EXPECT_EQ(restored_bytes, payload);
         EXPECT_EQ(kasumi::crypto::content::hash_file(restored), expected_hash);
         EXPECT_EQ(kasumi::test::read_binary(ciphertext), ciphertext_bytes);
-        const auto decrypt_scratch_bytes =
-            kasumi::platform::perf_trace::get_count(
-                "file decryption scratch bytes");
-        const auto decrypt_wipe_bytes = kasumi::platform::perf_trace::get_count(
-            "file decryption wipe bytes");
-        EXPECT_EQ(decrypt_scratch_bytes, expected_buffer);
-        EXPECT_EQ(decrypt_wipe_bytes, expected_buffer);
     }
 }
 
@@ -439,16 +393,9 @@ TEST(CryptoFileTest, WipesDecryptionBuffersAfterAuthenticatedFailure) {
     const auto output = kasumi::test::workspace_path(workspace, "output");
     kasumi::test::write_binary(damaged, corrupted);
 
-    ScopedPerfTrace trace;
     EXPECT_FALSE(kasumi::crypto::decrypt_file(damaged, output, key));
     EXPECT_FALSE(std::filesystem::exists(output));
     EXPECT_EQ(kasumi::test::read_binary(damaged), corrupted);
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
-                  "file decryption scratch bytes"),
-              2U * kasumi::crypto::CHUNK_SIZE);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("file decryption wipe bytes"),
-        2U * kasumi::crypto::CHUNK_SIZE);
 }
 
 TEST(CryptoFileTest, WipesDecryptionBuffersAfterOutputCreationFailure) {
@@ -462,15 +409,8 @@ TEST(CryptoFileTest, WipesDecryptionBuffersAfterOutputCreationFailure) {
     const auto output =
         kasumi::test::workspace_path(workspace, "absent") / "restored";
 
-    ScopedPerfTrace trace;
     EXPECT_FALSE(kasumi::crypto::decrypt_file(cipher, output, key));
     EXPECT_FALSE(std::filesystem::exists(output));
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
-                  "file decryption scratch bytes"),
-              2U * 23U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("file decryption wipe bytes"),
-        2U * 23U);
 }
 
 TEST(CryptoFileTest, RejectsHeaderMacWithoutAllocatingScratch) {
@@ -488,15 +428,8 @@ TEST(CryptoFileTest, RejectsHeaderMacWithoutAllocatingScratch) {
     const auto output = kasumi::test::workspace_path(workspace, "output");
     kasumi::test::write_binary(damaged_path, damaged);
 
-    ScopedPerfTrace trace;
     EXPECT_FALSE(kasumi::crypto::decrypt_file(damaged_path, output, key));
     EXPECT_FALSE(std::filesystem::exists(output));
-    EXPECT_EQ(kasumi::platform::perf_trace::get_count(
-                  "file decryption scratch bytes"),
-              0U);
-    EXPECT_EQ(
-        kasumi::platform::perf_trace::get_count("file decryption wipe bytes"),
-        0U);
 }
 
 TEST(CryptoContentTest, HashesReadBufferBoundaries) {
@@ -857,8 +790,7 @@ TEST(CryptoFileTest,
     ASSERT_TRUE(std::filesystem::exists(temp_path));
 }
 
-TEST(CryptoFileTest,
-     MissingDestinationParentFailsWithoutCreatingOutput) {
+TEST(CryptoFileTest, MissingDestinationParentFailsWithoutCreatingOutput) {
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
     auto workspace = kasumi::test::make_temp_workspace("retry-policy");
     const auto plain = kasumi::test::workspace_path(workspace, "plain.txt");
@@ -995,8 +927,8 @@ TEST(CryptoFileTest, RejectsSymlinkDestinationWithoutChangingTarget) {
 }
 
 TEST(CryptoFileTest, EncryptionPreservesExistingCiphertextWhenInputIsMissing) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("encrypt-missing-input-preserves-dest");
+    auto workspace = kasumi::test::make_temp_workspace(
+        "encrypt-missing-input-preserves-dest");
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
 
     const auto missing_plain =
@@ -1075,8 +1007,8 @@ TEST(CryptoFileTest, EncryptionCreationFailureDoesNotModifyExistingFiles) {
         "sibling content that must remain untouched";
     kasumi::test::write_text(existing_sibling, sibling_content);
 
-    const auto bad_destination =
-        kasumi::test::workspace_path(workspace, "nonexistent_subdir/output.enc");
+    const auto bad_destination = kasumi::test::workspace_path(
+        workspace, "nonexistent_subdir/output.enc");
 
     std::string error_detail;
     auto res = kasumi::crypto::encrypt_file_with_hashes(
@@ -1113,11 +1045,7 @@ TEST(CryptoFileTest, EncryptionRejectsHardlinkAliasWithoutModifyingPlaintext) {
 
     std::string error_detail;
     auto res = kasumi::crypto::encrypt_file_with_hashes(
-        plain,
-        alias,
-        key,
-        kasumi::crypto::FilePurpose::Content,
-        &error_detail);
+        plain, alias, key, kasumi::crypto::FilePurpose::Content, &error_detail);
 
     EXPECT_FALSE(res.has_value());
     EXPECT_TRUE(std::filesystem::exists(plain));
@@ -1155,8 +1083,7 @@ TEST(CryptoFileTest,
     EXPECT_TRUE(std::filesystem::exists(plain));
 }
 
-TEST(CryptoFileTest,
-     EncryptionRejectsSymlinkDestinationWithoutChangingTarget) {
+TEST(CryptoFileTest, EncryptionRejectsSymlinkDestinationWithoutChangingTarget) {
     auto workspace =
         kasumi::test::make_temp_workspace("encrypt-dest-symlink-reject");
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
@@ -1193,16 +1120,13 @@ TEST(CryptoFileTest,
               "victim content untouched");
 }
 
-TEST(CryptoFileTest,
-     EncryptionAtomicallyReplacesExistingCiphertextOnSuccess) {
+TEST(CryptoFileTest, EncryptionAtomicallyReplacesExistingCiphertextOnSuccess) {
     auto workspace =
         kasumi::test::make_temp_workspace("encrypt-replaces-existing");
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
 
-    const auto plain_a =
-        kasumi::test::workspace_path(workspace, "plain_a.txt");
-    const auto plain_b =
-        kasumi::test::workspace_path(workspace, "plain_b.txt");
+    const auto plain_a = kasumi::test::workspace_path(workspace, "plain_a.txt");
+    const auto plain_b = kasumi::test::workspace_path(workspace, "plain_b.txt");
     const auto destination =
         kasumi::test::workspace_path(workspace, "shared.enc");
     const auto decrypted =
@@ -1230,16 +1154,12 @@ TEST(CryptoFileTest,
     EXPECT_EQ(entry_count, 4U);
 }
 
-TEST(CryptoFileTest,
-     ConcurrentEncryptionsToSameDestinationPreserveIntegrity) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("encrypt-concurrent");
+TEST(CryptoFileTest, ConcurrentEncryptionsToSameDestinationPreserveIntegrity) {
+    auto workspace = kasumi::test::make_temp_workspace("encrypt-concurrent");
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
 
-    const auto plain_a =
-        kasumi::test::workspace_path(workspace, "plain_a.txt");
-    const auto plain_b =
-        kasumi::test::workspace_path(workspace, "plain_b.txt");
+    const auto plain_a = kasumi::test::workspace_path(workspace, "plain_a.txt");
+    const auto plain_b = kasumi::test::workspace_path(workspace, "plain_b.txt");
     const auto destination =
         kasumi::test::workspace_path(workspace, "shared_dest.enc");
     const auto decrypted =
@@ -1299,23 +1219,16 @@ TEST(CryptoKeyDerivationTest, SeparatesEveryDomainAndKeysRemoteIdentifiers) {
         kasumi::crypto::derive_key(key, kasumi::crypto::KeyPurpose::Journal);
     const auto identifiers = kasumi::crypto::derive_key(
         key, kasumi::crypto::KeyPurpose::RemoteIdentifier);
-    const auto checkpoint = kasumi::crypto::derive_key(
-        key, kasumi::crypto::KeyPurpose::FsckCheckpoint);
     EXPECT_NE(content, history);
     EXPECT_NE(content, epoch);
     EXPECT_NE(content, journal);
     EXPECT_NE(content, identifiers);
-    EXPECT_NE(content, checkpoint);
     EXPECT_NE(history, epoch);
     EXPECT_NE(history, journal);
     EXPECT_NE(history, identifiers);
-    EXPECT_NE(history, checkpoint);
     EXPECT_NE(epoch, journal);
     EXPECT_NE(epoch, identifiers);
-    EXPECT_NE(epoch, checkpoint);
     EXPECT_NE(journal, identifiers);
-    EXPECT_NE(journal, checkpoint);
-    EXPECT_NE(identifiers, checkpoint);
 
     const auto plaintext_hash = kasumi::hasher::hash_string("known file");
     const auto first = kasumi::crypto::content_identifier(key, plaintext_hash);

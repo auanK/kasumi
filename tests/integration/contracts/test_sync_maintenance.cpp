@@ -9,6 +9,7 @@
 #include "core/hasher.hpp"
 #include "crypto/file_crypto.hpp"
 #include "crypto/key_derivation.hpp"
+#include "kasumi/test/capture.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/provider_scenarios.hpp"
 #include "kasumi/test/scoped_environment.hpp"
@@ -64,26 +65,52 @@ std::string canonical_orphan() {
     return kasumi::hash_hex(kasumi::hasher::hash_string("orphan"));
 }
 
-TEST(ApplicationMaintenanceContract,
-     PublicSyncPreviewStatusAndFsckRemainAvailable) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("application-sync-maintenance");
+struct MaintenanceEnv {
+    kasumi::test::TempWorkspace workspace;
+    ExecutionEnvironment environment;
+    Profile profile;
+    std::filesystem::path remote;
+    Credentials credentials{NoCredentials{}};
+};
+
+MaintenanceEnv make_maintenance_env(std::string_view label,
+                                    char key_hex_char,
+                                    std::string_view profile_name = "demo") {
+    auto workspace = kasumi::test::make_temp_workspace(label);
     const ExecutionEnvironment environment{
         kasumi::test::workspace_path(workspace, "app")};
-    const Profile profile{
-        "demo",
-        kasumi::test::workspace_path(workspace, "local"),
-        kasumi::test::workspace_path(workspace, "remote").string()};
-    ASSERT_TRUE(kasumi::application::create_profile(
-        environment, profile, MasterKeyHex{std::string(64, '7')}));
-    kasumi::test::write_text(profile.local_dir / "file.txt", "one");
-    const Credentials credentials{NoCredentials{}};
+    const auto remote = kasumi::test::workspace_path(workspace, "remote");
+    const Profile profile{std::string(profile_name),
+                          kasumi::test::workspace_path(workspace, "local"),
+                          remote.string()};
+    EXPECT_TRUE(
+        kasumi::application::create_profile(
+            environment, profile, MasterKeyHex{std::string(64, key_hex_char)})
+            .has_value());
+    return {.workspace = std::move(workspace),
+            .environment = environment,
+            .profile = profile,
+            .remote = remote};
+}
 
-    auto opened = kasumi::transport::open_transport(
-        kasumi::test::workspace_path(workspace, "remote").string());
+std::optional<kasumi::transport::Transport>
+open_initialized_storage(const std::string& location) {
+    auto opened = kasumi::transport::open_transport(location);
+    if (!opened || !kasumi::transport::initialize(*opened)) {
+        return std::nullopt;
+    }
+    return std::move(*opened);
+}
+
+TEST(ApplicationMaintenanceContract,
+     PublicSyncPreviewStatusAndFsckRemainAvailable) {
+    auto [workspace, environment, profile, remote, credentials] =
+        make_maintenance_env("application-sync-maintenance", '7');
+    kasumi::test::write_text(profile.local_dir / "file.txt", "one");
+
+    auto opened = open_initialized_storage(profile.remote_dir);
     ASSERT_TRUE(opened.has_value());
     auto& storage = *opened;
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
     const auto initial_preview = kasumi::application::execute(
         {Request{Operation::Preview, "demo"}, credentials, environment});
     ASSERT_TRUE(initial_preview.has_value()) << initial_preview.error().detail;
@@ -180,22 +207,12 @@ TEST(ApplicationMaintenanceContract,
 }
 
 TEST(ApplicationMaintenanceContract, UnknownObjectsArePreserved) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("application-unknown-objects");
-    const ExecutionEnvironment environment{
-        kasumi::test::workspace_path(workspace, "app")};
-    const Profile profile{
-        "demo",
-        kasumi::test::workspace_path(workspace, "local"),
-        kasumi::test::workspace_path(workspace, "remote").string()};
-    ASSERT_TRUE(kasumi::application::create_profile(
-        environment, profile, MasterKeyHex{std::string(64, '6')}));
+    auto [workspace, environment, profile, remote, credentials] =
+        make_maintenance_env("application-unknown-objects", '6');
     ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
-    auto opened = kasumi::transport::open_transport(
-        kasumi::test::workspace_path(workspace, "remote").string());
+    auto opened = open_initialized_storage(profile.remote_dir);
     ASSERT_TRUE(opened.has_value());
     auto& storage = *opened;
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
     const auto foreign =
         kasumi::test::workspace_path(workspace, "foreign-object");
     kasumi::test::write_text(foreign, "foreign");
@@ -308,16 +325,8 @@ TEST(ApplicationMaintenanceContract, StateOnlySyncCreatesOnlyLocalState) {
 
 TEST(ApplicationMaintenanceContract,
      ReadOnlyOperationsDoNotCreateAnAbsentRemoteRoot) {
-    auto workspace = kasumi::test::make_temp_workspace(
-        "application-read-only-absent-remote");
-    const ExecutionEnvironment environment{
-        kasumi::test::workspace_path(workspace, "app")};
-    const Profile profile{
-        "demo",
-        kasumi::test::workspace_path(workspace, "local"),
-        kasumi::test::workspace_path(workspace, "remote").string()};
-    ASSERT_TRUE(kasumi::application::create_profile(
-        environment, profile, MasterKeyHex{std::string(64, '2')}));
+    auto [workspace, environment, profile, remote, credentials] =
+        make_maintenance_env("application-read-only-absent-remote", '2');
     ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
     ASSERT_FALSE(std::filesystem::exists(
         kasumi::test::workspace_path(workspace, "remote")));
@@ -333,16 +342,8 @@ TEST(ApplicationMaintenanceContract,
 }
 
 TEST(ApplicationMaintenanceContract, NoOpSyncDoesNotRewriteStateOrRemote) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("application-sync-no-op");
-    const ExecutionEnvironment environment{
-        kasumi::test::workspace_path(workspace, "app")};
-    const Profile profile{
-        "demo",
-        kasumi::test::workspace_path(workspace, "local"),
-        kasumi::test::workspace_path(workspace, "remote").string()};
-    ASSERT_TRUE(kasumi::application::create_profile(
-        environment, profile, MasterKeyHex{std::string(64, '3')}));
+    auto [workspace, environment, profile, remote, credentials] =
+        make_maintenance_env("application-sync-no-op", '3');
     ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
     kasumi::test::write_text(profile.local_dir / "file.txt", "same");
     ASSERT_TRUE(
@@ -353,10 +354,9 @@ TEST(ApplicationMaintenanceContract, NoOpSyncDoesNotRewriteStateOrRemote) {
     ASSERT_TRUE(paths.has_value());
     const auto state_before = kasumi::test::read_binary(paths->database_path);
     const auto remote_before = kasumi::test::snapshot_tree(profile.remote_dir);
-    auto opened = kasumi::transport::open_transport(profile.remote_dir);
+    auto opened = open_initialized_storage(profile.remote_dir);
     ASSERT_TRUE(opened.has_value());
     auto& storage = *opened;
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
     const auto listing_before = kasumi::transport::list(storage);
     ASSERT_TRUE(listing_before.has_value());
 
@@ -374,16 +374,8 @@ TEST(ApplicationMaintenanceContract, NoOpSyncDoesNotRewriteStateOrRemote) {
 
 TEST(ApplicationMaintenanceContract,
      StateOnlyRejectsAnUnreachableLogicalHeadWithoutCreatingState) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("application-state-only-unreachable");
-    const ExecutionEnvironment environment{
-        kasumi::test::workspace_path(workspace, "app")};
-    const Profile profile{
-        "demo",
-        kasumi::test::workspace_path(workspace, "local"),
-        kasumi::test::workspace_path(workspace, "remote").string()};
-    ASSERT_TRUE(kasumi::application::create_profile(
-        environment, profile, MasterKeyHex{std::string(64, '4')}));
+    auto [workspace, environment, profile, remote, credentials] =
+        make_maintenance_env("application-state-only-unreachable", '4');
     ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
     kasumi::test::write_text(profile.local_dir / "file.txt", "same");
     ASSERT_TRUE(
@@ -394,10 +386,9 @@ TEST(ApplicationMaintenanceContract,
     ASSERT_TRUE(paths.has_value());
     ASSERT_TRUE(std::filesystem::remove(paths->database_path));
     ASSERT_TRUE(kasumi::state_storage::initialize(paths->database_path));
-    auto opened = kasumi::transport::open_transport(profile.remote_dir);
+    auto opened = open_initialized_storage(profile.remote_dir);
     ASSERT_TRUE(opened.has_value());
     auto& storage = *opened;
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
     const auto listing = kasumi::transport::list(storage);
     ASSERT_TRUE(listing.has_value());
     const auto key_bytes =
@@ -493,16 +484,8 @@ TEST(ApplicationMaintenanceContract, SyncBetweenTwoClientsIsIdempotent) {
 
 TEST(ApplicationMaintenanceContract,
      PreviewAndStatusReportPersistedPendingMaterializations) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("application-pending-plan");
-    const ExecutionEnvironment environment{
-        kasumi::test::workspace_path(workspace, "app")};
-    const Profile profile{
-        "demo",
-        kasumi::test::workspace_path(workspace, "local"),
-        kasumi::test::workspace_path(workspace, "remote").string()};
-    ASSERT_TRUE(kasumi::application::create_profile(
-        environment, profile, MasterKeyHex{std::string(64, '8')}));
+    auto [workspace, environment, profile, remote, credentials] =
+        make_maintenance_env("application-pending-plan", '8');
     ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
     kasumi::test::write_text(profile.local_dir / "pending.txt", "payload");
     ASSERT_TRUE(
@@ -625,23 +608,13 @@ TEST(ApplicationMaintenanceContract,
 
 TEST(ApplicationMaintenanceContract,
      FsckWithoutSourceFailsAndPreservesHistory) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("application-fsck-no-source");
-    const ExecutionEnvironment environment{
-        kasumi::test::workspace_path(workspace, "app")};
-    const Profile profile{
-        "demo",
-        kasumi::test::workspace_path(workspace, "local"),
-        kasumi::test::workspace_path(workspace, "remote").string()};
-    ASSERT_TRUE(kasumi::application::create_profile(
-        environment, profile, MasterKeyHex{std::string(64, 'c')}));
+    auto [workspace, environment, profile, remote, credentials] =
+        make_maintenance_env("application-fsck-no-source", 'c');
     ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
     kasumi::test::write_text(profile.local_dir / "file.txt", "source");
-    auto opened = kasumi::transport::open_transport(
-        kasumi::test::workspace_path(workspace, "remote").string());
+    auto opened = open_initialized_storage(profile.remote_dir);
     ASSERT_TRUE(opened.has_value());
     auto& storage = *opened;
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
     ASSERT_TRUE(
         kasumi::application::execute(request(Operation::Sync, environment)));
     const auto identifier = content_identifier(storage);
@@ -674,15 +647,8 @@ TEST(ApplicationMaintenanceContract,
 }
 
 TEST(ApplicationMaintenanceContract, ActiveBarrierBlocksSyncBeforePublication) {
-    auto workspace = kasumi::test::make_temp_workspace("application-barrier");
-    const ExecutionEnvironment environment{
-        kasumi::test::workspace_path(workspace, "app")};
-    const Profile profile{
-        "demo",
-        kasumi::test::workspace_path(workspace, "local"),
-        kasumi::test::workspace_path(workspace, "remote").string()};
-    ASSERT_TRUE(kasumi::application::create_profile(
-        environment, profile, MasterKeyHex{std::string(64, 'f')}));
+    auto [workspace, environment, profile, remote, credentials] =
+        make_maintenance_env("application-barrier", 'f');
     ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
     kasumi::test::write_text(profile.local_dir / "file.txt", "before");
     ASSERT_TRUE(
@@ -725,23 +691,13 @@ TEST(ApplicationMaintenanceContract, ActiveBarrierBlocksSyncBeforePublication) {
 
 TEST(ApplicationMaintenanceContract,
      UnknownStorageIdentifiersAbortMaintenance) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("application-unknown-identifier");
-    const ExecutionEnvironment environment{
-        kasumi::test::workspace_path(workspace, "app")};
-    const Profile profile{
-        "demo",
-        kasumi::test::workspace_path(workspace, "local"),
-        kasumi::test::workspace_path(workspace, "remote").string()};
-    ASSERT_TRUE(kasumi::application::create_profile(
-        environment, profile, MasterKeyHex{std::string(64, 'e')}));
+    auto [workspace, environment, profile, remote, credentials] =
+        make_maintenance_env("application-unknown-identifier", 'e');
     ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
     kasumi::test::write_text(profile.local_dir / "file.txt", "source");
-    auto opened = kasumi::transport::open_transport(
-        kasumi::test::workspace_path(workspace, "remote").string());
+    auto opened = open_initialized_storage(profile.remote_dir);
     ASSERT_TRUE(opened.has_value());
     auto& storage = *opened;
-    ASSERT_TRUE(kasumi::transport::initialize(storage));
     ASSERT_TRUE(
         kasumi::application::execute(request(Operation::Sync, environment)));
     const auto orphan = canonical_orphan();
@@ -767,15 +723,8 @@ TEST(ApplicationMaintenanceContract,
 }
 
 TEST(SyncMaintenanceTest, FsckPublishesOrderedStagesAndAuthenticatedTotals) {
-    auto workspace = kasumi::test::make_temp_workspace("fsck-progress-stages");
-    const ExecutionEnvironment environment{
-        kasumi::test::workspace_path(workspace, "app")};
-    const Profile profile{
-        "demo",
-        kasumi::test::workspace_path(workspace, "local"),
-        kasumi::test::workspace_path(workspace, "remote").string()};
-    ASSERT_TRUE(kasumi::application::create_profile(
-        environment, profile, MasterKeyHex{std::string(64, 'd')}));
+    auto [workspace, environment, profile, remote, credentials] =
+        make_maintenance_env("fsck-progress-stages", 'd');
     ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
     kasumi::test::write_text(profile.local_dir / "file.txt", "source");
     auto opened = kasumi::transport::open_transport(
@@ -829,12 +778,11 @@ std::string content_id_for(const std::string& master_hex,
 int run_resolve_missing_cli(std::string profile = "demo") {
     char arg0[] = "kasumi";
     char arg1[] = "resolve-missing";
-    std::vector<char> profile_arg(profile.begin(), profile.end());
-    profile_arg.push_back('\0');
-    char* argv[] = {arg0, arg1, profile_arg.data()};
-    testing::internal::CaptureStdout();
-    const auto exit_code = kasumi::cli::run(3, argv);
-    const auto output = testing::internal::GetCapturedStdout();
+    char* argv[] = {arg0, arg1, profile.data()};
+    int exit_code = -1;
+    const auto output = kasumi::test::capture_stdout([&] {
+        exit_code = kasumi::cli::run(3, argv);
+    });
     if (exit_code != 0) {
         std::cerr << "CLI output (code " << exit_code << "): " << output
                   << "\n";

@@ -9,6 +9,7 @@
 #include "application/sync/mutation.hpp"
 #include "application/sync/mutation_batch.hpp"
 #include "application/sync/mutation_detail.hpp"
+#include "application/sync/mutation_fault_test.hpp"
 #include "application/sync/publication.hpp"
 #include "coordinator_detail.hpp"
 #include "core/hasher.hpp"
@@ -17,12 +18,10 @@
 #include "core/transaction/types.hpp"
 #include "crypto/key_derivation.hpp"
 #include "journal_fault_test.hpp"
-#include "application/sync/mutation_fault_test.hpp"
 #include "platform/clock.hpp"
 #include "platform/durability.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
 #include "state_storage/database.hpp"
@@ -48,21 +47,6 @@
 
 namespace kasumi::application::sync::coordinator {
 namespace detail {
-
-inline constexpr std::array<std::string_view, ActionCount> action_metrics{
-    "action/RenameLocal",
-    "action/Upload",
-    "action/CreateLocalDirectory",
-    "action/CreateRemoteDirectory",
-    "action/MoveLocal",
-    "action/Download",
-    "action/DeleteLocal",
-    "action/DeleteLocalDirectory",
-    "action/DeleteRemote",
-    "action/DeleteRemoteDirectory",
-    "action/CopyLocal",
-    "action/DeleteIgnoredLocalFile",
-};
 
 Error make_error(ErrorCode code,
                  std::string detail,
@@ -112,6 +96,26 @@ read_status(const std::filesystem::path& path) {
     return status;
 }
 
+std::expected<void, Error>
+require_physical_directory(std::filesystem::file_status status,
+                           const std::filesystem::path& path,
+                           std::string_view error_title) {
+    if (std::filesystem::is_symlink(status) ||
+        !std::filesystem::is_directory(status)) {
+        return std::unexpected(workspace_error(
+            error_title, path, "expected a physical directory"));
+    }
+    return {};
+}
+
+std::unexpected<Error> fail_after_rollback(std::expected<void, Error> rolled,
+                                           Error original) {
+    if (!rolled) {
+        return std::unexpected(std::move(rolled.error()));
+    }
+    return std::unexpected(std::move(original));
+}
+
 std::expected<std::filesystem::path, Error>
 profile_directory(const runtime::RuntimeData& runtime_data) {
     const auto profile = runtime_data.database_path.parent_path();
@@ -153,12 +157,10 @@ transactions_directory(const std::filesystem::path& profile, bool create) {
         }
         return directory;
     }
-    if (std::filesystem::is_symlink(*status) ||
-        !std::filesystem::is_directory(*status)) {
-        return std::unexpected(
-            workspace_error("invalid transactions directory",
-                            directory,
-                            "expected a physical directory"));
+    if (auto valid = require_physical_directory(
+            *status, directory, "invalid transactions directory");
+        !valid) {
+        return std::unexpected(valid.error());
     }
     auto secured = platform::private_storage::protect_directory(directory);
     if (!secured) {
@@ -253,6 +255,41 @@ std::expected<void, Error> write_workspace_owner(
             workspace_error("failed to persist transaction workspace ownership",
                             marker,
                             written.error()));
+    }
+    return {};
+}
+
+std::expected<std::optional<platform::private_storage::DirectoryIdentity>,
+              Error>
+read_workspace_owner(const std::filesystem::path& directory,
+                     std::string_view id,
+                     std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+
+template <typename Fn>
+std::expected<void, Error>
+for_each_transaction_entry(const std::filesystem::path& directory, Fn&& fn) {
+    std::error_code error;
+    std::filesystem::directory_iterator entry(directory, error), end;
+    if (error) {
+        return std::unexpected(
+            workspace_error("failed to enumerate transaction workspaces",
+                            directory,
+                            error.message()));
+    }
+    while (entry != end) {
+        const auto candidate = entry->path().lexically_normal();
+        if (auto ok =
+                fn(candidate, platform::path::to_utf8(candidate.filename()));
+            !ok) {
+            return std::unexpected(ok.error());
+        }
+        entry.increment(error);
+        if (error) {
+            return std::unexpected(
+                workspace_error("failed to enumerate transaction workspaces",
+                                directory,
+                                error.message()));
+        }
     }
     return {};
 }
@@ -429,12 +466,10 @@ std::expected<platform::Workspace, Error> create_transaction_workspace(
         return std::unexpected(status.error());
     }
     if (!missing(*status)) {
-        if (std::filesystem::is_symlink(*status) ||
-            !std::filesystem::is_directory(*status)) {
-            return std::unexpected(
-                workspace_error("invalid transaction workspace",
-                                root,
-                                "expected a physical directory"));
+        if (auto valid = require_physical_directory(
+                *status, root, "invalid transaction workspace");
+            !valid) {
+            return std::unexpected(valid.error());
         }
         auto opened = open_transaction_workspace(profile, id, key);
         if (!opened) {
@@ -496,12 +531,12 @@ open_transaction_workspace(
     if (!status) {
         return std::unexpected(status.error());
     }
-    if (!missing(*status) && (std::filesystem::is_symlink(*status) ||
-                              !std::filesystem::is_directory(*status))) {
-        return std::unexpected(
-            workspace_error("invalid transaction workspace",
-                            root,
-                            "expected a physical directory"));
+    if (!missing(*status)) {
+        if (auto valid = require_physical_directory(
+                *status, root, "invalid transaction workspace");
+            !valid) {
+            return std::unexpected(valid.error());
+        }
     }
 
     std::optional<platform::Workspace> quarantined;
@@ -510,57 +545,49 @@ open_transaction_workspace(
         return std::unexpected(directory_status.error());
     }
     if (!missing(*directory_status)) {
-        if (std::filesystem::is_symlink(*directory_status) ||
-            !std::filesystem::is_directory(*directory_status)) {
-            return std::unexpected(
-                workspace_error("invalid transactions directory",
-                                *directory,
-                                "expected a physical directory"));
+        if (auto valid =
+                require_physical_directory(*directory_status,
+                                           *directory,
+                                           "invalid transactions directory");
+            !valid) {
+            return std::unexpected(valid.error());
         }
-        std::error_code error;
-        std::filesystem::directory_iterator entry(*directory, error), end;
-        if (error) {
-            return std::unexpected(
-                workspace_error("failed to enumerate transaction workspaces",
-                                *directory,
-                                error.message()));
-        }
-        while (entry != end) {
-            const auto candidate = entry->path().lexically_normal();
-            const auto name = platform::path::to_utf8(candidate.filename());
-            const auto quarantined_id = transaction_id_from_quarantine(name);
-            if (quarantined_id && *quarantined_id == id) {
-                auto candidate_status = read_status(candidate);
-                if (!candidate_status) {
-                    return std::unexpected(candidate_status.error());
-                }
-                if (std::filesystem::is_symlink(*candidate_status) ||
-                    !std::filesystem::is_directory(*candidate_status)) {
-                    return std::unexpected(workspace_error(
-                        "invalid quarantined transaction workspace",
-                        candidate,
-                        "expected a physical directory"));
-                }
-                auto identity = read_workspace_owner(candidate, id, key);
-                if (!identity) {
-                    return std::unexpected(identity.error());
-                }
-                if (!*identity || quarantined) {
-                    return std::unexpected(workspace_error(
-                        "ambiguous quarantined transaction workspace",
-                        candidate,
-                        "ownership proof is missing or duplicated"));
-                }
-                quarantined = platform::Workspace{.root = candidate,
-                                                  .identity = **identity};
-            }
-            entry.increment(error);
-            if (error) {
-                return std::unexpected(workspace_error(
-                    "failed to enumerate transaction workspaces",
-                    *directory,
-                    error.message()));
-            }
+        if (auto visited = for_each_transaction_entry(
+                *directory,
+                [&](const std::filesystem::path& candidate,
+                    const std::string& name) -> std::expected<void, Error> {
+                    const auto quarantined_id =
+                        transaction_id_from_quarantine(name);
+                    if (!quarantined_id || *quarantined_id != id) {
+                        return {};
+                    }
+                    auto candidate_status = read_status(candidate);
+                    if (!candidate_status) {
+                        return std::unexpected(candidate_status.error());
+                    }
+                    if (auto valid = require_physical_directory(
+                            *candidate_status,
+                            candidate,
+                            "invalid quarantined transaction workspace");
+                        !valid) {
+                        return valid;
+                    }
+                    auto identity = read_workspace_owner(candidate, id, key);
+                    if (!identity) {
+                        return std::unexpected(identity.error());
+                    }
+                    if (!*identity || quarantined) {
+                        return std::unexpected(workspace_error(
+                            "ambiguous quarantined transaction workspace",
+                            candidate,
+                            "ownership proof is missing or duplicated"));
+                    }
+                    quarantined = platform::Workspace{.root = candidate,
+                                                      .identity = **identity};
+                    return {};
+                });
+            !visited) {
+            return std::unexpected(visited.error());
         }
     }
     if (quarantined) {
@@ -636,12 +663,10 @@ std::expected<void, Error> remove_transaction_workspace(
         }
         return retire_workspace_owner(sidecar, id, workspace->identity, key);
     }
-    if (std::filesystem::is_symlink(*status) ||
-        !std::filesystem::is_directory(*status)) {
-        return std::unexpected(
-            workspace_error("invalid transaction workspace",
-                            workspace->root,
-                            "expected a physical directory"));
+    if (auto valid = require_physical_directory(
+            *status, workspace->root, "invalid transaction workspace");
+        !valid) {
+        return valid;
     }
     if (!workspace->identity.valid) {
         return std::unexpected(
@@ -708,7 +733,6 @@ finish_transaction_cleanup(const journal::Paths& paths,
             if (!cleared) {
                 return std::unexpected(journal_error(cleared.error()));
             }
-            platform::perf_trace::count("workspace cleanup failures", 1);
             return std::unexpected(workspace_error(
                 "transaction completed with workspace preserved",
                 workspace->root,
@@ -740,51 +764,37 @@ cleanup_orphan_workspaces(const std::filesystem::path& profile,
     if (missing(*status)) {
         return {};
     }
-    if (std::filesystem::is_symlink(*status) ||
-        !std::filesystem::is_directory(*status)) {
-        return std::unexpected(
-            workspace_error("invalid transactions directory",
-                            *directory,
-                            "expected a physical directory"));
+    if (auto valid = require_physical_directory(
+            *status, *directory, "invalid transactions directory");
+        !valid) {
+        return valid;
     }
 
     std::vector<std::string> candidates;
-    std::error_code error;
-    {
-        std::filesystem::directory_iterator entry(*directory, error);
-        if (error) {
-            return std::unexpected(
-                workspace_error("failed to enumerate transaction workspaces",
-                                *directory,
-                                error.message()));
-        }
-        const std::filesystem::directory_iterator end;
-        while (entry != end) {
-            const auto candidate = entry->path().lexically_normal();
-            const auto name = platform::path::to_utf8(candidate.filename());
-            if (transaction::valid_transaction_id(name)) {
-                if (candidate.parent_path() != directory->lexically_normal()) {
-                    return std::unexpected(
-                        workspace_error("unsafe transaction workspace path",
-                                        candidate,
-                                        "path escapes transactions directory"));
+    if (auto visited = for_each_transaction_entry(
+            *directory,
+            [&](const std::filesystem::path& candidate,
+                const std::string& name) -> std::expected<void, Error> {
+                if (transaction::valid_transaction_id(name)) {
+                    if (candidate.parent_path() !=
+                        directory->lexically_normal()) {
+                        return std::unexpected(workspace_error(
+                            "unsafe transaction workspace path",
+                            candidate,
+                            "path escapes transactions directory"));
+                    }
+                    candidates.push_back(name);
+                } else if (const auto quarantine_id =
+                               transaction_id_from_quarantine(name)) {
+                    candidates.push_back(*quarantine_id);
+                } else if (const auto owner_id =
+                               transaction_id_from_owner_sidecar(name)) {
+                    candidates.push_back(*owner_id);
                 }
-                candidates.push_back(name);
-            } else if (const auto quarantine_id =
-                           transaction_id_from_quarantine(name)) {
-                candidates.push_back(*quarantine_id);
-            } else if (const auto owner_id =
-                           transaction_id_from_owner_sidecar(name)) {
-                candidates.push_back(*owner_id);
-            }
-            entry.increment(error);
-            if (error) {
-                return std::unexpected(workspace_error(
-                    "failed to enumerate transaction workspaces",
-                    *directory,
-                    error.message()));
-            }
-        }
+                return {};
+            });
+        !visited) {
+        return std::unexpected(visited.error());
     }
     std::ranges::sort(candidates);
     candidates.erase(std::unique(candidates.begin(), candidates.end()),
@@ -795,7 +805,6 @@ cleanup_orphan_workspaces(const std::filesystem::path& profile,
             return std::unexpected(workspace.error());
         }
         if (!*workspace || !(**workspace).identity.valid) {
-            platform::perf_trace::count("workspace cleanup failures", 1);
             continue;
         }
         auto removed = remove_transaction_workspace(**workspace, key);
@@ -825,38 +834,7 @@ save_record(const journal::Paths& paths,
             std::span<const std::uint8_t, crypto::KEY_SIZE> key,
             journal::SaveMode mode,
             journal::Session* session) {
-    const auto trace = platform::perf_trace::begin();
     auto saved = journal::save(paths, record, key, mode, session);
-    if (trace.active) {
-        const auto elapsed =
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - trace.started)
-                .count();
-        platform::perf_trace::maximum(
-            "journal save maximum us",
-            static_cast<std::uint64_t>(std::max<std::int64_t>(elapsed, 0)));
-    }
-    platform::perf_trace::finish("journal save", trace);
-    const char* phase_metric = nullptr;
-    switch (record.phase) {
-        case transaction::Phase::CommitUploaded:
-            phase_metric = "journal CommitUploaded save";
-            break;
-        case transaction::Phase::CommitVerified:
-            phase_metric = "journal CommitVerified save";
-            break;
-        case transaction::Phase::HeadPublished:
-            phase_metric = "journal HeadPublished save";
-            break;
-        case transaction::Phase::HeadVerified:
-            phase_metric = "journal HeadVerified save";
-            break;
-        default:
-            break;
-    }
-    if (phase_metric != nullptr) {
-        platform::perf_trace::finish(phase_metric, trace);
-    }
     if (!saved) {
         return std::unexpected(journal_error(saved.error()));
     }
@@ -874,6 +852,25 @@ history_storage::epoch::Epoch genesis_epoch(const transaction::Record& record) {
                    .min_history_age_hours = record.epoch_min_history_age_hours},
         .anchors = {{.commit_id = record.commit_id, .height = 0}},
         .previous_epoch_id = {}};
+}
+
+std::expected<history_storage::epoch::SealedEpoch, Error>
+seal_transaction_epoch(transaction::Record& record,
+                       const history_storage::epoch::Epoch& epoch,
+                       std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                       std::string_view mismatch_message) {
+    auto sealed = history_storage::epoch::seal(epoch, key);
+    if (!sealed) {
+        return std::unexpected(
+            make_error(ErrorCode::PublicationFailure, sealed.error().detail));
+    }
+    if (!record.epoch_id.empty() &&
+        record.epoch_id != sealed->reference.epoch_id) {
+        return std::unexpected(make_error(ErrorCode::RecoveryConflict,
+                                          std::string(mismatch_message)));
+    }
+    record.epoch_id = sealed->reference.epoch_id;
+    return *sealed;
 }
 
 std::expected<history_storage::epoch::SealedEpoch, Error>
@@ -897,18 +894,8 @@ prepare_genesis_epoch(transaction::Record& record,
         record.epoch_min_history_depth = policy.min_history_depth;
         record.epoch_min_history_age_hours = policy.min_history_age_hours;
     }
-    auto sealed = history_storage::epoch::seal(genesis_epoch(record), key);
-    if (!sealed) {
-        return std::unexpected(
-            make_error(ErrorCode::PublicationFailure, sealed.error().detail));
-    }
-    if (!record.epoch_id.empty() &&
-        record.epoch_id != sealed->reference.epoch_id) {
-        return std::unexpected(make_error(ErrorCode::RecoveryConflict,
-                                          "journal genesis Epoch mismatch"));
-    }
-    record.epoch_id = sealed->reference.epoch_id;
-    return *sealed;
+    return seal_transaction_epoch(
+        record, genesis_epoch(record), key, "journal genesis Epoch mismatch");
 }
 
 std::expected<history_storage::epoch::SealedEpoch, Error>
@@ -942,18 +929,7 @@ prepare_pruning_epoch(transaction::Record& record,
                                            .anchors = plan.anchors,
                                            .previous_epoch_id =
                                                previous_epoch_id};
-    auto sealed = history_storage::epoch::seal(epoch, key);
-    if (!sealed) {
-        return std::unexpected(
-            make_error(ErrorCode::PublicationFailure, sealed.error().detail));
-    }
-    if (!record.epoch_id.empty() &&
-        record.epoch_id != sealed->reference.epoch_id) {
-        return std::unexpected(
-            make_error(ErrorCode::RecoveryConflict, "journal Epoch mismatch"));
-    }
-    record.epoch_id = sealed->reference.epoch_id;
-    return *sealed;
+    return seal_transaction_epoch(record, epoch, key, "journal Epoch mismatch");
 }
 
 static std::expected<std::optional<history_storage::epoch::Reference>, Error>
@@ -997,6 +973,54 @@ validate_epoch_policy_presence(const reconciliation::StorageState& observed) {
                        "authenticated Epoch state is structurally invalid"));
     }
     return {};
+}
+
+std::expected<void, Error> publish_and_verify_epoch(
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const std::filesystem::path& workspace_dir,
+    const journal::Paths& paths,
+    transaction::Record& record,
+    const history_storage::epoch::Epoch& expected_epoch,
+    const history_storage::epoch::SealedEpoch& sealed_epoch,
+    std::string_view epoch_kind,
+    ErrorCode publish_error_code,
+    ErrorCode verify_error_code,
+    journal::Session* session) {
+    auto verify_epoch = [&]() {
+        return history_storage::epoch::verify(storage,
+                                              expected_epoch,
+                                              sealed_epoch.reference,
+                                              key,
+                                              workspace_dir);
+    };
+    const auto save_phase =
+        [&](transaction::Phase phase) -> std::expected<void, Error> {
+        record.phase = phase;
+        return save_record(
+            paths, record, key, journal::SaveMode::Advance, session);
+    };
+    if (record.phase < transaction::Phase::EpochUploaded) {
+        if (auto published = history_storage::epoch::publish(
+                storage, key, sealed_epoch, workspace_dir);
+            !published && !verify_epoch()) {
+            return std::unexpected(
+                make_error(publish_error_code,
+                           "failed to publish " + std::string(epoch_kind) +
+                               " Epoch: " + published.error().detail));
+        }
+        if (auto saved = save_phase(transaction::Phase::EpochUploaded);
+            !saved) {
+            return std::unexpected(saved.error());
+        }
+    }
+    if (auto verified = verify_epoch(); !verified) {
+        return std::unexpected(
+            make_error(verify_error_code,
+                       "failed to verify " + std::string(epoch_kind) +
+                           " Epoch: " + verified.error().detail));
+    }
+    return save_phase(transaction::Phase::EpochVerified);
 }
 
 std::expected<history_storage::epoch::RetentionPolicy, Error>
@@ -1127,6 +1151,82 @@ bool has_local_rollback_work(const transaction::Record& record) noexcept {
     return false;
 }
 
+std::vector<std::size_t>
+next_upload_batch_chunk(std::span<const std::size_t> pending_uploads,
+                        std::size_t& cursor,
+                        std::span<const transaction::Operation> operations) {
+    std::vector<std::size_t> chunk;
+    std::uint64_t chunk_bytes = 0;
+    while (cursor + chunk.size() < pending_uploads.size() &&
+           chunk.size() < upload_batch_max_items &&
+           (chunk.empty() ||
+            chunk_bytes +
+                    operations[pending_uploads[cursor + chunk.size()]].size <=
+                upload_batch_max_bytes)) {
+        const auto op_index = pending_uploads[cursor + chunk.size()];
+        chunk_bytes += operations[op_index].size;
+        chunk.push_back(op_index);
+    }
+    cursor += chunk.size();
+    return chunk;
+}
+
+std::expected<void, Error> rollback_operations_in_workspace(
+    transaction::Record& record,
+    const std::optional<platform::Workspace>& workspace,
+    const std::filesystem::path& local_root,
+    bool local_mutations_only) {
+    if (has_local_rollback_work(record) && !workspace) {
+        return std::unexpected(make_error(
+            ErrorCode::RecoveryConflict,
+            "transaction workspace missing while local rollback is required"));
+    }
+    if (!workspace) {
+        return {};
+    }
+    const auto dependencies =
+        mutation::detail::destination_dependencies(record.plan.operations);
+    for (std::size_t index = record.plan.operations.size(); index > 0;
+         --index) {
+        const auto operation_index = index - 1;
+        const auto& operation = record.plan.operations[operation_index];
+        auto& progress = record.progress[operation_index];
+        if ((local_mutations_only && !is_local_mutation(operation.action)) ||
+            (progress.state < transaction::OperationState::BackupCreated &&
+             !(operation.action == Action::CopyLocal &&
+               progress.state == transaction::OperationState::Prepared))) {
+            continue;
+        }
+        auto condition = mutation::detail::effective_destination(
+            record, operation_index, dependencies);
+        if (!condition) {
+            return std::unexpected(
+                make_error(ErrorCode::RecoveryConflict,
+                           mutation::describe(condition.error()),
+                           operation_index));
+        }
+        auto rolled =
+            mutation::rollback_operation(operation,
+                                         operation_index,
+                                         local_root,
+                                         *workspace,
+                                         progress,
+                                         *condition ? &**condition : nullptr);
+        if (!rolled) {
+            return std::unexpected(make_error(
+                ErrorCode::RecoveryConflict,
+                std::string{local_mutations_only ? "rollback local failed: "
+                                                 : "rollback failed: "} +
+                    mutation::describe(rolled.error()),
+                operation_index));
+        }
+        if (local_mutations_only) {
+            progress.state = transaction::OperationState::Prepared;
+        }
+    }
+    return {};
+}
+
 std::expected<void, Error>
 rollback_transaction(const journal::Paths& paths,
                      transaction::Record& record,
@@ -1134,45 +1234,10 @@ rollback_transaction(const journal::Paths& paths,
                      const std::filesystem::path& local_root,
                      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                      journal::Session* session) {
-    if (has_local_rollback_work(record) && !workspace) {
-        return std::unexpected(make_error(
-            ErrorCode::RecoveryConflict,
-            "transaction workspace missing while local rollback is required"));
-    }
-    if (workspace) {
-        const auto dependencies =
-            mutation::detail::destination_dependencies(record.plan.operations);
-        for (std::size_t index = record.plan.operations.size(); index > 0;
-             --index) {
-            const auto operation_index = index - 1;
-            const auto& progress = record.progress[operation_index];
-            if (progress.state < transaction::OperationState::BackupCreated &&
-                !(record.plan.operations[operation_index].action ==
-                      Action::CopyLocal &&
-                  progress.state == transaction::OperationState::Prepared)) {
-                continue;
-            }
-            auto condition = mutation::detail::effective_destination(
-                record, operation_index, dependencies);
-            if (!condition)
-                return std::unexpected(
-                    make_error(ErrorCode::RecoveryConflict,
-                               mutation::describe(condition.error()),
-                               operation_index));
-            auto rolled = mutation::rollback_operation(
-                record.plan.operations[operation_index],
-                operation_index,
-                local_root,
-                *workspace,
-                progress,
-                *condition ? &**condition : nullptr);
-            if (!rolled) {
-                return std::unexpected(make_error(
-                    ErrorCode::RecoveryConflict,
-                    "rollback failed: " + mutation::describe(rolled.error()),
-                    operation_index));
-            }
-        }
+    if (auto rolled = rollback_operations_in_workspace(
+            record, workspace, local_root, false);
+        !rolled) {
+        return rolled;
     }
     record.phase = transaction::Phase::Started;
     record.commit_id.clear();
@@ -1202,58 +1267,55 @@ std::expected<void, Error>
 rollback_local_mutations(transaction::Record& record,
                          const std::optional<platform::Workspace>& workspace,
                          const std::filesystem::path& local_root) {
-    if (has_local_rollback_work(record) && !workspace) {
-        return std::unexpected(make_error(
-            ErrorCode::RecoveryConflict,
-            "transaction workspace missing while local rollback is required"));
-    }
-    if (!workspace) {
-        return {};
-    }
-    const auto dependencies =
-        mutation::detail::destination_dependencies(record.plan.operations);
-    for (std::size_t index = record.plan.operations.size(); index > 0;
-         --index) {
-        const auto operation_index = index - 1;
-        if (!is_local_mutation(
-                record.plan.operations[operation_index].action) ||
-            (record.progress[operation_index].state <
-                 transaction::OperationState::BackupCreated &&
-             !(record.plan.operations[operation_index].action ==
-                   Action::CopyLocal &&
-               record.progress[operation_index].state ==
-                   transaction::OperationState::Prepared))) {
-            continue;
-        }
-        auto condition = mutation::detail::effective_destination(
-            record, operation_index, dependencies);
-        if (!condition)
-            return std::unexpected(
-                make_error(ErrorCode::RecoveryConflict,
-                           mutation::describe(condition.error()),
-                           operation_index));
-        auto rolled = mutation::rollback_operation(
-            record.plan.operations[operation_index],
-            operation_index,
-            local_root,
-            *workspace,
-            record.progress[operation_index],
-            *condition ? &**condition : nullptr);
-        if (!rolled) {
-            return std::unexpected(make_error(
-                ErrorCode::RecoveryConflict,
-                "rollback local failed: " + mutation::describe(rolled.error()),
-                operation_index));
-        }
-        record.progress[operation_index].state =
-            transaction::OperationState::Prepared;
+    if (auto rolled = rollback_operations_in_workspace(
+            record, workspace, local_root, true);
+        !rolled) {
+        return rolled;
     }
     record.phase = transaction::Phase::FilesStaged;
     return {};
 }
 
-std::size_t content_concurrency() noexcept {
-    return application::content_concurrency();
+std::expected<void, UploadBatchError> transfer_and_verify_upload_batch(
+    const mutation::StagedUploadBatch& batch,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const platform::Workspace& workspace,
+    std::size_t parallelism) {
+    auto transferred =
+        mutation::transfer_upload_batch(batch, storage, parallelism);
+    const bool transfer_unknown =
+        !transferred && transferred.error().code ==
+                            mutation::MutationErrorCode::RemoteResultUnknown;
+    if (!transferred && !transfer_unknown) {
+        return std::unexpected(UploadBatchError{
+            .transport_after_unknown_transfer = false,
+            .mutation = std::move(transferred.error()),
+        });
+    }
+    auto verified = mutation::verify_upload_batch(
+        batch, storage, key, workspace, parallelism);
+    if (!verified) {
+        return std::unexpected(UploadBatchError{
+            .transport_after_unknown_transfer =
+                transfer_unknown &&
+                verified.error().code ==
+                    mutation::MutationErrorCode::TransportFailure,
+            .mutation = std::move(verified.error()),
+        });
+    }
+    return {};
+}
+
+std::expected<void, Error>
+save_state_checked(const std::filesystem::path& database_path,
+                   const state_storage::StoredState& state) {
+    if (!state_storage::initialize(database_path) ||
+        !state_storage::save_state(database_path, state)) {
+        return std::unexpected(
+            make_error(ErrorCode::DatabaseFailure, "failed to save state.db"));
+    }
+    return {};
 }
 
 } // namespace detail
@@ -1330,8 +1392,6 @@ struct ContentWindowState {
     std::condition_variable_any changed;
     std::vector<std::optional<ContentWorkItem>> tasks;
     std::vector<std::optional<ContentWorkResult>> completions;
-    std::size_t in_flight = 0;
-    std::size_t peak_in_flight = 0;
 };
 
 void run_content_worker(std::stop_token stop,
@@ -1353,9 +1413,6 @@ void run_content_worker(std::stop_token stop,
             }
             task = std::move(*state.tasks[slot]);
             state.tasks[slot].reset();
-            ++state.in_flight;
-            state.peak_in_flight =
-                std::max(state.peak_in_flight, state.in_flight);
         }
 
         const auto index = task.index;
@@ -1391,7 +1448,6 @@ void run_content_worker(std::stop_token stop,
 
         {
             std::lock_guard lock(state.mutex);
-            --state.in_flight;
             state.completions[slot] = std::move(result);
         }
         state.changed.notify_all();
@@ -1481,7 +1537,6 @@ run_content_window(
             completed->reset();
         }
         --outstanding;
-        platform::perf_trace::count("content completion count");
 
         if (result.error) {
             if (!failure) {
@@ -1502,8 +1557,6 @@ run_content_window(
         }
     }
 
-    platform::perf_trace::maximum("content peak in-flight",
-                                  state.peak_in_flight);
     if (checkpoint_failure) {
         return std::unexpected(std::move(*checkpoint_failure));
     }
@@ -1525,11 +1578,6 @@ bool same_plan(const SyncPlan& left, const SyncPlan& right) noexcept {
     }
     return std::ranges::equal(
         left.operations, right.operations, same_operation);
-}
-
-bool same_rows(std::span<const NodeRow> left,
-               std::span<const NodeRow> right) noexcept {
-    return std::ranges::equal(left, right);
 }
 
 bool is_storage_repair_operation(const reconciliation::Input& input,
@@ -1566,19 +1614,15 @@ std::vector<bool> required_content_uploads(const reconciliation::Input& input,
         if (operation.action != Action::Upload) {
             continue;
         }
-        const auto content_identity =
+        auto content_identity =
             operation.hash + ':' + std::to_string(operation.size);
         if (input.verified_remote_content_objects.contains(content_identity) ||
             input.trusted_remote_content_objects.contains(content_identity)) {
-            available.insert(operation.hash + ':' +
-                             std::to_string(operation.size));
+            available.insert(std::move(content_identity));
             required[index] = false;
             continue;
         }
-        required[index] =
-            available
-                .insert(operation.hash + ':' + std::to_string(operation.size))
-                .second;
+        required[index] = available.insert(std::move(content_identity)).second;
     }
     return required;
 }
@@ -1675,9 +1719,10 @@ bool same_result(const reconciliation::Result& left,
                  const reconciliation::Result& right) noexcept {
     return same_plan(left.plan, right.plan) &&
            left.missing_objects == right.missing_objects &&
-           same_rows(left.pending_storage_rows, right.pending_storage_rows) &&
-           same_rows(left.pending_materializations,
-                     right.pending_materializations) &&
+           std::ranges::equal(left.pending_storage_rows,
+                              right.pending_storage_rows) &&
+           std::ranges::equal(left.pending_materializations,
+                              right.pending_materializations) &&
            left.missing_content_paths_without_local_source ==
                right.missing_content_paths_without_local_source &&
            left.observed_storage_generation ==
@@ -1688,8 +1733,7 @@ bool same_result(const reconciliation::Result& left,
            left.has_conflicts == right.has_conflicts &&
            left.requires_local_mutation == right.requires_local_mutation &&
            left.requires_storage_repair == right.requires_storage_repair &&
-           same_rows(left.candidate_shared_tree.rows,
-                     right.candidate_shared_tree.rows) &&
+           left.candidate_shared_tree == right.candidate_shared_tree &&
            left.shared_tree_changed == right.shared_tree_changed &&
            left.requires_publication == right.requires_publication &&
            left.requires_state_commit == right.requires_state_commit;
@@ -1715,48 +1759,25 @@ validate_execution_composition(const reconciliation::Input& input,
 } // namespace
 
 std::string describe(const Error& error) {
-    std::string result;
-    switch (error.code) {
-        case ErrorCode::InvalidInput:
-            result = "invalid_input";
-            break;
-        case ErrorCode::JournalFailure:
-            result = "journal_failure";
-            break;
-        case ErrorCode::WorkspaceFailure:
-            result = "workspace_failure";
-            break;
-        case ErrorCode::MutationFailure:
-            result = "mutation_failure";
-            break;
-        case ErrorCode::RemoteContentMissing:
-            result = "remote_content_missing";
-            break;
-        case ErrorCode::PublicationFailure:
-            result = "publication_failure";
-            break;
-        case ErrorCode::DatabaseFailure:
-            result = "database_failure";
-            break;
-        case ErrorCode::CompositionMismatch:
-            result = "composition_mismatch";
-            break;
-        case ErrorCode::ObservationFailure:
-            result = "observation_failure";
-            break;
-        case ErrorCode::ConcurrentModification:
-            result = "concurrent_modification";
-            break;
-        case ErrorCode::RecoveryIndeterminate:
-            result = "recovery_indeterminate";
-            break;
-        case ErrorCode::RecoveryConflict:
-            result = "recovery_conflict";
-            break;
-        case ErrorCode::RecoveryRequired:
-            result = "recovery_required";
-            break;
-    }
+    static constexpr std::array<std::pair<ErrorCode, std::string_view>, 13>
+        names{{
+            {ErrorCode::InvalidInput, "invalid_input"},
+            {ErrorCode::JournalFailure, "journal_failure"},
+            {ErrorCode::WorkspaceFailure, "workspace_failure"},
+            {ErrorCode::MutationFailure, "mutation_failure"},
+            {ErrorCode::RemoteContentMissing, "remote_content_missing"},
+            {ErrorCode::PublicationFailure, "publication_failure"},
+            {ErrorCode::DatabaseFailure, "database_failure"},
+            {ErrorCode::CompositionMismatch, "composition_mismatch"},
+            {ErrorCode::ObservationFailure, "observation_failure"},
+            {ErrorCode::ConcurrentModification, "concurrent_modification"},
+            {ErrorCode::RecoveryIndeterminate, "recovery_indeterminate"},
+            {ErrorCode::RecoveryConflict, "recovery_conflict"},
+            {ErrorCode::RecoveryRequired, "recovery_required"},
+        }};
+    const auto it = std::ranges::find(
+        names, error.code, &std::pair<ErrorCode, std::string_view>::first);
+    std::string result{it != names.end() ? it->second : "coordinator_error"};
     if (error.operation_index) {
         result += " operation " + std::to_string(*error.operation_index);
     }
@@ -1764,23 +1785,6 @@ std::string describe(const Error& error) {
         result += ": " + error.detail;
     }
     return result;
-}
-
-bool same_plan_operations(const SyncPlan& left,
-                          const SyncPlan& right) noexcept {
-    if (left.operations.size() != right.operations.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i < left.operations.size(); ++i) {
-        const auto& a = left.operations[i];
-        const auto& b = right.operations[i];
-        if (a.action != b.action || a.path != b.path || a.hash != b.hash ||
-            a.size != b.size || a.alt_path != b.alt_path ||
-            a.exclusive_destination != b.exclusive_destination) {
-            return false;
-        }
-    }
-    return true;
 }
 
 std::expected<void, Error>
@@ -1860,8 +1864,9 @@ execute(const runtime::RuntimeData& runtime_data,
             (*existing)->observed_base_id == observed_base_id &&
             (*existing)->observed_pending_paths == observed_pending_paths &&
             (*existing)->pending_paths == pending_paths &&
-            same_plan_operations((*existing)->plan,
-                                 reconciliation_result.plan)) {
+            std::ranges::equal((*existing)->plan.operations,
+                               reconciliation_result.plan.operations,
+                               same_operation)) {
             record_storage = std::move(**existing);
         } else {
             return std::unexpected(detail::make_error(
@@ -1889,22 +1894,13 @@ execute(const runtime::RuntimeData& runtime_data,
         return detail::save_record(
             *paths, *record, key, mode, &journal_session);
     };
+    const auto advance_phase =
+        [&](transaction::Phase phase) -> std::expected<void, Error> {
+        record->phase = phase;
+        return save_active_record();
+    };
     const auto content_upload_required = required_content_uploads(
         observed_input, reconciliation_result, record->plan);
-    for (const auto& operation : record->plan.operations) {
-        platform::perf_trace::count(
-            detail::action_metrics[action_index(operation.action)]);
-        if (operation.action == Action::MoveLocal) {
-            platform::perf_trace::count("move planned count");
-        }
-        if (operation.action == Action::CopyLocal) {
-            platform::perf_trace::count("copy planned count");
-        }
-    }
-    const auto preparation_saves_before =
-        platform::perf_trace::get_count("journal durable saves");
-    const auto preparation_bytes_before =
-        platform::perf_trace::get_count("journal written bytes total");
     auto saved = save_active_record();
     if (!saved) {
         return std::unexpected(saved.error());
@@ -1915,6 +1911,25 @@ execute(const runtime::RuntimeData& runtime_data,
         return std::unexpected(workspace.error());
     }
     std::optional<platform::Workspace> transaction_workspace{*workspace};
+    const auto rollback_local = [&]() {
+        return detail::rollback_transaction(*paths,
+                                            *record,
+                                            transaction_workspace,
+                                            runtime_data.local_dir,
+                                            key);
+    };
+    const auto rollback_terminal = [&]() {
+        return detail::rollback_transaction(*paths,
+                                            *record,
+                                            transaction_workspace,
+                                            runtime_data.local_dir,
+                                            key,
+                                            &journal_session);
+    };
+    const auto fail_terminal = [&](Error original) {
+        return detail::fail_after_rollback(rollback_terminal(),
+                                           std::move(original));
+    };
 
     for (std::size_t index = 0; index < record->plan.operations.size();
          ++index) {
@@ -1926,14 +1941,8 @@ execute(const runtime::RuntimeData& runtime_data,
                                         record->progress[index],
                                         record->plan.operations);
         if (!prepared) {
-            auto rolled = detail::rollback_transaction(*paths,
-                                                       *record,
-                                                       transaction_workspace,
-                                                       runtime_data.local_dir,
-                                                       key);
-            if (!rolled)
-                return std::unexpected(rolled.error());
-            return std::unexpected(mutation_error(prepared.error()));
+            return detail::fail_after_rollback(
+                rollback_local(), mutation_error(prepared.error()));
         }
         record->progress[index] = *prepared;
         journal_fault_test::hit("prepared", &*record, index);
@@ -1947,24 +1956,6 @@ execute(const runtime::RuntimeData& runtime_data,
     if (!saved)
         return std::unexpected(saved.error());
 
-    platform::perf_trace::count(
-        "journal preparation durable saves",
-        platform::perf_trace::get_count("journal durable saves") -
-            preparation_saves_before);
-    platform::perf_trace::count(
-        "journal preparation written bytes",
-        platform::perf_trace::get_count("journal written bytes total") -
-            preparation_bytes_before);
-
-    const auto rollback_terminal = [&]() {
-        return detail::rollback_transaction(*paths,
-                                            *record,
-                                            transaction_workspace,
-                                            runtime_data.local_dir,
-                                            key,
-                                            &journal_session);
-    };
-
     std::optional<publication::PreparedCommit> prepared_commit;
     std::optional<CommitTimeDecision> commit_time;
     // Destroyed first: waits for the task before destroying prepared_commit.
@@ -1972,10 +1963,7 @@ execute(const runtime::RuntimeData& runtime_data,
     if (record->publication_required) {
         const auto local_now = platform::clock::unix_seconds();
         if (!local_now || *local_now <= 0) {
-            auto rolled = rollback_terminal();
-            if (!rolled)
-                return std::unexpected(rolled.error());
-            return std::unexpected(detail::make_error(
+            return fail_terminal(detail::make_error(
                 ErrorCode::PublicationFailure,
                 local_now ? "invalid local commit timestamp"
                           : "failed to read local commit timestamp: " +
@@ -1984,10 +1972,7 @@ execute(const runtime::RuntimeData& runtime_data,
         auto chosen_time =
             choose_commit_time(observed_input.storage, *local_now);
         if (!chosen_time) {
-            auto rolled = rollback_terminal();
-            if (!rolled)
-                return std::unexpected(rolled.error());
-            return std::unexpected(chosen_time.error());
+            return fail_terminal(chosen_time.error());
         }
         commit_time.emplace(*chosen_time);
         auto prepared = publication::prepare_commit(
@@ -1998,10 +1983,7 @@ execute(const runtime::RuntimeData& runtime_data,
             commit_time->created_at,
             key);
         if (!prepared) {
-            auto rolled = rollback_terminal();
-            if (!rolled)
-                return std::unexpected(rolled.error());
-            return std::unexpected(publication_error(prepared.error()));
+            return fail_terminal(publication_error(prepared.error()));
         }
         prepared_commit.emplace(std::move(*prepared));
 
@@ -2015,15 +1997,10 @@ execute(const runtime::RuntimeData& runtime_data,
                  layout = history_storage::derive_remote_layout(key),
                  publication_workspace,
                  prepared = &*prepared_commit]() {
-                    const auto commit_put_trace = platform::perf_trace::begin();
                     auto published = publication::publish_commit_object(
                         storage, layout, key, *prepared, publication_workspace);
-                    platform::perf_trace::finish("commit PUT",
-                                                 commit_put_trace);
                     if (!published)
                         return published;
-                    const auto commit_verification_trace =
-                        platform::perf_trace::begin();
                     auto verified = publication::verify_commit_object(
                         storage,
                         layout,
@@ -2032,8 +2009,6 @@ execute(const runtime::RuntimeData& runtime_data,
                         published->head,
                         publication_workspace,
                         published->physical_hash);
-                    platform::perf_trace::finish("commit verification",
-                                                 commit_verification_trace);
                     if (!verified) {
                         return publication::PublishObjectResult{
                             std::unexpected(verified.error())};
@@ -2041,15 +2016,11 @@ execute(const runtime::RuntimeData& runtime_data,
                     return published;
                 });
         } catch (const std::exception& exception) {
-            auto rolled = rollback_terminal();
-            if (!rolled)
-                return std::unexpected(rolled.error());
-            return std::unexpected(detail::make_error(
+            return fail_terminal(detail::make_error(
                 ErrorCode::PublicationFailure,
                 std::string{"failed to start commit upload: "} +
                     exception.what()));
         }
-        platform::perf_trace::count("speculative commit uploads");
     }
 
     std::vector<std::size_t> apply_order;
@@ -2075,7 +2046,6 @@ execute(const runtime::RuntimeData& runtime_data,
                 transaction::OperationState::Applied) {
             record->progress[index].state =
                 transaction::OperationState::Applied;
-            platform::perf_trace::count("content uploads elided");
             continue;
         }
         if (std::ranges::find(apply_order, index) == apply_order.end()) {
@@ -2096,15 +2066,9 @@ execute(const runtime::RuntimeData& runtime_data,
     const auto mark_applied =
         [&](std::size_t index) -> std::expected<void, Error> {
         record->progress[index].state = transaction::OperationState::Applied;
-        if (record->plan.operations[index].action == Action::MoveLocal) {
-            platform::perf_trace::count("move applied count");
-            return {};
-        }
-        if (record->plan.operations[index].action == Action::CopyLocal) {
-            platform::perf_trace::count("copy applied count");
-            return {};
-        }
-        if (is_logical_mutation(record->plan.operations[index].action)) {
+        if (record->plan.operations[index].action == Action::MoveLocal ||
+            record->plan.operations[index].action == Action::CopyLocal ||
+            is_logical_mutation(record->plan.operations[index].action)) {
             return {};
         }
         return save_active_record();
@@ -2151,32 +2115,20 @@ execute(const runtime::RuntimeData& runtime_data,
                         transaction::OperationState::Prepared;
                 }
             }
-            auto rolled = detail::rollback_transaction(*paths,
-                                                       *record,
-                                                       transaction_workspace,
-                                                       runtime_data.local_dir,
-                                                       key);
-            if (!rolled) {
-                return std::unexpected(rolled.error());
-            }
-            return std::unexpected(detail::make_error(
-                ErrorCode::ConcurrentModification,
-                "local destination changed before mutation; completed local "
-                "effects were retained and the transaction was cleared; "
-                "reobserve and retry: " +
-                    mutation::describe(failure),
-                index));
+            return detail::fail_after_rollback(
+                rollback_local(),
+                detail::make_error(
+                    ErrorCode::ConcurrentModification,
+                    "local destination changed before mutation; completed "
+                    "local "
+                    "effects were retained and the transaction was cleared; "
+                    "reobserve and retry: " +
+                        mutation::describe(failure),
+                    index));
         }
         if (failure.code == mutation::MutationErrorCode::RemoteContentMissing) {
-            auto rolled = detail::rollback_transaction(*paths,
-                                                       *record,
-                                                       transaction_workspace,
-                                                       runtime_data.local_dir,
-                                                       key);
-            if (!rolled) {
-                return std::unexpected(rolled.error());
-            }
-            return std::unexpected(mutation_error(failure));
+            return detail::fail_after_rollback(rollback_local(),
+                                               mutation_error(failure));
         }
         if (!record->publication_required &&
             is_storage_repair_operation(observed_input,
@@ -2194,18 +2146,11 @@ execute(const runtime::RuntimeData& runtime_data,
             }
             return std::unexpected(mutation_error(failure));
         }
-        auto rolled = detail::rollback_transaction(*paths,
-                                                   *record,
-                                                   transaction_workspace,
-                                                   runtime_data.local_dir,
-                                                   key);
-        if (!rolled) {
-            return std::unexpected(rolled.error());
-        }
-        return std::unexpected(mutation_error(failure));
+        return detail::fail_after_rollback(rollback_local(),
+                                           mutation_error(failure));
     };
 
-    const auto parallelism = detail::content_concurrency();
+    const auto parallelism = application::content_concurrency();
     const auto dependencies =
         mutation::detail::destination_dependencies(record->plan.operations);
     std::vector<std::optional<mutation::DestinationPrecondition>> destinations(
@@ -2222,8 +2167,6 @@ execute(const runtime::RuntimeData& runtime_data,
         destinations[index] = std::move(*condition);
         return {};
     };
-    platform::perf_trace::maximum("configured content concurrency",
-                                  parallelism);
     std::unordered_map<std::string, std::size_t> download_counts;
     for (const auto index : apply_order) {
         const auto& operation = record->plan.operations[index];
@@ -2233,7 +2176,6 @@ execute(const runtime::RuntimeData& runtime_data,
         }
     }
     std::unordered_set<std::string> populated_downloads;
-    const auto content_transfer_trace = platform::perf_trace::begin();
     for (std::size_t position = 0; position < apply_order.size();) {
         const auto first = apply_order[position];
         const auto& first_operation = record->plan.operations[first];
@@ -2272,13 +2214,9 @@ execute(const runtime::RuntimeData& runtime_data,
                         destinations,
                         &journal_session);
                     if (!failure) {
-                        platform::perf_trace::finish("content transfer wall",
-                                                     content_transfer_trace);
                         return std::unexpected(failure.error());
                     }
                     if (*failure) {
-                        platform::perf_trace::finish("content transfer wall",
-                                                     content_transfer_trace);
                         return fail_mutation((*failure)->first,
                                              (*failure)->second);
                     }
@@ -2311,14 +2249,10 @@ execute(const runtime::RuntimeData& runtime_data,
                 download_cache,
                 destinations[first] ? &*destinations[first] : nullptr);
             if (!applied) {
-                platform::perf_trace::finish("content transfer wall",
-                                             content_transfer_trace);
                 return fail_mutation(first, applied.error());
             }
             auto marked = mark_applied(first);
             if (!marked) {
-                platform::perf_trace::finish("content transfer wall",
-                                             content_transfer_trace);
                 return std::unexpected(marked.error());
             }
             ++position;
@@ -2340,93 +2274,47 @@ execute(const runtime::RuntimeData& runtime_data,
 
         for (std::size_t chunk_start = 0;
              chunk_start < pending_uploads.size();) {
-            std::vector<std::size_t> chunk;
-            std::uint64_t chunk_bytes = 0;
-            while (chunk_start + chunk.size() < pending_uploads.size() &&
-                   chunk.size() < detail::upload_batch_max_items &&
-                   (chunk.empty() ||
-                    chunk_bytes + record->plan
-                                      .operations[pending_uploads[chunk_start +
-                                                                  chunk.size()]]
-                                      .size <=
-                        detail::upload_batch_max_bytes)) {
-                const auto op_index =
-                    pending_uploads[chunk_start + chunk.size()];
-                chunk_bytes += record->plan.operations[op_index].size;
-                chunk.push_back(op_index);
-            }
-            chunk_start += chunk.size();
+            const auto chunk = detail::next_upload_batch_chunk(
+                pending_uploads, chunk_start, record->plan.operations);
 
-            const auto stage_trace = platform::perf_trace::begin();
             auto staged_batch = mutation::stage_upload_batch(
                 chunk, *record, runtime_data.local_dir, key, *workspace);
-            platform::perf_trace::finish("content stage", stage_trace);
 
             if (!staged_batch) {
-                platform::perf_trace::finish("content transfer wall",
-                                             content_transfer_trace);
                 return fail_mutation(staged_batch.error().operation_index,
                                      staged_batch.error());
             }
 
-            const auto transfer_trace = platform::perf_trace::begin();
-            auto transferred = mutation::transfer_upload_batch(
-                *staged_batch, storage, parallelism);
-            platform::perf_trace::finish("content transfer", transfer_trace);
+            detail::ScopedUploadBatchCleanup batch_cleanup{*staged_batch};
 
-            const bool transfer_unknown =
-                !transferred &&
-                transferred.error().code ==
-                    mutation::MutationErrorCode::RemoteResultUnknown;
-            if (!transferred && !transfer_unknown) {
-                platform::perf_trace::finish("content transfer wall",
-                                             content_transfer_trace);
-                return fail_mutation(transferred.error().operation_index,
-                                     transferred.error());
-            }
-
-            const auto verification_trace = platform::perf_trace::begin();
-            auto verified = mutation::verify_upload_batch(
-                *staged_batch, storage, key, *workspace, parallelism);
-            platform::perf_trace::finish("content verification wall",
-                                         verification_trace);
-
-            if (!verified) {
-                platform::perf_trace::finish("content transfer wall",
-                                             content_transfer_trace);
-                if (transfer_unknown &&
-                    verified.error().code ==
-                        mutation::MutationErrorCode::TransportFailure) {
-                    return std::unexpected(mutation_error(verified.error()));
+            if (auto batch_ok = detail::transfer_and_verify_upload_batch(
+                    *staged_batch, storage, key, *workspace, parallelism);
+                !batch_ok) {
+                if (batch_ok.error().transport_after_unknown_transfer) {
+                    return std::unexpected(
+                        mutation_error(batch_ok.error().mutation));
                 }
-                return fail_mutation(verified.error().operation_index,
-                                     verified.error());
+                return fail_mutation(batch_ok.error().mutation.operation_index,
+                                     batch_ok.error().mutation);
             }
 
-            const auto checkpoint_trace = platform::perf_trace::begin();
             auto checkpointed = detail::checkpoint_upload_batch(
                 *paths, *record, *staged_batch, key, &journal_session);
-            platform::perf_trace::finish("batch checkpoint", checkpoint_trace);
 
             if (!checkpointed) {
-                platform::perf_trace::finish("content transfer wall",
-                                             content_transfer_trace);
                 return std::unexpected(checkpointed.error());
             }
 
+            batch_cleanup.dismissed = true;
             auto cleaned = mutation::cleanup_upload_batch(*staged_batch);
 
             if (!cleaned) {
-                platform::perf_trace::finish("content transfer wall",
-                                             content_transfer_trace);
                 return std::unexpected(mutation_error(cleaned.error()));
             }
         }
 
         position = end;
     }
-    platform::perf_trace::finish("content transfer wall",
-                                 content_transfer_trace);
     if (record->phase < transaction::Phase::LocalChangesApplied) {
         record->phase = transaction::Phase::LocalChangesApplied;
     }
@@ -2445,23 +2333,14 @@ execute(const runtime::RuntimeData& runtime_data,
                                                    *record,
                                                    runtime_data.local_dir);
     if (!timestamps) {
-        auto rolled = rollback_terminal();
-        if (!rolled)
-            return std::unexpected(rolled.error());
-        return std::unexpected(timestamps.error());
+        return fail_terminal(timestamps.error());
     }
 
-    const auto final_scan_trace = platform::perf_trace::begin();
     auto scanned = observation::collect_local_observation(
         runtime_data.local_dir, session, observed_input.ignore_list);
-    platform::perf_trace::finish("final local validation", final_scan_trace);
-    platform::perf_trace::finish("final local validation wall", final_scan_trace);
     if (!scanned) {
-        auto rolled = rollback_terminal();
-        if (!rolled)
-            return std::unexpected(rolled.error());
-        return std::unexpected(detail::make_error(ErrorCode::MutationFailure,
-                                                  "local scan failed"));
+        return fail_terminal(detail::make_error(ErrorCode::MutationFailure,
+                                                "local scan failed"));
     }
     // Identifies new files or directories created locally and concurrently
     // during sync.
@@ -2508,10 +2387,7 @@ execute(const runtime::RuntimeData& runtime_data,
         reconciliation_result.candidate_shared_tree,
         scanned->physical_evidence);
     if (!publication_tree) {
-        auto rolled = rollback_terminal();
-        if (!rolled)
-            return std::unexpected(rolled.error());
-        return std::unexpected(detail::make_error(
+        return fail_terminal(detail::make_error(
             ErrorCode::PublicationFailure, publication_tree.error().detail));
     }
 
@@ -2519,117 +2395,9 @@ execute(const runtime::RuntimeData& runtime_data,
         !detail::same_materialized_rows(
             reconciliation_result.candidate_shared_tree.rows,
             publication_tree->rows)) {
-        auto rolled = rollback_terminal();
-        if (!rolled)
-            return std::unexpected(rolled.error());
-        std::string detail_message = "materialized tree does not match "
-                                     "reconciled candidate tree";
-        if (publication_tree->rows.size() !=
-            reconciliation_result.candidate_shared_tree.rows.size()) {
-            detail_message +=
-                " (actual rows=" +
-                std::to_string(publication_tree->rows.size()) + ", expected=" +
-                std::to_string(
-                    reconciliation_result.candidate_shared_tree.rows.size()) +
-                ")";
-        }
-        const auto count =
-            std::min(publication_tree->rows.size(),
-                     reconciliation_result.candidate_shared_tree.rows.size());
-        std::size_t mismatch_index = count;
-        for (std::size_t index = 0; index < count; ++index) {
-            const auto& actual = publication_tree->rows[index];
-            const auto& expected =
-                reconciliation_result.candidate_shared_tree.rows[index];
-            if (actual.path != expected.path ||
-                actual.is_directory != expected.is_directory) {
-                mismatch_index = index;
-                break;
-            }
-            if (!detail::same_materialized_row(expected, actual)) {
-                mismatch_index = index;
-                break;
-            }
-        }
-        if (mismatch_index >= count) {
-            if (publication_tree->rows.size() > count) {
-                std::string added_file;
-                for (std::size_t i = count; i < publication_tree->rows.size();
-                     ++i) {
-                    if (!publication_tree->rows[i].is_directory) {
-                        added_file = publication_tree->rows[i].path;
-                        break;
-                    }
-                }
-                if (added_file.empty()) {
-                    added_file = publication_tree->rows[count].path;
-                }
-                detail_message +=
-                    " (file added on disk during sync: " + added_file + ")";
-            } else if (reconciliation_result.candidate_shared_tree.rows.size() >
-                       count) {
-                std::string removed_file;
-                for (std::size_t i = count;
-                     i <
-                     reconciliation_result.candidate_shared_tree.rows.size();
-                     ++i) {
-                    if (!reconciliation_result.candidate_shared_tree.rows[i]
-                             .is_directory) {
-                        removed_file =
-                            reconciliation_result.candidate_shared_tree.rows[i]
-                                .path;
-                        break;
-                    }
-                }
-                if (removed_file.empty()) {
-                    removed_file =
-                        reconciliation_result.candidate_shared_tree.rows[count]
-                            .path;
-                }
-                detail_message +=
-                    " (file missing from disk during sync: " + removed_file +
-                    ")";
-            } else {
-                for (std::size_t index = 0; index < count; ++index) {
-                    if (!detail::same_materialized_row(
-                            reconciliation_result.candidate_shared_tree
-                                .rows[index],
-                            publication_tree->rows[index])) {
-                        mismatch_index = index;
-                        break;
-                    }
-                }
-            }
-        }
-        if (mismatch_index < count) {
-            const auto& actual = publication_tree->rows[mismatch_index];
-            const auto& expected = reconciliation_result.candidate_shared_tree
-                                       .rows[mismatch_index];
-            detail_message +=
-                " (path=" +
-                (expected.path.empty() ? actual.path : expected.path);
-            if (actual.path != expected.path) {
-                detail_message += ", actual_path=" + actual.path;
-            }
-            if (expected.mtime != 0 && actual.mtime != expected.mtime) {
-                detail_message +=
-                    ", actual_mtime=" + std::to_string(actual.mtime) +
-                    ", expected_mtime=" + std::to_string(expected.mtime);
-            }
-            if (actual.size != expected.size) {
-                detail_message +=
-                    ", actual_size=" + std::to_string(actual.size) +
-                    ", expected_size=" + std::to_string(expected.size);
-            }
-            if (actual.is_directory != expected.is_directory) {
-                detail_message +=
-                    ", actual_type=" + std::to_string(actual.is_directory) +
-                    ", expected_type=" + std::to_string(expected.is_directory);
-            }
-            detail_message += ")";
-        }
-        return std::unexpected(
-            detail::make_error(ErrorCode::CompositionMismatch, detail_message));
+        return fail_terminal(detail::make_error(
+            ErrorCode::CompositionMismatch,
+            "materialized tree does not match reconciled candidate tree"));
     }
 
     if (!record->publication_required) {
@@ -2639,64 +2407,22 @@ execute(const runtime::RuntimeData& runtime_data,
                               &history::LoadedCommit::id);
         if (found == observed_input.storage.reachable_commits.end() ||
             found->commit.height != observed_input.storage.generation ||
-            !same_rows(found->commit.tree.rows,
-                       observed_input.storage.tree.rows) ||
+            found->commit.tree != observed_input.storage.tree ||
             !detail::same_materialized_head_rows(found->commit.tree.rows,
                                                  publication_tree->rows,
                                                  observed_input.local_tree)) {
-            auto rolled = rollback_terminal();
-            if (!rolled)
-                return std::unexpected(rolled.error());
-            std::string detail_message =
-                "local materialization diverges from observed head";
-            if (found != observed_input.storage.reachable_commits.end()) {
-                const auto count = std::min(found->commit.tree.rows.size(),
-                                            publication_tree->rows.size());
-                for (std::size_t index = 0; index < count; ++index) {
-                    const auto& expected = found->commit.tree.rows[index];
-                    const auto& actual = publication_tree->rows[index];
-                    const auto* obs =
-                        find_row(observed_input.local_tree, actual.path);
-                    const bool pre_existing_equivalent =
-                        obs != nullptr && !obs->is_directory &&
-                        !expected.is_directory && obs->hash == expected.hash &&
-                        obs->size == expected.size &&
-                        actual.hash == expected.hash &&
-                        actual.size == expected.size &&
-                        obs->mtime != expected.mtime;
-                    if (pre_existing_equivalent) {
-                        continue;
-                    }
-                    if (actual.path != expected.path ||
-                        actual.hash != expected.hash ||
-                        actual.size != expected.size ||
-                        (expected.mtime != 0 &&
-                         actual.mtime != expected.mtime) ||
-                        actual.is_directory != expected.is_directory) {
-                        detail_message +=
-                            " (path=" + expected.path +
-                            ", actual_mtime=" + std::to_string(actual.mtime) +
-                            ", expected_mtime=" +
-                            std::to_string(expected.mtime) + ", actual_type=" +
-                            std::to_string(actual.is_directory) +
-                            ", expected_type=" +
-                            std::to_string(expected.is_directory) + ")";
-                        break;
-                    }
-                }
-            }
-            return std::unexpected(detail::make_error(
-                ErrorCode::CompositionMismatch, detail_message));
+            return fail_terminal(detail::make_error(
+                ErrorCode::CompositionMismatch,
+                "local materialization diverges from observed head"));
         }
         std::string ff_ciphertext_id = record->ciphertext_id;
         if (ff_ciphertext_id.empty()) {
             auto it = std::ranges::find(observed_input.storage.marked_heads,
                                         found->id);
             if (it != observed_input.storage.marked_heads.end()) {
+                const auto layout = history_storage::derive_remote_layout(key);
                 for (const auto& identifier :
                      observed_input.storage.marked_head_identifiers) {
-                    const auto layout =
-                        history_storage::derive_remote_layout(key);
                     const auto parsed = history_storage::parse_marker_object(
                         layout, identifier);
                     if (parsed && parsed->commit_id == found->id) {
@@ -2706,8 +2432,7 @@ execute(const runtime::RuntimeData& runtime_data,
                 }
             }
         }
-        if (!state_storage::initialize(runtime_data.database_path) ||
-            !state_storage::save_state(
+        if (auto saved_state = detail::save_state_checked(
                 runtime_data.database_path,
                 state_storage::StoredState{
                     .tree = found->commit.tree,
@@ -2717,105 +2442,101 @@ execute(const runtime::RuntimeData& runtime_data,
                     .epoch_id = observed_input.storage.epoch_id,
                     .epoch_sequence = observed_input.storage.epoch_sequence,
                     .pending_materializations =
-                        reconciliation_result.pending_materializations})) {
-            const auto database_error = detail::make_error(
-                ErrorCode::DatabaseFailure, "failed to save state.db");
+                        reconciliation_result.pending_materializations});
+            !saved_state) {
             auto rolled = rollback_terminal();
             if (!rolled) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::RecoveryConflict,
-                    database_error.detail +
+                    saved_state.error().detail +
                         "; rollback failed: " + rolled.error().detail));
             }
-            return std::unexpected(database_error);
+            return std::unexpected(saved_state.error());
         }
-        record->phase = transaction::Phase::DatabaseCommitted;
-        saved = save_active_record();
-        if (!saved)
-            return std::unexpected(saved.error());
-        record->phase = transaction::Phase::CleanupCompleted;
-        saved = save_active_record();
-        if (!saved)
-            return std::unexpected(saved.error());
+        if (auto saved_phase =
+                advance_phase(transaction::Phase::DatabaseCommitted);
+            !saved_phase) {
+            return std::unexpected(saved_phase.error());
+        }
+        if (auto saved_phase =
+                advance_phase(transaction::Phase::CleanupCompleted);
+            !saved_phase) {
+            return std::unexpected(saved_phase.error());
+        }
         return detail::finish_transaction_cleanup(
             *paths, transaction_workspace, key, &journal_session);
     }
 
     if (!prepared_commit || !commit_publication.valid()) {
-        auto rolled = rollback_terminal();
-        if (!rolled)
-            return std::unexpected(rolled.error());
-        return std::unexpected(detail::make_error(
+        return fail_terminal(detail::make_error(
             ErrorCode::PublicationFailure,
             "speculative commit publication was not initialized"));
     }
     record->commit_id = prepared_commit->commit_id;
     record->parent_ids = prepared_commit->commit.parents;
-    record->phase = transaction::Phase::CommitPrepared;
-    saved = save_active_record();
-    if (!saved)
-        return std::unexpected(saved.error());
+    if (auto saved_phase = advance_phase(transaction::Phase::CommitPrepared);
+        !saved_phase) {
+        return std::unexpected(saved_phase.error());
+    }
 
     publication::PublishObjectResult published;
     try {
         published = commit_publication.get();
     } catch (const std::exception& exception) {
-        auto rolled = rollback_terminal();
-        if (!rolled)
-            return std::unexpected(rolled.error());
-        return std::unexpected(
+        return fail_terminal(
             detail::make_error(ErrorCode::PublicationFailure,
                                std::string{"commit publication task failed: "} +
                                    exception.what()));
     }
     if (!published) {
-        auto rolled = rollback_terminal();
-        if (!rolled)
-            return std::unexpected(rolled.error());
-        return std::unexpected(publication_error(published.error()));
+        return fail_terminal(publication_error(published.error()));
     }
     record->ciphertext_id = published->head.ciphertext_id;
     record->marker_id = published->marker_id;
-    record->phase = transaction::Phase::CommitUploaded;
-    saved = save_active_record();
-    if (!saved)
-        return std::unexpected(saved.error());
-    record->phase = transaction::Phase::CommitVerified;
-    saved = save_active_record();
-    if (!saved)
-        return std::unexpected(saved.error());
+    if (auto saved_phase = advance_phase(transaction::Phase::CommitUploaded);
+        !saved_phase) {
+        return std::unexpected(saved_phase.error());
+    }
+    if (auto saved_phase = advance_phase(transaction::Phase::CommitVerified);
+        !saved_phase) {
+        return std::unexpected(saved_phase.error());
+    }
 
     const auto layout = history_storage::derive_remote_layout(key);
-    const auto head_put_trace = platform::perf_trace::begin();
-    auto marker_published = publication::publish_head_marker(
-        storage,
-        layout,
-        published->head,
-        runtime_data.database_path.parent_path());
-    platform::perf_trace::finish("head PUT", head_put_trace);
-    if (!marker_published) {
+    const auto confirm_head_marker =
+        [&](const publication::Error& failed,
+            std::string_view stage) -> std::expected<void, Error> {
         auto inspected = publication::inspect_head_marker(
             storage,
             layout,
             published->head,
             runtime_data.database_path.parent_path());
         if (!inspected) {
-            return std::unexpected(detail::indeterminate_publication(
-                inspected.error(), "head marker publication"));
+            return std::unexpected(
+                detail::indeterminate_publication(inspected.error(), stage));
         }
         if (*inspected != publication::HeadMarkerState::Valid) {
-            auto rolled = rollback_terminal();
-            if (!rolled)
-                return std::unexpected(rolled.error());
-            return std::unexpected(publication_error(marker_published.error()));
+            return fail_terminal(publication_error(failed));
+        }
+        return {};
+    };
+    auto marker_published = publication::publish_head_marker(
+        storage,
+        layout,
+        published->head,
+        runtime_data.database_path.parent_path());
+    if (!marker_published) {
+        if (auto ok = confirm_head_marker(marker_published.error(),
+                                          "head marker publication");
+            !ok) {
+            return std::unexpected(ok.error());
         }
     }
-    record->phase = transaction::Phase::HeadPublished;
-    saved = save_active_record();
-    if (!saved)
-        return std::unexpected(saved.error());
+    if (auto saved_phase = advance_phase(transaction::Phase::HeadPublished);
+        !saved_phase) {
+        return std::unexpected(saved_phase.error());
+    }
 
-    const auto head_verification_trace = platform::perf_trace::begin();
     auto head_verified = publication::verify_head_marker(
         storage,
         layout,
@@ -2823,37 +2544,46 @@ execute(const runtime::RuntimeData& runtime_data,
         runtime_data.database_path.parent_path(),
         marker_published ? marker_published->physical_hash
                          : std::string_view{});
-    platform::perf_trace::finish("head verification", head_verification_trace);
     if (!head_verified) {
         if (head_verified.error().code ==
             publication::ErrorCode::VerificationFailure) {
-            auto rolled = rollback_terminal();
-            if (!rolled)
-                return std::unexpected(rolled.error());
-            return std::unexpected(publication_error(head_verified.error()));
+            return fail_terminal(publication_error(head_verified.error()));
         }
-        auto inspected = publication::inspect_head_marker(
-            storage,
-            layout,
-            published->head,
-            runtime_data.database_path.parent_path());
-        if (!inspected) {
-            return std::unexpected(detail::indeterminate_publication(
-                inspected.error(), "head marker verification"));
-        }
-        if (*inspected != publication::HeadMarkerState::Valid) {
-            auto rolled = rollback_terminal();
-            if (!rolled)
-                return std::unexpected(rolled.error());
-            return std::unexpected(publication_error(head_verified.error()));
+        if (auto ok = confirm_head_marker(head_verified.error(),
+                                          "head marker verification");
+            !ok) {
+            return std::unexpected(ok.error());
         }
     }
-    record->phase = transaction::Phase::HeadVerified;
-    saved = save_active_record();
-    if (!saved)
-        return std::unexpected(saved.error());
+    if (auto saved_phase = advance_phase(transaction::Phase::HeadVerified);
+        !saved_phase) {
+        return std::unexpected(saved_phase.error());
+    }
 
     std::optional<history_storage::epoch::Reference> verified_new_epoch;
+    const auto publish_epoch =
+        [&](const history_storage::epoch::Epoch& expected_epoch,
+            const history_storage::epoch::SealedEpoch& sealed_epoch,
+            std::string_view epoch_kind) -> std::expected<void, Error> {
+        if (auto ok = detail::publish_and_verify_epoch(
+                storage,
+                key,
+                runtime_data.database_path.parent_path(),
+                *paths,
+                *record,
+                expected_epoch,
+                sealed_epoch,
+                epoch_kind,
+                ErrorCode::PublicationFailure,
+                ErrorCode::PublicationFailure,
+                &journal_session);
+            !ok) {
+            return ok;
+        }
+        verified_new_epoch = sealed_epoch.reference;
+        return {};
+    };
+
     if (prepared_commit->commit.parents.empty()) {
         history_storage::epoch::RetentionPolicy policy{
             .min_history_depth = runtime_data.min_history_depth,
@@ -2862,49 +2592,15 @@ execute(const runtime::RuntimeData& runtime_data,
         if (!epoch) {
             return std::unexpected(epoch.error());
         }
-        record->phase = transaction::Phase::EpochPrepared;
-        saved = save_active_record();
-        if (!saved)
-            return std::unexpected(saved.error());
-
-        auto epoch_published = history_storage::epoch::publish(
-            storage, key, *epoch, runtime_data.database_path.parent_path());
-        if (!epoch_published) {
-            auto visible = history_storage::epoch::verify(
-                storage,
-                detail::genesis_epoch(*record),
-                epoch->reference,
-                key,
-                runtime_data.database_path.parent_path());
-            if (!visible) {
-                return std::unexpected(
-                    detail::make_error(ErrorCode::PublicationFailure,
-                                       "failed to publish genesis Epoch: " +
-                                           epoch_published.error().detail));
-            }
+        if (auto saved_phase = advance_phase(transaction::Phase::EpochPrepared);
+            !saved_phase) {
+            return std::unexpected(saved_phase.error());
         }
-        record->phase = transaction::Phase::EpochUploaded;
-        saved = save_active_record();
-        if (!saved)
-            return std::unexpected(saved.error());
-
-        auto epoch_verified = history_storage::epoch::verify(
-            storage,
-            detail::genesis_epoch(*record),
-            epoch->reference,
-            key,
-            runtime_data.database_path.parent_path());
-        if (!epoch_verified) {
-            return std::unexpected(
-                detail::make_error(ErrorCode::PublicationFailure,
-                                   "failed to verify genesis Epoch: " +
-                                       epoch_verified.error().detail));
+        if (auto published_epoch = publish_epoch(
+                detail::genesis_epoch(*record), *epoch, "genesis");
+            !published_epoch) {
+            return std::unexpected(published_epoch.error());
         }
-        record->phase = transaction::Phase::EpochVerified;
-        saved = save_active_record();
-        if (!saved)
-            return std::unexpected(saved.error());
-        verified_new_epoch = epoch->reference;
     } else if (!observed_input.storage.epoch_id.empty()) {
         auto policy =
             detail::authenticated_epoch_policy(observed_input.storage);
@@ -2944,51 +2640,11 @@ execute(const runtime::RuntimeData& runtime_data,
                     .anchors = plan->anchors,
                     .previous_epoch_id = observed_input.storage.epoch_id};
 
-                auto epoch_published = history_storage::epoch::publish(
-                    storage,
-                    key,
-                    *epoch,
-                    runtime_data.database_path.parent_path());
-                if (!epoch_published) {
-                    auto visible = history_storage::epoch::verify(
-                        storage,
-                        expected_epoch,
-                        epoch->reference,
-                        key,
-                        runtime_data.database_path.parent_path());
-                    if (!visible) {
-                        return std::unexpected(detail::make_error(
-                            ErrorCode::PublicationFailure,
-                            "failed to publish pruning Epoch: " +
-                                epoch_published.error().detail));
-                    }
+                if (auto published_epoch =
+                        publish_epoch(expected_epoch, *epoch, "pruning");
+                    !published_epoch) {
+                    return std::unexpected(published_epoch.error());
                 }
-
-                record->phase = transaction::Phase::EpochUploaded;
-                saved = save_active_record();
-                if (!saved) {
-                    return std::unexpected(saved.error());
-                }
-
-                auto epoch_verified = history_storage::epoch::verify(
-                    storage,
-                    expected_epoch,
-                    epoch->reference,
-                    key,
-                    runtime_data.database_path.parent_path());
-                if (!epoch_verified) {
-                    return std::unexpected(
-                        detail::make_error(ErrorCode::PublicationFailure,
-                                           "failed to verify pruning Epoch: " +
-                                               epoch_verified.error().detail));
-                }
-
-                record->phase = transaction::Phase::EpochVerified;
-                saved = save_active_record();
-                if (!saved) {
-                    return std::unexpected(saved.error());
-                }
-                verified_new_epoch = epoch->reference;
             }
         }
     }
@@ -2998,10 +2654,7 @@ execute(const runtime::RuntimeData& runtime_data,
     if (!epoch_reference) {
         return std::unexpected(epoch_reference.error());
     }
-    const auto database_trace = platform::perf_trace::begin();
-    const bool database_saved =
-        state_storage::initialize(runtime_data.database_path) &&
-        state_storage::save_state(
+    if (auto saved_state = detail::save_state_checked(
             runtime_data.database_path,
             state_storage::StoredState{
                 .tree = prepared_commit->commit.tree,
@@ -3014,36 +2667,32 @@ execute(const runtime::RuntimeData& runtime_data,
                     *epoch_reference ? (**epoch_reference).sequence : 0,
                 .pending_materializations =
                     reconciliation_result.pending_materializations});
-    platform::perf_trace::finish("local DB commit", database_trace);
-    if (!database_saved) {
-        return std::unexpected(detail::make_error(ErrorCode::DatabaseFailure,
-                                                  "failed to save state.db"));
+        !saved_state) {
+        return std::unexpected(saved_state.error());
     }
-    record->phase = transaction::Phase::DatabaseCommitted;
-    saved = save_active_record();
-    if (!saved)
-        return std::unexpected(saved.error());
+    if (auto saved_phase = advance_phase(transaction::Phase::DatabaseCommitted);
+        !saved_phase) {
+        return std::unexpected(saved_phase.error());
+    }
 
     auto observed_cleanup_ids = prepared_commit->commit.parents;
     observed_cleanup_ids.insert(
         observed_cleanup_ids.end(),
         observed_input.storage.ancestral_marked_heads.begin(),
         observed_input.storage.ancestral_marked_heads.end());
-    const auto cleanup_trace = platform::perf_trace::begin();
     auto post_prune = publication::prune_observed_parent_markers(
         storage,
         layout,
         observed_cleanup_ids,
         observed_input.storage.marked_head_identifiers);
-    platform::perf_trace::finish("marker cleanup", cleanup_trace);
     if (!post_prune) {
         return std::unexpected(detail::indeterminate_publication(
             post_prune.error(), "marker pruning"));
     }
-    record->phase = transaction::Phase::CleanupCompleted;
-    saved = save_active_record();
-    if (!saved)
-        return std::unexpected(saved.error());
+    if (auto saved_phase = advance_phase(transaction::Phase::CleanupCompleted);
+        !saved_phase) {
+        return std::unexpected(saved_phase.error());
+    }
     return detail::finish_transaction_cleanup(
         *paths, transaction_workspace, key, &journal_session);
 }

@@ -2,8 +2,10 @@
 
 #include "application/history_storage/publication.hpp"
 #include "core/hasher.hpp"
+#include "core/history.hpp"
 #include "core/transaction/codec.hpp"
 #include "core/wire.hpp"
+#include "crypto/secure_memory.hpp"
 #include "journal_fault_test.hpp"
 #include "platform/durability.hpp"
 #include "platform/file_fingerprint.hpp"
@@ -40,6 +42,16 @@ namespace kasumi::application::sync::journal {
 
 namespace {
 
+struct SessionGuard {
+    Session* session;
+    bool keep = false;
+    ~SessionGuard() {
+        if (!keep && session) {
+            session->invalidate();
+        }
+    }
+};
+
 inline constexpr std::array<std::uint8_t, 4> journal_magic{'K', 'T', 'X', '3'};
 inline constexpr std::array<std::uint8_t, 4> journal_log_magic{
     'K', 'T', 'D', '3'};
@@ -75,46 +87,21 @@ inline constexpr std::uint64_t maximum_log_size = 128ULL * 1024ULL * 1024ULL;
 thread_local bool passive_inspection = false;
 
 struct PassiveInspectionScope {
-    PassiveInspectionScope() : previous(std::exchange(passive_inspection, true)) {}
-    ~PassiveInspectionScope() { passive_inspection = previous; }
+    PassiveInspectionScope()
+        : previous(std::exchange(passive_inspection, true)) {
+    }
+    ~PassiveInspectionScope() {
+        passive_inspection = previous;
+    }
     PassiveInspectionScope(const PassiveInspectionScope&) = delete;
     PassiveInspectionScope& operator=(const PassiveInspectionScope&) = delete;
     bool previous;
 };
 inline constexpr std::uint64_t maximum_delta_count = 1'000'000;
+inline constexpr std::size_t maximum_pending_path_count = 1'000'000;
 
 bool path_not_found(const std::error_code& error) noexcept {
     return error == std::errc::no_such_file_or_directory;
-}
-
-void encode_u64_le(std::uint64_t value, std::uint8_t* output) noexcept {
-    for (std::size_t index = 0; index < sizeof(value); ++index) {
-        output[index] =
-            static_cast<std::uint8_t>((value >> (index * 8)) & 0xffU);
-    }
-}
-
-std::uint64_t decode_u64_le(const std::uint8_t* input) noexcept {
-    std::uint64_t value = 0;
-    for (std::size_t index = 0; index < sizeof(value); ++index) {
-        value |= static_cast<std::uint64_t>(input[index]) << (index * 8);
-    }
-    return value;
-}
-
-void encode_u32_le(std::uint32_t value, std::uint8_t* output) noexcept {
-    for (std::size_t index = 0; index < sizeof(value); ++index) {
-        output[index] =
-            static_cast<std::uint8_t>((value >> (index * 8)) & 0xffU);
-    }
-}
-
-std::uint32_t decode_u32_le(const std::uint8_t* input) noexcept {
-    std::uint32_t value = 0;
-    for (std::size_t index = 0; index < sizeof(value); ++index) {
-        value |= static_cast<std::uint32_t>(input[index]) << (index * 8);
-    }
-    return value;
 }
 
 std::expected<void, std::string> validate_paths(const Paths& paths) {
@@ -226,26 +213,21 @@ validate_file_or_absent(const std::filesystem::path& path,
 }
 
 std::expected<void, std::string> validate_save_paths(const Paths& paths) {
-    auto structural = validate_paths(paths);
-    if (!structural) {
+    if (auto structural = validate_paths(paths); !structural) {
         return structural;
     }
-    auto parent = validate_parent_directory(paths.final_path, false);
-    if (!parent) {
+    if (auto parent = validate_parent_directory(paths.final_path, false);
+        !parent) {
         return parent;
     }
-    auto final = validate_file_or_absent(paths.final_path, "final journal");
-    if (!final) {
-        return final;
-    }
-    auto temporary =
-        validate_file_or_absent(paths.temporary_path, "temporary journal");
-    if (!temporary) {
-        return temporary;
-    }
-    auto log = validate_file_or_absent(paths.log_path, "journal log");
-    if (!log) {
-        return log;
+    for (const auto& [path, label] :
+         std::array<std::pair<const std::filesystem::path&, std::string_view>,
+                    3>{{{paths.final_path, "final journal"},
+                        {paths.temporary_path, "temporary journal"},
+                        {paths.log_path, "journal log"}}}) {
+        if (auto ok = validate_file_or_absent(path, label); !ok) {
+            return ok;
+        }
     }
     return {};
 }
@@ -296,133 +278,94 @@ bool same_progress(const transaction::OperationProgress& a,
            a.previous_hash == b.previous_hash;
 }
 
-struct Delta {
+std::uint8_t compute_delta_flags(const transaction::Record& prev,
+                                 const transaction::Record& curr,
+                                 std::vector<std::uint32_t>& changed_progress) {
     std::uint8_t flags = 0;
-    transaction::Phase phase = transaction::Phase::Started;
-    std::vector<std::pair<std::uint32_t, transaction::OperationProgress>>
-        progress_changes;
-    std::string commit_id;
-    std::string ciphertext_id;
-    std::string marker_id;
-    std::vector<std::string> parent_ids;
-    std::string epoch_vault_id;
-    std::string epoch_id;
-    std::int64_t epoch_issued_at = 0;
-    std::uint32_t epoch_min_history_depth = 0;
-    std::uint32_t epoch_min_history_age_hours = 0;
-    std::vector<std::string> observed_pending_paths;
-    std::vector<std::string> pending_paths;
-};
-
-Delta compute_delta(const transaction::Record& prev,
-                    const transaction::Record& curr) {
-    Delta delta;
-    if (curr.phase != prev.phase) {
-        delta.flags |= HasPhase;
-        delta.phase = curr.phase;
-    }
-
+    if (curr.phase != prev.phase)
+        flags |= HasPhase;
     for (std::size_t i = 0;
          i < curr.progress.size() && i < prev.progress.size();
          ++i) {
-        if (!same_progress(curr.progress[i], prev.progress[i])) {
-            delta.progress_changes.emplace_back(static_cast<std::uint32_t>(i),
-                                                curr.progress[i]);
-        }
+        if (!same_progress(curr.progress[i], prev.progress[i]))
+            changed_progress.push_back(static_cast<std::uint32_t>(i));
     }
-    if (!delta.progress_changes.empty()) {
-        delta.flags |= HasProgress;
-    }
-
+    if (!changed_progress.empty())
+        flags |= HasProgress;
     if (curr.commit_id != prev.commit_id ||
         curr.ciphertext_id != prev.ciphertext_id ||
-        curr.marker_id != prev.marker_id ||
-        curr.parent_ids != prev.parent_ids) {
-        delta.flags |= HasPublication;
-        delta.commit_id = curr.commit_id;
-        delta.ciphertext_id = curr.ciphertext_id;
-        delta.marker_id = curr.marker_id;
-        delta.parent_ids = curr.parent_ids;
-    }
-
+        curr.marker_id != prev.marker_id || curr.parent_ids != prev.parent_ids)
+        flags |= HasPublication;
     if (curr.epoch_vault_id != prev.epoch_vault_id ||
         curr.epoch_id != prev.epoch_id ||
         curr.epoch_issued_at != prev.epoch_issued_at ||
         curr.epoch_min_history_depth != prev.epoch_min_history_depth ||
-        curr.epoch_min_history_age_hours != prev.epoch_min_history_age_hours) {
-        delta.flags |= HasEpoch;
-        delta.epoch_vault_id = curr.epoch_vault_id;
-        delta.epoch_id = curr.epoch_id;
-        delta.epoch_issued_at = curr.epoch_issued_at;
-        delta.epoch_min_history_depth = curr.epoch_min_history_depth;
-        delta.epoch_min_history_age_hours = curr.epoch_min_history_age_hours;
-    }
-
+        curr.epoch_min_history_age_hours != prev.epoch_min_history_age_hours)
+        flags |= HasEpoch;
     if (curr.observed_pending_paths != prev.observed_pending_paths ||
-        curr.pending_paths != prev.pending_paths) {
-        delta.flags |= HasPendingPaths;
-        delta.observed_pending_paths = curr.observed_pending_paths;
-        delta.pending_paths = curr.pending_paths;
-    }
-
-    return delta;
+        curr.pending_paths != prev.pending_paths)
+        flags |= HasPendingPaths;
+    return flags;
 }
 
-std::optional<std::uint64_t> delta_size(const Delta& delta) noexcept {
-    std::uint64_t size = 1;
-    const auto add = [&](std::uint64_t n) {
-        if (n > maximum_payload_size - size)
-            return false;
-        size += n;
-        return true;
-    };
-    const auto string = [&](const std::string& value) {
-        return add(4) && add(value.size());
-    };
-    const auto strings = [&](const std::vector<std::string>& values) {
-        if (!add(4))
-            return false;
-        for (const auto& value : values)
-            if (!string(value))
-                return false;
-        return true;
-    };
-    if ((delta.flags & HasPhase) && !add(1))
-        return std::nullopt;
-    if (delta.flags & HasProgress) {
-        if (!add(4))
-            return std::nullopt;
-        for (const auto& [index, progress] : delta.progress_changes) {
-            (void)index;
-            if (!add(10) || !string(progress.previous_hash))
-                return std::nullopt;
-        }
-    }
-    if ((delta.flags & HasPublication) &&
-        (!string(delta.commit_id) || !string(delta.ciphertext_id) ||
-         !string(delta.marker_id) || !strings(delta.parent_ids)))
-        return std::nullopt;
-    if ((delta.flags & HasEpoch) &&
-        (!string(delta.epoch_vault_id) || !string(delta.epoch_id) || !add(16)))
-        return std::nullopt;
-    if ((delta.flags & HasPendingPaths) &&
-        (!strings(delta.observed_pending_paths) ||
-         !strings(delta.pending_paths)))
-        return std::nullopt;
-    return size;
+void assign_mutable_fields(transaction::Record& dst,
+                           const transaction::Record& src) {
+    dst.phase = src.phase;
+    dst.progress = src.progress;
+    dst.commit_id = src.commit_id;
+    dst.ciphertext_id = src.ciphertext_id;
+    dst.marker_id = src.marker_id;
+    dst.parent_ids = src.parent_ids;
+    dst.epoch_vault_id = src.epoch_vault_id;
+    dst.epoch_id = src.epoch_id;
+    dst.epoch_issued_at = src.epoch_issued_at;
+    dst.epoch_min_history_depth = src.epoch_min_history_depth;
+    dst.epoch_min_history_age_hours = src.epoch_min_history_age_hours;
+    dst.observed_pending_paths = src.observed_pending_paths;
+    dst.pending_paths = src.pending_paths;
 }
 
-std::vector<std::byte> encode_delta(const Delta& delta) {
+std::expected<std::uint32_t, std::string>
+validate_log_entry_header(std::span<const std::uint8_t> bytes,
+                          std::size_t offset,
+                          std::size_t limit,
+                          std::uint64_t count,
+                          const Hash& chain) {
+    if (limit - offset < log_header_size) {
+        return std::unexpected("journal delta header truncated");
+    }
+    const auto* ptr = bytes.data() + offset;
+    if (!std::equal(journal_log_magic.begin(), journal_log_magic.end(), ptr)) {
+        return std::unexpected("incompatible journal delta format");
+    }
+    if (count >= maximum_delta_count ||
+        wire::decode_le<std::uint64_t>(ptr + 4) != count ||
+        std::memcmp(chain.data(), ptr + 12, 32) != 0) {
+        return std::unexpected("journal delta sequence or chain mismatch");
+    }
+    const auto payload_size = wire::decode_le<std::uint32_t>(ptr + 44);
+    if (payload_size > maximum_payload_size ||
+        payload_size > limit - offset - log_header_size) {
+        return std::unexpected("invalid or truncated journal delta payload");
+    }
+    return payload_size;
+}
+
+std::vector<std::byte>
+encode_delta(std::uint8_t flags,
+             const transaction::Record& record,
+             std::span<const std::uint32_t> changed_progress) {
     wire::Writer writer;
-    wire::write<std::uint8_t>(writer, delta.flags);
-    if (delta.flags & HasPhase) {
+    wire::write<std::uint8_t>(writer, flags);
+    if (flags & HasPhase) {
         wire::write<std::uint8_t>(writer,
-                                  static_cast<std::uint8_t>(delta.phase));
+                                  static_cast<std::uint8_t>(record.phase));
     }
-    if (delta.flags & HasProgress) {
+    if (flags & HasProgress) {
         wire::write<std::uint32_t>(
-            writer, static_cast<std::uint32_t>(delta.progress_changes.size()));
-        for (const auto& [idx, prog] : delta.progress_changes) {
+            writer, static_cast<std::uint32_t>(changed_progress.size()));
+        for (const auto idx : changed_progress) {
+            const auto& prog = record.progress[idx];
             wire::write<std::uint32_t>(writer, idx);
             wire::write<std::uint8_t>(writer,
                                       static_cast<std::uint8_t>(prog.state));
@@ -431,114 +374,24 @@ std::vector<std::byte> encode_delta(const Delta& delta) {
             wire::write_string(writer, prog.previous_hash);
         }
     }
-    if (delta.flags & HasPublication) {
-        wire::write_string(writer, delta.commit_id);
-        wire::write_string(writer, delta.ciphertext_id);
-        wire::write_string(writer, delta.marker_id);
-        wire::write<std::uint32_t>(
-            writer, static_cast<std::uint32_t>(delta.parent_ids.size()));
-        for (const auto& pid : delta.parent_ids) {
-            wire::write_string(writer, pid);
-        }
+    if (flags & HasPublication) {
+        wire::write_string(writer, record.commit_id);
+        wire::write_string(writer, record.ciphertext_id);
+        wire::write_string(writer, record.marker_id);
+        wire::write_strings(writer, record.parent_ids);
     }
-    if (delta.flags & HasEpoch) {
-        wire::write_string(writer, delta.epoch_vault_id);
-        wire::write_string(writer, delta.epoch_id);
-        wire::write<std::int64_t>(writer, delta.epoch_issued_at);
-        wire::write<std::uint32_t>(writer, delta.epoch_min_history_depth);
-        wire::write<std::uint32_t>(writer, delta.epoch_min_history_age_hours);
+    if (flags & HasEpoch) {
+        wire::write_string(writer, record.epoch_vault_id);
+        wire::write_string(writer, record.epoch_id);
+        wire::write<std::int64_t>(writer, record.epoch_issued_at);
+        wire::write<std::uint32_t>(writer, record.epoch_min_history_depth);
+        wire::write<std::uint32_t>(writer, record.epoch_min_history_age_hours);
     }
-    if (delta.flags & HasPendingPaths) {
-        wire::write<std::uint32_t>(
-            writer,
-            static_cast<std::uint32_t>(delta.observed_pending_paths.size()));
-        for (const auto& p : delta.observed_pending_paths) {
-            wire::write_string(writer, p);
-        }
-        wire::write<std::uint32_t>(
-            writer, static_cast<std::uint32_t>(delta.pending_paths.size()));
-        for (const auto& p : delta.pending_paths) {
-            wire::write_string(writer, p);
-        }
+    if (flags & HasPendingPaths) {
+        wire::write_strings(writer, record.observed_pending_paths);
+        wire::write_strings(writer, record.pending_paths);
     }
     return std::move(writer.buffer);
-}
-
-// Capacity estimate excludes allocator/path bookkeeping and can double-count
-// SSO.
-std::uint64_t string_memory(const std::vector<std::string>& values) noexcept {
-    std::uint64_t bytes = values.capacity() * sizeof(std::string);
-    for (const auto& value : values)
-        bytes += value.capacity();
-    return bytes;
-}
-
-std::uint64_t selected_memory(const transaction::Record& record,
-                              const Delta& delta) noexcept {
-    std::uint64_t bytes = 0;
-    for (const auto& [index, progress] : delta.progress_changes) {
-        (void)progress;
-        bytes += record.progress[index].previous_hash.capacity();
-    }
-    if (delta.flags & HasPublication)
-        bytes += record.commit_id.capacity() + record.ciphertext_id.capacity() +
-                 record.marker_id.capacity() + string_memory(record.parent_ids);
-    if (delta.flags & HasEpoch)
-        bytes += record.epoch_vault_id.capacity() + record.epoch_id.capacity();
-    if (delta.flags & HasPendingPaths)
-        bytes += string_memory(record.observed_pending_paths) +
-                 string_memory(record.pending_paths);
-    return bytes;
-}
-
-std::uint64_t record_memory(const transaction::Record& record) noexcept {
-    std::uint64_t bytes =
-        sizeof(record) + record.plan.operations.capacity() * sizeof(Operation) +
-        record.progress.capacity() * sizeof(transaction::OperationProgress);
-    bytes += record.operation_id.capacity() +
-             record.observed_head_id.capacity() +
-             record.observed_base_id.capacity();
-    bytes += record.commit_id.capacity() + record.ciphertext_id.capacity() +
-             record.marker_id.capacity() + string_memory(record.parent_ids);
-    bytes += record.epoch_vault_id.capacity() + record.epoch_id.capacity();
-    bytes += string_memory(record.observed_pending_paths) +
-             string_memory(record.pending_paths);
-    for (const auto& operation : record.plan.operations) {
-        bytes += (operation.path.native().capacity() +
-                  operation.alt_path.native().capacity()) *
-                     sizeof(std::filesystem::path::value_type) +
-                 operation.hash.capacity();
-    }
-    for (const auto& progress : record.progress)
-        bytes += progress.previous_hash.capacity();
-    return bytes;
-}
-
-// Changes own their allocations before disk confirmation; commit only
-// moves/swaps.
-void apply_prepared_delta(transaction::Record& record, Delta& delta) noexcept {
-    if (delta.flags & HasPhase)
-        record.phase = delta.phase;
-    for (auto& [index, progress] : delta.progress_changes) {
-        record.progress[index] = std::move(progress);
-    }
-    if (delta.flags & HasPublication) {
-        record.commit_id.swap(delta.commit_id);
-        record.ciphertext_id.swap(delta.ciphertext_id);
-        record.marker_id.swap(delta.marker_id);
-        record.parent_ids.swap(delta.parent_ids);
-    }
-    if (delta.flags & HasEpoch) {
-        record.epoch_vault_id.swap(delta.epoch_vault_id);
-        record.epoch_id.swap(delta.epoch_id);
-        record.epoch_issued_at = delta.epoch_issued_at;
-        record.epoch_min_history_depth = delta.epoch_min_history_depth;
-        record.epoch_min_history_age_hours = delta.epoch_min_history_age_hours;
-    }
-    if (delta.flags & HasPendingPaths) {
-        record.observed_pending_paths.swap(delta.observed_pending_paths);
-        record.pending_paths.swap(delta.pending_paths);
-    }
 }
 
 std::expected<void, std::string> apply_delta(transaction::Record& record,
@@ -552,14 +405,12 @@ std::expected<void, std::string> apply_delta(transaction::Record& record,
     if (flags == 0 || (flags & ~std::uint8_t{0x1f}) != 0) {
         return std::unexpected("unknown or empty delta flags");
     }
-    Delta prepared;
-    prepared.flags = flags;
     if (flags & HasPhase) {
         auto ph = wire::read<std::uint8_t>(reader);
         if (!ph || !transaction::valid(static_cast<transaction::Phase>(*ph))) {
             return std::unexpected("invalid or truncated phase in delta");
         }
-        prepared.phase = static_cast<transaction::Phase>(*ph);
+        record.phase = static_cast<transaction::Phase>(*ph);
     }
     if (flags & HasProgress) {
         auto count = wire::read<std::uint32_t>(reader);
@@ -591,36 +442,28 @@ std::expected<void, std::string> apply_delta(transaction::Record& record,
             if (*slot != record.progress[*idx].backup_slot) {
                 return std::unexpected("delta changed immutable backup slot");
             }
-            prepared.progress_changes.emplace_back(
-                *idx,
-                transaction::OperationProgress{
-                    .previous_hash = std::move(*prev_h),
-                    .backup_slot = *slot,
-                    .state = static_cast<transaction::OperationState>(*st),
-                    .had_original = *had_orig == 1,
-                });
+            record.progress[*idx] = transaction::OperationProgress{
+                .previous_hash = std::move(*prev_h),
+                .backup_slot = *slot,
+                .state = static_cast<transaction::OperationState>(*st),
+                .had_original = *had_orig == 1,
+            };
         }
     }
     if (flags & HasPublication) {
         auto commit_id = wire::read_string(reader, 4096);
         auto ciphertext_id = wire::read_string(reader, 4096);
         auto marker_id = wire::read_string(reader, 4096);
-        auto parent_count = wire::read<std::uint32_t>(reader);
-        if (!commit_id || !ciphertext_id || !marker_id || !parent_count ||
-            *parent_count > 32 || *parent_count > reader.data.size() / 4) {
+        std::vector<std::string> parent_ids;
+        if (!commit_id || !ciphertext_id || !marker_id ||
+            !wire::read_strings(
+                reader, parent_ids, history::maximum_parent_count)) {
             return std::unexpected("truncated publication fields in delta");
         }
-        prepared.commit_id = std::move(*commit_id);
-        prepared.ciphertext_id = std::move(*ciphertext_id);
-        prepared.marker_id = std::move(*marker_id);
-        prepared.parent_ids.clear();
-        prepared.parent_ids.reserve(*parent_count);
-        for (std::uint32_t i = 0; i < *parent_count; ++i) {
-            auto pid = wire::read_string(reader, 4096);
-            if (!pid)
-                return std::unexpected("truncated parent id in delta");
-            prepared.parent_ids.push_back(std::move(*pid));
-        }
+        record.commit_id = std::move(*commit_id);
+        record.ciphertext_id = std::move(*ciphertext_id);
+        record.marker_id = std::move(*marker_id);
+        record.parent_ids = std::move(parent_ids);
     }
     if (flags & HasEpoch) {
         auto vault_id = wire::read_string(reader, 4096);
@@ -631,43 +474,26 @@ std::expected<void, std::string> apply_delta(transaction::Record& record,
         if (!vault_id || !epoch_id || !issued_at || !depth || !age) {
             return std::unexpected("truncated epoch fields in delta");
         }
-        prepared.epoch_vault_id = std::move(*vault_id);
-        prepared.epoch_id = std::move(*epoch_id);
-        prepared.epoch_issued_at = *issued_at;
-        prepared.epoch_min_history_depth = *depth;
-        prepared.epoch_min_history_age_hours = *age;
+        record.epoch_vault_id = std::move(*vault_id);
+        record.epoch_id = std::move(*epoch_id);
+        record.epoch_issued_at = *issued_at;
+        record.epoch_min_history_depth = *depth;
+        record.epoch_min_history_age_hours = *age;
     }
     if (flags & HasPendingPaths) {
-        auto obs_count = wire::read<std::uint32_t>(reader);
-        if (!obs_count || *obs_count > 1'000'000 ||
-            *obs_count > reader.data.size() / 4)
+        if (!wire::read_strings(reader,
+                                record.observed_pending_paths,
+                                maximum_pending_path_count)) {
             return std::unexpected("truncated observed_pending_paths count");
-        prepared.observed_pending_paths.clear();
-        prepared.observed_pending_paths.reserve(*obs_count);
-        for (std::uint32_t i = 0; i < *obs_count; ++i) {
-            auto p = wire::read_string(reader, 4096);
-            if (!p)
-                return std::unexpected(
-                    "truncated observed_pending_path item in delta");
-            prepared.observed_pending_paths.push_back(std::move(*p));
         }
-        auto pend_count = wire::read<std::uint32_t>(reader);
-        if (!pend_count || *pend_count > 1'000'000 ||
-            *pend_count > reader.data.size() / 4)
+        if (!wire::read_strings(
+                reader, record.pending_paths, maximum_pending_path_count)) {
             return std::unexpected("invalid pending_paths count");
-        prepared.pending_paths.clear();
-        prepared.pending_paths.reserve(*pend_count);
-        for (std::uint32_t i = 0; i < *pend_count; ++i) {
-            auto p = wire::read_string(reader, 4096);
-            if (!p)
-                return std::unexpected("truncated pending_path item in delta");
-            prepared.pending_paths.push_back(std::move(*p));
         }
     }
     if (!reader.data.empty()) {
         return std::unexpected("trailing bytes after delta completion");
     }
-    apply_prepared_delta(record, prepared);
     return {};
 }
 
@@ -691,9 +517,9 @@ make_delta_aad(std::uint64_t seq,
                std::string_view operation_id) {
     std::vector<std::uint8_t> aad(48 + operation_id.size());
     std::copy(journal_log_magic.begin(), journal_log_magic.end(), aad.begin());
-    encode_u64_le(seq, aad.data() + 4);
+    wire::encode_le<std::uint64_t>(seq, aad.data() + 4);
     std::memcpy(aad.data() + 12, prev_hash.data(), kasumi::HASH_SIZE);
-    encode_u32_le(payload_len, aad.data() + 44);
+    wire::encode_le<std::uint32_t>(payload_len, aad.data() + 44);
     std::memcpy(aad.data() + 48, operation_id.data(), operation_id.size());
     return aad;
 }
@@ -827,12 +653,6 @@ read_bytes(const std::filesystem::path& path, std::uint64_t limit) {
     input.close();
     if (input.fail())
         return std::unexpected("failed to close journal artifact");
-    const auto filename = path.filename();
-    platform::perf_trace::count(
-        filename == "snapshot.enc"          ? "journal snapshot read bytes"
-        : filename == "transaction.log.enc" ? "journal log read bytes"
-                                            : "journal confirmation read bytes",
-        bytes.size());
     return bytes;
 }
 
@@ -874,8 +694,6 @@ std::expected<void, std::string> write_file(const std::filesystem::path& path,
         journal_fault_test::hit("append-payload", &record, index);
     output.write(reinterpret_cast<const char*>(bytes.data() + middle),
                  static_cast<std::streamsize>(bytes.size() - middle));
-    platform::perf_trace::count("journal written bytes total", bytes.size());
-    platform::perf_trace::count("journal bytes written", bytes.size());
     if (journal_fault_test::fail("write", record))
         output.setstate(std::ios::badbit);
     if (!output)
@@ -905,6 +723,53 @@ std::expected<void, std::string> write_file(const std::filesystem::path& path,
         return synced;
     journal_fault_test::hit(
         append ? "append-sync" : "temporary-sync", &record, index);
+    platform::perf_trace::count("journal written bytes total", bytes.size());
+    return {};
+}
+
+std::expected<void, std::string>
+seal_aead_frame(std::span<std::uint8_t> frame,
+                std::size_t frame_aad_size,
+                std::span<const std::uint8_t> aad,
+                const crypto::Key& key,
+                std::span<const std::byte> plaintext = {}) {
+    if (auto random = platform::random::fill_bytes(
+            frame.subspan(frame_aad_size, nonce_size));
+        !random) {
+        return random;
+    }
+    crypto_aead_lock(
+        plaintext.empty()
+            ? nullptr
+            : frame.data() + frame_aad_size + nonce_size + mac_size,
+        frame.data() + frame_aad_size + nonce_size,
+        key.data(),
+        frame.data() + frame_aad_size,
+        aad.data(),
+        aad.size(),
+        plaintext.empty()
+            ? nullptr
+            : reinterpret_cast<const std::uint8_t*>(plaintext.data()),
+        plaintext.size());
+    return {};
+}
+
+std::expected<void, std::string>
+unlock_aead_frame(const std::uint8_t* nonce_and_mac,
+                  std::span<const std::uint8_t> aad,
+                  const crypto::Key& key,
+                  std::span<const std::uint8_t> ciphertext,
+                  std::uint8_t* plaintext,
+                  std::string_view error_message) {
+    if (crypto_aead_unlock(plaintext,
+                           nonce_and_mac + nonce_size,
+                           key.data(),
+                           nonce_and_mac,
+                           aad.data(),
+                           aad.size(),
+                           ciphertext.empty() ? nullptr : ciphertext.data(),
+                           ciphertext.size()) != 0)
+        return std::unexpected(std::string{error_message});
     return {};
 }
 
@@ -917,21 +782,13 @@ std::expected<void, std::string> write_tip(const Paths& paths,
     const auto& magic = retirement ? retirement_magic : tip_magic;
     std::copy(magic.begin(), magic.end(), bytes.begin());
     std::memcpy(bytes.data() + 4, tip.snapshot.data(), 32);
-    encode_u64_le(tip.bytes, bytes.data() + 36);
-    encode_u64_le(tip.count, bytes.data() + 44);
+    wire::encode_le<std::uint64_t>(tip.bytes, bytes.data() + 36);
+    wire::encode_le<std::uint64_t>(tip.count, bytes.data() + 44);
     std::memcpy(bytes.data() + 52, tip.chain.data(), 32);
-    auto random = platform::random::fill_bytes(
-        std::span{bytes}.subspan(tip_aad_size, nonce_size));
-    if (!random)
-        return random;
-    crypto_aead_lock(nullptr,
-                     bytes.data() + tip_aad_size + nonce_size,
-                     key.data(),
-                     bytes.data() + tip_aad_size,
-                     bytes.data(),
-                     tip_aad_size,
-                     nullptr,
-                     0);
+    if (auto sealed = seal_aead_frame(
+            bytes, tip_aad_size, std::span{bytes}.first(tip_aad_size), key);
+        !sealed)
+        return sealed;
     const auto final = retirement ? retirement_path(paths) : tip_path(paths);
     auto temporary = final;
     temporary += ".new";
@@ -965,6 +822,9 @@ std::expected<void, std::string> write_tip(const Paths& paths,
         return synced;
     journal_fault_test::hit(
         retirement ? "retirement-proved" : "confirmed", &record, tip.count);
+    if (!retirement) {
+        platform::perf_trace::count("journal durable saves");
+    }
     return {};
 }
 
@@ -978,19 +838,19 @@ read_tip(const Paths& paths, const crypto::Key& key, bool retirement = false) {
     if (bytes->size() != tip_size ||
         !std::equal(magic.begin(), magic.end(), bytes->begin()))
         return std::unexpected("incompatible journal confirmation format");
-    if (crypto_aead_unlock(nullptr,
-                           bytes->data() + tip_aad_size + nonce_size,
-                           key.data(),
-                           bytes->data() + tip_aad_size,
-                           bytes->data(),
-                           tip_aad_size,
-                           nullptr,
-                           0) != 0)
-        return std::unexpected("journal confirmation authentication failed");
+    if (auto ok =
+            unlock_aead_frame(bytes->data() + tip_aad_size,
+                              std::span{*bytes}.first(tip_aad_size),
+                              key,
+                              {},
+                              nullptr,
+                              "journal confirmation authentication failed");
+        !ok)
+        return std::unexpected(ok.error());
     Tip tip;
     std::memcpy(tip.snapshot.data(), bytes->data() + 4, 32);
-    tip.bytes = decode_u64_le(bytes->data() + 36);
-    tip.count = decode_u64_le(bytes->data() + 44);
+    tip.bytes = wire::decode_le<std::uint64_t>(bytes->data() + 36);
+    tip.count = wire::decode_le<std::uint64_t>(bytes->data() + 44);
     std::memcpy(tip.chain.data(), bytes->data() + 52, 32);
     if (tip.bytes > maximum_log_size || tip.count > maximum_delta_count ||
         tip.count > tip.bytes / log_header_size)
@@ -1046,10 +906,36 @@ bool same_identity(const transaction::Record& a, const transaction::Record& b) {
     return true;
 }
 
+// Validates every entry header up to byte_limit and matches tip count/hash.
+template <typename OnEntry>
+std::expected<void, std::string>
+walk_log_chain(std::span<const std::uint8_t> log,
+               std::size_t byte_limit,
+               const Tip& expected_tip,
+               std::string_view mismatch_msg,
+               OnEntry&& on_entry) {
+    auto chain = expected_tip.snapshot;
+    std::uint64_t count = 0;
+    std::size_t offset = 0;
+    while (offset < byte_limit) {
+        const auto size =
+            validate_log_entry_header(log, offset, byte_limit, count, chain);
+        if (!size)
+            return std::unexpected(size.error());
+        if (auto ok = on_entry(count, chain, offset, *size); !ok)
+            return std::unexpected(ok.error());
+        chain =
+            hasher::hash_bytes(log.data() + offset, log_header_size + *size);
+        offset += log_header_size + *size;
+        ++count;
+    }
+    if (count != expected_tip.count || chain != expected_tip.chain)
+        return std::unexpected(std::string{mismatch_msg});
+    return {};
+}
+
 std::expected<Replay, std::string> replay(const Paths& paths,
                                           const crypto::Key& key) {
-    const auto trace = platform::perf_trace::begin();
-    platform::perf_trace::count("journal full replays");
     auto tip = read_tip(paths, key);
     if (!tip)
         return std::unexpected(tip.error());
@@ -1064,19 +950,18 @@ std::expected<Replay, std::string> replay(const Paths& paths,
     if (hasher::hash_bytes(snapshot->data(), snapshot->size()) != tip->snapshot)
         return std::unexpected(
             "journal snapshot/confirmation generation mismatch");
-    auto size = decode_u64_le(snapshot->data() + 4);
+    auto size = wire::decode_le<std::uint64_t>(snapshot->data() + 4);
     if (size != snapshot->size() - header_size || size > maximum_payload_size)
         return std::unexpected("invalid journal snapshot payload size");
     SensitiveBytes plaintext(static_cast<std::size_t>(size));
-    if (crypto_aead_unlock(plaintext.data(),
-                           snapshot->data() + aad_size + nonce_size,
-                           key.data(),
-                           snapshot->data() + aad_size,
-                           snapshot->data(),
-                           aad_size,
-                           snapshot->data() + header_size,
-                           plaintext.size()) != 0)
-        return std::unexpected("journal snapshot authentication failed");
+    if (auto ok = unlock_aead_frame(snapshot->data() + aad_size,
+                                    std::span{*snapshot}.first(aad_size),
+                                    key,
+                                    std::span{*snapshot}.subspan(header_size),
+                                    plaintext.data(),
+                                    "journal snapshot authentication failed");
+        !ok)
+        return std::unexpected(ok.error());
     auto record =
         transaction::codec::decode(std::as_bytes(std::span{plaintext}));
     if (!record)
@@ -1097,55 +982,45 @@ std::expected<Replay, std::string> replay(const Paths& paths,
     if (log.size() < tip->bytes)
         return std::unexpected("confirmed journal suffix missing or truncated");
     KeyGuard log_key{derive_log_key(key)};
-    std::uint64_t count = 0;
-    auto chain = tip->snapshot;
-    std::size_t offset = 0;
-    while (offset < tip->bytes) {
-        if (tip->bytes - offset < log_header_size)
-            return std::unexpected("confirmed delta header truncated");
-        const auto* ptr = log.data() + offset;
-        if (!std::equal(
-                journal_log_magic.begin(), journal_log_magic.end(), ptr))
-            return std::unexpected("incompatible journal delta format");
-        if (count >= maximum_delta_count || decode_u64_le(ptr + 4) != count ||
-            std::memcmp(chain.data(), ptr + 12, 32) != 0)
-            return std::unexpected("journal delta sequence or chain mismatch");
-        const auto payload_size = decode_u32_le(ptr + 44);
-        if (payload_size > maximum_payload_size ||
-            payload_size > tip->bytes - offset - log_header_size)
-            return std::unexpected(
-                "invalid or truncated confirmed delta payload");
-        const auto aad =
-            make_delta_aad(count, chain, payload_size, record->operation_id);
-        SensitiveBytes delta(payload_size);
-        if (crypto_aead_unlock(delta.data(),
-                               ptr + 48 + nonce_size,
-                               log_key.value.data(),
-                               ptr + 48,
-                               aad.data(),
-                               aad.size(),
-                               ptr + log_header_size,
-                               payload_size) != 0)
-            return std::unexpected("journal delta authentication failed");
-        auto applied = apply_delta(*record, std::as_bytes(std::span{delta}));
-        if (!applied)
-            return std::unexpected(applied.error());
-        auto semantic = validate_record_semantics(
-            metadata_record(*record, (delta.front() & HasPendingPaths) != 0));
-        if (!semantic)
-            return std::unexpected(
-                "journal delta semantic validation failed: " +
-                semantic.error());
-        chain = hasher::hash_bytes(ptr, log_header_size + payload_size);
-        offset += log_header_size + payload_size;
-        ++count;
-    }
-    if (count != tip->count || chain != tip->chain)
-        return std::unexpected("confirmed journal prefix mismatch");
+    auto walked = walk_log_chain(
+        log,
+        tip->bytes,
+        *tip,
+        "confirmed journal prefix mismatch",
+        [&](std::uint64_t count,
+            const kasumi::Hash& chain,
+            std::size_t offset,
+            std::uint32_t payload_size) -> std::expected<void, std::string> {
+            const auto* ptr = log.data() + offset;
+            const auto aad = make_delta_aad(
+                count, chain, payload_size, record->operation_id);
+            SensitiveBytes delta(payload_size);
+            if (auto ok =
+                    unlock_aead_frame(ptr + 48,
+                                      aad,
+                                      log_key.value,
+                                      {ptr + log_header_size, payload_size},
+                                      delta.data(),
+                                      "journal delta authentication failed");
+                !ok)
+                return ok;
+            if (auto applied =
+                    apply_delta(*record, std::as_bytes(std::span{delta}));
+                !applied)
+                return applied;
+            if (auto semantic = validate_record_semantics(metadata_record(
+                    *record, (delta.front() & HasPendingPaths) != 0));
+                !semantic)
+                return std::unexpected(
+                    "journal delta semantic validation failed: " +
+                    semantic.error());
+            return {};
+        });
+    if (!walked)
+        return std::unexpected(walked.error());
     valid_record = validate_record_semantics(*record);
     if (!valid_record)
         return std::unexpected(valid_record.error());
-    platform::perf_trace::finish("journal replay", trace);
     return Replay{std::move(*record), *tip};
 }
 
@@ -1157,26 +1032,15 @@ std::expected<Tip, std::string> save_snapshot(const Paths& paths,
     if (!encoded)
         return std::unexpected(encoded.error());
     PayloadGuard encoded_guard{*encoded};
-    SensitiveBytes plaintext(encoded->size());
-    std::memcpy(plaintext.data(), encoded->data(), encoded->size());
-    crypto_wipe(encoded->data(), encoded->size());
-    if (plaintext.size() > maximum_payload_size)
+    if (encoded->size() > maximum_payload_size)
         return std::unexpected("journal snapshot exceeds limit");
-    std::vector<std::uint8_t> bytes(header_size + plaintext.size());
+    std::vector<std::uint8_t> bytes(header_size + encoded->size());
     std::copy(journal_magic.begin(), journal_magic.end(), bytes.begin());
-    encode_u64_le(plaintext.size(), bytes.data() + 4);
-    auto random = platform::random::fill_bytes(
-        std::span{bytes}.subspan(aad_size, nonce_size));
-    if (!random)
-        return std::unexpected(random.error());
-    crypto_aead_lock(bytes.data() + header_size,
-                     bytes.data() + aad_size + nonce_size,
-                     key.data(),
-                     bytes.data() + aad_size,
-                     bytes.data(),
-                     aad_size,
-                     plaintext.data(),
-                     plaintext.size());
+    wire::encode_le<std::uint64_t>(encoded->size(), bytes.data() + 4);
+    if (auto sealed = seal_aead_frame(
+            bytes, aad_size, std::span{bytes}.first(aad_size), key, *encoded);
+        !sealed)
+        return std::unexpected(sealed.error());
     auto written = write_file(paths.temporary_path, bytes, record, false, 0);
     if (!written)
         return std::unexpected(written.error());
@@ -1195,15 +1059,6 @@ std::expected<Tip, std::string> save_snapshot(const Paths& paths,
         paths.final_path.parent_path());
     if (!parent)
         return std::unexpected(parent.error());
-    platform::perf_trace::count("journal framing bytes total",
-                                header_size + tip_size);
-    platform::perf_trace::maximum("journal snapshot bytes", bytes.size());
-    platform::perf_trace::maximum("journal confirmation bytes", tip_size);
-    platform::perf_trace::count("journal serialized bytes total",
-                                plaintext.size());
-    platform::perf_trace::count("journal encrypted bytes total",
-                                plaintext.size());
-    platform::perf_trace::count("journal durable saves");
     return tip;
 }
 
@@ -1251,52 +1106,93 @@ bool same_artifact(const std::optional<platform::FileFingerprint>& a,
     return a && b && a->kind == b->kind && a->value == b->value;
 }
 
-struct SaveDeltaResult {
-    Tip tip;
-    Delta changes;
-};
+bool is_known_artifact_name(std::string_view name) noexcept {
+    constexpr std::array<std::string_view, 7> known_names{
+        "snapshot.enc",
+        "snapshot.enc.new",
+        "transaction.log.enc",
+        "confirmed.enc",
+        "confirmed.enc.new",
+        "retired.enc",
+        "retired.enc.new",
+    };
+    return std::ranges::find(known_names, name) != known_names.end();
+}
 
-std::expected<SaveDeltaResult, std::string>
-save_delta(const Paths& paths,
-           const transaction::Record& record,
-           const crypto::Key& key,
-           const transaction::Record& previous,
-           const Tip& previous_tip,
-           SaveMode mode) {
-    const auto identity_trace = platform::perf_trace::begin();
-    const bool identity_matches = same_identity(previous, record);
-    platform::perf_trace::finish("journal identity comparison", identity_trace);
-    if (!identity_matches)
+std::expected<bool, std::string>
+validate_artifact_directory(const std::filesystem::path& directory,
+                            std::string_view file_label) {
+    bool has_retired_file = false;
+    std::error_code ec;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(directory, ec)) {
+        if (ec) {
+            return std::unexpected("failed to enumerate journal artifacts: " +
+                                   ec.message());
+        }
+        const auto name = entry.path().filename().string();
+        if (!is_known_artifact_name(name)) {
+            return std::unexpected("unknown journal artifact");
+        }
+        if (name == "retired.enc") {
+            has_retired_file = true;
+        }
+        if (auto validated = validate_file_or_absent(entry.path(), file_label);
+            !validated) {
+            return std::unexpected(validated.error());
+        }
+    }
+    if (ec) {
+        return std::unexpected("failed to enumerate journal artifacts: " +
+                               ec.message());
+    }
+    return has_retired_file;
+}
+
+bool is_reset_checkpoint(const transaction::Record& record) noexcept {
+    return record.phase == transaction::Phase::Started &&
+           std::ranges::all_of(record.progress, [](const auto& progress) {
+               return progress.state == transaction::OperationState::Pending &&
+                      !progress.had_original && progress.previous_hash.empty();
+           });
+}
+
+kasumi::Hash journal_key_id(const KeyGuard& journal_key) {
+    return hasher::hash_bytes(journal_key.value.data(),
+                              journal_key.value.size());
+}
+
+std::expected<Tip, std::string> save_delta(const Paths& paths,
+                                           const transaction::Record& record,
+                                           const crypto::Key& key,
+                                           const transaction::Record& previous,
+                                           const Tip& previous_tip,
+                                           SaveMode mode) {
+    if (!same_identity(previous, record))
         return std::unexpected("active journal identity changed; complete "
                                "recovery/clear before a new transaction");
-    const bool rollback_reset =
-        record.phase == transaction::Phase::Started &&
-        std::ranges::all_of(record.progress, [](const auto& progress) {
-            return progress.state == transaction::OperationState::Pending &&
-                   !progress.had_original && progress.previous_hash.empty();
-        });
+    const bool rollback_reset = is_reset_checkpoint(record);
     const bool local_rollback =
         mode == SaveMode::Rollback && !record.publication_required &&
         record.phase == transaction::Phase::FilesStaged &&
         previous.phase <= transaction::Phase::LocalChangesApplied;
     if (mode == SaveMode::Rollback && !rollback_reset && !local_rollback)
         return std::unexpected("invalid rollback checkpoint");
-    const auto trace = platform::perf_trace::begin();
-    auto delta = compute_delta(previous, record);
-    platform::perf_trace::finish("journal delta calculation", trace);
-    platform::perf_trace::finish("journal delta calculation wall", trace);
+    std::vector<std::uint32_t> changed_progress;
+    const auto flags = compute_delta_flags(previous, record, changed_progress);
     if (mode == SaveMode::Advance) {
         if (record.phase < previous.phase)
             return std::unexpected("checkpoint phase regressed");
-        for (const auto& [index, progress] : delta.progress_changes)
-            if (progress.state < previous.progress[index].state)
+        for (const auto index : changed_progress)
+            if (record.progress[index].state < previous.progress[index].state)
                 return std::unexpected("checkpoint progress regressed");
     }
     if (local_rollback) {
-        for (const auto& [index, progress] : delta.progress_changes)
-            if (progress.state < previous.progress[index].state &&
+        for (const auto index : changed_progress)
+            if (record.progress[index].state < previous.progress[index].state &&
                 (!is_local_mutation(record.plan.operations[index].action) ||
-                 progress.state != transaction::OperationState::Prepared ||
+                 record.progress[index].state !=
+                     transaction::OperationState::Prepared ||
                  previous.progress[index].state <
                      transaction::OperationState::BackupCreated))
                 return std::unexpected("invalid local rollback progress");
@@ -1332,7 +1228,7 @@ save_delta(const Paths& paths,
     auto snapshot_sync = platform::durability::sync_file(paths.final_path);
     if (!snapshot_sync)
         return std::unexpected(snapshot_sync.error());
-    if (delta.flags == 0) {
+    if (flags == 0) {
         if (!missing(*log_status)) {
             auto synced = platform::durability::sync_file(paths.log_path);
             if (!synced)
@@ -1343,49 +1239,29 @@ save_delta(const Paths& paths,
             return std::unexpected(synced.error());
         auto parent =
             platform::durability::sync_parent_directory(paths.final_path);
-        if (parent)
-            platform::perf_trace::count("journal durable saves");
         if (!parent)
             return std::unexpected(parent.error());
-        return SaveDeltaResult{previous_tip, std::move(delta)};
+        return previous_tip;
     }
     if (previous_tip.count >= maximum_delta_count)
         return std::unexpected("journal delta count exceeds limit");
-    auto payload_size = delta_size(delta);
-    if (!payload_size || previous_tip.bytes > maximum_log_size ||
-        log_header_size + *payload_size > maximum_log_size - previous_tip.bytes)
-        return std::unexpected("journal delta/log exceeds limit");
-    const auto encode_trace = platform::perf_trace::begin();
-    auto encoded = encode_delta(delta);
-    platform::perf_trace::finish("journal encode wall", encode_trace);
+    auto encoded = encode_delta(flags, record, changed_progress);
     PayloadGuard encoded_guard{encoded};
-    SensitiveBytes payload(encoded.size());
-    std::memcpy(payload.data(), encoded.data(), encoded.size());
-    crypto_wipe(encoded.data(), encoded.size());
-    if (payload.size() > maximum_payload_size ||
-        log_header_size + payload.size() >
+    if (encoded.size() > maximum_payload_size ||
+        previous_tip.bytes > maximum_log_size ||
+        log_header_size + encoded.size() >
             maximum_log_size - previous_tip.bytes)
-        return std::unexpected("journal log exceeds limit");
+        return std::unexpected("journal delta/log exceeds limit");
     KeyGuard log_key{derive_log_key(key)};
     const auto aad = make_delta_aad(previous_tip.count,
                                     previous_tip.chain,
-                                    static_cast<std::uint32_t>(payload.size()),
+                                    static_cast<std::uint32_t>(encoded.size()),
                                     record.operation_id);
-    std::vector<std::uint8_t> bytes(log_header_size + payload.size());
+    std::vector<std::uint8_t> bytes(log_header_size + encoded.size());
     std::copy_n(aad.begin(), 48, bytes.begin());
-    auto random =
-        platform::random::fill_bytes(std::span{bytes}.subspan(48, nonce_size));
-    if (!random)
-        return std::unexpected(random.error());
-    crypto_aead_lock(bytes.data() + log_header_size,
-                     bytes.data() + 48 + nonce_size,
-                     log_key.value.data(),
-                     bytes.data() + 48,
-                     aad.data(),
-                     aad.size(),
-                     payload.data(),
-                     payload.size());
-    const auto durable_write_trace = platform::perf_trace::begin();
+    if (auto sealed = seal_aead_frame(bytes, 48, aad, log_key.value, encoded);
+        !sealed)
+        return std::unexpected(sealed.error());
     auto written =
         write_file(paths.log_path, bytes, record, true, previous_tip.count);
     if (!written)
@@ -1398,21 +1274,9 @@ save_delta(const Paths& paths,
     ++tip.count;
     tip.chain = hasher::hash_bytes(bytes.data(), bytes.size());
     auto confirmed = write_tip(paths, tip, record, key);
-    platform::perf_trace::finish("journal durable write wall", durable_write_trace);
     if (!confirmed)
         return std::unexpected(confirmed.error());
-    platform::perf_trace::count("journal durable saves");
-    platform::perf_trace::count("journal delta count");
-    platform::perf_trace::count("journal framing bytes total",
-                                log_header_size + tip_size);
-    platform::perf_trace::count("journal serialized bytes total",
-                                payload.size());
-    platform::perf_trace::count("journal encrypted bytes total",
-                                payload.size());
-    platform::perf_trace::maximum("journal log bytes", tip.bytes);
-    platform::perf_trace::maximum("journal record serialized bytes",
-                                  payload.size());
-    return SaveDeltaResult{tip, std::move(delta)};
+    return tip;
 }
 
 std::expected<void, std::string> validate_retirement(const Paths& paths,
@@ -1445,31 +1309,19 @@ std::expected<void, std::string> validate_retirement(const Paths& paths,
                 return std::unexpected(bytes.error());
             if (bytes->size() != proof.bytes)
                 return std::unexpected("retired log length mismatch");
-            auto chain = proof.snapshot;
-            std::uint64_t count = 0;
-            std::size_t offset = 0;
-            while (offset < bytes->size()) {
-                if (bytes->size() - offset < log_header_size)
-                    return std::unexpected("retired log truncated");
-                const auto* ptr = bytes->data() + offset;
-                if (!std::equal(journal_log_magic.begin(),
-                                journal_log_magic.end(),
-                                ptr) ||
-                    decode_u64_le(ptr + 4) != count ||
-                    std::memcmp(chain.data(), ptr + 12, 32) != 0)
-                    return std::unexpected(
-                        "retired log generation or sequence mismatch");
-                const auto size = decode_u32_le(ptr + 44);
-                if (size > maximum_payload_size ||
-                    size > bytes->size() - offset - log_header_size ||
-                    count >= maximum_delta_count)
-                    return std::unexpected("invalid retired log record");
-                chain = hasher::hash_bytes(ptr, log_header_size + size);
-                offset += log_header_size + size;
-                ++count;
-            }
-            if (count != proof.count || chain != proof.chain)
-                return std::unexpected("retired log confirmation mismatch");
+            if (auto ok = walk_log_chain(
+                    *bytes,
+                    bytes->size(),
+                    proof,
+                    "retired log confirmation mismatch",
+                    [](std::uint64_t,
+                       const kasumi::Hash&,
+                       std::size_t,
+                       std::uint32_t) -> std::expected<void, std::string> {
+                        return {};
+                    });
+                !ok)
+                return std::unexpected(ok.error());
         }
     }
     return {};
@@ -1501,17 +1353,10 @@ std::expected<void, std::string> clear_locked(const Paths& paths,
         return parent;
     // Reject the whole cleanup before touching any malformed or unknown
     // artifact.
-    for (const auto& entry : std::filesystem::directory_iterator(root)) {
-        const auto name = entry.path().filename().string();
-        if (name != "snapshot.enc" && name != "snapshot.enc.new" &&
-            name != "transaction.log.enc" && name != "confirmed.enc" &&
-            name != "confirmed.enc.new" && name != "retired.enc" &&
-            name != "retired.enc.new")
+    if (auto ok = validate_artifact_directory(root, "cleanup artifact"); !ok) {
+        if (ok.error() == "unknown journal artifact")
             return std::unexpected("unknown journal cleanup artifact");
-        auto validated =
-            validate_file_or_absent(entry.path(), "cleanup artifact");
-        if (!validated)
-            return validated;
+        return std::unexpected(ok.error());
     }
     const Paths root_paths{root / "snapshot.enc",
                            root / "snapshot.enc.new",
@@ -1533,12 +1378,7 @@ std::expected<void, std::string> clear_locked(const Paths& paths,
         if (!previous)
             return std::unexpected(previous.error());
         const auto& record = previous->record;
-        const bool reset =
-            record.phase == transaction::Phase::Started &&
-            std::ranges::all_of(record.progress, [](const auto& progress) {
-                return progress.state == transaction::OperationState::Pending &&
-                       !progress.had_original && progress.previous_hash.empty();
-            });
+        const bool reset = is_reset_checkpoint(record);
         if (record.phase != transaction::Phase::CleanupCompleted && !reset)
             return std::unexpected(
                 "cannot clear a nonterminal journal before confirmed rollback");
@@ -1549,10 +1389,6 @@ std::expected<void, std::string> clear_locked(const Paths& paths,
             auto proved = write_tip(paths, previous->tip, record, key, true);
             if (!proved)
                 return proved;
-            platform::perf_trace::count("journal framing bytes total",
-                                        tip_size);
-            platform::perf_trace::maximum("journal retirement proof bytes",
-                                          tip_size);
         } else {
             auto proof = read_tip(paths, key, true);
             if (!proof)
@@ -1615,123 +1451,96 @@ std::expected<void, std::string> clear_locked(const Paths& paths,
 
 } // namespace
 
+struct SessionAccess {
+    static std::expected<void, std::string>
+    refresh(Session& session, const Paths& paths, const Tip& tip) {
+        auto snapshot = artifact_state(paths.final_path);
+        auto log = artifact_state(paths.log_path);
+        if (!snapshot || !log)
+            return std::unexpected(!snapshot ? snapshot.error() : log.error());
+        session.tip_snapshot = tip.snapshot;
+        session.tip_bytes = tip.bytes;
+        session.tip_count = tip.count;
+        session.tip_chain = tip.chain;
+        session.snapshot_fingerprint = snapshot->fingerprint;
+        session.snapshot_bytes = snapshot->bytes;
+        session.log_fingerprint = log->fingerprint;
+        return {};
+    }
+
+    static std::expected<void, std::string> bind(Session* session,
+                                                 const Paths& paths,
+                                                 const kasumi::Hash& key_id,
+                                                 transaction::Record&& record,
+                                                 const Tip& tip) {
+        if (!session)
+            return {};
+        if (auto ok = refresh(*session, paths, tip); !ok)
+            return ok;
+        session->paths = paths;
+        session->operation_id = record.operation_id;
+        session->key_identity = key_id;
+        session->confirmed_record.emplace(std::move(record));
+        session->state = SessionState::Confirmed;
+        return {};
+    }
+};
+
 std::expected<void, std::string>
 save(const Paths& paths,
      const transaction::Record& record,
      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
      SaveMode mode,
      Session* session) {
-    platform::perf_trace::count("journal save calls");
-    const auto save_wall_trace = platform::perf_trace::begin();
-    struct JournalSaveGuard {
-        platform::perf_trace::Token token;
-        ~JournalSaveGuard() {
-            platform::perf_trace::finish("journal save wall", token);
-        }
-    } journal_save_guard{save_wall_trace};
     std::lock_guard lock(journal_mutex);
     KeyGuard journal_key{crypto::derive_key(key, crypto::KeyPurpose::Journal)};
-    const auto invalidate = [&] {
-        if (session) {
-            platform::perf_trace::count("journal session invalidations");
-            session->invalidate();
-        }
-    };
     try {
         if (session && session->state == SessionState::Retired)
             return std::unexpected("journal session is retired");
-        if (mode != SaveMode::Advance && mode != SaveMode::Rollback) {
-            invalidate();
+        SessionGuard guard{session};
+        if (mode != SaveMode::Advance && mode != SaveMode::Rollback)
             return std::unexpected("unknown journal save mode");
-        }
         auto structural = validate_paths(paths);
-        if (!structural) {
-            invalidate();
+        if (!structural)
             return structural;
-        }
-        if (session && session->confirmed() == &record) {
-            invalidate();
+        if (session && session->confirmed() == &record)
             return std::unexpected(
                 "requested record must be independent of the session cache");
-        }
-        const auto key_id = hasher::hash_bytes(journal_key.value.data(),
-                                               journal_key.value.size());
-        if (session && session->is_valid() &&
-            !session->bound_to(paths, key_id)) {
-            invalidate();
+        const auto key_id = journal_key_id(journal_key);
+        if (session && session->is_valid() && !session->bound_to(paths, key_id))
             return std::unexpected("active journal session paths/key changed");
-        }
-        const auto validation_trace = platform::perf_trace::begin();
         auto codec_validation = transaction::codec::validate(record);
-        if (!codec_validation) {
-            platform::perf_trace::finish("journal validation",
-                                         validation_trace);
-            invalidate();
+        if (!codec_validation)
             return codec_validation;
-        }
-        const auto semantic_trace = platform::perf_trace::begin();
         auto semantic = validate_record_semantics(record, true);
-        platform::perf_trace::finish("journal semantic validation wall", semantic_trace);
-        platform::perf_trace::finish("journal validation", validation_trace);
-        if (!semantic) {
-            invalidate();
+        if (!semantic)
             return semantic;
-        }
         auto retired = read_status(retired_path(paths));
-        if (!retired) {
-            invalidate();
+        if (!retired)
             return std::unexpected(retired.error());
-        }
         auto proof = read_status(retirement_path(paths));
-        if (!proof) {
-            invalidate();
+        if (!proof)
             return std::unexpected(proof.error());
-        }
-        if (!missing(*retired) || !missing(*proof)) {
-            invalidate();
+        if (!missing(*retired) || !missing(*proof))
             return std::unexpected(
                 "journal retirement must finish before saving");
-        }
-        const auto bind =
-            [&](transaction::Record&& confirmed,
+        const auto bind_session =
+            [&](auto make_confirmed,
                 const Tip& tip) -> std::expected<void, std::string> {
             if (!session)
                 return {};
-            auto snapshot = artifact_state(paths.final_path);
-            if (!snapshot)
-                return std::unexpected(snapshot.error());
-            auto log = artifact_state(paths.log_path);
-            if (!log)
-                return std::unexpected(log.error());
-            session->paths = paths;
-            session->operation_id = confirmed.operation_id;
-            session->local_generation = confirmed.local_generation;
-            session->storage_generation = confirmed.storage_generation;
-            session->key_identity = key_id;
-            session->tip_snapshot = tip.snapshot;
-            session->tip_bytes = tip.bytes;
-            session->tip_count = tip.count;
-            session->tip_chain = tip.chain;
-            session->snapshot_fingerprint = snapshot->fingerprint;
-            session->snapshot_bytes = snapshot->bytes;
-            session->log_fingerprint = log->fingerprint;
-            session->memory_bytes = record_memory(confirmed);
-            platform::perf_trace::maximum(
-                "journal confirmed state estimated bytes",
-                session->memory_bytes);
-            session->confirmed_record.emplace(std::move(confirmed));
-            session->state = SessionState::Confirmed;
-            return {};
+            if (journal_fault_test::cleanup_fail("session-update"))
+                throw std::bad_alloc{};
+            return SessionAccess::bind(
+                session, paths, key_id, make_confirmed(), tip);
         };
         if (session && session->is_valid()) {
             // Check before private-storage validation updates ACL/ctime itself.
             auto snapshot = artifact_state(paths.final_path);
             auto log = artifact_state(paths.log_path);
-            if (!snapshot || !log) {
-                invalidate();
+            if (!snapshot || !log)
                 return std::unexpected(!snapshot ? snapshot.error()
                                                  : log.error());
-            }
             const bool artifacts_match =
                 same_artifact(snapshot->fingerprint,
                               session->snapshot_fingerprint) &&
@@ -1742,142 +1551,93 @@ save(const Paths& paths,
                      : same_artifact(log->fingerprint,
                                      session->log_fingerprint));
             auto validation = validate_save_paths(paths);
-            if (!validation) {
-                invalidate();
+            if (!validation)
                 return validation;
-            }
             auto disk_tip = read_tip(paths, journal_key.value);
-            if (!disk_tip) {
-                invalidate();
+            if (!disk_tip)
                 return std::unexpected(disk_tip.error());
-            }
             const Tip session_tip{.snapshot = session->tip_snapshot,
                                   .bytes = session->tip_bytes,
                                   .count = session->tip_count,
                                   .chain = session->tip_chain};
             if (artifacts_match && *disk_tip == session_tip) {
-                auto saved = save_delta(paths,
-                                        record,
-                                        journal_key.value,
-                                        *session->confirmed_record,
-                                        session_tip,
-                                        mode);
-                if (!saved) {
-                    invalidate();
-                    return std::unexpected(saved.error());
-                }
+                auto saved_tip = save_delta(paths,
+                                            record,
+                                            journal_key.value,
+                                            *session->confirmed_record,
+                                            session_tip,
+                                            mode);
+                if (!saved_tip)
+                    return std::unexpected(saved_tip.error());
                 if (journal_fault_test::cleanup_fail("session-update"))
                     throw std::bad_alloc{};
                 journal_fault_test::hit(
-                    "before-session-update", &record, saved->tip.count);
-                auto next_snapshot = artifact_state(paths.final_path);
-                auto next_log = artifact_state(paths.log_path);
-                if (!next_snapshot || !next_log) {
-                    invalidate();
-                    return std::unexpected(!next_snapshot
-                                               ? next_snapshot.error()
-                                               : next_log.error());
-                }
-                const auto update_trace = platform::perf_trace::begin();
-                const auto before_bytes =
-                    selected_memory(*session->confirmed_record, saved->changes);
-                apply_prepared_delta(*session->confirmed_record,
-                                     saved->changes);
-                session->memory_bytes =
-                    session->memory_bytes - before_bytes +
-                    selected_memory(*session->confirmed_record, saved->changes);
-                platform::perf_trace::maximum(
-                    "journal confirmed state estimated bytes",
-                    session->memory_bytes);
-                session->tip_snapshot = saved->tip.snapshot;
-                session->tip_bytes = saved->tip.bytes;
-                session->tip_count = saved->tip.count;
-                session->tip_chain = saved->tip.chain;
-                session->snapshot_fingerprint = next_snapshot->fingerprint;
-                session->snapshot_bytes = next_snapshot->bytes;
-                session->log_fingerprint = next_log->fingerprint;
-                platform::perf_trace::finish("journal confirmed state update",
-                                             update_trace);
-                platform::perf_trace::count("journal fast paths");
+                    "before-session-update", &record, saved_tip->count);
+                if (auto refreshed =
+                        SessionAccess::refresh(*session, paths, *saved_tip);
+                    !refreshed)
+                    return refreshed;
+                assign_mutable_fields(*session->confirmed_record, record);
+                guard.keep = true;
                 return {};
             }
-            platform::perf_trace::count("journal session fallbacks");
-            invalidate();
+            session->invalidate();
         }
         auto outer =
             validate_parent_directory(paths.final_path.parent_path(), false);
-        if (!outer) {
-            invalidate();
+        if (!outer)
             return outer;
-        }
         auto status = read_status(paths.final_path.parent_path());
-        if (!status) {
-            invalidate();
+        if (!status)
             return std::unexpected(status.error());
-        }
         const bool fresh = missing(*status);
-        if (fresh && mode == SaveMode::Rollback) {
-            invalidate();
+        if (fresh && mode == SaveMode::Rollback)
             return std::unexpected("rollback requires active authority");
-        }
         if (fresh) {
             auto created = platform::private_storage::create_directory(
                 paths.final_path.parent_path());
-            if (!created) {
-                invalidate();
+            if (!created)
                 return created;
-            }
         }
         auto validation = validate_save_paths(paths);
-        if (!validation) {
-            invalidate();
+        if (!validation)
             return validation;
-        }
         if (fresh) {
             auto tip = save_snapshot(paths, record, journal_key.value);
-            if (!tip) {
-                invalidate();
+            if (!tip)
                 return std::unexpected(tip.error());
-            }
-            if (session) {
-                if (journal_fault_test::cleanup_fail("session-update"))
-                    throw std::bad_alloc{};
-                auto bound = bind(transaction::Record{record}, *tip);
-                if (!bound) {
-                    invalidate();
-                    return bound;
-                }
-            }
+            if (auto bound = bind_session(
+                    [&] {
+                        return transaction::Record{record};
+                    },
+                    *tip);
+                !bound)
+                return bound;
+            guard.keep = true;
             return {};
         }
         auto previous = replay(paths, journal_key.value);
-        if (!previous) {
-            invalidate();
+        if (!previous)
             return std::unexpected(previous.error());
-        }
-        auto saved = save_delta(paths,
-                                record,
-                                journal_key.value,
-                                previous->record,
-                                previous->tip,
-                                mode);
-        if (!saved) {
-            invalidate();
-            return std::unexpected(saved.error());
-        }
-        if (session) {
-            if (journal_fault_test::cleanup_fail("session-update"))
-                throw std::bad_alloc{};
-            apply_prepared_delta(previous->record, saved->changes);
-            auto bound = bind(std::move(previous->record), saved->tip);
-            if (!bound) {
-                invalidate();
-                return bound;
-            }
-        }
+        auto saved_tip = save_delta(paths,
+                                    record,
+                                    journal_key.value,
+                                    previous->record,
+                                    previous->tip,
+                                    mode);
+        if (!saved_tip)
+            return std::unexpected(saved_tip.error());
+        if (auto bound = bind_session(
+                [&] {
+                    assign_mutable_fields(previous->record, record);
+                    return std::move(previous->record);
+                },
+                *saved_tip);
+            !bound)
+            return bound;
+        guard.keep = true;
         return {};
     } catch (const std::exception& error) {
-        invalidate();
         return std::unexpected(std::string{"failed to save journal: "} +
                                error.what());
     }
@@ -1889,125 +1649,74 @@ load(const Paths& paths,
      Session* session) {
     std::lock_guard lock(journal_mutex);
     KeyGuard journal_key{crypto::derive_key(key, crypto::KeyPurpose::Journal)};
+    SessionGuard guard{session};
+    const auto retire_and_clear = [&]()
+        -> std::expected<std::optional<transaction::Record>, std::string> {
+        auto cleared = clear_locked(paths, journal_key.value);
+        if (!cleared)
+            return std::unexpected(cleared.error());
+        if (session) {
+            session->state = SessionState::Retired;
+        }
+        return std::optional<transaction::Record>{};
+    };
     try {
         if (session && session->state == SessionState::Retired)
             return std::unexpected("journal session is retired");
-        const auto key_id = hasher::hash_bytes(journal_key.value.data(),
-                                               journal_key.value.size());
+        const auto key_id = journal_key_id(journal_key);
         if (session && session->is_valid() &&
             !session->bound_to(paths, key_id)) {
-            session->invalidate();
             return std::unexpected("active journal session paths/key changed");
         }
         auto structural = validate_paths(paths);
-        if (!structural) {
-            if (session)
-                session->invalidate();
+        if (!structural)
             return std::unexpected(structural.error());
-        }
         auto retired = read_status(retired_path(paths));
-        if (!retired) {
-            if (session)
-                session->invalidate();
+        if (!retired)
             return std::unexpected(retired.error());
-        }
-        if (!missing(*retired)) {
-            auto cleared = clear_locked(paths, journal_key.value);
-            if (!cleared) {
-                if (session)
-                    session->invalidate();
-                return std::unexpected(cleared.error());
-            }
-            if (session) {
-                session->state = SessionState::Retired;
-                session->invalidate();
-            }
-            return std::optional<transaction::Record>{};
-        }
+        if (!missing(*retired))
+            return retire_and_clear();
         auto outer =
             validate_parent_directory(paths.final_path.parent_path(), true);
-        if (!outer) {
-            if (session)
-                session->invalidate();
+        if (!outer)
             return std::unexpected(outer.error());
-        }
         auto parent = validate_parent_directory(paths.final_path, true);
-        if (!parent) {
-            if (session)
-                session->invalidate();
+        if (!parent)
             return std::unexpected(parent.error());
-        }
         auto directory = read_status(paths.final_path.parent_path());
-        if (!directory) {
-            if (session)
-                session->invalidate();
+        if (!directory)
             return std::unexpected(directory.error());
-        }
         if (missing(*directory)) {
             if (session) {
                 session->invalidate();
                 session->state = SessionState::Uninitialized;
             }
+            guard.keep = true;
             return std::optional<transaction::Record>{};
         }
         auto proof = read_status(retirement_path(paths));
-        if (!proof) {
-            if (session)
-                session->invalidate();
+        if (!proof)
             return std::unexpected(proof.error());
-        }
-        if (!missing(*proof)) {
-            auto cleared = clear_locked(paths, journal_key.value);
-            if (!cleared) {
-                if (session)
-                    session->invalidate();
-                return std::unexpected(cleared.error());
-            }
-            if (session) {
-                session->state = SessionState::Retired;
-                session->invalidate();
-            }
-            return std::optional<transaction::Record>{};
-        }
+        if (!missing(*proof))
+            return retire_and_clear();
         auto loaded = replay(paths, journal_key.value);
-        if (!loaded) {
-            if (session)
-                session->invalidate();
+        if (!loaded)
             return std::unexpected(loaded.error());
-        }
         journal_fault_test::hit("loaded", &loaded->record);
-        if (session) {
-            auto snapshot = artifact_state(paths.final_path);
-            auto log = artifact_state(paths.log_path);
-            if (!snapshot || !log) {
-                session->invalidate();
-                return std::unexpected(!snapshot ? snapshot.error()
-                                                 : log.error());
-            }
-            session->snapshot_fingerprint = snapshot->fingerprint;
-            session->snapshot_bytes = snapshot->bytes;
-            session->log_fingerprint = log->fingerprint;
-            session->paths = paths;
-            session->operation_id = loaded->record.operation_id;
-            session->local_generation = loaded->record.local_generation;
-            session->storage_generation = loaded->record.storage_generation;
-            session->key_identity = hasher::hash_bytes(
-                journal_key.value.data(), journal_key.value.size());
-            session->tip_snapshot = loaded->tip.snapshot;
-            session->tip_bytes = loaded->tip.bytes;
-            session->tip_count = loaded->tip.count;
-            session->tip_chain = loaded->tip.chain;
-            session->memory_bytes = record_memory(loaded->record);
-            platform::perf_trace::maximum(
-                "journal confirmed state estimated bytes",
-                session->memory_bytes);
-            session->confirmed_record = loaded->record;
-            session->state = SessionState::Confirmed;
+        if (auto bound =
+                SessionAccess::bind(session,
+                                    paths,
+                                    key_id,
+                                    transaction::Record{loaded->record},
+                                    loaded->tip);
+            !bound) {
+            return std::unexpected(bound.error());
         }
-        return std::optional<transaction::Record>{std::move(loaded->record)};
+        auto result =
+            std::optional<transaction::Record>{std::move(loaded->record)};
+        guard.keep = true;
+        return result;
     } catch (const std::exception& error) {
-        if (session)
-            session->invalidate();
         return std::unexpected(std::string{"failed to load journal: "} +
                                error.what());
     }
@@ -2019,37 +1728,26 @@ clear(const Paths& paths,
       Session* session) {
     std::lock_guard lock(journal_mutex);
     KeyGuard journal_key{crypto::derive_key(key, crypto::KeyPurpose::Journal)};
-    const auto trace = platform::perf_trace::begin();
+    SessionGuard guard{session};
     try {
-        const auto key_id = hasher::hash_bytes(journal_key.value.data(),
-                                               journal_key.value.size());
+        const auto key_id = journal_key_id(journal_key);
         if (session && session->is_valid() &&
             !session->bound_to(paths, key_id)) {
-            session->invalidate();
-            platform::perf_trace::finish("journal clear", trace);
             return std::unexpected("active journal session paths/key changed");
         }
         auto result = clear_locked(paths, journal_key.value);
         if (result && session) {
             session->state = SessionState::Retired;
-            session->invalidate();
-        } else if (!result && session) {
-            session->invalidate();
         }
-        platform::perf_trace::finish("journal clear", trace);
         return result;
     } catch (const std::exception& error) {
-        if (session)
-            session->invalidate();
-        platform::perf_trace::finish("journal clear", trace);
         return std::unexpected(std::string{"failed to clear journal: "} +
                                error.what());
     }
 }
 
-InspectionResult
-inspect(const Paths& paths,
-        std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+InspectionResult inspect(const Paths& paths,
+                         std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
     try {
         PassiveInspectionScope passive;
         std::lock_guard lock(journal_mutex);
@@ -2079,19 +1777,14 @@ inspect(const Paths& paths,
         }
 
 #if defined(_WIN32)
-        if (!missing(*active_status)) {
-            const DWORD attrs = GetFileAttributesW(active.c_str());
-            if (attrs != INVALID_FILE_ATTRIBUTES &&
-                (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                return InspectionResult::Corrupted;
-            }
-        }
-        if (!missing(*retired_status)) {
-            const DWORD attrs = GetFileAttributesW(retired.c_str());
-            if (attrs != INVALID_FILE_ATTRIBUTES &&
-                (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                return InspectionResult::Corrupted;
-            }
+        const auto has_reparse = [](const std::filesystem::path& path) {
+            const DWORD attrs = GetFileAttributesW(path.c_str());
+            return attrs != INVALID_FILE_ATTRIBUTES &&
+                   (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+        };
+        if ((!missing(*active_status) && has_reparse(active)) ||
+            (!missing(*retired_status) && has_reparse(retired))) {
+            return InspectionResult::Corrupted;
         }
 #endif
 
@@ -2103,71 +1796,33 @@ inspect(const Paths& paths,
             return InspectionResult::Absent;
         }
 
-        KeyGuard journal_key{crypto::derive_key(key, crypto::KeyPurpose::Journal)};
+        KeyGuard journal_key{
+            crypto::derive_key(key, crypto::KeyPurpose::Journal)};
+
+        const auto validate_retired_tip = [&](const Paths& target_paths) {
+            auto proof = read_tip(target_paths, journal_key.value, true);
+            return proof &&
+                   validate_retirement(target_paths, *proof, journal_key.value);
+        };
 
         if (!missing(*retired_status)) {
             std::error_code ec;
-            if (std::filesystem::is_empty(retired, ec)) {
-                return InspectionResult::Corrupted;
-            }
-            bool has_retired_file = false;
-            for (const auto& entry :
-                 std::filesystem::directory_iterator(retired, ec)) {
-                if (ec) {
-                    return InspectionResult::Corrupted;
-                }
-                const auto name = entry.path().filename().string();
-                if (name != "snapshot.enc" && name != "snapshot.enc.new" &&
-                    name != "transaction.log.enc" && name != "confirmed.enc" &&
-                    name != "confirmed.enc.new" && name != "retired.enc" &&
-                    name != "retired.enc.new") {
-                    return InspectionResult::Corrupted;
-                }
-                if (name == "retired.enc") {
-                    has_retired_file = true;
-                }
-                auto validated =
-                    validate_file_or_absent(entry.path(), "journal artifact");
-                if (!validated) {
-                    return InspectionResult::Corrupted;
-                }
-            }
-            if (!has_retired_file) {
+            auto has_retired_file =
+                validate_artifact_directory(retired, "journal artifact");
+            if (std::filesystem::is_empty(retired, ec) || !has_retired_file ||
+                !*has_retired_file) {
                 return InspectionResult::Corrupted;
             }
             const Paths root_paths{retired / "snapshot.enc",
                                    retired / "snapshot.enc.new",
                                    retired / "transaction.log.enc"};
-            auto proof = read_tip(root_paths, journal_key.value, true);
-            if (!proof) {
-                return InspectionResult::Corrupted;
-            }
-            auto matching =
-                validate_retirement(root_paths, *proof, journal_key.value);
-            if (!matching) {
-                return InspectionResult::Corrupted;
-            }
-            return InspectionResult::Retired;
+            return validate_retired_tip(root_paths)
+                       ? InspectionResult::Retired
+                       : InspectionResult::Corrupted;
         }
 
-        std::error_code ec;
-        for (const auto& entry :
-             std::filesystem::directory_iterator(active, ec)) {
-            if (ec) {
-                return InspectionResult::Corrupted;
-            }
-            const auto name = entry.path().filename().string();
-            if (name != "snapshot.enc" && name != "snapshot.enc.new" &&
-                name != "transaction.log.enc" && name != "confirmed.enc" &&
-                name != "confirmed.enc.new" && name != "retired.enc" &&
-                name != "retired.enc.new") {
-                return InspectionResult::Corrupted;
-            }
-            auto validated =
-                validate_file_or_absent(entry.path(), "journal artifact");
-            if (!validated) {
-                return InspectionResult::Corrupted;
-            }
+        if (!validate_artifact_directory(active, "journal artifact")) {
+            return InspectionResult::Corrupted;
         }
 
         auto retirement_file_status = read_status(retirement_path(paths));
@@ -2175,22 +1830,13 @@ inspect(const Paths& paths,
             return InspectionResult::Corrupted;
         }
         if (!missing(*retirement_file_status)) {
-            auto proof = read_tip(paths, journal_key.value, true);
-            if (!proof) {
-                return InspectionResult::Corrupted;
-            }
-            auto matching = validate_retirement(paths, *proof, journal_key.value);
-            if (!matching) {
-                return InspectionResult::Corrupted;
-            }
-            return InspectionResult::Retired;
+            return validate_retired_tip(paths) ? InspectionResult::Retired
+                                               : InspectionResult::Corrupted;
         }
 
         auto replayed = replay(paths, journal_key.value);
-        if (!replayed) {
-            return InspectionResult::Corrupted;
-        }
-        return InspectionResult::Active;
+        return replayed ? InspectionResult::Active
+                        : InspectionResult::Corrupted;
     } catch (...) {
         return InspectionResult::Corrupted;
     }

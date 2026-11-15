@@ -7,8 +7,21 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 
 namespace kasumi::transport::detail {
+
+inline Error
+make_error(ErrorCode code, std::string message, int native_code = 0) {
+    return Error{.code = code,
+                 .message = std::move(message),
+                 .native_code = native_code};
+}
+
+// Validates a non-empty relative slash-separated storage path.
+bool valid_relative_identifier(std::string_view identifier,
+                               bool require_normal) noexcept;
 
 // Configuration for local directory storage.
 struct LocalConfiguration {

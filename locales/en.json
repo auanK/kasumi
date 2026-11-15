@@ -46,7 +46,6 @@
     "stage_publishing": "[4/5] Publishing new state...",
     "stage_finalizing": "[5/5] Finalizing...",
     "completed": "Synchronization completed.",
-    "completed_with_duration": "Synchronization completed in {}.",
     "trusted_content_warning": "[WARNING] Reused {} unverified remote content objects based on explicit trust. Run 'kasumi fsck' to verify vault integrity.",
     "partial_header": "Synchronization completed partially.",
     "pending_singular": "{} file is waiting for unavailable remote content.",
@@ -155,11 +154,9 @@
     "commit_header": "Remote commit",
     "file_saved_header": "Remote file saved",
     "epochs_header": "Remote epochs: {}",
-    "epoch_none": "No remote epochs published.",
     "epoch_detail_header": "Remote epoch",
     "contents_header": "Remote contents{}",
     "contents_deep_audit": " — deep audit",
-    "audit_header": "Cryptographic audit",
     "content_header": "Remote content",
     "markers_header": "Remote physical markers: {}",
     "objects_header": "Remote physical namespace: {} object(s)",
@@ -347,7 +344,7 @@
   "command_help": {
     "sync": "Usage: kasumi sync <profile> [--dry-run | --initial [--trust-existing-content] | --audit-inventory] [--full]\n\nSynchronize with remote storage. --dry-run simulates without altering data.\n--initial initializes a missing local database; --trust-existing-content requires --initial.\n--audit-inventory runs Sync then a structural audit; it cannot be combined with the other modes.\n--full displays all plan and pending items.\nExample: kasumi sync Programming --dry-run\n",
     "status": "Usage: kasumi status <profile> [--full]\n\nShow pending local changes. --full displays all plan and pending items.\nExample: kasumi status Programming --full\n",
-    "fsck": "Usage: kasumi fsck <profile>\n\nAudit remote integrity and authenticated content. May update a private checkpoint.\nExample: kasumi fsck Programming\n",
+    "fsck": "Usage: kasumi fsck <profile>\n\nAudit remote integrity and authenticated content.\nExample: kasumi fsck Programming\n",
     "gc": "Usage: kasumi gc <profile>\n\nAnalyze garbage collection candidates and remove safe objects.\nStop Sync on every client and serialize maintenance before running GC.\nSubcommands: remove-writer, remove-barrier (use each subcommand with --help).\nExample: kasumi gc Programming\n",
     "gc_remove-writer": "Usage: kasumi gc remove-writer <profile> <writer-id>\n\nRemove one exact writer marker listed by remote writers.\nVerify that its process is inactive and no Sync or maintenance is running.\nNo Sync or GC is performed.\nExample: kasumi remote writers Programming\n",
     "gc_remove-barrier": "Usage: kasumi gc remove-barrier <profile> --confirm-abandoned\n\nRemove an abandoned maintenance barrier after manual verification.\n--confirm-abandoned is required; verify no GC or Sync is active on any device.\nVerifies physical identity and confirms absence; never runs Sync or GC.\nExample: kasumi gc remove-barrier Programming --confirm-abandoned\n",
@@ -371,7 +368,7 @@
     "remote_orphans": "Usage: kasumi remote orphans <profile>\n\nList orphans; does not run GC or remove objects.\n",
     "remote_writers": "Usage: kasumi remote writers <profile>\n\nList writers and the maintenance barrier.\n",
     "remote_health": "Usage: kasumi remote health <profile>\n\nFull remote health diagnostic. Findings still return 0; inspection failure returns 1.\nDoes not replace the fsck payload audit.\n",
-    "options": "\nGlobal option: --lang <code>, before the command (en, pt-BR or external catalog).\nHelp: -h, --help. Duplicate, unknown or valueless options are rejected.\n"
+    "options": "\nGlobal option: --lang <code>, before the command (en or pt-BR).\nHelp: -h, --help. Duplicate, unknown or valueless options are rejected.\n"
   },
   "resolve_missing": {
     "singular": "resolved 1 missing path",

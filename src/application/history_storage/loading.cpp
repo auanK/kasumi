@@ -4,13 +4,11 @@
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
 #include "platform/cancellation.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
 #include "platform/workspace.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <fstream>
 #include <limits>
 #include <system_error>
@@ -21,31 +19,29 @@ namespace kasumi::application::history_storage::detail {
 
 std::expected<std::vector<std::uint8_t>, Error>
 read_file(const std::filesystem::path& path, std::size_t maximum_size) {
-    std::error_code filesystem_error;
-    const auto size = std::filesystem::file_size(path, filesystem_error);
-    if (filesystem_error) {
-        return std::unexpected(
-            error(ErrorCode::WorkspaceFailure, filesystem_error.message()));
-    }
-    if (size > maximum_size || size > std::numeric_limits<std::size_t>::max()) {
+    std::vector<std::uint8_t> bytes;
+    std::array<std::uint8_t, 65536> scratch{};
+    bool oversized = false;
+    const auto streamed = platform::private_storage::stream_regular_file(
+        path, scratch, [&](std::span<const std::uint8_t> chunk) {
+            if (chunk.size() >
+                maximum_size - std::min(maximum_size, bytes.size())) {
+                oversized = true;
+                return false;
+            }
+            bytes.insert(bytes.end(), chunk.begin(), chunk.end());
+            return true;
+        });
+    if (oversized ||
+        (!streamed &&
+         streamed.error().kind ==
+             platform::private_storage::StreamErrorKind::SizeMismatch)) {
         return std::unexpected(
             error(ErrorCode::LimitExceeded, "temporary file exceeds limit"));
     }
-
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        return std::unexpected(error(ErrorCode::WorkspaceFailure,
-                                     "could not open temporary file"));
-    }
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-    if (!bytes.empty()) {
-        input.read(reinterpret_cast<char*>(bytes.data()),
-                   static_cast<std::streamsize>(bytes.size()));
-    }
-    if (!input ||
-        input.gcount() != static_cast<std::streamsize>(bytes.size())) {
-        return std::unexpected(error(ErrorCode::WorkspaceFailure,
-                                     "could not read temporary file"));
+    if (!streamed) {
+        return std::unexpected(
+            error(ErrorCode::WorkspaceFailure, streamed.error().detail));
     }
     return bytes;
 }
@@ -81,12 +77,10 @@ void remove_file(const std::filesystem::path& path) noexcept {
 }
 
 void remove_workspace(TemporaryWorkspaceData* workspace) noexcept {
-    const auto trace = platform::perf_trace::begin();
     if (workspace != nullptr && !workspace->workspace.root.empty()) {
         platform::cleanup_workspace(workspace->workspace);
     }
     delete workspace;
-    platform::perf_trace::finish("workspace cleanup", trace);
 }
 
 std::expected<TemporaryWorkspace, Error>
@@ -145,11 +139,8 @@ download_commit_candidate(transport::Transport& storage,
                           const HeadReference& reference,
                           const std::filesystem::path& destination) {
     remove_file(destination);
-    platform::perf_trace::count("commit.individual_get_calls", 1);
-    const auto get_trace = platform::perf_trace::begin();
     auto result =
         transport::get(storage, commit_object(layout, reference), destination);
-    platform::perf_trace::finish("rc/get_commit", get_trace);
     if (!result) {
         if (result.error().code == transport::ErrorCode::ObjectNotFound) {
             return std::unexpected(
@@ -169,11 +160,8 @@ inspect_marker(transport::Transport& storage,
     const auto path =
         workspace / ("marker-inspect-" + std::to_string(sequence++));
     remove_file(path);
-    platform::perf_trace::count("marker.get_calls", 1);
-    const auto get_trace = platform::perf_trace::begin();
     auto fetched =
         transport::get(storage, marker_object(layout, reference), path);
-    platform::perf_trace::finish("rc/get_marker", get_trace);
     if (!fetched) {
         remove_file(path);
         if (fetched.error().code == transport::ErrorCode::ObjectNotFound) {
@@ -186,22 +174,17 @@ inspect_marker(transport::Transport& storage,
     remove_file(path);
     if (!bytes) {
         if (bytes.error().code == ErrorCode::LimitExceeded) {
-            platform::perf_trace::count("marker.invalid_count", 1);
             return MarkerState::Invalid;
         }
         return std::unexpected(bytes.error());
     }
-    platform::perf_trace::count("marker.bytes_downloaded", bytes->size());
     if (bytes->size() != marker_size) {
-        platform::perf_trace::count("marker.invalid_count", 1);
         return MarkerState::Invalid;
     }
     const auto decoded = decode_marker(*bytes);
     if (decoded && *decoded == reference) {
-        platform::perf_trace::count("marker.authenticated_count", 1);
         return MarkerState::Valid;
     }
-    platform::perf_trace::count("marker.invalid_count", 1);
     return MarkerState::Invalid;
 }
 
@@ -229,7 +212,7 @@ std::expected<bool, Error> ciphertext_matches(const std::filesystem::path& path,
     return hash_hex(*actual_hash) == ciphertext_id;
 }
 
-std::expected<void, Error>
+std::expected<std::uintmax_t, Error>
 validate_ciphertext_size(const std::filesystem::path& path) {
     std::error_code filesystem_error;
     const auto size = std::filesystem::file_size(path, filesystem_error);
@@ -241,7 +224,7 @@ validate_ciphertext_size(const std::filesystem::path& path) {
         return std::unexpected(
             error(ErrorCode::LimitExceeded, "ciphertext exceeds maximum size"));
     }
-    return {};
+    return size;
 }
 
 VariantResult
@@ -253,120 +236,81 @@ try_load_variant(transport::Transport& storage,
                  std::size_t sequence) {
     auto ciphertext = workspace / reference.commit_id / reference.ciphertext_id;
     std::error_code prefetched_error;
-    if (!std::filesystem::is_regular_file(ciphertext, prefetched_error)) {
+    const bool prefetched =
+        std::filesystem::is_regular_file(ciphertext, prefetched_error);
+    if (!prefetched) {
         ciphertext = workspace / ("ciphertext-" + std::to_string(sequence));
     }
     const auto plaintext =
         workspace / ("plaintext-" + std::to_string(sequence));
-    const auto invalid_ciphertext = [&]() -> VariantResult {
+    const auto cleanup = [&] {
         remove_file(ciphertext);
         remove_file(plaintext);
-        return LoadedVariant{.state = VariantState::InvalidCiphertext,
-                             .commit = std::nullopt};
     };
-    const auto invalid_commit = [&]() -> VariantResult {
-        remove_file(ciphertext);
-        remove_file(plaintext);
-        return LoadedVariant{.state = VariantState::InvalidCommit,
-                             .commit = std::nullopt};
+    const auto finish_invalid = [&](VariantState state) -> VariantResult {
+        cleanup();
+        return LoadedVariant{.state = state, .commit = std::nullopt};
     };
 
-    if (!std::filesystem::is_regular_file(ciphertext, prefetched_error)) {
+    if (!prefetched) {
         auto downloaded =
             download_commit_candidate(storage, layout, reference, ciphertext);
         if (!downloaded) {
+            cleanup();
             if (downloaded.error().code == ErrorCode::MissingCommit) {
-                remove_file(ciphertext);
-                remove_file(plaintext);
                 return LoadedVariant{.state = VariantState::Missing,
                                      .commit = std::nullopt};
             }
-            remove_file(ciphertext);
-            remove_file(plaintext);
             return std::unexpected(downloaded.error());
         }
     }
-    auto size_valid = validate_ciphertext_size(ciphertext);
-    if (!size_valid) {
-        if (size_valid.error().code == ErrorCode::LimitExceeded) {
-            return invalid_ciphertext();
+    auto cipher_size = validate_ciphertext_size(ciphertext);
+    if (!cipher_size) {
+        if (cipher_size.error().code == ErrorCode::LimitExceeded) {
+            return finish_invalid(VariantState::InvalidCiphertext);
         }
-        remove_file(ciphertext);
-        remove_file(plaintext);
-        return std::unexpected(size_valid.error());
-    }
-    const auto auth_trace = platform::perf_trace::begin();
-    platform::perf_trace::count("commit.decrypt_auth_count", 1);
-    std::error_code size_ec;
-    const auto cipher_size = std::filesystem::file_size(ciphertext, size_ec);
-    if (!size_ec) {
-        platform::perf_trace::count("commit.ciphertext_bytes", cipher_size);
+        cleanup();
+        return std::unexpected(cipher_size.error());
     }
     auto matches = ciphertext_matches(ciphertext, reference.ciphertext_id);
     if (!matches) {
-        platform::perf_trace::finish("commit decrypt/auth", auth_trace);
-        remove_file(ciphertext);
-        remove_file(plaintext);
+        cleanup();
         return std::unexpected(matches.error());
     }
     if (!*matches ||
         !crypto::decrypt_file(
             ciphertext, plaintext, key, crypto::FilePurpose::History)) {
-        platform::perf_trace::finish("commit decrypt/auth", auth_trace);
-        return invalid_ciphertext();
+        return finish_invalid(VariantState::InvalidCiphertext);
     }
 
     auto bytes = read_file(plaintext, history::maximum_commit_plaintext_size);
     if (!bytes) {
-        platform::perf_trace::finish("commit decrypt/auth", auth_trace);
         if (bytes.error().code == ErrorCode::LimitExceeded) {
-            return invalid_commit();
+            return finish_invalid(VariantState::InvalidCommit);
         }
-        remove_file(ciphertext);
-        remove_file(plaintext);
+        cleanup();
         return std::unexpected(bytes.error());
     }
     auto commit = history::deserialize(*bytes);
     if (!commit) {
-        platform::perf_trace::finish("commit decrypt/auth", auth_trace);
-        return invalid_commit();
+        return finish_invalid(VariantState::InvalidCommit);
     }
     auto canonical = history::serialize(*commit);
     if (!canonical) {
-        platform::perf_trace::finish("commit decrypt/auth", auth_trace);
-        return invalid_commit();
+        return finish_invalid(VariantState::InvalidCommit);
     }
     const bool valid_commit =
         crypto::commit_identifier(key, *canonical) == reference.commit_id &&
         *canonical == *bytes;
-    platform::perf_trace::finish("commit decrypt/auth", auth_trace);
-    remove_file(ciphertext);
-    remove_file(plaintext);
+    cleanup();
     if (!valid_commit) {
         return LoadedVariant{.state = VariantState::InvalidCommit,
                              .commit = std::nullopt};
     }
-    platform::perf_trace::count("commit.authenticated_variants", 1);
-    platform::perf_trace::count("commit.plaintext_bytes_authenticated",
-                                bytes->size());
     return LoadedVariant{
         .state = VariantState::Valid,
         .commit = history::LoadedCommit{.id = reference.commit_id,
                                         .commit = std::move(*commit)}};
-}
-
-VariantResult
-try_load_variant(transport::Transport& storage,
-                 std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                 const HeadReference& reference,
-                 const std::filesystem::path& workspace,
-                 std::size_t sequence) {
-    return try_load_variant(storage,
-                            derive_remote_layout(key),
-                            key,
-                            reference,
-                            workspace,
-                            sequence);
 }
 
 std::expected<history::LoadedCommit, Error>
@@ -422,22 +366,6 @@ try_load_variants(transport::Transport& storage,
         error(ErrorCode::MissingCommit, "commit object is missing"));
 }
 
-std::expected<history::LoadedCommit, Error>
-try_load_variants(transport::Transport& storage,
-                  std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                  std::vector<HeadReference> references,
-                  const std::filesystem::path& workspace,
-                  std::size_t& sequence,
-                  HeadReference* authenticated_reference) {
-    return try_load_variants(storage,
-                             derive_remote_layout(key),
-                             key,
-                             std::move(references),
-                             workspace,
-                             sequence,
-                             authenticated_reference);
-}
-
 std::expected<void, Error>
 verify_published_commit(transport::Transport& storage,
                         const RemoteLayout& layout,
@@ -465,34 +393,71 @@ verify_published_commit(transport::Transport& storage,
 }
 
 std::expected<void, Error>
-verify_published_commit(transport::Transport& storage,
-                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                        const history::Commit& expected,
-                        const HeadReference& reference,
-                        const std::filesystem::path& workspace,
-                        std::size_t& sequence) {
-    return verify_published_commit(storage,
-                                   derive_remote_layout(key),
-                                   key,
-                                   expected,
-                                   reference,
-                                   workspace,
-                                   sequence);
+prefetch_commit_batch(transport::Transport& storage,
+                      const RemoteLayout& layout,
+                      const ObjectMap& commit_variants,
+                      const std::filesystem::path& destination_root,
+                      std::size_t min_objects) {
+    if (storage.storage.get_batch == nullptr) {
+        return {};
+    }
+    transport::GetBatch batch{
+        .source_prefix =
+            std::string{trim_trailing_slash(layout.commits_prefix)},
+        .destination_root = destination_root,
+    };
+    for (const auto& [unused, references] : commit_variants) {
+        static_cast<void>(unused);
+        for (const auto& reference : references) {
+            batch.identifiers.push_back(reference.commit_id + "/" +
+                                        reference.ciphertext_id);
+        }
+    }
+    if (batch.identifiers.size() < min_objects) {
+        return {};
+    }
+    if (auto prefetched = transport::get_batch(storage, batch); !prefetched) {
+        return std::unexpected(transport_error(prefetched.error()));
+    }
+    return {};
+}
+
+std::expected<bool, Error>
+verify_remote_physical_hash(transport::Transport& storage,
+                            std::string_view identifier,
+                            std::string_view local_hash,
+                            std::string_view mismatch_detail) {
+    if (local_hash.empty()) {
+        return false;
+    }
+    auto remote_hash = transport::physical_hash(storage, identifier, "sha256");
+    if (!remote_hash) {
+        if (remote_hash.error().code == transport::ErrorCode::Unsupported) {
+            return false;
+        }
+        if (remote_hash.error().code == transport::ErrorCode::ObjectNotFound) {
+            return std::unexpected(
+                error(ErrorCode::VerificationFailure,
+                      "remote object disappeared before verification"));
+        }
+        return std::unexpected(transport_error(remote_hash.error()));
+    }
+    if (*remote_hash != local_hash) {
+        return std::unexpected(error(ErrorCode::VerificationFailure,
+                                     std::string{mismatch_detail}));
+    }
+    return true;
 }
 
 std::expected<HistoryInventory, Error>
 build_scoped_history_inventory(transport::Transport& storage,
                                const RemoteLayout& layout) {
-    const auto heads_dir =
-        layout.heads_prefix.ends_with('/')
-            ? layout.heads_prefix.substr(0, layout.heads_prefix.size() - 1)
-            : layout.heads_prefix;
-    auto listing = transport::list(storage, heads_dir);
+    auto listing = list_identifiers(storage, layout.heads_prefix);
     if (!listing) {
-        if (listing.error().code == transport::ErrorCode::StorageNotFound) {
-            return HistoryInventory{};
-        }
-        return std::unexpected(transport_error(listing.error()));
+        return std::unexpected(listing.error());
+    }
+    if (listing->empty()) {
+        return HistoryInventory{};
     }
 
     HistoryInventory inventory;
@@ -511,25 +476,9 @@ build_scoped_history_inventory(transport::Transport& storage,
         inventory.marker_variants[reference->commit_id].push_back(
             std::move(*reference));
     }
-    std::ranges::sort(inventory.identifiers);
-    auto [first_marker, last_marker] =
-        std::ranges::unique(inventory.identifiers);
-    inventory.identifiers.erase(first_marker, last_marker);
-    if (inventory.identifiers.size() > maximum_history_object_count) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "too many storage objects"));
-    }
-    for (auto& [unused, variants] : inventory.marker_variants) {
-        static_cast<void>(unused);
-        sort_unique(variants);
-        if (variants.size() > maximum_ciphertext_variants_per_commit) {
-            return std::unexpected(error(ErrorCode::LimitExceeded,
-                                         "too many ciphertext variants"));
-        }
-    }
-    if (inventory.marker_variants.size() > history::maximum_marked_head_count) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "too many logical heads"));
+    sort_unique(inventory.identifiers);
+    if (auto finalized = finalize_history_inventory(inventory); !finalized) {
+        return std::unexpected(finalized.error());
     }
     return inventory;
 }
@@ -544,12 +493,10 @@ discover_scoped_commit_variants(transport::Transport& storage,
             error(ErrorCode::InvalidIdentifier, "invalid commit identifier"));
     }
     const auto prefix = layout.commits_prefix + std::string{commit_id};
-    auto listing = transport::list(storage, prefix);
-    if (!listing) {
-        if (listing.error().code == transport::ErrorCode::StorageNotFound) {
-            return {};
-        }
-        return std::unexpected(transport_error(listing.error()));
+    auto listing = list_identifiers(storage, prefix);
+    if (!listing || listing->empty()) {
+        return listing ? std::expected<void, Error>{}
+                       : std::unexpected(listing.error());
     }
 
     auto& variants = inventory.commit_variants[std::string{commit_id}];
@@ -562,10 +509,7 @@ discover_scoped_commit_variants(transport::Transport& storage,
         inventory.identifiers.push_back(identifier);
         variants.push_back(std::move(*reference));
     }
-    std::ranges::sort(inventory.identifiers);
-    auto [first_commit, last_commit] =
-        std::ranges::unique(inventory.identifiers);
-    inventory.identifiers.erase(first_commit, last_commit);
+    sort_unique(inventory.identifiers);
     sort_unique(variants);
     if (inventory.identifiers.size() > maximum_history_object_count ||
         variants.size() > maximum_ciphertext_variants_per_commit) {
@@ -602,9 +546,6 @@ LoadResult load_impl(transport::Transport& storage,
         return std::unexpected(temporary.error());
     }
     const auto layout = derive_remote_layout(key);
-    const auto listing_trace = platform::perf_trace::begin();
-    const auto scoped_head_trace =
-        scoped ? platform::perf_trace::begin() : platform::perf_trace::Token{};
     auto inventory = [&]() {
         if (scoped) {
             return build_scoped_history_inventory(storage, layout);
@@ -612,36 +553,97 @@ LoadResult load_impl(transport::Transport& storage,
         return identifiers ? build_history_inventory(*identifiers, layout)
                            : build_history_inventory(storage, layout);
     }();
-    platform::perf_trace::finish("history listing", listing_trace);
-    if (scoped) {
-        platform::perf_trace::finish(trusted_marker_identifiers.empty()
-                                         ? "initial head LIST"
-                                         : "fresh stability LIST",
-                                     scoped_head_trace);
-    }
     if (!inventory) {
         return std::unexpected(inventory.error());
     }
-    std::size_t commit_variant_count = 0;
-    for (const auto& [unused, references] : inventory->commit_variants) {
-        static_cast<void>(unused);
-        commit_variant_count += references.size();
-    }
-    platform::perf_trace::count("commit.variants_observed",
-                                commit_variant_count);
-
-    std::size_t marker_variant_count = 0;
-    for (const auto& [commit_id, references] : inventory->marker_variants) {
-        static_cast<void>(commit_id);
-        marker_variant_count += references.size();
-    }
-    platform::perf_trace::count("marker.variants_observed",
-                                marker_variant_count);
 
     std::optional<epoch::VerifiedEpoch> discovered_epoch;
     std::map<std::string, std::vector<HeadReference>> marker_candidates;
     std::map<std::string, std::uint64_t> epoch_anchors;
     const KnownHistoryAnchor* cached_anchor = nullptr;
+
+    auto cancelled = [&](bool check_cancellation) -> std::optional<Error> {
+        if (check_cancellation && platform::cancellation::requested()) {
+            return error(ErrorCode::TransportFailure,
+                         "operation cancelled by user");
+        }
+        return std::nullopt;
+    };
+
+    auto load_latest_epoch = [&](std::optional<epoch::Reference> accepted_epoch,
+                                 bool check_cancellation)
+        -> std::expected<std::optional<epoch::VerifiedEpoch>, Error> {
+        if (auto cancel = cancelled(check_cancellation)) {
+            return std::unexpected(*cancel);
+        }
+        auto raw_epoch =
+            identifiers ? epoch::load_latest(storage,
+                                             key,
+                                             workspace_root,
+                                             *identifiers,
+                                             accepted_epoch)
+                        : epoch::load_latest(
+                              storage, key, workspace_root, accepted_epoch);
+        if (auto cancel = cancelled(check_cancellation)) {
+            return std::unexpected(*cancel);
+        }
+        if (!raw_epoch) {
+            const auto code = [&] {
+                switch (raw_epoch.error().code) {
+                    case epoch::ErrorCode::TransportFailure:
+                        return ErrorCode::TransportFailure;
+                    case epoch::ErrorCode::WorkspaceFailure:
+                        return ErrorCode::WorkspaceFailure;
+                    case epoch::ErrorCode::LimitExceeded:
+                        return ErrorCode::LimitExceeded;
+                    default:
+                        return ErrorCode::InconsistentInventory;
+                }
+            }();
+            return std::unexpected(error(code, raw_epoch.error().detail));
+        }
+        return *raw_epoch;
+    };
+
+    auto load_markers = [&](const std::filesystem::path& workspace_dir,
+                            bool check_cancellation)
+        -> std::expected<std::map<std::string, std::vector<HeadReference>>,
+                         Error> {
+        std::map<std::string, std::vector<HeadReference>> candidates;
+        std::size_t sequence = 0;
+        for (const auto& [commit_id, references] : inventory->marker_variants) {
+            if (auto cancel = cancelled(check_cancellation)) {
+                return std::unexpected(*cancel);
+            }
+            std::vector<HeadReference> valid;
+            for (const auto& reference : references) {
+                const auto marker_id = marker_object(layout, reference);
+                auto state =
+                    std::ranges::find(trusted_marker_identifiers, marker_id) !=
+                            trusted_marker_identifiers.end()
+                        ? std::expected<MarkerState, Error>{MarkerState::Valid}
+                        : inspect_marker(storage,
+                                         layout,
+                                         reference,
+                                         workspace_dir,
+                                         sequence);
+                if (!state) {
+                    return std::unexpected(state.error());
+                }
+                if (*state == MarkerState::Valid) {
+                    valid.push_back(reference);
+                }
+            }
+            if (valid.empty()) {
+                return std::unexpected(
+                    error(ErrorCode::InvalidMarker,
+                          "all markers for a commit are invalid"));
+            }
+            sort_unique(valid);
+            candidates.emplace(commit_id, std::move(valid));
+        }
+        return candidates;
+    };
 
     if (native_complete_batch) {
         auto marker_temporary = make_workspace(temporary_root);
@@ -659,192 +661,49 @@ LoadResult load_impl(transport::Transport& storage,
         } reads;
 
         auto fetch_commit_batch = [&]() -> std::expected<void, Error> {
-            if (platform::cancellation::requested()) {
-                return std::unexpected(error(ErrorCode::TransportFailure,
-                                             "operation cancelled by user"));
+            if (auto cancel = cancelled(true)) {
+                return std::unexpected(*cancel);
             }
-            const auto commit_batch_trace = platform::perf_trace::begin();
-            const auto commits_dir =
-                layout.commits_prefix.ends_with('/')
-                    ? layout.commits_prefix.substr(
-                          0, layout.commits_prefix.size() - 1)
-                    : layout.commits_prefix;
-            transport::GetBatch batch{
-                .source_prefix = commits_dir,
-                .destination_root = (*temporary)->workspace.root,
-            };
-            for (const auto& [unused, references] :
-                 inventory->commit_variants) {
-                static_cast<void>(unused);
-                for (const auto& reference : references) {
-                    batch.identifiers.push_back(reference.commit_id + "/" +
-                                                reference.ciphertext_id);
-                }
+            if (auto prefetched =
+                    prefetch_commit_batch(storage,
+                                          layout,
+                                          inventory->commit_variants,
+                                          (*temporary)->workspace.root);
+                !prefetched) {
+                return prefetched;
             }
-            if (!batch.identifiers.empty()) {
-                platform::perf_trace::count("commit.get_batch_calls", 1);
-                platform::perf_trace::count("commit.get_batch_objects",
-                                            batch.identifiers.size());
-                auto prefetched = transport::get_batch(storage, batch);
-                platform::perf_trace::finish("commit batch fetch",
-                                             commit_batch_trace);
-                if (!prefetched) {
-                    return std::unexpected(transport_error(prefetched.error()));
-                }
-            } else {
-                platform::perf_trace::finish("commit batch fetch",
-                                             commit_batch_trace);
-            }
-            if (platform::cancellation::requested()) {
-                return std::unexpected(error(ErrorCode::TransportFailure,
-                                             "operation cancelled by user"));
+            if (auto cancel = cancelled(true)) {
+                return std::unexpected(*cancel);
             }
             return {};
         };
 
-        auto load_epoch =
-            [&]() -> std::expected<std::optional<epoch::VerifiedEpoch>, Error> {
-            if (platform::cancellation::requested()) {
-                return std::unexpected(error(ErrorCode::TransportFailure,
-                                             "operation cancelled by user"));
-            }
-            auto raw_epoch =
-                identifiers ? epoch::load_latest(storage,
-                                                 key,
-                                                 workspace_root,
-                                                 *identifiers,
-                                                 std::nullopt)
-                            : epoch::load_latest(
-                                  storage, key, workspace_root, std::nullopt);
-            if (platform::cancellation::requested()) {
-                return std::unexpected(error(ErrorCode::TransportFailure,
-                                             "operation cancelled by user"));
-            }
-            if (!raw_epoch) {
-                const auto code = [&] {
-                    switch (raw_epoch.error().code) {
-                        case epoch::ErrorCode::TransportFailure:
-                            return ErrorCode::TransportFailure;
-                        case epoch::ErrorCode::WorkspaceFailure:
-                            return ErrorCode::WorkspaceFailure;
-                        case epoch::ErrorCode::LimitExceeded:
-                            return ErrorCode::LimitExceeded;
-                        default:
-                            return ErrorCode::InconsistentInventory;
-                    }
-                }();
-                return std::unexpected(error(code, raw_epoch.error().detail));
-            }
-            return *raw_epoch;
-        };
-
-        auto load_markers = [&]()
-            -> std::expected<std::map<std::string, std::vector<HeadReference>>,
-                             Error> {
-            if (platform::cancellation::requested()) {
-                return std::unexpected(error(ErrorCode::TransportFailure,
-                                             "operation cancelled by user"));
-            }
-            const auto heads_trace = platform::perf_trace::begin();
-            std::map<std::string, std::vector<HeadReference>> candidates;
-            std::size_t sequence = 0;
-            for (const auto& [commit_id, references] :
-                 inventory->marker_variants) {
-                if (platform::cancellation::requested()) {
-                    platform::perf_trace::finish("head loading", heads_trace);
-                    return std::unexpected(
-                        error(ErrorCode::TransportFailure,
-                              "operation cancelled by user"));
-                }
-                for (const auto& reference : references) {
-                    const auto marker_id = marker_object(layout, reference);
-                    auto state = std::ranges::find(trusted_marker_identifiers,
-                                                   marker_id) !=
-                                         trusted_marker_identifiers.end()
-                                     ? std::expected<MarkerState,
-                                                     Error>{MarkerState::Valid}
-                                     : inspect_marker(storage,
-                                                      layout,
-                                                      reference,
-                                                      (*marker_temporary)->workspace.root,
-                                                      sequence);
-                    if (!state) {
-                        platform::perf_trace::finish("head loading",
-                                                     heads_trace);
-                        return std::unexpected(state.error());
-                    }
-                    if (*state == MarkerState::Valid) {
-                        candidates[commit_id].push_back(reference);
-                    }
-                }
-                if (candidates[commit_id].empty()) {
-                    platform::perf_trace::finish("head loading", heads_trace);
-                    return std::unexpected(
-                        error(ErrorCode::InvalidMarker,
-                              "all markers for a commit are invalid"));
-                }
-                sort_unique(candidates[commit_id]);
-            }
-            platform::perf_trace::finish("head loading", heads_trace);
-            return candidates;
-        };
-
-        std::atomic_size_t active_lanes{0};
-        std::atomic_size_t peak_lanes{0};
-        std::atomic_size_t completed_lanes{0};
-
-        auto record_lane_start = [&] {
-            const auto current = ++active_lanes;
-            auto prev = peak_lanes.load();
-            while (current > prev &&
-                   !peak_lanes.compare_exchange_weak(prev, current)) {
-            }
-        };
-        auto record_lane_finish = [&] {
-            --active_lanes;
-            ++completed_lanes;
-        };
-
-        const auto overlap_trace = platform::perf_trace::begin();
         {
             std::jthread batch_thread([&] {
-                record_lane_start();
                 reads.commit_batch_result = fetch_commit_batch();
-                record_lane_finish();
             });
             std::jthread epoch_thread([&] {
-                record_lane_start();
-                reads.epoch_result = load_epoch();
-                record_lane_finish();
+                reads.epoch_result = load_latest_epoch(std::nullopt, true);
             });
             std::jthread marker_thread([&] {
-                record_lane_start();
-                reads.marker_result = load_markers();
-                record_lane_finish();
+                reads.marker_result =
+                    load_markers((*marker_temporary)->workspace.root, true);
             });
         }
-        platform::perf_trace::finish("history remote overlap", overlap_trace);
-        platform::perf_trace::maximum("history.remote_overlap_peak",
-                                      peak_lanes.load());
-        platform::perf_trace::count("history.remote_overlap_completions",
-                                    completed_lanes.load());
 
-        // Deterministic error reduction precedence:
-        // 1. Commit batch error:
+        // Deterministic error reduction precedence: commit batch, then epoch,
+        // then marker.
         if (!reads.commit_batch_result) {
             return std::unexpected(reads.commit_batch_result.error());
         }
-        // 2. Epoch error:
         if (!reads.epoch_result) {
             return std::unexpected(reads.epoch_result.error());
         }
-        // 3. Marker error:
         if (!reads.marker_result) {
             return std::unexpected(reads.marker_result.error());
         }
-        if (platform::cancellation::requested()) {
-            return std::unexpected(error(ErrorCode::TransportFailure,
-                                         "operation cancelled by user"));
+        if (auto cancel = cancelled(true)) {
+            return std::unexpected(*cancel);
         }
 
         discovered_epoch = std::move(*reads.epoch_result);
@@ -873,28 +732,9 @@ LoadResult load_impl(transport::Transport& storage,
         const auto accepted_epoch = frontier
                                         ? frontier->accepted_epoch
                                         : std::optional<epoch::Reference>{};
-        auto raw_epoch =
-            identifiers ? epoch::load_latest(storage,
-                                             key,
-                                             workspace_root,
-                                             *identifiers,
-                                             accepted_epoch)
-                        : epoch::load_latest(
-                              storage, key, workspace_root, accepted_epoch);
+        auto raw_epoch = load_latest_epoch(accepted_epoch, false);
         if (!raw_epoch) {
-            const auto code = [&] {
-                switch (raw_epoch.error().code) {
-                    case epoch::ErrorCode::TransportFailure:
-                        return ErrorCode::TransportFailure;
-                    case epoch::ErrorCode::WorkspaceFailure:
-                        return ErrorCode::WorkspaceFailure;
-                    case epoch::ErrorCode::LimitExceeded:
-                        return ErrorCode::LimitExceeded;
-                    default:
-                        return ErrorCode::InconsistentInventory;
-                }
-            }();
-            return std::unexpected(error(code, raw_epoch.error().detail));
+            return std::unexpected(raw_epoch.error());
         }
         discovered_epoch = *raw_epoch;
         const bool unchanged_accepted_epoch =
@@ -907,35 +747,11 @@ LoadResult load_impl(transport::Transport& storage,
             }
         }
 
-        const auto heads_trace = platform::perf_trace::begin();
-        std::size_t sequence = 0;
-        for (const auto& [commit_id, references] : inventory->marker_variants) {
-            for (const auto& reference : references) {
-                const auto marker_id = marker_object(layout, reference);
-                auto state =
-                    std::ranges::find(trusted_marker_identifiers, marker_id) !=
-                            trusted_marker_identifiers.end()
-                        ? std::expected<MarkerState, Error>{MarkerState::Valid}
-                        : inspect_marker(storage,
-                                         layout,
-                                         reference,
-                                         (*temporary)->workspace.root,
-                                         sequence);
-                if (!state) {
-                    return std::unexpected(state.error());
-                }
-                if (*state == MarkerState::Valid) {
-                    marker_candidates[commit_id].push_back(reference);
-                }
-            }
-            if (marker_candidates[commit_id].empty()) {
-                return std::unexpected(
-                    error(ErrorCode::InvalidMarker,
-                          "all markers for a commit are invalid"));
-            }
-            sort_unique(marker_candidates[commit_id]);
+        auto loaded_markers = load_markers((*temporary)->workspace.root, false);
+        if (!loaded_markers) {
+            return std::unexpected(loaded_markers.error());
         }
-        platform::perf_trace::finish("head loading", heads_trace);
+        marker_candidates = std::move(*loaded_markers);
     }
 
     if (marker_candidates.empty()) {
@@ -947,16 +763,14 @@ LoadResult load_impl(transport::Transport& storage,
         return LoadedHistory{};
     }
 
-    const auto commits_trace = platform::perf_trace::begin();
     std::map<std::string, history::LoadedCommit> loaded;
     std::vector<HeadReference> authenticated_commit_variants;
     std::vector<std::pair<std::string, std::size_t>> pending;
     bool scoped_anchor_referenced =
         scoped && cached_anchor &&
         marker_candidates.contains(cached_anchor->commit_id);
-    for (const auto& [commit_id, unused] : marker_candidates) {
-        static_cast<void>(unused);
-        pending.emplace_back(commit_id, 0);
+    for (const auto& entry : marker_candidates) {
+        pending.emplace_back(entry.first, 0);
     }
 
     std::size_t commit_sequence = 0;
@@ -967,10 +781,8 @@ LoadResult load_impl(transport::Transport& storage,
             return std::unexpected(
                 error(ErrorCode::LimitExceeded, "history graph is too deep"));
         }
-        if (loaded.contains(commit_id)) {
-            continue;
-        }
-        if (cached_anchor && commit_id == cached_anchor->commit_id) {
+        if (loaded.contains(commit_id) ||
+            (cached_anchor && commit_id == cached_anchor->commit_id)) {
             continue;
         }
         if (loaded.size() >= history::maximum_loaded_commit_count) {
@@ -987,45 +799,39 @@ LoadResult load_impl(transport::Transport& storage,
             }
         }
 
-        auto variants_for_attempt = [&]() {
+        HeadReference authenticated_reference;
+        auto attempt_load = [&]() {
             std::vector<HeadReference> variants;
             if (const auto found = inventory->commit_variants.find(commit_id);
                 found != inventory->commit_variants.end()) {
                 variants = found->second;
             }
-            if (const auto found = marker_candidates.find(commit_id);
-                found != marker_candidates.end()) {
-                variants.insert(
-                    variants.end(), found->second.begin(), found->second.end());
+            if (marker_found != marker_candidates.end()) {
+                variants.insert(variants.end(),
+                                marker_found->second.begin(),
+                                marker_found->second.end());
             }
             sort_unique(variants);
-            return variants;
+            return try_load_variants(storage,
+                                     layout,
+                                     key,
+                                     variants,
+                                     (*temporary)->workspace.root,
+                                     commit_sequence,
+                                     &authenticated_reference);
         };
 
-        HeadReference authenticated_reference;
-        auto commit = try_load_variants(storage,
-                                        layout,
-                                        key,
-                                        variants_for_attempt(),
-                                        (*temporary)->workspace.root,
-                                        commit_sequence,
-                                        &authenticated_reference);
+        auto commit = attempt_load();
         if (!commit && scoped && marker_found != marker_candidates.end() &&
             (commit.error().code == ErrorCode::MissingCommit ||
              commit.error().code == ErrorCode::InvalidCiphertext ||
              commit.error().code == ErrorCode::InvalidCommit)) {
-            auto discovered = discover_scoped_commit_variants(
-                storage, layout, commit_id, *inventory);
-            if (!discovered) {
+            if (auto discovered = discover_scoped_commit_variants(
+                    storage, layout, commit_id, *inventory);
+                !discovered) {
                 return std::unexpected(discovered.error());
             }
-            commit = try_load_variants(storage,
-                                       layout,
-                                       key,
-                                       variants_for_attempt(),
-                                       (*temporary)->workspace.root,
-                                       commit_sequence,
-                                       &authenticated_reference);
+            commit = attempt_load();
         }
         if (!commit) {
             return std::unexpected(commit.error());
@@ -1036,9 +842,9 @@ LoadResult load_impl(transport::Transport& storage,
                                          "head height cannot have a child"));
         }
         const auto parents = commit->commit.parents;
-        if (const auto boundary = epoch_anchors.find(commit_id);
-            boundary != epoch_anchors.end()) {
-            if (commit->commit.height != boundary->second) {
+        const bool is_anchor = epoch_anchors.contains(commit_id);
+        if (is_anchor) {
+            if (commit->commit.height != epoch_anchors.at(commit_id)) {
                 return std::unexpected(
                     error(ErrorCode::InvalidCommit,
                           "Epoch anchor height does not match its commit"));
@@ -1048,7 +854,7 @@ LoadResult load_impl(transport::Transport& storage,
         loaded.emplace(commit_id, std::move(*commit));
         authenticated_commit_variants.push_back(
             std::move(authenticated_reference));
-        if (epoch_anchors.contains(commit_id)) {
+        if (is_anchor) {
             continue;
         }
         for (const auto& parent : parents) {
@@ -1060,9 +866,8 @@ LoadResult load_impl(transport::Transport& storage,
     }
 
     if (!epoch_anchors.empty()) {
-        for (const auto& [anchor_id, unused] : epoch_anchors) {
-            static_cast<void>(unused);
-            if (!loaded.contains(anchor_id)) {
+        for (const auto& entry : epoch_anchors) {
+            if (!loaded.contains(entry.first)) {
                 return std::unexpected(
                     error(ErrorCode::InvalidCommit,
                           "Epoch anchor is not reachable from a history head"));
@@ -1126,27 +931,21 @@ LoadResult load_impl(transport::Transport& storage,
     result.authenticated_commit_variants =
         std::move(authenticated_commit_variants);
     result.marked_heads.reserve(marker_candidates.size());
-    for (const auto& [commit_id, unused] : marker_candidates) {
-        static_cast<void>(unused);
+    for (const auto& [commit_id, references] : marker_candidates) {
         result.marked_heads.push_back(commit_id);
-        for (const auto& reference : marker_candidates.at(commit_id)) {
+        for (const auto& reference : references) {
             result.marked_head_identifiers.push_back(
                 marker_object(layout, reference));
         }
     }
-    std::ranges::sort(result.marked_head_identifiers);
-    result.marked_head_identifiers.erase(
-        std::ranges::unique(result.marked_head_identifiers).begin(),
-        result.marked_head_identifiers.end());
+    sort_unique(result.marked_head_identifiers);
     result.commits.reserve(loaded.size());
-    for (auto& [unused, commit] : loaded) {
-        static_cast<void>(unused);
-        result.commits.push_back(std::move(commit));
+    for (auto& entry : loaded) {
+        result.commits.push_back(std::move(entry.second));
     }
     if (!epoch_anchors.empty()) {
-        for (const auto& [anchor_id, unused] : epoch_anchors) {
-            static_cast<void>(unused);
-            result.trusted_anchor_ids.push_back(anchor_id);
+        for (const auto& entry : epoch_anchors) {
+            result.trusted_anchor_ids.push_back(entry.first);
         }
     } else if (cached_anchor) {
         result.trusted_anchor_ids.push_back(cached_anchor->commit_id);
@@ -1154,8 +953,6 @@ LoadResult load_impl(transport::Transport& storage,
     if (discovered_epoch) {
         result.epoch = *discovered_epoch;
     }
-    platform::perf_trace::count("commit.loaded_logical_commits", loaded.size());
-    platform::perf_trace::finish("commit loading", commits_trace);
     return result;
 }
 

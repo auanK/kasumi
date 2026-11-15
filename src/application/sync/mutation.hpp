@@ -18,8 +18,8 @@
 
 namespace kasumi::application::sync::mutation {
 
-using ::kasumi::Operation;
 using ::kasumi::Action;
+using ::kasumi::Operation;
 
 // Failure categories when applying an operation.
 enum class MutationErrorCode {

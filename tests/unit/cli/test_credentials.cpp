@@ -1,10 +1,11 @@
 #include "application/profile.hpp"
-#include "core/hasher.hpp"
-#include "core/node.hpp"
 #include "cli/app.hpp"
 #include "cli/credentials.hpp"
 #include "cli/i18n.hpp"
 #include "cli/wizard.hpp"
+#include "core/hasher.hpp"
+#include "core/node.hpp"
+#include "kasumi/test/capture.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
@@ -15,21 +16,58 @@
 #include <cstdio>
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <initializer_list>
 #include <iostream>
 #include <optional>
-#include <utility>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
+
+namespace {
+
+std::string run_cli_out(std::initializer_list<const char*> arguments,
+                        int expected_code) {
+    std::vector<std::string> storage(arguments.begin(), arguments.end());
+    std::vector<char*> argv;
+    argv.reserve(storage.size());
+    for (auto& value : storage) {
+        argv.push_back(value.data());
+    }
+    return kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::run(static_cast<int>(argv.size()), argv.data()),
+                  expected_code);
+    });
+}
+
+std::string run_wizard_out(const kasumi::application::ExecutionEnvironment& env,
+                           std::string_view stdin_text,
+                           int* exit_code = nullptr) {
+    std::istringstream input{std::string{stdin_text}};
+    auto* previous_input = std::cin.rdbuf(input.rdbuf());
+    std::string output = kasumi::test::capture_stdout([&] {
+        const int result = kasumi::cli::run_config_wizard(env);
+        std::fflush(stdout);
+        if (exit_code != nullptr) {
+            *exit_code = result;
+        }
+    });
+    std::cin.rdbuf(previous_input);
+    std::cin.clear();
+    return output;
+}
+
+} // namespace
 
 TEST(CliCredentialsTest, ReadsSecretFromEnvironmentWithoutPrompt) {
     auto secret = kasumi::test::scoped_environment_variable(
         "KASUMI_TEST_SECRET", "secret-value");
-    testing::internal::CaptureStdout();
-
-    const auto result = kasumi::cli::credentials::read_secret(
-        "KASUMI_TEST_SECRET", "prompt that must not appear");
-    const auto output = testing::internal::GetCapturedStdout();
+    std::string result;
+    const auto output = kasumi::test::capture_stdout([&] {
+        result = kasumi::cli::credentials::read_secret(
+            "KASUMI_TEST_SECRET", "prompt that must not appear");
+    });
 
     EXPECT_EQ(result, "secret-value");
     EXPECT_TRUE(output.empty());
@@ -52,13 +90,13 @@ TEST(CliCredentialsTest, RepeatsPasswordAndSaltUntilConfirmed) {
         "salt",
     };
     std::size_t next = 0;
-    testing::internal::CaptureStdout();
-
-    const auto result =
-        kasumi::cli::credentials::read_password_pair([&](const std::string&) {
-            return answers.at(next++);
-        });
-    const auto output = testing::internal::GetCapturedStdout();
+    kasumi::application::PasswordPair result;
+    const auto output = kasumi::test::capture_stdout([&] {
+        result = kasumi::cli::credentials::read_password_pair(
+            [&](const std::string&) {
+                return answers.at(next++);
+            });
+    });
 
     EXPECT_EQ(result.password, "password");
     EXPECT_EQ(result.salt_password, "salt");
@@ -93,23 +131,9 @@ TEST(CliCredentialsTest, UsesPasswordSaltTerminologyInPrompts) {
 
 TEST(CliAppTest, PrintsSynchronizationProgressOnce) {
     auto workspace = kasumi::test::make_temp_workspace("cli-sync-progress");
-#if defined(_WIN32)
-    auto scoped_root = kasumi::test::scoped_environment_variable(
-        "APPDATA", kasumi::test::workspace_path(workspace, "appdata").string());
-#else
-    auto scoped_root = kasumi::test::scoped_environment_variable(
-        "XDG_CONFIG_HOME",
-        kasumi::test::workspace_path(workspace, "config").string());
-#endif
-    char command[] = "kasumi";
-    char operation[] = "sync";
-    char profile[] = "missing";
-    char* argv[] = {command, operation, profile};
-    testing::internal::CaptureStdout();
-
-    EXPECT_EQ(kasumi::cli::run(3, argv), 1);
-
-    const auto output = testing::internal::GetCapturedStdout();
+    auto scoped_root = kasumi::test::scoped_config_home(
+        kasumi::test::workspace_path(workspace, "config"));
+    const auto output = run_cli_out({"kasumi", "sync", "missing"}, 1);
     const auto expected_starting = "Synchronizing \"missing\"...";
     std::size_t occurrences = 0;
     std::size_t position = 0;
@@ -123,14 +147,7 @@ TEST(CliAppTest, PrintsSynchronizationProgressOnce) {
 }
 
 TEST(CliAppTest, PrintsMinimalHelpWithoutRuntimeAccess) {
-    char command[] = "kasumi";
-    char help[] = "--help";
-    char* argv[] = {command, help};
-    testing::internal::CaptureStdout();
-
-    EXPECT_EQ(kasumi::cli::run(2, argv), 0);
-
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = run_cli_out({"kasumi", "--help"}, 0);
     EXPECT_NE(output.find("kasumi sync <profile>"), std::string::npos);
     EXPECT_NE(output.find("kasumi remote contents <profile> --audit"),
               std::string::npos);
@@ -141,16 +158,7 @@ TEST(CliAppTest, PrintsMinimalHelpWithoutRuntimeAccess) {
 }
 
 TEST(CliAppTest, PrintsHelpInPortugueseWhenFlagProvided) {
-    char command[] = "kasumi";
-    char lang_flag[] = "--lang";
-    char lang_val[] = "pt";
-    char help[] = "--help";
-    char* argv[] = {command, lang_flag, lang_val, help};
-    testing::internal::CaptureStdout();
-
-    EXPECT_EQ(kasumi::cli::run(4, argv), 0);
-
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = run_cli_out({"kasumi", "--lang", "pt", "--help"}, 0);
     EXPECT_NE(output.find("kasumi sync <perfil>"), std::string::npos);
     EXPECT_NE(output.find("não executa GC"), std::string::npos);
     EXPECT_NE(output.find("diagnóstico remoto completo"), std::string::npos);
@@ -166,16 +174,8 @@ TEST(CliAppTest, PrintsPreviewStartingProgressOnce) {
         "KASUMI_WORKSPACE",
         kasumi::test::workspace_path(workspace, "config").string());
 #endif
-    char command[] = "kasumi";
-    char operation[] = "sync";
-    char profile[] = "missing";
-    char flag[] = "--dry-run";
-    char* argv[] = {command, operation, profile, flag};
-    testing::internal::CaptureStdout();
-
-    EXPECT_EQ(kasumi::cli::run(4, argv), 1);
-
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output =
+        run_cli_out({"kasumi", "sync", "missing", "--dry-run"}, 1);
     const auto expected_starting =
         "Simulating synchronization of \"missing\"...";
     EXPECT_NE(output.find(expected_starting), std::string::npos);
@@ -189,15 +189,7 @@ TEST(CliAppTest, PrintsStatusStartingProgressOnce) {
         "KASUMI_WORKSPACE",
         kasumi::test::workspace_path(workspace, "config").string());
 #endif
-    char command[] = "kasumi";
-    char operation[] = "status";
-    char profile[] = "missing";
-    char* argv[] = {command, operation, profile};
-    testing::internal::CaptureStdout();
-
-    EXPECT_EQ(kasumi::cli::run(3, argv), 1);
-
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output = run_cli_out({"kasumi", "status", "missing"}, 1);
     const auto expected_starting = "Checking status of \"missing\"...";
     EXPECT_NE(output.find(expected_starting), std::string::npos);
     EXPECT_NE(output.find("[ERROR]"), std::string::npos);
@@ -210,16 +202,8 @@ TEST(CliAppTest, AcceptsFullFlagOnStatusAndPreview) {
         "KASUMI_WORKSPACE",
         kasumi::test::workspace_path(workspace, "config").string());
 #endif
-    char command[] = "kasumi";
-    char operation[] = "status";
-    char profile[] = "missing";
-    char full_flag[] = "--full";
-    char* argv[] = {command, operation, profile, full_flag};
-    testing::internal::CaptureStdout();
-
-    EXPECT_EQ(kasumi::cli::run(4, argv), 1);
-
-    const auto output = testing::internal::GetCapturedStdout();
+    const auto output =
+        run_cli_out({"kasumi", "status", "missing", "--full"}, 1);
     EXPECT_NE(output.find("Checking status of \"missing\"..."),
               std::string::npos);
     EXPECT_NE(output.find("[ERROR]"), std::string::npos);
@@ -227,23 +211,9 @@ TEST(CliAppTest, AcceptsFullFlagOnStatusAndPreview) {
 
 TEST(CliAppTest, PrintsGarbageCollectStartingProgressOnce) {
     auto workspace = kasumi::test::make_temp_workspace("cli-gc-progress");
-#if defined(_WIN32)
-    auto scoped_root = kasumi::test::scoped_environment_variable(
-        "APPDATA", kasumi::test::workspace_path(workspace, "appdata").string());
-#else
-    auto scoped_root = kasumi::test::scoped_environment_variable(
-        "XDG_CONFIG_HOME",
-        kasumi::test::workspace_path(workspace, "config").string());
-#endif
-    char command[] = "kasumi";
-    char operation[] = "gc";
-    char profile[] = "missing";
-    char* argv[] = {command, operation, profile};
-    testing::internal::CaptureStdout();
-
-    EXPECT_EQ(kasumi::cli::run(3, argv), 1);
-
-    const auto output = testing::internal::GetCapturedStdout();
+    auto scoped_root = kasumi::test::scoped_config_home(
+        kasumi::test::workspace_path(workspace, "config"));
+    const auto output = run_cli_out({"kasumi", "gc", "missing"}, 1);
     const auto expected_starting =
         "Running garbage collection for \"missing\"...";
     EXPECT_NE(output.find(expected_starting), std::string::npos);
@@ -251,25 +221,10 @@ TEST(CliAppTest, PrintsGarbageCollectStartingProgressOnce) {
 
 TEST(CliAppTest, PrintsGarbageCollectStartingProgressInPortuguese) {
     auto workspace = kasumi::test::make_temp_workspace("cli-gc-progress-pt");
-#if defined(_WIN32)
-    auto scoped_root = kasumi::test::scoped_environment_variable(
-        "APPDATA", kasumi::test::workspace_path(workspace, "appdata").string());
-#else
-    auto scoped_root = kasumi::test::scoped_environment_variable(
-        "XDG_CONFIG_HOME",
-        kasumi::test::workspace_path(workspace, "config").string());
-#endif
-    char command[] = "kasumi";
-    char operation[] = "gc";
-    char profile[] = "missing";
-    char lang_flag[] = "--lang";
-    char lang_val[] = "pt-BR";
-    char* argv[] = {command, lang_flag, lang_val, operation, profile};
-    testing::internal::CaptureStdout();
-
-    EXPECT_EQ(kasumi::cli::run(5, argv), 1);
-
-    const auto output = testing::internal::GetCapturedStdout();
+    auto scoped_root = kasumi::test::scoped_config_home(
+        kasumi::test::workspace_path(workspace, "config"));
+    const auto output =
+        run_cli_out({"kasumi", "--lang", "pt-BR", "gc", "missing"}, 1);
     const auto expected_starting =
         "Executando coleta de lixo em \"missing\"...";
     EXPECT_NE(output.find(expected_starting), std::string::npos);
@@ -278,23 +233,9 @@ TEST(CliAppTest, PrintsGarbageCollectStartingProgressInPortuguese) {
 
 TEST(CliAppTest, PrintsFsckStartingProgressOnce) {
     auto workspace = kasumi::test::make_temp_workspace("cli-fsck-progress");
-#if defined(_WIN32)
-    auto scoped_root = kasumi::test::scoped_environment_variable(
-        "APPDATA", kasumi::test::workspace_path(workspace, "appdata").string());
-#else
-    auto scoped_root = kasumi::test::scoped_environment_variable(
-        "XDG_CONFIG_HOME",
-        kasumi::test::workspace_path(workspace, "config").string());
-#endif
-    char command[] = "kasumi";
-    char operation[] = "fsck";
-    char profile[] = "missing";
-    char* argv[] = {command, operation, profile};
-    testing::internal::CaptureStdout();
-
-    EXPECT_EQ(kasumi::cli::run(3, argv), 1);
-
-    const auto output = testing::internal::GetCapturedStdout();
+    auto scoped_root = kasumi::test::scoped_config_home(
+        kasumi::test::workspace_path(workspace, "config"));
+    const auto output = run_cli_out({"kasumi", "fsck", "missing"}, 1);
     const std::string starting = "Auditing \"missing\"...";
     const auto first = output.find(starting);
     ASSERT_NE(first, std::string::npos);
@@ -305,25 +246,10 @@ TEST(CliAppTest, PrintsFsckStartingProgressOnce) {
 
 TEST(CliAppTest, PrintsFsckStartingProgressInPortuguese) {
     auto workspace = kasumi::test::make_temp_workspace("cli-fsck-progress-pt");
-#if defined(_WIN32)
-    auto scoped_root = kasumi::test::scoped_environment_variable(
-        "APPDATA", kasumi::test::workspace_path(workspace, "appdata").string());
-#else
-    auto scoped_root = kasumi::test::scoped_environment_variable(
-        "XDG_CONFIG_HOME",
-        kasumi::test::workspace_path(workspace, "config").string());
-#endif
-    char command[] = "kasumi";
-    char operation[] = "fsck";
-    char profile[] = "missing";
-    char lang_flag[] = "--lang";
-    char lang_val[] = "pt-BR";
-    char* argv[] = {command, lang_flag, lang_val, operation, profile};
-    testing::internal::CaptureStdout();
-
-    EXPECT_EQ(kasumi::cli::run(5, argv), 1);
-
-    const auto output = testing::internal::GetCapturedStdout();
+    auto scoped_root = kasumi::test::scoped_config_home(
+        kasumi::test::workspace_path(workspace, "config"));
+    const auto output =
+        run_cli_out({"kasumi", "--lang", "pt-BR", "fsck", "missing"}, 1);
     const std::string starting = "Auditando \"missing\"...";
     const auto first = output.find(starting);
     ASSERT_NE(first, std::string::npos);
@@ -346,15 +272,7 @@ TEST(CliWizardTest, RejectsDuplicateNameBeforeOtherPrompts) {
         environment,
         profile,
         kasumi::application::MasterKeyHex{std::string(64, '1')}));
-    std::istringstream input{"n\nexisting\nq\n"};
-    auto* previous_input = std::cin.rdbuf(input.rdbuf());
-    testing::internal::CaptureStdout();
-
-    kasumi::cli::run_config_wizard(environment);
-
-    std::fflush(stdout);
-    const auto output = testing::internal::GetCapturedStdout();
-    std::cin.rdbuf(previous_input);
+    const auto output = run_wizard_out(environment, "n\nexisting\nq\n");
     EXPECT_NE(output.find("The profile 'existing' already exists"),
               std::string::npos);
     EXPECT_EQ(output.find("Synchronized local path"), std::string::npos);
@@ -370,15 +288,9 @@ TEST(CliWizardTest, CreatesProfileWithHiddenRetentionDefaults) {
                                                           "salt-password-long");
     const auto local = kasumi::test::workspace_path(workspace, "local");
     const auto remote = kasumi::test::workspace_path(workspace, "remote");
-    std::istringstream input{"n\nnew-profile\n" + local.string() + "\n" +
-                             remote.string() + "\nq\n"};
-    auto* previous_input = std::cin.rdbuf(input.rdbuf());
-    testing::internal::CaptureStdout();
-
-    kasumi::cli::run_config_wizard(environment);
-
-    const auto output = testing::internal::GetCapturedStdout();
-    std::cin.rdbuf(previous_input);
+    const auto output = run_wizard_out(environment,
+                                       "n\nnew-profile\n" + local.string() +
+                                           "\n" + remote.string() + "\nq\n");
     ASSERT_EQ(output.find("Profundidade mínima do histórico"),
               std::string::npos);
     ASSERT_EQ(output.find("Retenção mínima em horas"), std::string::npos);
@@ -413,14 +325,8 @@ TEST(CliWizardTest, EditingProfilePreservesManualRetentionValues) {
         profile,
         kasumi::application::MasterKeyHex{std::string(64, '1')}));
 
-    std::istringstream input{"e\nadvanced\n" + new_local.string() + "\n\nq\n"};
-    auto* previous_input = std::cin.rdbuf(input.rdbuf());
-    testing::internal::CaptureStdout();
-
-    kasumi::cli::run_config_wizard(environment);
-
-    const auto output = testing::internal::GetCapturedStdout();
-    std::cin.rdbuf(previous_input);
+    const auto output = run_wizard_out(
+        environment, "e\nadvanced\n" + new_local.string() + "\n\nq\n");
     EXPECT_EQ(output.find("Política do histórico"), std::string::npos);
     EXPECT_EQ(output.find("Profundidade mínima"), std::string::npos);
     EXPECT_EQ(output.find("Retenção mínima"), std::string::npos);
@@ -477,8 +383,8 @@ TEST(CliWizardTest, ListsAllLocalStatesInBothLanguagesWithoutSideEffects) {
         if (name == "pending") {
             state.pending_materializations.push_back(tree.rows[1]);
         }
-        ASSERT_TRUE(kasumi::state_storage::save_state(paths->database_path,
-                                                       state));
+        ASSERT_TRUE(
+            kasumi::state_storage::save_state(paths->database_path, state));
     }
     const auto problem_paths = kasumi::runtime::resolve_profile_paths(
         environment.app_data_dir, "problem");
@@ -495,14 +401,8 @@ TEST(CliWizardTest, ListsAllLocalStatesInBothLanguagesWithoutSideEffects) {
     for (const auto language : {kasumi::cli::i18n::Language::English,
                                 kasumi::cli::i18n::Language::Portuguese}) {
         kasumi::cli::i18n::set_language(language);
-        std::istringstream input{"q\n"};
-        auto* previous_input = std::cin.rdbuf(input.rdbuf());
-        testing::internal::CaptureStdout();
-        const int result = kasumi::cli::run_config_wizard(environment);
-        std::fflush(stdout);
-        const auto output = testing::internal::GetCapturedStdout();
-        std::cin.rdbuf(previous_input);
-        std::cin.clear();
+        int result = 0;
+        const auto output = run_wizard_out(environment, "q\n", &result);
 
         EXPECT_EQ(result, 0);
         for (const auto& [name, state] : displayed_states) {
@@ -512,7 +412,7 @@ TEST(CliWizardTest, ListsAllLocalStatesInBothLanguagesWithoutSideEffects) {
         }
     }
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
-    EXPECT_EQ(before,
-              kasumi::test::snapshot_tree(
-                  kasumi::test::workspace_root(workspace)));
+    EXPECT_EQ(
+        before,
+        kasumi::test::snapshot_tree(kasumi::test::workspace_root(workspace)));
 }

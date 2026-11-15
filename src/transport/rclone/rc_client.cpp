@@ -49,50 +49,7 @@ std::chrono::milliseconds artificial_latency() noexcept {
     return value;
 }
 
-enum class RcMethod {
-    CorePid,
-    CoreQuit,
-};
-
-void record_endpoint_request(std::string_view path_suffix) noexcept {
-    if (!platform::perf_trace::enabled()) {
-        return;
-    }
-    if (path_suffix == "operations/check") {
-        platform::perf_trace::count(
-            "rc.http_requests_by_endpoint.operations/check", 1);
-    } else if (path_suffix == "operations/hashsumfile") {
-        platform::perf_trace::count(
-            "rc.http_requests_by_endpoint.operations/hashsumfile", 1);
-    } else if (path_suffix == "operations/copyfile") {
-        platform::perf_trace::count(
-            "rc.http_requests_by_endpoint.operations/copyfile", 1);
-    } else if (path_suffix == "operations/deletefile") {
-        platform::perf_trace::count(
-            "rc.http_requests_by_endpoint.operations/deletefile", 1);
-    } else if (path_suffix == "operations/stat") {
-        platform::perf_trace::count(
-            "rc.http_requests_by_endpoint.operations/stat", 1);
-    } else if (path_suffix == "operations/mkdir") {
-        platform::perf_trace::count(
-            "rc.http_requests_by_endpoint.operations/mkdir", 1);
-    } else if (path_suffix == "operations/list") {
-        platform::perf_trace::count(
-            "rc.http_requests_by_endpoint.operations/list", 1);
-    } else if (path_suffix == "sync/copy") {
-        platform::perf_trace::count("rc.http_requests_by_endpoint.sync/copy",
-                                    1);
-    } else if (path_suffix == "core/pid") {
-        platform::perf_trace::count("rc.http_requests_by_endpoint.core/pid", 1);
-    } else if (path_suffix == "core/quit") {
-        platform::perf_trace::count("rc.http_requests_by_endpoint.core/quit",
-                                    1);
-    } else {
-        std::string dynamic_metric =
-            "rc.http_requests_by_endpoint." + std::string{path_suffix};
-        platform::perf_trace::count(dynamic_metric, 1);
-    }
-}
+using detail::make_error;
 
 std::expected<std::string, Error>
 post_rc_impl(State& state,
@@ -102,12 +59,6 @@ post_rc_impl(State& state,
              std::chrono::milliseconds read_timeout,
              int attempt,
              int attempts);
-
-Error make_error(ErrorCode code, std::string message, int native_code = 0) {
-    return Error{.code = code,
-                 .message = std::move(message),
-                 .native_code = native_code};
-}
 
 Error with_request_context(const State& state,
                            Error error,
@@ -126,16 +77,6 @@ Error with_request_context(const State& state,
         platform::path::to_utf8(state.configuration.executable),
         error.message);
     return error;
-}
-
-std::string_view endpoint(RcMethod method) noexcept {
-    switch (method) {
-        case RcMethod::CorePid:
-            return "core/pid";
-        case RcMethod::CoreQuit:
-            return "core/quit";
-    }
-    return {};
 }
 
 bool drain_finished(const State& state) {
@@ -199,31 +140,26 @@ post_rc_impl(State& state,
                                     std::chrono::milliseconds{50});
         }
     });
-    platform::perf_trace::count("rc.http_requests_attempted", 1);
-    record_endpoint_request(path_suffix);
-    platform::perf_trace::count("rc.bytes_sent_control_json",
-                                request_body.size());
-
+    const auto trace = platform::perf_trace::begin();
     const auto response =
         client.Post(path, std::string{request_body}, "application/json");
     watcher.request_stop();
+    if (trace.active) {
+        platform::perf_trace::finish(
+            std::string{"rc/"} + std::string{path_suffix}, trace);
+    }
     if (platform::cancellation::requested()) {
-        platform::perf_trace::count("rc.http_requests_failed", 1);
         return std::unexpected(
             make_error(ErrorCode::Cancelled, "operation cancelled by user"));
     }
     if (!response) {
-        platform::perf_trace::count("rc.http_requests_failed", 1);
         return std::unexpected(
             make_error(ErrorCode::Io,
                        std::string{"RC HTTP failure: "} +
                            httplib::to_string(response.error()),
                        static_cast<int>(response.error())));
     }
-    platform::perf_trace::count("rc.bytes_received_control_json",
-                                response->body.size());
     if (response->body.size() > response_limit) {
-        platform::perf_trace::count("rc.http_requests_failed", 1);
         return std::unexpected(make_error(
             ErrorCode::ProtocolFailure,
             "RC response exceeds limit",
@@ -232,13 +168,11 @@ post_rc_impl(State& state,
                 static_cast<std::size_t>((std::numeric_limits<int>::max)())))));
     }
     if (response->status == 401 || response->status == 403) {
-        platform::perf_trace::count("rc.http_requests_failed", 1);
         return std::unexpected(make_error(ErrorCode::PermissionDenied,
                                           "RC authentication rejected",
                                           response->status));
     }
     if (response->status < 200 || response->status >= 300) {
-        platform::perf_trace::count("rc.http_requests_failed", 1);
         std::string detail = "unexpected RC HTTP status; body omitted";
         try {
             const auto json = nlohmann::json::parse(response->body);
@@ -250,7 +184,6 @@ post_rc_impl(State& state,
         return std::unexpected(
             make_error(ErrorCode::ProtocolFailure, detail, response->status));
     }
-    platform::perf_trace::count("rc.http_requests_completed", 1);
     return response->body;
 }
 
@@ -259,38 +192,19 @@ bool transient_read_failure(const Error& error) noexcept {
 }
 
 std::expected<void, Error> validate_rc_handshake(State& state, int child_pid) {
-    const auto response = post_rc(state,
-                                  endpoint(RcMethod::CorePid),
-                                  "{}",
-                                  maximum_response_size,
-                                  default_read_timeout);
+    const auto response = post_rc(
+        state, "core/pid", "{}", maximum_response_size, default_read_timeout);
     if (!response) {
         return std::unexpected(response.error());
     }
     try {
         const auto json = nlohmann::json::parse(*response);
         if (!json.is_object() || !json.contains("pid") ||
-            (!json["pid"].is_number_integer() &&
-             !json["pid"].is_number_unsigned())) {
+            !json["pid"].is_number_integer() || json["pid"] <= 0) {
             return std::unexpected(make_error(ErrorCode::ProtocolFailure,
                                               "invalid core/pid response"));
         }
-        std::uint64_t remote_pid = 0;
-        if (json["pid"].is_number_integer()) {
-            const auto signed_pid = json["pid"].get<std::int64_t>();
-            if (signed_pid <= 0) {
-                return std::unexpected(make_error(ErrorCode::ProtocolFailure,
-                                                  "invalid core/pid response"));
-            }
-            remote_pid = static_cast<std::uint64_t>(signed_pid);
-        } else {
-            remote_pid = json["pid"].get<std::uint64_t>();
-            if (remote_pid == 0) {
-                return std::unexpected(make_error(ErrorCode::ProtocolFailure,
-                                                  "invalid core/pid response"));
-            }
-        }
-        if (remote_pid != static_cast<std::uint64_t>(child_pid)) {
+        if (json["pid"] != child_pid) {
             return std::unexpected(
                 make_error(ErrorCode::ProtocolFailure,
                            "RC PID does not match started process"));
@@ -305,23 +219,14 @@ std::expected<void, Error> validate_rc_handshake(State& state, int child_pid) {
 std::expected<void, Error> wait_for_rc_readiness(State& state, int child_pid) {
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds{5};
-    const auto first_attempt = platform::perf_trace::begin();
-    bool first_attempt_finished = false;
     while (std::chrono::steady_clock::now() < deadline) {
         if (drain_finished(state)) {
             return std::unexpected(
                 make_error(ErrorCode::ProcessFailure,
                            "rclone process drain finished during startup"));
         }
-        platform::perf_trace::count("RC readiness attempts");
         const auto handshake = validate_rc_handshake(state, child_pid);
-        if (!first_attempt_finished) {
-            platform::perf_trace::finish("RC readiness first attempt",
-                                         first_attempt);
-            first_attempt_finished = true;
-        }
         if (handshake) {
-            platform::perf_trace::count("RC readiness successful attempts");
             return {};
         }
         if (handshake.error().code == ErrorCode::PermissionDenied ||
@@ -329,7 +234,6 @@ std::expected<void, Error> wait_for_rc_readiness(State& state, int child_pid) {
             handshake.error().code == ErrorCode::Cancelled) {
             return std::unexpected(handshake.error());
         }
-        platform::perf_trace::count("RC readiness retries");
         std::this_thread::sleep_for(std::chrono::milliseconds(75));
     }
     return std::unexpected(make_error(
@@ -344,14 +248,9 @@ post_rc(State& state,
         std::string_view request_body,
         std::size_t response_limit,
         std::chrono::milliseconds read_timeout) {
-    const auto trace = platform::perf_trace::begin();
     const auto started = std::chrono::steady_clock::now();
     auto result = post_rc_impl(
         state, endpoint, request_body, response_limit, read_timeout, 1, 1);
-    if (trace.active) {
-        platform::perf_trace::finish(std::string{"rc/"} + std::string{endpoint},
-                                     trace);
-    }
     if (!result) {
         return std::unexpected(with_request_context(
             state, std::move(result.error()), endpoint, started, 1, 1));
@@ -365,37 +264,26 @@ post_rc_read_only(State& state,
                   std::string_view request_body,
                   std::size_t response_limit,
                   std::chrono::milliseconds deadline) {
-    const auto trace = platform::perf_trace::begin();
     const auto started = std::chrono::steady_clock::now();
-    const auto finish = [&] {
-        if (trace.active) {
-            platform::perf_trace::finish(
-                std::string{"rc/"} + std::string{endpoint}, trace);
-        }
-    };
     const auto expires_at = std::chrono::steady_clock::now() + deadline;
     Error last_error;
     for (int attempt = 0; attempt < maximum_read_attempts; ++attempt) {
+        const auto contextualize = [&](Error err) {
+            return with_request_context(state,
+                                        std::move(err),
+                                        endpoint,
+                                        started,
+                                        attempt + 1,
+                                        maximum_read_attempts);
+        };
         if (platform::cancellation::requested()) {
-            finish();
-            return std::unexpected(with_request_context(
-                state,
-                make_error(ErrorCode::Cancelled, "operation cancelled by user"),
-                endpoint,
-                started,
-                attempt + 1,
-                maximum_read_attempts));
+            return std::unexpected(contextualize(make_error(
+                ErrorCode::Cancelled, "operation cancelled by user")));
         }
         const auto now = std::chrono::steady_clock::now();
         if (now >= expires_at) {
-            finish();
-            return std::unexpected(with_request_context(
-                state,
-                make_error(ErrorCode::Timeout, "RC read deadline exceeded"),
-                endpoint,
-                started,
-                attempt + 1,
-                maximum_read_attempts));
+            return std::unexpected(contextualize(
+                make_error(ErrorCode::Timeout, "RC read deadline exceeded")));
         }
         const auto remaining =
             std::max(std::chrono::milliseconds{1},
@@ -409,16 +297,9 @@ post_rc_read_only(State& state,
                                    attempt + 1,
                                    maximum_read_attempts);
         if (!result) {
-            result =
-                std::unexpected(with_request_context(state,
-                                                     std::move(result.error()),
-                                                     endpoint,
-                                                     started,
-                                                     attempt + 1,
-                                                     maximum_read_attempts));
+            result = std::unexpected(contextualize(std::move(result.error())));
         }
         if (result || !transient_read_failure(result.error())) {
-            finish();
             return result;
         }
         last_error = std::move(result.error());
@@ -427,19 +308,11 @@ post_rc_read_only(State& state,
         }
         const auto retry_at = std::chrono::steady_clock::now();
         if (retry_at + read_retry_delay >= expires_at) {
-            finish();
-            return std::unexpected(with_request_context(
-                state,
-                make_error(ErrorCode::Timeout, "RC read deadline exceeded"),
-                endpoint,
-                started,
-                attempt + 1,
-                maximum_read_attempts));
+            return std::unexpected(contextualize(
+                make_error(ErrorCode::Timeout, "RC read deadline exceeded")));
         }
-        platform::perf_trace::count("RC idempotent read retries");
         std::this_thread::sleep_for(read_retry_delay);
     }
-    finish();
     return std::unexpected(std::move(last_error));
 }
 
@@ -460,7 +333,7 @@ bool request_core_quit_best_effort(State& state) noexcept {
     bool acknowledged = false;
     try {
         acknowledged = post_rc(state,
-                               endpoint(RcMethod::CoreQuit),
+                               "core/quit",
                                "{}",
                                maximum_response_size,
                                default_read_timeout)

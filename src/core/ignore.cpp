@@ -1,10 +1,11 @@
 #include "core/ignore.hpp"
 
+#include "core/hasher.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <fstream>
-#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -89,14 +90,9 @@ bool generated_internal_name(std::string_view name) noexcept {
 
     constexpr std::size_t transaction_id_size = 32;
     if (suffix.size() <= transaction_id_size + 1 ||
-        suffix[transaction_id_size] != '-') {
+        suffix[transaction_id_size] != '-' ||
+        !is_lowercase_hex(suffix.substr(0, transaction_id_size))) {
         return false;
-    }
-    for (const char character : suffix.substr(0, transaction_id_size)) {
-        if (!((character >= '0' && character <= '9') ||
-              (character >= 'a' && character <= 'f'))) {
-            return false;
-        }
     }
     const auto index = suffix.substr(transaction_id_size + 1);
     return std::ranges::all_of(index, [](char character) {
@@ -104,97 +100,58 @@ bool generated_internal_name(std::string_view name) noexcept {
     });
 }
 
-struct PathSlice {
-    std::string_view text;
-    bool is_directory = false;
-};
-
-inline bool slice_matches(const IgnoreRule& rule, const PathSlice& slice) {
-    if (rule.directory_only && !slice.is_directory) {
+bool slice_matches(const IgnoreRule& rule,
+                   std::string_view text,
+                   bool is_directory) {
+    if (rule.directory_only && !is_directory) {
         return false;
     }
     if (rule.pattern.find('/') == std::string::npos &&
         rule.pattern.find("**") == std::string::npos &&
-        slice.text.find('/') != std::string_view::npos) {
+        text.find('/') != std::string_view::npos) {
         return false;
     }
     const auto first_star = rule.pattern.find('*');
     const auto first_qmark = rule.pattern.find('?');
-    // Fast path: literal pattern without wildcards
     if (first_star == std::string::npos && first_qmark == std::string::npos) {
-        return slice.text == rule.pattern;
+        return text == rule.pattern;
     }
-    // Fast path: *.extension pattern (starts with '*', no other wildcards)
     if (first_star == 0 && first_qmark == std::string::npos &&
         rule.pattern.find('*', 1) == std::string::npos) {
         const std::string_view suffix =
             std::string_view(rule.pattern).substr(1);
-        return slice.text.size() >= suffix.size() &&
-               slice.text.ends_with(suffix);
+        return text.size() >= suffix.size() && text.ends_with(suffix);
     }
-    return glob_matches(rule.pattern, slice.text);
-}
-
-// Fallback algorithm for patterns with unanchored '**' and no '/'
-bool fallback_rule_matches(const IgnoreRule& rule,
-                           std::string_view path,
-                           bool is_directory) {
-    for (std::size_t start = 0; start <= path.size();) {
-        if (start == 0 ||
-            (!rule.anchored && rule.pattern.find('/') == std::string::npos)) {
-            for (std::size_t end = start;; ++end) {
-                const auto slash = path.find('/', end);
-                end = slash == std::string_view::npos ? path.size() : slash;
-                const bool directory = end < path.size() || is_directory;
-                if ((!rule.directory_only || directory) &&
-                    glob_matches(rule.pattern,
-                                 path.substr(start, end - start))) {
-                    return true;
-                }
-                if (slash == std::string_view::npos)
-                    break;
-            }
-        }
-        const auto slash = path.find('/', start);
-        if (slash == std::string_view::npos)
-            break;
-        start = slash + 1;
-    }
-    return false;
+    return glob_matches(rule.pattern, text);
 }
 
 bool rule_matches(const IgnoreRule& rule,
                   std::string_view path,
-                  bool is_directory,
-                  std::span<const PathSlice> prefixes,
-                  std::span<const PathSlice> components) {
-    const bool has_slash = rule.pattern.find('/') != std::string::npos;
-
-    // Case 1: Anchored rule OR pattern contains '/'
-    // Only prefixes (start == 0) can ever match.
-    if (rule.anchored || has_slash) {
-        for (const auto& prefix : prefixes) {
-            if (slice_matches(rule, prefix)) {
+                  bool is_directory) {
+    const bool prefix_only =
+        rule.anchored || rule.pattern.find('/') != std::string_view::npos;
+    const bool component_only =
+        !prefix_only && rule.pattern.find("**") == std::string::npos;
+    for (std::size_t start = 0; start <= path.size();) {
+        const auto first_slash = path.find('/', start);
+        for (std::size_t end = start;; ++end) {
+            const auto slash = path.find('/', end);
+            end = slash == std::string_view::npos ? path.size() : slash;
+            if (slice_matches(rule,
+                              path.substr(start, end - start),
+                              end < path.size() || is_directory)) {
                 return true;
             }
-        }
-        return false;
-    }
-
-    // Case 2: Not anchored, pattern has no '/'
-    // If pattern has no '**', it can never match any string containing '/'!
-    // Therefore only single components can match.
-    if (rule.pattern.find("**") == std::string::npos) {
-        for (const auto& comp : components) {
-            if (slice_matches(rule, comp)) {
-                return true;
+            if (component_only || slash == std::string_view::npos) {
+                break;
             }
         }
-        return false;
+        if (prefix_only || first_slash == std::string_view::npos) {
+            break;
+        }
+        start = first_slash + 1;
     }
-
-    // Case 3: Not anchored, no '/', but contains '**'
-    return fallback_rule_matches(rule, path, is_directory);
+    return false;
 }
 
 void parse_rule_line(std::string line,
@@ -244,8 +201,8 @@ void parse_rule_line(std::string line,
             return;
         }
         if (line.starts_with('!')) {
-            result.parse_error = IgnoreParseError{
-                line_number, "(?d)!pattern is not supported"};
+            result.parse_error =
+                IgnoreParseError{line_number, "(?d)!pattern is not supported"};
             return;
         }
         if (line.starts_with("(?")) {
@@ -293,62 +250,10 @@ void parse_rule_line(std::string line,
 const IgnoreRule* last_matching_rule(const IgnoreList& list,
                                      std::string_view path,
                                      bool is_directory) {
-    // Stack-allocated buffers for zero heap allocation for paths with depth <=
-    // 32
-    std::array<PathSlice, 32> stack_prefixes{};
-    std::array<PathSlice, 32> stack_components{};
-    std::vector<PathSlice> heap_prefixes;
-    std::vector<PathSlice> heap_components;
-
-    std::span<const PathSlice> prefixes;
-    std::span<const PathSlice> components;
-
-    std::size_t count = 0;
-    std::size_t start = 0;
-    while (start <= path.size() && count < stack_prefixes.size()) {
-        const auto slash = path.find('/', start);
-        const auto end =
-            (slash == std::string_view::npos) ? path.size() : slash;
-        const bool comp_is_dir = (end < path.size()) || is_directory;
-
-        stack_components[count] = {path.substr(start, end - start),
-                                   comp_is_dir};
-        stack_prefixes[count] = {path.substr(0, end), comp_is_dir};
-        ++count;
-
-        if (slash == std::string_view::npos)
-            break;
-        start = slash + 1;
-    }
-
-    if (start <= path.size() && count == stack_prefixes.size()) {
-        // Fallback for paths deeper than 32 components
-        heap_components.assign(stack_components.begin(),
-                               stack_components.end());
-        heap_prefixes.assign(stack_prefixes.begin(), stack_prefixes.end());
-        while (start <= path.size()) {
-            const auto slash = path.find('/', start);
-            const auto end =
-                (slash == std::string_view::npos) ? path.size() : slash;
-            const bool comp_is_dir = (end < path.size()) || is_directory;
-            heap_components.push_back(
-                {path.substr(start, end - start), comp_is_dir});
-            heap_prefixes.push_back({path.substr(0, end), comp_is_dir});
-            if (slash == std::string_view::npos)
-                break;
-            start = slash + 1;
-        }
-        prefixes = heap_prefixes;
-        components = heap_components;
-    } else {
-        prefixes = std::span<const PathSlice>(stack_prefixes.data(), count);
-        components = std::span<const PathSlice>(stack_components.data(), count);
-    }
-
     // Evaluating rules in reverse order: the first matching rule is the
     // last applicable rule in forward order and dictates the final result.
     for (auto it = list.rules.rbegin(); it != list.rules.rend(); ++it) {
-        if (rule_matches(*it, path, is_directory, prefixes, components)) {
+        if (rule_matches(*it, path, is_directory)) {
             return &*it;
         }
     }
@@ -373,20 +278,13 @@ bool is_kasumiignore_path(std::string_view path) {
     const auto slash = path.find_last_of("/\\");
     const auto name =
         slash == std::string_view::npos ? path : path.substr(slash + 1);
-    constexpr std::string_view expected = ".kasumiignore";
-    if (name.size() != expected.size()) {
-        return false;
-    }
-    for (std::size_t index = 0; index < name.size(); ++index) {
-        auto character = name[index];
-        if (character >= 'A' && character <= 'Z') {
-            character = static_cast<char>(character - 'A' + 'a');
-        }
-        if (character != expected[index]) {
-            return false;
-        }
-    }
-    return true;
+    return std::ranges::equal(
+        name, std::string_view{".kasumiignore"}, [](char a, char b) {
+            if (a >= 'A' && a <= 'Z') {
+                a = static_cast<char>(a - 'A' + 'a');
+            }
+            return a == b;
+        });
 }
 
 IgnoreList parse_ignore_rules(std::string_view content) {
@@ -414,11 +312,21 @@ IgnoreList parse_ignore_rules(std::string_view content) {
 IgnoreList load_ignore_list(const std::filesystem::path& file_path) {
     IgnoreList result;
     std::error_code error;
-    if (!std::filesystem::exists(file_path, error)) {
-        if (error) {
-            result.parse_error = IgnoreParseError{
-                0, "could not inspect ignore file: " + error.message()};
-        }
+    const auto status = std::filesystem::symlink_status(file_path, error);
+    if (error == std::errc::no_such_file_or_directory ||
+        error == std::errc::not_a_directory ||
+        (!error && status.type() == std::filesystem::file_type::not_found)) {
+        return result;
+    }
+    if (error) {
+        result.parse_error = IgnoreParseError{
+            0, "could not inspect ignore file: " + error.message()};
+        return result;
+    }
+    if (std::filesystem::is_symlink(status) ||
+        !std::filesystem::is_regular_file(status)) {
+        result.parse_error = IgnoreParseError{
+            0, "ignore file must be a regular non-symlink file"};
         return result;
     }
     std::ifstream input(file_path);
@@ -437,8 +345,8 @@ IgnoreList load_ignore_list(const std::filesystem::path& file_path) {
     }
     if (input.bad()) {
         result.rules.clear();
-        result.parse_error = IgnoreParseError{
-            line_number + 1, "could not read ignore file"};
+        result.parse_error =
+            IgnoreParseError{line_number + 1, "could not read ignore file"};
     }
     return result;
 }

@@ -11,11 +11,15 @@
 #include "cli/wizard.hpp"
 #include "platform/cancellation.hpp"
 
+#include <array>
 #include <chrono>
 #include <csignal>
 #include <print>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
+#include <variant>
 #include <vector>
 #ifndef _WIN32
 #include <signal.h>
@@ -72,11 +76,10 @@ int run(int argc, char* argv[]) {
     const int effective_argc = static_cast<int>(sanitized_ptrs.size());
     char** effective_argv = sanitized_ptrs.data();
     if (invalid_options) {
-        i18n::init_language(argc, argv);
         return present_parse_error(help_topic(effective_argc, effective_argv));
     }
 
-    const bool no_args = argc == 1;
+    const bool no_args = effective_argc == 1;
     const bool is_version =
         effective_argc == 2 && effective_argv != nullptr &&
         effective_argv[1] != nullptr &&
@@ -117,7 +120,7 @@ int run(int argc, char* argv[]) {
 #else
     if (std::holds_alternative<ConfigureInvocation>(*parse_result)) {
         // The wizard's blocking stdin read must not restart after SIGINT.
-        struct sigaction action {};
+        struct sigaction action{};
         action.sa_handler = request_cancellation;
         sigemptyset(&action.sa_mask);
         action.sa_flags = 0;
@@ -143,20 +146,11 @@ int run(int argc, char* argv[]) {
     }
     if (std::holds_alternative<application::InspectionRequest>(*parse_result)) {
         auto request = std::get<application::InspectionRequest>(*parse_result);
-        const auto run_remote = [&](application::Credentials credentials) {
-            application::InspectionInput input{
-                .request = request,
-                .credentials = std::move(credentials),
-                .environment = environment,
-            };
-            return request.operation ==
-                           application::InspectionOperation::RemoteGet
-                       ? application::read_remote_file(std::move(input))
-                       : application::inspect(std::move(input));
-        };
-        auto initial_credentials = credentials::from_environment();
-        auto result = run_remote(std::move(initial_credentials));
-        application::wipe_credentials(initial_credentials);
+        auto result = application::inspect({
+            .request = request,
+            .credentials = credentials::from_environment(),
+            .environment = environment,
+        });
 
         if (platform::cancellation::requested()) {
             return finish(
@@ -170,79 +164,62 @@ int run(int argc, char* argv[]) {
     }
 
     auto request = std::get<application::Request>(*parse_result);
-    if (request.operation == application::Operation::RemoveWriter) {
-        std::println("{} {}",
-                     i18n::tr(i18n::Key::LabelWarning),
-                     i18n::tr(i18n::Key::ManualWriterRemovalWarning));
+    if (request.operation == application::Operation::RemoveWriter ||
+        request.operation == application::Operation::RemoveBarrier) {
+        std::println(
+            "{} {}",
+            i18n::tr(i18n::Key::LabelWarning),
+            i18n::tr(request.operation == application::Operation::RemoveWriter
+                         ? i18n::Key::ManualWriterRemovalWarning
+                         : i18n::Key::ManualBarrierRemovalWarning));
     }
-    if (request.operation == application::Operation::RemoveBarrier) {
-        std::println("{} {}",
-                     i18n::tr(i18n::Key::LabelWarning),
-                     i18n::tr(i18n::Key::ManualBarrierRemovalWarning));
-    }
-    auto initial_credentials = credentials::from_environment();
 
     application::ProgressCallback on_progress{};
     FsckProgressDisplayState fsck_display_state;
     GarbageCollectProgressDisplayState gc_display_state;
-    if (request.operation == application::Operation::Sync) {
-        std::println(
-            "{}", i18n::format(i18n::Key::SyncStarting, request.profile_name));
-        on_progress = [](const application::ExecutionProgress& progress) {
-            if (const auto* sync =
-                    std::get_if<application::SyncProgress>(&progress)) {
-                present(*sync, application::Operation::Sync);
-            }
-        };
-    } else if (request.operation == application::Operation::Preview) {
-        std::println(
-            "{}",
-            i18n::format(i18n::Key::PreviewStarting, request.profile_name));
-        on_progress = [](const application::ExecutionProgress& progress) {
-            if (const auto* sync =
-                    std::get_if<application::SyncProgress>(&progress)) {
-                present(*sync, application::Operation::Preview);
-            }
-        };
-    } else if (request.operation == application::Operation::Status) {
-        std::println(
-            "{}",
-            i18n::format(i18n::Key::StatusStarting, request.profile_name));
-        on_progress = [](const application::ExecutionProgress& progress) {
-            if (const auto* sync =
-                    std::get_if<application::SyncProgress>(&progress)) {
-                present(*sync, application::Operation::Status);
-            }
-        };
-    } else if (request.operation == application::Operation::Fsck) {
-        std::println(
-            "{}", i18n::format(i18n::Key::FsckStarting, request.profile_name));
-        on_progress = [&fsck_display_state](
+    constexpr std::array<std::pair<application::Operation, i18n::Key>, 5>
+        starting_keys{{
+            {application::Operation::Sync, i18n::Key::SyncStarting},
+            {application::Operation::Preview, i18n::Key::PreviewStarting},
+            {application::Operation::Status, i18n::Key::StatusStarting},
+            {application::Operation::Fsck, i18n::Key::FsckStarting},
+            {application::Operation::GarbageCollect, i18n::Key::GcStarting},
+        }};
+    for (const auto& [op, key] : starting_keys) {
+        if (op != request.operation) {
+            continue;
+        }
+        std::println("{}", i18n::format(key, request.profile_name));
+        on_progress = [operation = request.operation,
+                       &fsck_display_state,
+                       &gc_display_state](
                           const application::ExecutionProgress& progress) {
-            if (const auto* fsck =
-                    std::get_if<application::FsckProgress>(&progress)) {
-                present(*fsck, fsck_display_state);
-            }
+            std::visit(
+                [&](const auto& event) {
+                    using T = std::decay_t<decltype(event)>;
+                    if constexpr (std::is_same_v<T,
+                                                 application::SyncProgress>) {
+                        present(event, operation);
+                    } else if constexpr (std::is_same_v<
+                                             T,
+                                             application::FsckProgress>) {
+                        present(event, fsck_display_state);
+                    } else if constexpr (
+                        std::is_same_v<T,
+                                       application::GarbageCollectProgress>) {
+                        present(event, gc_display_state);
+                    }
+                },
+                progress);
         };
-    } else if (request.operation == application::Operation::GarbageCollect) {
-        std::println("{}",
-                     i18n::format(i18n::Key::GcStarting, request.profile_name));
-        on_progress = [&gc_display_state](
-                          const application::ExecutionProgress& progress) {
-            if (const auto* gc =
-                    std::get_if<application::GarbageCollectProgress>(
-                        &progress)) {
-                present(*gc, gc_display_state);
-            }
-        };
+        break;
     }
 
     auto result =
         application::execute({.request = request,
-                              .credentials = std::move(initial_credentials),
+                              .credentials = credentials::from_environment(),
                               .environment = environment,
                               .on_progress = std::move(on_progress)});
-    application::wipe_credentials(initial_credentials);
 
     if (platform::cancellation::requested()) {
         return finish(present_cancellation(request.operation));

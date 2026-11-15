@@ -1,496 +1,29 @@
 #include "cli/i18n.hpp"
 
-#include "application/environment.hpp"
 #include "cli/i18n_embedded.hpp"
 
-#include <array>
 #include <cctype>
 #include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 namespace kasumi::cli::i18n {
-
 namespace {
 
-constexpr std::size_t KEY_COUNT =
-    static_cast<std::size_t>(Key::WizardConfigReadFailed) + 1;
-
-struct KeyMapping {
-    Key key;
-    const char* path;
-};
-
-constexpr KeyMapping KEY_MAPPINGS[] = {
-    {Key::LabelError, "labels.error"},
-    {Key::LabelWarning, "labels.warning"},
-    {Key::LabelOk, "labels.ok"},
-    {Key::LabelYes, "labels.yes"},
-    {Key::LabelNo, "labels.no"},
-    {Key::LabelAncestralMarker, "labels.ancestral_marker"},
-    {Key::LabelAncestral, "labels.ancestral"},
-    {Key::LabelStage, "labels.stage"},
-    {Key::LabelMutationState, "labels.mutation_state"},
-    {Key::LabelTransportError, "labels.transport_error"},
-    {Key::OperationDuration, "labels.duration"},
-    {Key::ResolveMissingSingular, "resolve_missing.singular"},
-    {Key::ResolveMissingPlural, "resolve_missing.plural"},
-    {Key::ResolveMissingNone, "resolve_missing.none"},
-
-    {Key::HelpText, "help_text"},
-    {Key::HelpSync, "command_help.sync"},
-    {Key::HelpStatus, "command_help.status"},
-    {Key::HelpFsck, "command_help.fsck"},
-    {Key::HelpGc, "command_help.gc"},
-    {Key::HelpGcRemoveWriter, "command_help.gc_remove-writer"},
-    {Key::HelpGcRemoveBarrier, "command_help.gc_remove-barrier"},
-    {Key::HelpResolveMissing, "command_help.resolve-missing"},
-    {Key::HelpRemote, "command_help.remote"},
-    {Key::HelpConfig, "command_help.config"},
-    {Key::HelpUpdate, "command_help.update"},
-    {Key::HelpRemoteHeads, "command_help.remote_heads"},
-    {Key::HelpRemoteTree, "command_help.remote_tree"},
-    {Key::HelpRemoteCommits, "command_help.remote_commits"},
-    {Key::HelpRemoteSummary, "command_help.remote_summary"},
-    {Key::HelpRemoteStat, "command_help.remote_stat"},
-    {Key::HelpRemoteCommit, "command_help.remote_commit"},
-    {Key::HelpRemoteGet, "command_help.remote_get"},
-    {Key::HelpRemoteEpochs, "command_help.remote_epochs"},
-    {Key::HelpRemoteEpoch, "command_help.remote_epoch"},
-    {Key::HelpRemoteContents, "command_help.remote_contents"},
-    {Key::HelpRemoteContent, "command_help.remote_content"},
-    {Key::HelpRemoteMarkers, "command_help.remote_markers"},
-    {Key::HelpRemoteObjects, "command_help.remote_objects"},
-    {Key::HelpRemoteOrphans, "command_help.remote_orphans"},
-    {Key::HelpRemoteWriters, "command_help.remote_writers"},
-    {Key::HelpRemoteHealth, "command_help.remote_health"},
-    {Key::HelpOptions, "command_help.options"},
-    {Key::ErrorInvalidArguments, "errors.invalid_arguments"},
-    {Key::VersionText, "version_text"},
-    {Key::UpdateChecking, "update.checking"},
-    {Key::UpdateCurrentVersion, "update.current_version"},
-    {Key::UpdateLatestVersion, "update.latest_version"},
-    {Key::UpdateDownloading, "update.downloading"},
-    {Key::UpdateVerifying, "update.verifying"},
-    {Key::UpdateInstalling, "update.installing"},
-    {Key::UpdateHandoffStarted, "update.handoff_started"},
-    {Key::UpdateAlreadyCurrent, "update.already_current"},
-    {Key::UpdateCompleted, "update.completed"},
-    {Key::UpdateAdminRequired, "update.admin_required"},
-    {Key::UpdateRequestPermission, "update.request_permission"},
-    {Key::UpdateElevationUnavailable, "update.elevation_unavailable"},
-    {Key::UpdateManagedInstallation, "update.managed_installation"},
-    {Key::UpdateFailed, "update.failed"},
-
-    {Key::SyncInProgress, "sync.in_progress"},
-    {Key::SyncStarting, "sync.starting"},
-    {Key::SyncStageObserving, "sync.stage_observing"},
-    {Key::SyncStageCalculating, "sync.stage_calculating"},
-    {Key::SyncEverythingInSync, "sync.everything_in_sync"},
-    {Key::SyncChangesSingular, "sync.changes_singular"},
-    {Key::SyncChangesPlural, "sync.changes_plural"},
-    {Key::SyncCreatedDirSingular, "sync.created_dir_singular"},
-    {Key::SyncCreatedDirPlural, "sync.created_dir_plural"},
-    {Key::SyncRemovedDirSingular, "sync.removed_dir_singular"},
-    {Key::SyncRemovedDirPlural, "sync.removed_dir_plural"},
-    {Key::SyncStageApplying, "sync.stage_applying"},
-    {Key::SyncStagePublishing, "sync.stage_publishing"},
-    {Key::SyncStageFinalizing, "sync.stage_finalizing"},
-    {Key::SyncCompleted, "sync.completed"},
-    {Key::SyncNothingToDo, "sync.nothing_to_do"},
-    {Key::SyncPlanHeader, "sync.plan_header"},
-    {Key::SyncPlanOmittedSingular, "sync.plan_omitted_singular"},
-    {Key::SyncPlanOmittedPlural, "sync.plan_omitted_plural"},
-    {Key::SyncConflictsWarning, "sync.conflicts_warning"},
-    {Key::SyncConflictsStatusHint, "sync.conflicts_status_hint"},
-    {Key::SyncSummaryHeader, "sync.summary_header"},
-    {Key::SyncEstimatedTraffic, "sync.estimated_traffic"},
-    {Key::SyncUpload, "sync.upload"},
-    {Key::SyncDownload, "sync.download"},
-    {Key::SyncCompletedWithDuration, "sync.completed_with_duration"},
-    {Key::SyncTrustedContentWarning, "sync.trusted_content_warning"},
-    {Key::SyncPartialHeader, "sync.partial_header"},
-    {Key::SyncPendingSingular, "sync.pending_singular"},
-    {Key::SyncPendingPlural, "sync.pending_plural"},
-    {Key::SyncPendingLabel, "sync.pending_label"},
-    {Key::SyncPendingOmittedSingular, "sync.pending_omitted_singular"},
-    {Key::SyncPendingOmittedPlural, "sync.pending_omitted_plural"},
-    {Key::SyncCancelledByUser, "sync.cancelled_by_user"},
-    {Key::OperationCancelledByUser, "sync.operation_cancelled_by_user"},
-    {Key::SyncErrorObserving, "sync.error_observing"},
-    {Key::SyncErrorCalculating, "sync.error_calculating"},
-    {Key::SyncErrorApplying, "sync.error_applying"},
-    {Key::SyncErrorPublishing, "sync.error_publishing"},
-    {Key::SyncErrorFinalizing, "sync.error_finalizing"},
-    {Key::SyncErrorReason, "sync.error_reason"},
-    {Key::SyncInventoryAuditHeader, "sync.inventory_audit_header"},
-    {Key::SyncInventoryAuditSummary, "sync.inventory_audit_summary"},
-    {Key::PreviewCompleted, "sync.preview_completed"},
-    {Key::PlanStageObserving, "sync.plan_stage_observing"},
-    {Key::PlanStageCalculating, "sync.plan_stage_calculating"},
-    {Key::PreviewStarting, "sync.preview_starting"},
-    {Key::StatusStarting, "sync.status_starting"},
-    {Key::FsckStarting, "fsck.starting"},
-    {Key::FsckStagePreparing, "fsck.stage_preparing"},
-    {Key::FsckStageObserving, "fsck.stage_observing"},
-    {Key::FsckStageAnalyzing, "fsck.stage_analyzing"},
-    {Key::FsckStageAuditingContent, "fsck.stage_auditing_content"},
-    {Key::FsckStageFinalizing, "fsck.stage_finalizing"},
-    {Key::FsckNoContent, "fsck.no_content"},
-    {Key::FsckProgressObject, "fsck.progress_object"},
-    {Key::FsckProgressObjects, "fsck.progress_objects"},
-    {Key::FsckProgressBytes, "fsck.progress_bytes"},
-    {Key::FsckProgressBytesPercent, "fsck.progress_bytes_percent"},
-    {Key::FsckSummarySingular, "fsck.summary_singular"},
-    {Key::FsckSummaryPlural, "fsck.summary_plural"},
-    {Key::FsckSummaryBytes, "fsck.summary_bytes"},
-    {Key::GcStarting, "gc.starting"},
-    {Key::GcStagePreparing, "gc.stage_preparing"},
-    {Key::GcStageAnalyzing, "gc.stage_analyzing"},
-    {Key::GcCandidatesNone, "gc.candidates_none"},
-    {Key::GcCandidatesSingular, "gc.candidates_singular"},
-    {Key::GcCandidatesPlural, "gc.candidates_plural"},
-    {Key::GcStageApplying, "gc.stage_applying"},
-    {Key::GcStageFinalizing, "gc.stage_finalizing"},
-    {Key::GcCompleted, "gc.completed"},
-    {Key::GcSummary, "gc.summary"},
-    {Key::ManualWriterRemovalWarning, "manual_writer_removal.warning"},
-    {Key::ManualWriterRemovalCompleted, "manual_writer_removal.completed"},
-    {Key::ManualBarrierRemovalWarning, "manual_barrier_removal.warning"},
-    {Key::ManualBarrierRemovalCompleted, "manual_barrier_removal.completed"},
-    {Key::ManualBarrierRemovalAbsent, "manual_barrier_removal.absent"},
-    {Key::ManualBarrierRemovalWritersRemain,
-     "manual_barrier_removal.writers_remain"},
-    {Key::BarrierRemovalStageCheckingPresence,
-     "manual_barrier_removal.stage_checking_presence"},
-    {Key::BarrierRemovalStageDownloadingPayload,
-     "manual_barrier_removal.stage_downloading_payload"},
-    {Key::BarrierRemovalStageValidatingPayload,
-     "manual_barrier_removal.stage_validating_payload"},
-    {Key::BarrierRemovalStageCheckingWriters,
-     "manual_barrier_removal.stage_checking_writers"},
-    {Key::BarrierRemovalStageVerifyingPhysicalIdentity,
-     "manual_barrier_removal.stage_verifying_physical_identity"},
-    {Key::BarrierRemovalStageRemoving, "manual_barrier_removal.stage_removing"},
-    {Key::BarrierRemovalStageConfirmingAbsence,
-     "manual_barrier_removal.stage_confirming_absence"},
-    {Key::BarrierRemovalMutationNotAttempted,
-     "manual_barrier_removal.mutation_not_attempted"},
-    {Key::BarrierRemovalMutationConfirmed,
-     "manual_barrier_removal.mutation_confirmed"},
-    {Key::BarrierRemovalMutationUncertain,
-     "manual_barrier_removal.mutation_uncertain"},
-    {Key::GcWarningHeaderSingular, "gc.warning_header_singular"},
-    {Key::GcWarningHeaderPlural, "gc.warning_header_plural"},
-    {Key::GcWarningDetail1, "gc.warning_detail1"},
-    {Key::GcWarningDetail2, "gc.warning_detail2"},
-
-    {Key::ErrorPlanCalculation, "errors.plan_calculation"},
-    {Key::ErrorFsckFailed, "errors.fsck_failed"},
-    {Key::ErrorFsckClean, "errors.fsck_clean"},
-    {Key::ErrorFsckAuditing, "errors.fsck_auditing"},
-    {Key::ErrorGcCancelled, "errors.gc_cancelled"},
-    {Key::ErrorWriterRemovalFailed, "errors.writer_removal_failed"},
-    {Key::ErrorBarrierRemovalFailed, "errors.barrier_removal_failed"},
-    {Key::ErrorSyncFailed, "errors.sync_failed"},
-    {Key::ErrorInventoryAuditFailed, "errors.inventory_audit_failed"},
-    {Key::ErrorInventoryAuditSyncCompleted,
-     "errors.inventory_audit_sync_completed"},
-    {Key::ErrorInventoryAuditPublished, "errors.inventory_audit_published"},
-    {Key::ErrorSyncAuditCombination, "errors.sync_audit_combination"},
-    {Key::ErrorInconsistentInspection, "errors.inconsistent_inspection"},
-    {Key::ErrorAvailableHeads, "errors.available_heads"},
-    {Key::ErrorUseRemoteTreeHead, "errors.use_remote_tree_head"},
-
-    {Key::RemoteHeadsNone, "remote.heads_none"},
-    {Key::RemoteHeadsHeader, "remote.heads_header"},
-    {Key::RemoteTreeNone, "remote.tree_none"},
-    {Key::RemoteTreeHead, "remote.tree_head"},
-    {Key::RemoteTreeHeight, "remote.tree_height"},
-    {Key::RemoteTreeFiles, "remote.tree_files"},
-    {Key::RemoteTreeDirectories, "remote.tree_directories"},
-    {Key::RemoteTreeSize, "remote.tree_size"},
-    {Key::RemoteCommitsNone, "remote.commits_none"},
-    {Key::RemoteCommitsHeader, "remote.commits_header"},
-    {Key::RemoteSummaryHeader, "remote.summary_header"},
-    {Key::RemoteSummaryHistoryPresent, "remote.summary_history_present"},
-    {Key::RemoteSummaryHistoryAbsent, "remote.summary_history_absent"},
-    {Key::RemoteStatHeader, "remote.stat_header"},
-    {Key::RemoteStatView, "remote.stat_view"},
-    {Key::RemoteStatDirectory, "remote.stat_directory"},
-    {Key::RemoteStatFile, "remote.stat_file"},
-    {Key::RemoteCommitHeader, "remote.commit_header"},
-    {Key::RemoteFileSavedHeader, "remote.file_saved_header"},
-    {Key::RemoteEpochsHeader, "remote.epochs_header"},
-    {Key::RemoteEpochNone, "remote.epoch_none"},
-    {Key::RemoteEpochDetailHeader, "remote.epoch_detail_header"},
-    {Key::RemoteContentsHeader, "remote.contents_header"},
-    {Key::RemoteContentsDeepAudit, "remote.contents_deep_audit"},
-    {Key::RemoteAuditHeader, "remote.audit_header"},
-    {Key::RemoteContentHeader, "remote.content_header"},
-    {Key::RemoteMarkersHeader, "remote.markers_header"},
-    {Key::RemoteObjectsHeader, "remote.objects_header"},
-    {Key::RemoteOrphansHeader, "remote.orphans_header"},
-    {Key::RemoteOrphansReadOnlyHint, "remote.orphans_read_only_hint"},
-    {Key::RemoteWritersHeader, "remote.writers_header"},
-    {Key::RemoteHealthHeader, "remote.health_header"},
-
-    {Key::FieldCommit, "fields.commit"},
-    {Key::FieldHeight, "fields.height"},
-    {Key::FieldCreatedAt, "fields.created_at"},
-    {Key::FieldParents, "fields.parents"},
-    {Key::FieldFiles, "fields.files"},
-    {Key::FieldDirectories, "fields.directories"},
-    {Key::FieldSize, "fields.size"},
-    {Key::FieldRoot, "fields.root"},
-    {Key::FieldEntries, "fields.entries"},
-    {Key::FieldLogicalHead, "fields.logical_head"},
-    {Key::FieldPhysicalMarker, "fields.physical_marker"},
-    {Key::FieldAncestralMarker, "fields.ancestral_marker"},
-    {Key::FieldPhysicalVariants, "fields.physical_variants"},
-    {Key::FieldCiphertext, "fields.ciphertext"},
-    {Key::FieldObject, "fields.object"},
-    {Key::FieldState, "fields.state"},
-    {Key::FieldPath, "fields.path"},
-    {Key::FieldDestination, "fields.destination"},
-    {Key::FieldLogicalHash, "fields.logical_hash"},
-    {Key::FieldSequence, "fields.sequence"},
-    {Key::FieldEpochId, "fields.epoch_id"},
-    {Key::FieldVaultId, "fields.vault_id"},
-    {Key::FieldIssuedAt, "fields.issued_at"},
-    {Key::FieldMinRetention, "fields.min_retention"},
-    {Key::FieldPreviousEpoch, "fields.previous_epoch"},
-    {Key::FieldNextEpoch, "fields.next_epoch"},
-    {Key::FieldAnchors, "fields.anchors"},
-    {Key::FieldType, "fields.type"},
-    {Key::FieldModifiedAt, "fields.modified_at"},
-    {Key::FieldHistory, "fields.history"},
-    {Key::FieldReachableCommits, "fields.reachable_commits"},
-    {Key::FieldLogicalHeads, "fields.logical_heads"},
-    {Key::FieldConflicts, "fields.conflicts"},
-    {Key::FieldMissingContents, "fields.missing_contents"},
-    {Key::FieldOrphanContents, "fields.orphan_contents"},
-    {Key::FieldActiveWriters, "fields.active_writers"},
-    {Key::FieldParentsCount, "fields.parents_count"},
-    {Key::FieldAnchorItem, "fields.anchor_item"},
-    {Key::FieldContentId, "fields.content_id"},
-    {Key::FieldReferenced, "fields.referenced"},
-    {Key::FieldPhysicallyPresent, "fields.physically_present"},
-    {Key::FieldCurrentTree, "fields.current_tree"},
-    {Key::FieldLogicalSize, "fields.logical_size"},
-    {Key::FieldPathsCount, "fields.paths_count"},
-    {Key::FieldPhysicalCount, "fields.physical_count"},
-    {Key::FieldMissingCount, "fields.missing_count"},
-    {Key::FieldOrphanCount, "fields.orphan_count"},
-    {Key::FieldValidCount, "fields.valid_count"},
-    {Key::FieldInvalidCount, "fields.invalid_count"},
-    {Key::FieldAncestralsCount, "fields.ancestrals_count"},
-    {Key::FieldUnknownOrInvalid, "fields.unknown_or_invalid"},
-    {Key::FieldIdentifier, "fields.identifier"},
-    {Key::FieldCategory, "fields.category"},
-    {Key::FieldStructure, "fields.structure"},
-    {Key::FieldStructureValid, "fields.structure_valid"},
-    {Key::FieldStructureInvalid, "fields.structure_invalid"},
-    {Key::FieldRelation, "fields.relation"},
-    {Key::FieldClassification, "fields.classification"},
-    {Key::FieldStructuralCandidate, "fields.structural_candidate"},
-    {Key::FieldBarrier, "fields.barrier"},
-    {Key::FieldPresent, "fields.present"},
-    {Key::FieldAbsent, "fields.absent"},
-    {Key::FieldMaintenanceBlocked, "fields.maintenance_blocked"},
-    {Key::FieldProtocolConsistent, "fields.protocol_consistent"},
-    {Key::FieldMarkers, "fields.markers"},
-    {Key::FieldWriters, "fields.writers"},
-    {Key::FieldUnknownObjects, "fields.unknown_objects"},
-    {Key::FieldUnreachableObjects, "fields.unreachable_objects"},
-    {Key::FieldInvalidContents, "fields.invalid_contents"},
-    {Key::FieldReasons, "fields.reasons"},
-
-    {Key::VariantValid, "variants.valid"},
-    {Key::VariantInvalidCiphertext, "variants.invalid_ciphertext"},
-    {Key::VariantInvalidCommit, "variants.invalid_commit"},
-    {Key::VariantInvalid, "variants.invalid"},
-
-    {Key::ContentStatePresent, "content_states.present"},
-    {Key::ContentStateMissing, "content_states.missing"},
-    {Key::ContentStateOrphan, "content_states.orphan"},
-    {Key::ContentStateValid, "content_states.valid"},
-    {Key::ContentStateInvalid, "content_states.invalid"},
-    {Key::ContentStateUnknown, "content_states.unknown"},
-
-    {Key::MarkerStateLogicalHead, "marker_states.logical_head"},
-    {Key::MarkerStateAncestral, "marker_states.ancestral"},
-    {Key::MarkerStateInvalidPath, "marker_states.invalid_path"},
-    {Key::MarkerStateMissing, "marker_states.missing"},
-    {Key::MarkerStateInvalidMarker, "marker_states.invalid_marker"},
-    {Key::MarkerStateMissingCommit, "marker_states.missing_commit"},
-    {Key::MarkerStateInvalidCiphertext, "marker_states.invalid_ciphertext"},
-    {Key::MarkerStateInvalidCommit, "marker_states.invalid_commit"},
-    {Key::MarkerStateInvalid, "marker_states.invalid"},
-
-    {Key::ObjectCategoryContent, "object_categories.content"},
-    {Key::ObjectCategoryCommitVariant, "object_categories.commit_variant"},
-    {Key::ObjectCategoryHeadMarker, "object_categories.head_marker"},
-    {Key::ObjectCategoryEpoch, "object_categories.epoch"},
-    {Key::ObjectCategoryWriter, "object_categories.writer"},
-    {Key::ObjectCategoryBarrier, "object_categories.barrier"},
-    {Key::ObjectCategoryProtocol, "object_categories.protocol"},
-    {Key::ObjectCategoryUnknown, "object_categories.unknown"},
-
-    {Key::OrphanKindCommit, "orphan_kinds.commit"},
-    {Key::OrphanKindCommitVariant, "orphan_kinds.commit_variant"},
-    {Key::OrphanKindRedundantVariant, "orphan_kinds.redundant_variant"},
-    {Key::OrphanKindInvalidVariant, "orphan_kinds.invalid_variant"},
-    {Key::OrphanKindContent, "orphan_kinds.content"},
-    {Key::OrphanKindProtectedEpoch, "orphan_kinds.protected_epoch"},
-    {Key::OrphanKindUnknown, "orphan_kinds.unknown"},
-
-    {Key::WriterStateInvalid, "writer_states.invalid"},
-    {Key::WriterStateIndeterminate, "writer_states.indeterminate"},
-
-    {Key::HealthStateHealthy, "health_states.healthy"},
-    {Key::HealthStateDegraded, "health_states.degraded"},
-    {Key::HealthStateCritical, "health_states.critical"},
-
-    {Key::PromptPassword, "prompts.password"},
-    {Key::PromptConfirmPassword, "prompts.confirm_password"},
-    {Key::PromptSalt, "prompts.salt"},
-    {Key::PromptConfirmSalt, "prompts.confirm_salt"},
-    {Key::PasswordsDoNotMatch, "prompts.passwords_do_not_match"},
-    {Key::SaltsDoNotMatch, "prompts.salts_do_not_match"},
-
-    {Key::WizardHeader, "wizard.header"},
-    {Key::WizardNoProfiles, "wizard.no_profiles"},
-    {Key::WizardProfileListEntry, "wizard.profile_list_entry"},
-    {Key::WizardMenu, "wizard.menu"},
-    {Key::WizardPromptProfileName, "wizard.prompt_profile_name"},
-    {Key::WizardProfileAlreadyExists, "wizard.profile_already_exists"},
-    {Key::WizardPromptLocalPath, "wizard.prompt_local_path"},
-    {Key::WizardPromptRemotePath, "wizard.prompt_remote_path"},
-    {Key::WizardLocalPathMustBeAbsolute, "wizard.local_path_must_be_absolute"},
-    {Key::WizardRemotePathMustBeAbsolute,
-     "wizard.remote_path_must_be_absolute"},
-    {Key::WizardProfileCreated, "wizard.profile_created"},
-    {Key::WizardProfileNotFound, "wizard.profile_not_found"},
-    {Key::WizardPromptProfileToDelete, "wizard.prompt_profile_to_delete"},
-    {Key::WizardProfileDeleted, "wizard.profile_deleted"},
-    {Key::WizardPromptProfileToEdit, "wizard.prompt_profile_to_edit"},
-    {Key::WizardPromptNewLocalPath, "wizard.prompt_new_local_path"},
-    {Key::WizardPromptNewRemotePath, "wizard.prompt_new_remote_path"},
-    {Key::WizardProfileEdited, "wizard.profile_edited"},
-    {Key::WizardPromptProfileToRename, "wizard.prompt_profile_to_rename"},
-    {Key::WizardPromptNewProfileName, "wizard.prompt_new_profile_name"},
-    {Key::WizardProfileRenamed, "wizard.profile_renamed"},
-    {Key::WizardPromptSourceProfile, "wizard.prompt_source_profile"},
-    {Key::WizardProfileCloned, "wizard.profile_cloned"},
-    {Key::WizardInvalidOption, "wizard.invalid_option"},
-    {Key::WizardConfigReadFailed, "wizard.config_read_failed"},
-};
-
 Language g_current_language = Language::English;
-std::string g_current_language_code = "en";
-std::array<std::string, KEY_COUNT> g_current_strings;
-bool g_initialized = false;
 
-void flatten_json(const nlohmann::json& j,
-                  const std::string& prefix,
-                  std::unordered_map<std::string, std::string>& out) {
-    if (j.is_object()) {
-        for (auto it = j.begin(); it != j.end(); ++it) {
-            std::string key =
-                prefix.empty() ? it.key() : prefix + "." + it.key();
-            flatten_json(it.value(), key, out);
-        }
-    } else if (j.is_string()) {
-        out[prefix] = j.get<std::string>();
+bool equals_ignore_case(std::string_view a, std::string_view b) noexcept {
+    if (a.size() != b.size()) {
+        return false;
     }
-}
-
-std::unordered_map<std::string, std::string>
-parse_catalog(std::string_view json_str) {
-    std::unordered_map<std::string, std::string> map;
-    try {
-        const auto parsed = nlohmann::json::parse(json_str);
-        flatten_json(parsed, "", map);
-    } catch (...) {
-        // Return whatever could be parsed
-    }
-    return map;
-}
-
-const std::unordered_map<std::string, std::string>& get_default_en_map() {
-    static const auto s_map = parse_catalog(embedded::reconstructed_en_json());
-    return s_map;
-}
-
-const std::unordered_map<std::string, std::string>& get_default_pt_br_map() {
-    static const auto s_map =
-        parse_catalog(embedded::reconstructed_pt_br_json());
-    return s_map;
-}
-
-void populate_strings_from_map(
-    const std::unordered_map<std::string, std::string>& target_map) {
-    const auto& default_en = get_default_en_map();
-    for (const auto& mapping : KEY_MAPPINGS) {
-        const auto idx = static_cast<std::size_t>(mapping.key);
-        if (idx >= KEY_COUNT) {
-            continue;
-        }
-        auto it = target_map.find(mapping.path);
-        if (it != target_map.end() && !it->second.empty()) {
-            g_current_strings[idx] = it->second;
-        } else {
-            auto def_it = default_en.find(mapping.path);
-            if (def_it != default_en.end()) {
-                g_current_strings[idx] = def_it->second;
-            } else {
-                g_current_strings[idx].clear();
-            }
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            static_cast<unsigned char>(b[i])) {
+            return false;
         }
     }
-    g_initialized = true;
-}
-
-std::string try_read_file(const std::filesystem::path& path) {
-    std::error_code ec;
-    if (!std::filesystem::exists(path, ec) ||
-        !std::filesystem::is_regular_file(path, ec)) {
-        return "";
-    }
-    std::ifstream file(path, std::ios::in | std::ios::binary);
-    if (!file.is_open()) {
-        return "";
-    }
-    return std::string((std::istreambuf_iterator<char>(file)),
-                       std::istreambuf_iterator<char>());
-}
-
-std::string find_external_locale_file(std::string_view code) {
-    std::string filename = std::string(code) + ".json";
-
-    std::vector<std::filesystem::path> search_paths;
-
-    // 1. AppData / Config path
-    const auto environment = application::default_execution_environment();
-    search_paths.push_back(environment.app_data_dir / "locales" / filename);
-
-    // 2. Working directory locales/
-    search_paths.push_back(std::filesystem::current_path() / "locales" /
-                           filename);
-
-    for (const auto& path : search_paths) {
-        auto content = try_read_file(path);
-        if (!content.empty()) {
-            return content;
-        }
-    }
-    return "";
+    return true;
 }
 
 } // namespace
@@ -499,143 +32,65 @@ Language current_language() noexcept {
     return g_current_language;
 }
 
-std::string_view current_language_code() noexcept {
-    return g_current_language_code;
-}
-
-void set_language(Language language) {
+void set_language(Language language) noexcept {
     g_current_language = language;
-    switch (language) {
-        case Language::Portuguese:
-            g_current_language_code = "pt-BR";
-            populate_strings_from_map(get_default_pt_br_map());
-            break;
-        case Language::English:
-        case Language::Custom:
-        default:
-            g_current_language_code = "en";
-            populate_strings_from_map(get_default_en_map());
-            break;
-    }
 }
 
-void set_language(std::string_view code) {
-    std::string lower_code;
-    lower_code.reserve(code.size());
-    for (char c : code) {
-        lower_code.push_back(
-            static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-    }
-
-    g_current_language_code = std::string(code);
-
-    // 1. Check for external locale file first
-    auto external_content = find_external_locale_file(code);
-    if (external_content.empty() && lower_code != code) {
-        external_content = find_external_locale_file(lower_code);
-    }
-
-    if (!external_content.empty()) {
-        auto custom_map = parse_catalog(external_content);
-        if (!custom_map.empty()) {
-            g_current_language = parse_language(code);
-            populate_strings_from_map(custom_map);
-            return;
-        }
-    }
-
-    // 2. Fall back to embedded catalogs
-    if (lower_code == "pt" || lower_code == "pt-br" || lower_code == "pt_br" ||
-        lower_code == "portuguese") {
-        g_current_language = Language::Portuguese;
-        populate_strings_from_map(get_default_pt_br_map());
-    } else {
-        g_current_language = Language::English;
-        populate_strings_from_map(get_default_en_map());
-    }
+void set_language(std::string_view code) noexcept {
+    g_current_language = parse_language(code);
 }
 
 Language parse_language(std::string_view code) noexcept {
-    std::string lower;
-    lower.reserve(code.size());
-    for (char c : code) {
-        lower.push_back(
-            static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-    }
-    if (lower == "pt" || lower == "pt-br" || lower == "pt_br" ||
-        lower == "portuguese") {
+    if (equals_ignore_case(code, "pt") || equals_ignore_case(code, "pt-br") ||
+        equals_ignore_case(code, "pt_br") ||
+        equals_ignore_case(code, "portuguese")) {
         return Language::Portuguese;
     }
-    if (lower == "en" || lower == "en-us" || lower == "en_us" ||
-        lower == "english") {
-        return Language::English;
-    }
-    return Language::Custom;
+    return Language::English;
 }
 
 std::string_view language_code(Language language) noexcept {
-    switch (language) {
-        case Language::Portuguese:
-            return "pt-BR";
-        case Language::Custom:
-            return g_current_language_code;
-        case Language::English:
-        default:
-            return "en";
-    }
+    return language == Language::Portuguese ? "pt-BR" : "en";
 }
 
 std::string_view tr(Key key) noexcept {
-    if (!g_initialized) {
-        // Safe default on cold call before run()
-        set_language(Language::English);
-    }
     const auto index = static_cast<std::size_t>(key);
-    if (index >= KEY_COUNT) {
+    if (index >= embedded::KEY_COUNT) {
         return "";
     }
-    return g_current_strings[index];
-}
-
-bool load_custom_catalog(std::string_view json_content) {
-    auto map = parse_catalog(json_content);
-    if (map.empty()) {
-        return false;
-    }
-    g_current_language = Language::Custom;
-    populate_strings_from_map(map);
-    return true;
+    const auto& catalog = g_current_language == Language::Portuguese
+                              ? embedded::PT_BR_STRINGS
+                              : embedded::EN_STRINGS;
+    return catalog[index];
 }
 
 std::vector<std::string> extract_language_argument(int argc,
                                                    char* argv[]) noexcept {
     std::vector<std::string> sanitized;
-    if (argc < 1 || argv == nullptr || argv[0] == nullptr)
+    if (argc < 1 || argv == nullptr || argv[0] == nullptr) {
         return sanitized;
+    }
     sanitized.emplace_back(argv[0]);
     int command_index = 1;
-    if (argc >= 4 && argv[1] != nullptr &&
+    if (argc >= 3 && argv[1] != nullptr &&
         std::string_view{argv[1]} == "--lang" && argv[2] != nullptr &&
         argv[2][0] != '\0' && argv[2][0] != '-') {
         set_language(argv[2]);
         command_index = 3;
     }
     for (int index = command_index; index < argc; ++index) {
-        if (argv[index] != nullptr)
+        if (argv[index] != nullptr) {
             sanitized.emplace_back(argv[index]);
+        }
     }
     return sanitized;
 }
 
 void init_language(int argc, char* argv[]) noexcept {
-    // 1. Default is English
     set_language(Language::English);
-
-    // 2. Check environment variable KASUMI_LANG
     if (const char* env_lang = std::getenv("KASUMI_LANG")) {
         set_language(env_lang);
     }
-
     if (argc >= 3 && argv != nullptr && argv[1] != nullptr &&
         std::string_view{argv[1]} == "--lang" && argv[2] != nullptr &&
         argv[2][0] != '\0' && argv[2][0] != '-') {

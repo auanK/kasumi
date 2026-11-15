@@ -5,6 +5,7 @@
 #include "platform/path.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <exception>
 #include <utility>
@@ -30,69 +31,35 @@ bool valid_operation_strings(const kasumi::Operation& operation,
            valid_string(operation.hash) && valid_string(progress.previous_hash);
 }
 
+inline constexpr std::array persisted_actions{
+    kasumi::Action::RenameLocal,
+    kasumi::Action::Upload,
+    kasumi::Action::CreateLocalDirectory,
+    kasumi::Action::CreateRemoteDirectory,
+    kasumi::Action::Download,
+    kasumi::Action::DeleteLocal,
+    kasumi::Action::DeleteLocalDirectory,
+    kasumi::Action::DeleteRemote,
+    kasumi::Action::DeleteRemoteDirectory,
+    kasumi::Action::MoveLocal,
+    kasumi::Action::CopyLocal,
+    kasumi::Action::DeleteIgnoredLocalFile,
+};
+
 constexpr std::optional<std::uint8_t>
 persisted_action_id(kasumi::Action action) noexcept {
-    switch (action) {
-        case kasumi::Action::RenameLocal:
-            return 0;
-        case kasumi::Action::Upload:
-            return 1;
-        case kasumi::Action::CreateLocalDirectory:
-            return 2;
-        case kasumi::Action::CreateRemoteDirectory:
-            return 3;
-        case kasumi::Action::Download:
-            return 4;
-        case kasumi::Action::DeleteLocal:
-            return 5;
-        case kasumi::Action::DeleteLocalDirectory:
-            return 6;
-        case kasumi::Action::DeleteRemote:
-            return 7;
-        case kasumi::Action::DeleteRemoteDirectory:
-            return 8;
-        case kasumi::Action::MoveLocal:
-            return 9;
-        case kasumi::Action::CopyLocal:
-            return 10;
-        case kasumi::Action::DeleteIgnoredLocalFile:
-            return 11;
-        case kasumi::Action::Count:
-            return std::nullopt;
+    const auto it = std::ranges::find(persisted_actions, action);
+    if (it == persisted_actions.end()) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    return static_cast<std::uint8_t>(it - persisted_actions.begin());
 }
 
 constexpr std::optional<kasumi::Action>
 action_from_persisted_id(std::uint8_t id) noexcept {
-    switch (id) {
-        case 0:
-            return kasumi::Action::RenameLocal;
-        case 1:
-            return kasumi::Action::Upload;
-        case 2:
-            return kasumi::Action::CreateLocalDirectory;
-        case 3:
-            return kasumi::Action::CreateRemoteDirectory;
-        case 4:
-            return kasumi::Action::Download;
-        case 5:
-            return kasumi::Action::DeleteLocal;
-        case 6:
-            return kasumi::Action::DeleteLocalDirectory;
-        case 7:
-            return kasumi::Action::DeleteRemote;
-        case 8:
-            return kasumi::Action::DeleteRemoteDirectory;
-        case 9:
-            return kasumi::Action::MoveLocal;
-        case 10:
-            return kasumi::Action::CopyLocal;
-        case 11:
-            return kasumi::Action::DeleteIgnoredLocalFile;
-        default:
-            return std::nullopt;
-    }
+    return id < persisted_actions.size()
+               ? std::optional<kasumi::Action>{persisted_actions[id]}
+               : std::nullopt;
 }
 
 } // namespace
@@ -103,14 +70,7 @@ std::expected<void, std::string> validate(const Record& record) {
     }
     try {
         if (sync_plan_size(record.plan) > maximum_operation_count ||
-            !valid_string(record.operation_id) ||
-            !valid_string(record.observed_head_id) ||
-            !valid_string(record.observed_base_id) ||
-            !valid_string(record.commit_id) ||
-            !valid_string(record.ciphertext_id) ||
             !valid_string(record.marker_id) ||
-            !valid_string(record.epoch_vault_id) ||
-            !valid_string(record.epoch_id) ||
             record.parent_ids.size() > history::maximum_parent_count ||
             record.observed_pending_paths.size() > maximum_pending_path_count ||
             record.pending_paths.size() > maximum_pending_path_count) {
@@ -123,15 +83,12 @@ std::expected<void, std::string> validate(const Record& record) {
                 return std::unexpected("operation string exceeds codec limit");
             }
         }
-
-        for (const auto* strings : {&record.parent_ids,
-                                    &record.observed_pending_paths,
-                                    &record.pending_paths}) {
-            for (const auto& value : *strings) {
-                if (!valid_string(value))
-                    return std::unexpected(
-                        "transaction string exceeds codec limit");
-            }
+        const auto too_long = [](std::string_view value) {
+            return !valid_string(value);
+        };
+        if (std::ranges::any_of(record.observed_pending_paths, too_long) ||
+            std::ranges::any_of(record.pending_paths, too_long)) {
+            return std::unexpected("transaction string exceeds codec limit");
         }
         return {};
     } catch (const std::exception& error) {
@@ -156,15 +113,8 @@ EncodeResult encode(const Record& record) {
         wire::write_string(writer, record.observed_base_id);
         wire::write<std::uint64_t>(writer, record.local_generation);
         wire::write<std::uint64_t>(writer, record.storage_generation);
-        const auto write_pending_paths = [&](const auto& paths) {
-            wire::write<std::uint32_t>(
-                writer, static_cast<std::uint32_t>(paths.size()));
-            for (const auto& path : paths) {
-                wire::write_string(writer, path);
-            }
-        };
-        write_pending_paths(record.observed_pending_paths);
-        write_pending_paths(record.pending_paths);
+        wire::write_strings(writer, record.observed_pending_paths);
+        wire::write_strings(writer, record.pending_paths);
         wire::write<std::uint64_t>(writer, record.plan.target_generation);
         wire::write_string(writer, record.commit_id);
         wire::write_string(writer, record.ciphertext_id);
@@ -174,11 +124,7 @@ EncodeResult encode(const Record& record) {
         wire::write<std::int64_t>(writer, record.epoch_issued_at);
         wire::write<std::uint32_t>(writer, record.epoch_min_history_depth);
         wire::write<std::uint32_t>(writer, record.epoch_min_history_age_hours);
-        wire::write<std::uint32_t>(
-            writer, static_cast<std::uint32_t>(record.parent_ids.size()));
-        for (const auto& parent_id : record.parent_ids) {
-            wire::write_string(writer, parent_id);
-        }
+        wire::write_strings(writer, record.parent_ids);
 
         wire::write<std::uint32_t>(
             writer, static_cast<std::uint32_t>(sync_plan_size(record.plan)));
@@ -202,17 +148,13 @@ EncodeResult encode(const Record& record) {
                                       operation.exclusive_destination ? 1 : 0);
             if (operation.action == kasumi::Action::DeleteIgnoredLocalFile) {
                 wire::write<std::uint64_t>(
-                    writer,
-                    operation.expected_source_identity.volume_or_dev);
+                    writer, operation.expected_source_identity.volume_or_dev);
                 wire::write<std::uint64_t>(
-                    writer,
-                    operation.expected_source_identity.file_id_low);
+                    writer, operation.expected_source_identity.file_id_low);
                 wire::write<std::uint64_t>(
-                    writer,
-                    operation.expected_source_identity.file_id_high);
+                    writer, operation.expected_source_identity.file_id_high);
                 wire::write<std::uint8_t>(
-                    writer,
-                    operation.expected_source_identity.valid ? 1 : 0);
+                    writer, operation.expected_source_identity.valid ? 1 : 0);
             }
 
             wire::write_string(writer, progress.previous_hash);
@@ -246,27 +188,13 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
         auto observed_base_id = wire::read_string(reader, maximum_string_size);
         auto local = wire::read<std::uint64_t>(reader);
         auto storage = wire::read<std::uint64_t>(reader);
-        const auto read_pending_paths = [&](auto& paths) {
-            auto count = wire::read<std::uint32_t>(reader);
-            if (!count || *count > maximum_pending_path_count ||
-                *count > reader.data.size() / sizeof(std::uint32_t)) {
-                return false;
-            }
-            paths.reserve(*count);
-            for (std::uint32_t index = 0; index < *count; ++index) {
-                auto path = wire::read_string(reader, maximum_string_size);
-                if (!path) {
-                    return false;
-                }
-                paths.push_back(std::move(*path));
-            }
-            return true;
-        };
         std::vector<std::string> observed_pending_paths;
         std::vector<std::string> pending_paths;
         const bool pending_fields_present =
-            read_pending_paths(observed_pending_paths) &&
-            read_pending_paths(pending_paths);
+            wire::read_strings(
+                reader, observed_pending_paths, maximum_pending_path_count) &&
+            wire::read_strings(
+                reader, pending_paths, maximum_pending_path_count);
         auto target = wire::read<std::uint64_t>(reader);
         auto commit_id = wire::read_string(reader, maximum_string_size);
         auto ciphertext_id = wire::read_string(reader, maximum_string_size);
@@ -276,14 +204,23 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
         auto epoch_issued_at = wire::read<std::int64_t>(reader);
         auto epoch_min_history_depth = wire::read<std::uint32_t>(reader);
         auto epoch_min_history_age_hours = wire::read<std::uint32_t>(reader);
-        auto parent_count = wire::read<std::uint32_t>(reader);
         if (!id || !phase_raw || !publication_required || !observed_head_id ||
             !observed_base_id || !local || !storage ||
             !pending_fields_present || !target || !commit_id ||
             !ciphertext_id || !marker_id || !epoch_vault_id || !epoch_id ||
             !epoch_issued_at || !epoch_min_history_depth ||
-            !epoch_min_history_age_hours || !parent_count) {
+            !epoch_min_history_age_hours) {
             return std::unexpected("missing fields");
+        }
+        bool parents_overflow = false;
+        std::vector<std::string> parent_ids;
+        if (!wire::read_strings(reader,
+                                parent_ids,
+                                history::maximum_parent_count,
+                                &parents_overflow)) {
+            return std::unexpected(parents_overflow
+                                       ? "parent count exceeds limit"
+                                       : "missing parent ID");
         }
         if (*publication_required > 1) {
             return std::unexpected("invalid publication boolean");
@@ -294,36 +231,27 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
             return std::unexpected("unknown phase");
         }
 
-        Record record;
-        record.operation_id = std::move(*id);
-        record.phase = phase;
-        record.publication_required = *publication_required == 1;
-        record.observed_head_id = std::move(*observed_head_id);
-        record.observed_base_id = std::move(*observed_base_id);
-        record.local_generation = *local;
-        record.storage_generation = *storage;
-        record.observed_pending_paths = std::move(observed_pending_paths);
-        record.pending_paths = std::move(pending_paths);
+        Record record{
+            .operation_id = std::move(*id),
+            .phase = phase,
+            .publication_required = *publication_required == 1,
+            .observed_head_id = std::move(*observed_head_id),
+            .observed_base_id = std::move(*observed_base_id),
+            .local_generation = *local,
+            .storage_generation = *storage,
+            .observed_pending_paths = std::move(observed_pending_paths),
+            .pending_paths = std::move(pending_paths),
+            .commit_id = std::move(*commit_id),
+            .ciphertext_id = std::move(*ciphertext_id),
+            .parent_ids = std::move(parent_ids),
+            .marker_id = std::move(*marker_id),
+            .epoch_vault_id = std::move(*epoch_vault_id),
+            .epoch_id = std::move(*epoch_id),
+            .epoch_issued_at = *epoch_issued_at,
+            .epoch_min_history_depth = *epoch_min_history_depth,
+            .epoch_min_history_age_hours = *epoch_min_history_age_hours,
+        };
         record.plan.target_generation = *target;
-        record.commit_id = std::move(*commit_id);
-        record.ciphertext_id = std::move(*ciphertext_id);
-        record.marker_id = std::move(*marker_id);
-        record.epoch_vault_id = std::move(*epoch_vault_id);
-        record.epoch_id = std::move(*epoch_id);
-        record.epoch_issued_at = *epoch_issued_at;
-        record.epoch_min_history_depth = *epoch_min_history_depth;
-        record.epoch_min_history_age_hours = *epoch_min_history_age_hours;
-        if (*parent_count > history::maximum_parent_count) {
-            return std::unexpected("parent count exceeds limit");
-        }
-        record.parent_ids.reserve(*parent_count);
-        for (std::uint32_t index = 0; index < *parent_count; ++index) {
-            auto parent_id = wire::read_string(reader, maximum_string_size);
-            if (!parent_id) {
-                return std::unexpected("missing parent ID");
-            }
-            record.parent_ids.push_back(std::move(*parent_id));
-        }
 
         auto count = wire::read<std::uint32_t>(reader);
         if (!count) {
@@ -344,24 +272,22 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
             auto hash = wire::read_string(reader, maximum_string_size);
             auto size = wire::read<std::uint64_t>(reader);
             auto exclusive = wire::read<std::uint8_t>(reader);
-            std::optional<std::uint64_t> identity_volume;
-            std::optional<std::uint64_t> identity_low;
-            std::optional<std::uint64_t> identity_high;
-            std::optional<std::uint8_t> identity_valid;
-            if (*version >= 10 && action_raw &&
-                *action_raw == 11) {
-                if (auto field = wire::read<std::uint64_t>(reader)) {
-                    identity_volume = *field;
+            kasumi::PhysicalFileIdentity source_identity{};
+            if (*version >= 10 && action_raw && *action_raw == 11) {
+                auto volume = wire::read<std::uint64_t>(reader);
+                auto low = wire::read<std::uint64_t>(reader);
+                auto high = wire::read<std::uint64_t>(reader);
+                auto id_valid = wire::read<std::uint8_t>(reader);
+                if (!volume || !low || !high || !id_valid || *id_valid != 1) {
+                    return std::unexpected(
+                        "invalid disposable source identity");
                 }
-                if (auto field = wire::read<std::uint64_t>(reader)) {
-                    identity_low = *field;
-                }
-                if (auto field = wire::read<std::uint64_t>(reader)) {
-                    identity_high = *field;
-                }
-                if (auto field = wire::read<std::uint8_t>(reader)) {
-                    identity_valid = *field;
-                }
+                source_identity = {
+                    .volume_or_dev = *volume,
+                    .file_id_low = *low,
+                    .file_id_high = *high,
+                    .valid = true,
+                };
             }
             auto previous_hash = wire::read_string(reader, maximum_string_size);
             auto backup = wire::read<std::uint32_t>(reader);
@@ -372,11 +298,6 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
                 !exclusive || !previous_hash || !backup || !state_raw ||
                 !had_original) {
                 return std::unexpected("truncated operation");
-            }
-            if (*version >= 10 && action_raw && *action_raw == 11 &&
-                (!identity_volume || !identity_low || !identity_high ||
-                 !identity_valid || *identity_valid != 1)) {
-                return std::unexpected("invalid disposable source identity");
             }
             const auto action = action_from_persisted_id(*action_raw);
             if (!action || (*version == 9 && *action_raw == 11)) {
@@ -398,14 +319,7 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
                 .alt_path = platform::path::from_utf8(*alt_path),
                 .size = *size,
                 .exclusive_destination = *exclusive == 1,
-                .expected_source_identity =
-                    *action == kasumi::Action::DeleteIgnoredLocalFile
-                        ? kasumi::PhysicalFileIdentity{
-                              .volume_or_dev = *identity_volume,
-                              .file_id_low = *identity_low,
-                              .file_id_high = *identity_high,
-                              .valid = *identity_valid == 1}
-                        : kasumi::PhysicalFileIdentity{},
+                .expected_source_identity = source_identity,
             });
             record.progress.push_back(OperationProgress{
                 .previous_hash = std::move(*previous_hash),

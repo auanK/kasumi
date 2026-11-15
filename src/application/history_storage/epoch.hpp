@@ -159,27 +159,13 @@ verify(transport::Transport& storage,
        std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
        const std::filesystem::path& workspace_root);
 
-// Discovers, authenticates, and deterministically selects the latest remote
-// Epoch.
-LatestResult
-load_latest(transport::Transport& storage,
-            std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
-            const std::filesystem::path& workspace_root);
-
-// Reuses an already observed complete listing.
+// Discovers and authenticates the latest remote Epoch (and its ancestry up to
+// trusted_ancestor, or the full chain when nullopt).
 LatestResult
 load_latest(transport::Transport& storage,
             std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
             const std::filesystem::path& workspace_root,
-            std::span<const std::string> identifiers);
-
-// Discovers the latest Epoch and authenticates its ancestry up to the
-// exact checkpoint, or the entire chain when there is no checkpoint.
-LatestResult
-load_latest(transport::Transport& storage,
-            std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
-            const std::filesystem::path& workspace_root,
-            std::optional<Reference> trusted_ancestor);
+            std::optional<Reference> trusted_ancestor = std::nullopt);
 
 // Incremental variant using an already observed listing.
 LatestResult
@@ -187,7 +173,7 @@ load_latest(transport::Transport& storage,
             std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
             const std::filesystem::path& workspace_root,
             std::span<const std::string> identifiers,
-            std::optional<Reference> trusted_ancestor);
+            std::optional<Reference> trusted_ancestor = std::nullopt);
 
 // Discovers and authenticates the full remote chain, from genesis to the
 // current Epoch.

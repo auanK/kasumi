@@ -1,12 +1,11 @@
 #include "crypto/physical_hash.hpp"
 
+#include "platform/private_storage.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
-#include <fstream>
-#include <iomanip>
-#include <sstream>
 
 namespace kasumi::crypto::physical {
 namespace {
@@ -81,12 +80,15 @@ void compress(std::array<std::uint32_t, 8>& state,
 }
 
 std::string hex_digest(const std::array<std::uint32_t, 8>& state) {
-    std::ostringstream output;
-    output << std::hex << std::setfill('0');
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string output;
+    output.reserve(64);
     for (const auto word : state) {
-        output << std::setw(8) << word;
+        for (int shift = 28; shift >= 0; shift -= 4) {
+            output.push_back(digits[(word >> shift) & 0xFU]);
+        }
     }
-    return output.str();
+    return output;
 }
 
 } // namespace
@@ -148,29 +150,19 @@ hash_file(const std::filesystem::path& path, std::string_view algorithm) {
         return std::unexpected("unsupported physical hash algorithm");
     }
 
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        return std::unexpected(
-            "could not open file for physical hash calculation");
-    }
-
     auto state = sha256_init();
     std::array<std::uint8_t, 64U * 1024U> buffer{};
-    while (input) {
-        input.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
-        const auto count = input.gcount();
-        if (count > 0) {
-            sha256_update(
-                state,
-                std::span{buffer}.first(static_cast<std::size_t>(count)));
-        }
-    }
-
-    if (!input.eof() && input.fail()) {
+    auto streamed = platform::private_storage::stream_regular_file(
+        path, buffer, [&](std::span<const std::uint8_t> chunk) {
+            sha256_update(state, chunk);
+        });
+    if (!streamed) {
         return std::unexpected(
-            "could not read file for physical hash calculation");
+            streamed.error().kind ==
+                    platform::private_storage::StreamErrorKind::ReadFailed
+                ? "could not read file for physical hash calculation"
+                : "could not open file for physical hash calculation");
     }
-
     return sha256_finish(state);
 }
 

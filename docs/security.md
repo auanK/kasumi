@@ -78,7 +78,6 @@ Keyed BLAKE2b derives distinct 32-byte subkeys across isolated domains:
 * `Epoch`: Epoch lifecycle envelope encryption
 * `Journal`: local transaction journal encryption
 * `RemoteIdentifier`: keyed identifier derivation
-* `FsckCheckpoint`: local authenticated fsck checkpoint
 
 Content, Commit, Epoch, and namespace identifiers also use disjoint cryptographic domain tags. Derived namespace components are truncated to eight hex characters (the version component to four), so namespace derivation is not a confidentiality guarantee for protocol structure. Ephemeral subkey buffers in memory are wiped at defined cleanup points using `crypto_wipe`; Kasumi does not claim to prevent all copies or swap exposure of secrets.
 
@@ -132,7 +131,7 @@ Epochs define authenticated retention horizons and boundary anchors. The coopera
 
 Internal routines reject symlinks and Windows reparse points inside private state directories. Writing configuration, master key, and journal files employs temporary files, filesystem flush (`fsync` / `FlushFileBuffers`), and atomic rename replacement.
 
-`db.sqlite` persists accepted history trees, Commit and Epoch references, pending materializations, and the file-hash cache (logical paths, hashes, sizes, timestamps, and native identities). It is not encrypted or authenticated as a whole. The local `inspection-history-v1.cache` can also contain decoded Commit trees and is authenticated but not encrypted. These local files rely on filesystem permissions and disk encryption for at-rest privacy. The `transaction.bin.enc/` directory contains encrypted journal snapshot/deltas and authenticated confirmation/retirement records used by [interruption recovery](architecture/transactions-and-recovery.md). Staging and plaintext backups under `.transactions/<id>/` are not uniformly encrypted. [Local Persistent State](architecture/local-state.md) distinguishes these authorities from caches and checkpoints.
+`db.sqlite` persists accepted history trees, Commit and Epoch references, pending materializations, and the file-hash cache (logical paths, hashes, sizes, timestamps, and native identities). It is not encrypted or authenticated as a whole. These local files rely on filesystem permissions and disk encryption for at-rest privacy. The `transaction.bin.enc/` directory contains encrypted journal snapshot/deltas and authenticated confirmation/retirement records used by [interruption recovery](architecture/transactions-and-recovery.md). Staging and plaintext backups under `.transactions/<id>/` are not uniformly encrypted. [Local Persistent State](architecture/local-state.md) distinguishes these authorities from caches and checkpoints.
 
 Hash-cache fingerprint equality is a metadata optimization, not a proof of
 unchanged bytes. Sync independently hashes destructive targets, but its final

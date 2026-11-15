@@ -17,7 +17,21 @@
 #include <unordered_set>
 #include <vector>
 
+namespace kasumi::state_storage {
+struct StoredState;
+}
+
 namespace kasumi::application::observation::history {
+
+struct ObservationHints {
+    std::optional<history_storage::KnownHistoryFrontier> frontier;
+    std::vector<std::string> trusted_marker_identifiers;
+};
+
+ObservationHints
+make_observation_hints(state_storage::StoredState state,
+                       const history_storage::RemoteLayout& layout,
+                       bool use_frontier = true);
 
 // Failure categories when observing remote history.
 enum class ErrorCode {

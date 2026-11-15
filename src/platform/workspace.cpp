@@ -1,7 +1,7 @@
 #include "platform/workspace.hpp"
 
+#include "detail.hpp"
 #include "platform/path.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
 #include "workspace_fault_test.hpp"
@@ -16,14 +16,6 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#else
-#include <cerrno>
-#include <fcntl.h>
-#if defined(__linux__)
-#include <linux/fs.h>
-#include <sys/syscall.h>
-#endif
-#include <unistd.h>
 #endif
 
 namespace kasumi::platform {
@@ -100,10 +92,8 @@ clear_read_only(const std::filesystem::path& root) {
                                platform::path::to_utf8(root) +
                                "': " + error.message());
     }
-
-    const auto clear_attribute =
-        [](const std::filesystem::path& path,
-           DWORD attributes) -> std::expected<void, std::string> {
+    auto clear_attr = [](const std::filesystem::path& path,
+                         DWORD attributes) -> std::expected<void, std::string> {
         if ((attributes & FILE_ATTRIBUTE_READONLY) != 0 &&
             !SetFileAttributesW(
                 path.c_str(),
@@ -118,147 +108,51 @@ clear_read_only(const std::filesystem::path& root) {
         }
         return {};
     };
-
-    auto attributes = GetFileAttributesW(native_root.c_str());
+    const auto attributes = GetFileAttributesW(native_root.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
         return std::unexpected("could not inspect workspace '" +
                                platform::path::to_utf8(root) +
                                "': " + windows_error(GetLastError()));
     }
-    if (auto cleared = clear_attribute(native_root, attributes); !cleared) {
+    if (auto cleared = clear_attr(native_root, attributes); !cleared) {
         return cleared;
     }
-
-    std::vector<std::filesystem::path> directories{native_root};
-    while (!directories.empty()) {
-        auto directory = std::move(directories.back());
-        directories.pop_back();
-        WIN32_FIND_DATAW entry{};
-        auto pattern = directory.native();
-        pattern.append(L"\\*");
-        const auto search = FindFirstFileW(pattern.c_str(), &entry);
-        if (search == INVALID_HANDLE_VALUE) {
-            const auto code = GetLastError();
-            if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
-                continue;
-            }
-            return std::unexpected("could not enumerate workspace '" +
-                                   platform::path::to_utf8(directory) +
-                                   "': " + windows_error(code));
-        }
-
-        std::string failure;
-        do {
-            const std::wstring_view name{entry.cFileName};
-            if (name == L"." || name == L"..") {
-                continue;
-            }
-            auto native_path = directory.native();
-            native_path.push_back(L'\\');
-            native_path.append(entry.cFileName);
-            const std::filesystem::path path{std::move(native_path)};
-            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                failure = "invalid workspace path '" +
-                          platform::path::to_utf8(path) +
-                          "': reparse point is not allowed";
-                break;
-            }
-            auto cleared = clear_attribute(path, entry.dwFileAttributes);
-            if (!cleared) {
-                failure = cleared.error();
-                break;
-            }
-            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-                directories.push_back(path);
-            }
-        } while (FindNextFileW(search, &entry));
-
-        const auto enumeration_error = GetLastError();
-        FindClose(search);
-        if (!failure.empty()) {
-            return std::unexpected(std::move(failure));
-        }
-        if (enumeration_error != ERROR_NO_MORE_FILES &&
-            enumeration_error != ERROR_FILE_NOT_FOUND &&
-            enumeration_error != ERROR_PATH_NOT_FOUND) {
-            return std::unexpected("could not advance in workspace '" +
-                                   platform::path::to_utf8(directory) +
-                                   "': " + windows_error(enumeration_error));
-        }
-    }
-    return {};
+    return detail::walk_windows_tree(
+        native_root,
+        false,
+        [](void* ctx, const std::filesystem::path& path, std::uint32_t attrs) {
+            return (*static_cast<decltype(clear_attr)*>(ctx))(path, attrs);
+        },
+        &clear_attr);
 }
 
 std::error_code remove_tree_windows(const std::filesystem::path& root) {
-    std::vector<std::pair<std::filesystem::path, bool>> pending{{root, false}};
-    while (!pending.empty()) {
-        auto [path, postorder] = std::move(pending.back());
-        pending.pop_back();
-        if (postorder) {
-            if (!RemoveDirectoryW(path.c_str())) {
+    std::error_code result;
+    auto walked = detail::walk_windows_tree(
+        root,
+        true,
+        [](void* ctx,
+           const std::filesystem::path& path,
+           std::uint32_t attrs) -> std::expected<void, std::string> {
+            const BOOL ok = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0
+                                ? RemoveDirectoryW(path.c_str())
+                                : DeleteFileW(path.c_str());
+            if (!ok) {
                 const auto code = GetLastError();
                 if (code != ERROR_FILE_NOT_FOUND &&
                     code != ERROR_PATH_NOT_FOUND) {
-                    return {static_cast<int>(code), std::system_category()};
+                    *static_cast<std::error_code*>(ctx) = {
+                        static_cast<int>(code), std::system_category()};
+                    return std::unexpected(std::string{"remove"});
                 }
             }
-            continue;
-        }
-
-        auto pattern = path.native();
-        pattern.append(L"\\*");
-        WIN32_FIND_DATAW entry{};
-        const auto search = FindFirstFileW(pattern.c_str(), &entry);
-        if (search == INVALID_HANDLE_VALUE) {
-            const auto code = GetLastError();
-            if (code != ERROR_FILE_NOT_FOUND && code != ERROR_PATH_NOT_FOUND) {
-                return {static_cast<int>(code), std::system_category()};
-            }
-            pending.emplace_back(std::move(path), true);
-            continue;
-        }
-
-        pending.emplace_back(path, true);
-        std::error_code failure;
-        do {
-            const std::wstring_view name{entry.cFileName};
-            if (name == L"." || name == L"..") {
-                continue;
-            }
-            auto native_child = path.native();
-            native_child.push_back(L'\\');
-            native_child.append(entry.cFileName);
-            std::filesystem::path child{std::move(native_child)};
-            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                failure =
-                    std::make_error_code(std::errc::operation_not_permitted);
-                break;
-            }
-            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-                pending.emplace_back(std::move(child), false);
-            } else if (!DeleteFileW(child.c_str())) {
-                const auto code = GetLastError();
-                if (code != ERROR_FILE_NOT_FOUND &&
-                    code != ERROR_PATH_NOT_FOUND) {
-                    failure = {static_cast<int>(code), std::system_category()};
-                    break;
-                }
-            }
-        } while (FindNextFileW(search, &entry));
-
-        const auto enumeration_error = GetLastError();
-        FindClose(search);
-        if (failure) {
-            return failure;
-        }
-        if (enumeration_error != ERROR_NO_MORE_FILES &&
-            enumeration_error != ERROR_FILE_NOT_FOUND &&
-            enumeration_error != ERROR_PATH_NOT_FOUND) {
-            return {static_cast<int>(enumeration_error),
-                    std::system_category()};
-        }
+            return {};
+        },
+        &result);
+    if (!walked && !result) {
+        return std::make_error_code(std::errc::operation_not_permitted);
     }
-    return {};
+    return result;
 }
 
 bool retryable_lock(std::error_code error) noexcept {
@@ -266,30 +160,6 @@ bool retryable_lock(std::error_code error) noexcept {
            error.value() == ERROR_LOCK_VIOLATION;
 }
 
-#else
-
-std::error_code rename_no_replace(const std::filesystem::path& source,
-                                  const std::filesystem::path& destination) {
-#if defined(__linux__)
-    if (::syscall(SYS_renameat2,
-                  AT_FDCWD,
-                  source.c_str(),
-                  AT_FDCWD,
-                  destination.c_str(),
-                  RENAME_NOREPLACE) == 0) {
-        return {};
-    }
-    return {errno, std::generic_category()};
-#else
-    static_cast<void>(source);
-    static_cast<void>(destination);
-    return std::make_error_code(std::errc::operation_not_supported);
-#endif
-}
-
-#endif
-
-#ifdef _WIN32
 std::error_code rename_no_replace(const std::filesystem::path& source,
                                   const std::filesystem::path& destination) {
     std::error_code error;
@@ -301,12 +171,27 @@ std::error_code rename_no_replace(const std::filesystem::path& source,
     if (error) {
         return error;
     }
-    if (MoveFileW(native_source.c_str(), native_destination.c_str())) {
-        return {};
-    }
-    return {static_cast<int>(GetLastError()), std::system_category()};
+    return detail::rename_no_replace(native_source, native_destination);
 }
+
+#else
+
+std::error_code rename_no_replace(const std::filesystem::path& source,
+                                  const std::filesystem::path& destination) {
+    return detail::rename_no_replace(source, destination);
+}
+
 #endif
+
+std::expected<Workspace, std::string>
+identify_created_workspace(std::filesystem::path root) {
+    const auto identity = private_storage::query_directory_identity(root);
+    if (!identity.valid) {
+        return std::unexpected("could not identify newly created workspace '" +
+                               platform::path::to_utf8(root) + "'");
+    }
+    return Workspace{.root = std::move(root), .identity = identity};
+}
 
 } // namespace
 
@@ -324,18 +209,14 @@ create_workspace(std::string_view purpose) {
                 return std::unexpected(id.error());
             }
 
-            const auto root =
-                base / ("kasumi-" + std::string{purpose} + "-" + *id);
+            std::string name{"kasumi-"};
+            name += purpose;
+            name += '-';
+            name += *id;
+            const auto root = base / name;
             auto created = private_storage::create_directory(root);
             if (created) {
-                const auto identity =
-                    private_storage::query_directory_identity(root);
-                if (!identity.valid) {
-                    return std::unexpected(
-                        "could not identify newly created workspace '" +
-                        platform::path::to_utf8(root) + "'");
-                }
-                return Workspace{.root = root, .identity = identity};
+                return identify_created_workspace(root);
             }
             std::error_code exists_error;
             if (!std::filesystem::exists(root, exists_error) || exists_error) {
@@ -363,12 +244,7 @@ create_workspace_at(const std::filesystem::path& root) {
                                platform::path::to_utf8(root) +
                                "': " + created.error());
     }
-    const auto identity = private_storage::query_directory_identity(root);
-    if (!identity.valid) {
-        return std::unexpected("could not identify newly created workspace '" +
-                               platform::path::to_utf8(root) + "'");
-    }
-    return Workspace{.root = root, .identity = identity};
+    return identify_created_workspace(root);
 }
 
 std::filesystem::path workspace_file(const Workspace& workspace,
@@ -420,8 +296,9 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
                                platform::path::to_utf8(workspace.root) + "'");
     }
     if (!workspace.identity.valid) {
-        return std::unexpected("workspace ownership identity is unavailable for '" +
-                               platform::path::to_utf8(workspace.root) + "'");
+        return std::unexpected(
+            "workspace ownership identity is unavailable for '" +
+            platform::path::to_utf8(workspace.root) + "'");
     }
     if (private_storage::query_directory_identity(native_root) !=
         workspace.identity) {
@@ -437,9 +314,9 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
         if (!id) {
             return std::unexpected(id.error());
         }
-        quarantine = workspace.root.parent_path() /
-                     (".kasumi-cleanup-" + quarantine_label(workspace.root) +
-                      "-" + *id);
+        quarantine =
+            workspace.root.parent_path() /
+            (".kasumi-cleanup-" + quarantine_label(workspace.root) + "-" + *id);
         quarantine_error = rename_no_replace(native_root, quarantine);
         if (!quarantine_error) {
             break;
@@ -457,17 +334,26 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
 #endif
         if (quarantine_error != std::errc::file_exists &&
             quarantine_error != std::errc::directory_not_empty) {
-            return std::unexpected("could not isolate workspace before cleanup '" +
-                                   platform::path::to_utf8(workspace.root) +
-                                   "': " + quarantine_error.message());
+            return std::unexpected(
+                "could not isolate workspace before cleanup '" +
+                platform::path::to_utf8(workspace.root) +
+                "': " + quarantine_error.message());
         }
     }
     if (quarantine_error) {
-        return std::unexpected("could not reserve a cleanup path for workspace '" +
-                               platform::path::to_utf8(workspace.root) + "'");
+        return std::unexpected(
+            "could not reserve a cleanup path for workspace '" +
+            platform::path::to_utf8(workspace.root) + "'");
     }
     const auto restore = [&]() {
         return rename_no_replace(quarantine, native_root);
+    };
+    const auto fail_restoring = [&](std::string msg) {
+        const auto restored = restore();
+        if (restored) {
+            msg += "; could not restore workspace path";
+        }
+        return std::unexpected(std::move(msg));
     };
     if (private_storage::query_directory_identity(quarantine) !=
         workspace.identity) {
@@ -479,13 +365,11 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
                       : std::string{}));
     }
 
-    // shortcut: same-user writers can race inside quarantine; use handle-relative recursive deletion if that threat is in scope.
+    // shortcut: same-user writers can race inside quarantine; use
+    // handle-relative recursive deletion if that threat is in scope.
     auto secured = private_storage::protect_tree(quarantine);
     if (!secured) {
-        const auto restored = restore();
-        return std::unexpected(secured.error() +
-                               (restored ? "; could not restore workspace path"
-                                         : std::string{}));
+        return fail_restoring(secured.error());
     }
 
 #ifdef KASUMI_WORKSPACE_FAULT_TESTS
@@ -497,34 +381,22 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
 #ifdef _WIN32
     const auto native_quarantine = extended_path(quarantine, error);
     if (error) {
-        const auto restored = restore();
-        return std::unexpected("could not resolve quarantined workspace: " +
-                               error.message() +
-                               (restored ? "; could not restore workspace path"
-                                         : std::string{}));
+        return fail_restoring("could not resolve quarantined workspace: " +
+                              error.message());
     }
     const auto attributes = GetFileAttributesW(native_quarantine.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
-        const auto restored = restore();
-        return std::unexpected("could not inspect workspace '" +
-                               platform::path::to_utf8(workspace.root) +
-                               "': " + windows_error(GetLastError()) +
-                               (restored ? "; could not restore workspace path"
-                                         : std::string{}));
+        return fail_restoring("could not inspect workspace '" +
+                              platform::path::to_utf8(workspace.root) +
+                              "': " + windows_error(GetLastError()));
     }
     if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        const auto restored = restore();
-        return std::unexpected("invalid workspace '" +
-                               platform::path::to_utf8(workspace.root) + "'" +
-                               (restored ? "; could not restore workspace path"
-                                         : std::string{}));
+        return fail_restoring("invalid workspace '" +
+                              platform::path::to_utf8(workspace.root) + "'");
     }
     auto writable = clear_read_only(native_quarantine);
     if (!writable) {
-        const auto restored = restore();
-        return std::unexpected(writable.error() +
-                               (restored ? "; could not restore workspace path"
-                                         : std::string{}));
+        return fail_restoring(writable.error());
     }
 
     for (std::size_t attempt = 0; attempt < maximum_attempts; ++attempt) {
@@ -547,12 +419,12 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
     if (error) {
         const auto restored = restore();
         auto detail = "could not remove workspace '" +
-                      platform::path::to_utf8(workspace.root) + "': " +
-                      error.message();
+                      platform::path::to_utf8(workspace.root) +
+                      "': " + error.message();
         if (restored) {
             detail += "; could not restore partial workspace from '" +
-                      platform::path::to_utf8(quarantine) + "': " +
-                      restored.message();
+                      platform::path::to_utf8(quarantine) +
+                      "': " + restored.message();
         } else {
             detail += "; partial workspace restored at original path";
         }
@@ -562,11 +434,7 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
 }
 
 void cleanup_workspace(const Workspace& workspace) noexcept {
-    const auto trace = perf_trace::begin();
-    if (!remove_workspace(workspace)) {
-        perf_trace::count("workspace cleanup failures", 1);
-    }
-    perf_trace::finish("workspace cleanup", trace);
+    static_cast<void>(remove_workspace(workspace));
 }
 
 std::expected<void, std::string>

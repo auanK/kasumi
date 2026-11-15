@@ -245,7 +245,6 @@ struct RemoteOrphanInfo {
 };
 
 struct RemoteOrphansReport {
-    bool diagnostic_only = true;
     std::vector<RemoteOrphanInfo> objects;
 };
 

@@ -15,8 +15,7 @@ namespace kasumi::platform::workspace_fault_test {
 
 using RetryHook = std::function<void(
     const std::filesystem::path&, std::size_t, std::error_code)>;
-using CleanupInterruptHook =
-    std::function<bool(const std::filesystem::path&)>;
+using CleanupInterruptHook = std::function<bool(const std::filesystem::path&)>;
 
 inline RetryHook& retry_hook() {
     static thread_local RetryHook hook;

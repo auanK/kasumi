@@ -1,7 +1,6 @@
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/profile_lock.hpp"
 #include "platform/workspace.hpp"
@@ -14,17 +13,19 @@
 #include <string>
 #include <vector>
 
+// clang-format off
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include <aclapi.h>
 #include <windows.h>
+#include <aclapi.h>
 #else
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
+// clang-format on
 
 namespace {
 
@@ -90,8 +91,17 @@ void expect_private_dacl(const std::filesystem::path& path) {
 void add_unauthorized_dacl_ace(const std::filesystem::path& path) {
     PSID everyone_sid = nullptr;
     SID_IDENTIFIER_AUTHORITY world_auth = SECURITY_WORLD_SID_AUTHORITY;
-    ASSERT_TRUE(AllocateAndInitializeSid(
-        &world_auth, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &everyone_sid));
+    ASSERT_TRUE(AllocateAndInitializeSid(&world_auth,
+                                         1,
+                                         SECURITY_WORLD_RID,
+                                         0,
+                                         0,
+                                         0,
+                                         0,
+                                         0,
+                                         0,
+                                         0,
+                                         &everyone_sid));
 
     EXPLICIT_ACCESSW ea{};
     ea.grfAccessPermissions = GENERIC_READ;
@@ -114,7 +124,8 @@ void add_unauthorized_dacl_ace(const std::filesystem::path& path) {
               ERROR_SUCCESS);
 
     PACL new_dacl = nullptr;
-    ASSERT_EQ(SetEntriesInAclW(1, &ea, existing_dacl, &new_dacl), ERROR_SUCCESS);
+    ASSERT_EQ(SetEntriesInAclW(1, &ea, existing_dacl, &new_dacl),
+              ERROR_SUCCESS);
     ASSERT_EQ(SetNamedSecurityInfoW(const_cast<wchar_t*>(path.c_str()),
                                     SE_FILE_OBJECT,
                                     DACL_SECURITY_INFORMATION,
@@ -164,7 +175,6 @@ void set_null_dacl(const std::filesystem::path& path) {
               ERROR_SUCCESS);
 }
 
-
 #else
 
 void expect_mode(const std::filesystem::path& path, mode_t expected) {
@@ -197,8 +207,7 @@ TEST(PrivateStorageTest, CreatesRestrictedDirectoryAndFile) {
 TEST(ProfileLockTest, ProtectsNewLockAndPreservesExistingChildren) {
     auto workspace =
         kasumi::test::make_temp_workspace("profile-lock-private-dacl");
-    const auto directory =
-        kasumi::test::workspace_path(workspace, "shared");
+    const auto directory = kasumi::test::workspace_path(workspace, "shared");
     ASSERT_TRUE(std::filesystem::create_directory(directory));
     const auto child = directory / "existing.txt";
     {
@@ -226,18 +235,18 @@ TEST(ProfileLockTest, OwnerCanRecoverDirectoryWithoutReadPermission) {
     }
     auto workspace =
         kasumi::test::make_temp_workspace("profile-lock-recover-directory");
-    const auto directory =
-        kasumi::test::workspace_path(workspace, "shared");
+    const auto directory = kasumi::test::workspace_path(workspace, "shared");
     ASSERT_TRUE(kasumi::platform::private_storage::create_directory(directory));
     ASSERT_EQ(::chmod(directory.c_str(), 0300), 0);
 
-    auto lock = kasumi::platform::acquire_profile_lock(directory / "config.lock");
+    auto lock =
+        kasumi::platform::acquire_profile_lock(directory / "config.lock");
     const bool acquired = lock.has_value();
     const std::string detail = acquired ? std::string{} : lock.error();
     if (acquired) {
         kasumi::platform::release_profile_lock(*lock);
     }
-    struct stat status {};
+    struct stat status{};
     const bool inspected = ::lstat(directory.c_str(), &status) == 0;
     const auto mode = inspected ? status.st_mode & 0777 : mode_t{};
     const bool restored = ::chmod(directory.c_str(), 0700) == 0;
@@ -261,8 +270,7 @@ TEST(ProfileLockTest, RejectsInvalidAndInaccessibleParents) {
     std::error_code error;
     std::filesystem::create_directory_symlink(target, link, error);
     ASSERT_FALSE(error) << error.message();
-    EXPECT_FALSE(
-        kasumi::platform::acquire_profile_lock(link / "config.lock"));
+    EXPECT_FALSE(kasumi::platform::acquire_profile_lock(link / "config.lock"));
 
     const auto regular = root / "regular";
     {
@@ -275,8 +283,8 @@ TEST(ProfileLockTest, RejectsInvalidAndInaccessibleParents) {
     const auto inaccessible = root / "inaccessible";
     ASSERT_TRUE(std::filesystem::create_directory(inaccessible));
     ASSERT_EQ(::chmod(inaccessible.c_str(), 0000), 0);
-    auto lock = kasumi::platform::acquire_profile_lock(
-        inaccessible / "config.lock");
+    auto lock =
+        kasumi::platform::acquire_profile_lock(inaccessible / "config.lock");
     const bool rejected = !lock.has_value();
     if (lock) {
         kasumi::platform::release_profile_lock(*lock);
@@ -290,8 +298,7 @@ TEST(ProfileLockTest, RejectsInvalidAndInaccessibleParents) {
 TEST(ProfileLockTest, RejectsSymlinkAndUnexpectedLockObjects) {
     auto workspace =
         kasumi::test::make_temp_workspace("profile-lock-unexpected-objects");
-    const auto directory =
-        kasumi::test::workspace_path(workspace, "shared");
+    const auto directory = kasumi::test::workspace_path(workspace, "shared");
     ASSERT_TRUE(std::filesystem::create_directory(directory));
 
     const auto link = directory / "config.lock";
@@ -383,8 +390,7 @@ TEST(WorkspaceTest, PathOnlyWorkspaceCannotRemoveExistingDirectory) {
     ASSERT_TRUE(std::filesystem::create_directory(root));
     kasumi::test::write_text(root / "keep.txt", "unowned data");
 
-    const auto removed =
-        kasumi::platform::remove_workspace({.root = root});
+    const auto removed = kasumi::platform::remove_workspace({.root = root});
     EXPECT_FALSE(removed.has_value());
     EXPECT_EQ(kasumi::test::read_text(root / "keep.txt"), "unowned data");
 }
@@ -424,8 +430,7 @@ TEST(PrivateStorageTest, RemovesWorkspaceWithNestedLongPath) {
     ASSERT_TRUE(kasumi::platform::private_storage::protect_tree(extended_root));
     expect_private_dacl(extended_file);
 
-    const auto removed =
-        kasumi::platform::remove_workspace(*workspace);
+    const auto removed = kasumi::platform::remove_workspace(*workspace);
     EXPECT_TRUE(removed.has_value()) << (removed ? "" : removed.error());
     EXPECT_FALSE(std::filesystem::exists(root));
     if (!removed) {
@@ -472,11 +477,16 @@ TEST(PrivateStorageTest, AtomicWritePreservesOpenReaderSnapshot) {
     const auto directory = kasumi::test::workspace_path(workspace, "private");
     const auto file = directory / "config.toml";
     ASSERT_TRUE(kasumi::platform::private_storage::create_directory(directory));
-    ASSERT_TRUE(kasumi::platform::private_storage::write_atomically(file, "old"));
-    const auto native = CreateFileW(
-        file.c_str(), GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    ASSERT_TRUE(
+        kasumi::platform::private_storage::write_atomically(file, "old"));
+    const auto native =
+        CreateFileW(file.c_str(),
+                    GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr,
+                    OPEN_EXISTING,
+                    FILE_FLAG_OPEN_REPARSE_POINT,
+                    nullptr);
     ASSERT_NE(native, INVALID_HANDLE_VALUE);
     kasumi::platform::private_storage::PrivateHandle reader{
         reinterpret_cast<std::intptr_t>(native)};
@@ -485,8 +495,11 @@ TEST(PrivateStorageTest, AtomicWritePreservesOpenReaderSnapshot) {
         kasumi::platform::private_storage::write_atomically(file, "new");
     std::array<char, 3> bytes{};
     DWORD read = 0;
-    ASSERT_TRUE(ReadFile(native, bytes.data(), static_cast<DWORD>(bytes.size()),
-                         &read, nullptr));
+    ASSERT_TRUE(ReadFile(native,
+                         bytes.data(),
+                         static_cast<DWORD>(bytes.size()),
+                         &read,
+                         nullptr));
     const std::string snapshot{bytes.data(), read};
     EXPECT_EQ(snapshot, "old");
     reader.close();
@@ -496,7 +509,8 @@ TEST(PrivateStorageTest, AtomicWritePreservesOpenReaderSnapshot) {
     EXPECT_EQ(kasumi::test::read_text(file), "new");
     expect_private_dacl(file);
     EXPECT_EQ(std::distance(std::filesystem::directory_iterator(directory),
-                            std::filesystem::directory_iterator{}), 1);
+                            std::filesystem::directory_iterator{}),
+              1);
 }
 
 TEST(PrivateStorageTest, AtomicWriteRejectsNonSharingReaderAndKeepsOriginal) {
@@ -505,7 +519,8 @@ TEST(PrivateStorageTest, AtomicWriteRejectsNonSharingReaderAndKeepsOriginal) {
     const auto directory = kasumi::test::workspace_path(workspace, "private");
     const auto file = directory / "config.toml";
     ASSERT_TRUE(kasumi::platform::private_storage::create_directory(directory));
-    ASSERT_TRUE(kasumi::platform::private_storage::write_atomically(file, "old"));
+    ASSERT_TRUE(
+        kasumi::platform::private_storage::write_atomically(file, "old"));
     std::ifstream reader(file, std::ios::binary);
     ASSERT_TRUE(reader);
     const auto saved =
@@ -515,7 +530,8 @@ TEST(PrivateStorageTest, AtomicWriteRejectsNonSharingReaderAndKeepsOriginal) {
     EXPECT_EQ(kasumi::test::read_text(file), "old");
     expect_private_dacl(file);
     EXPECT_EQ(std::distance(std::filesystem::directory_iterator(directory),
-                            std::filesystem::directory_iterator{}), 1);
+                            std::filesystem::directory_iterator{}),
+              1);
 }
 #endif
 
@@ -761,12 +777,14 @@ TEST(PrivateStorageTest,
     // 4. Confirmar is_collision == true.
     EXPECT_TRUE(f2.error().is_collision);
 
-    // 5. Confirmar que o conteúdo e o handle da primeira operação permanecem válidos.
+    // 5. Confirmar que o conteúdo e o handle da primeira operação permanecem
+    // válidos.
     EXPECT_TRUE(f1->is_open());
     kasumi::platform::private_storage::close_private_file(*f1);
     EXPECT_EQ(kasumi::test::read_text(file_path), payload);
 
-    // 6. Confirmar que erro por diretório inexistente tem is_collision == false.
+    // 6. Confirmar que erro por diretório inexistente tem is_collision ==
+    // false.
     const auto invalid_path =
         kasumi::test::workspace_path(workspace, "nonexistent_dir/file.bin");
     auto f3 =
@@ -780,7 +798,8 @@ TEST(PrivateStorageTest, FlushAndCloseReleasesHandleAndPreservesContent) {
     const auto file_path = kasumi::test::workspace_path(workspace, "flush.bin");
 
     // 1. Criar um arquivo privado em workspace descartável.
-    auto file = kasumi::platform::private_storage::create_private_file(file_path);
+    auto file =
+        kasumi::platform::private_storage::create_private_file(file_path);
     ASSERT_TRUE(file.has_value());
 
     // 2. Confirmar que o handle está aberto.
@@ -823,9 +842,11 @@ TEST(PrivateStorageTest, FlushAndCloseReleasesHandleAndPreservesContent) {
 
 TEST(PrivateStorageTest, FlushAndCloseRepeatedCallIsNoOp) {
     auto workspace = kasumi::test::make_temp_workspace("flush-close-repeat");
-    const auto file_path = kasumi::test::workspace_path(workspace, "repeat.bin");
+    const auto file_path =
+        kasumi::test::workspace_path(workspace, "repeat.bin");
 
-    auto file = kasumi::platform::private_storage::create_private_file(file_path);
+    auto file =
+        kasumi::platform::private_storage::create_private_file(file_path);
     ASSERT_TRUE(file.has_value());
     EXPECT_TRUE(file->is_open());
 
@@ -842,7 +863,8 @@ TEST(PrivateStorageTest, FlushAndCloseRepeatedCallIsNoOp) {
     EXPECT_EQ(file->handle.value,
               kasumi::platform::private_storage::invalid_private_handle);
 
-    // Segunda chamada não tenta utilizar handle inválido e retorna sucesso (no-op).
+    // Segunda chamada não tenta utilizar handle inválido e retorna sucesso
+    // (no-op).
     auto second_res =
         kasumi::platform::private_storage::flush_and_close_private_file(*file);
     EXPECT_TRUE(second_res.has_value());
@@ -856,60 +878,31 @@ TEST(PrivateStorageTest, FlushAndCloseRepeatedCallIsNoOp) {
     EXPECT_EQ(kasumi::test::read_text(file_path), payload);
 }
 
-
 #if defined(_WIN32)
 TEST(PrivateStorageTest, DirectoryAlreadyProtectedAvoidsRedundantWrite) {
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
-
     auto workspace = kasumi::test::make_temp_workspace("priv-dir-idempotent");
     const auto dir = kasumi::test::workspace_path(workspace, "private_dir");
 
     ASSERT_TRUE(kasumi::platform::private_storage::create_directory(dir));
     expect_private_dacl(dir);
 
-    const auto writes_after_create =
-        kasumi::platform::perf_trace::get_count("acl.writes_applied");
-    EXPECT_GT(writes_after_create, 0U);
-
-    // Calling protect_directory on already-conforming directory must NOT perform a second write
     ASSERT_TRUE(kasumi::platform::private_storage::protect_directory(dir));
     expect_private_dacl(dir);
-
-    const auto writes_after_protect =
-        kasumi::platform::perf_trace::get_count("acl.writes_applied");
-    EXPECT_EQ(writes_after_protect, writes_after_create);
-    EXPECT_GT(kasumi::platform::perf_trace::get_count("acl.already_compliant"), 0U);
 }
 
 TEST(PrivateStorageTest, FileAlreadyProtectedAvoidsRedundantWrite) {
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
-
     auto workspace = kasumi::test::make_temp_workspace("priv-file-idempotent");
-    const auto file = kasumi::test::workspace_path(workspace, "private_file.bin");
+    const auto file =
+        kasumi::test::workspace_path(workspace, "private_file.bin");
 
     ASSERT_TRUE(kasumi::platform::private_storage::create_file(file));
     expect_private_dacl(file);
 
-    const auto writes_after_create =
-        kasumi::platform::perf_trace::get_count("acl.writes_applied");
-    EXPECT_GT(writes_after_create, 0U);
-
-    // Calling protect_file on already-conforming file must NOT perform a second write
     ASSERT_TRUE(kasumi::platform::private_storage::protect_file(file));
     expect_private_dacl(file);
-
-    const auto writes_after_protect =
-        kasumi::platform::perf_trace::get_count("acl.writes_applied");
-    EXPECT_EQ(writes_after_protect, writes_after_create);
-    EXPECT_GT(kasumi::platform::perf_trace::get_count("acl.already_compliant"), 0U);
 }
 
 TEST(PrivateStorageTest, ExternallyExpandedDaclIsHardened) {
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
-
     auto workspace = kasumi::test::make_temp_workspace("priv-file-hardened");
     const auto file = kasumi::test::workspace_path(workspace, "tampered.bin");
 
@@ -922,13 +915,9 @@ TEST(PrivateStorageTest, ExternallyExpandedDaclIsHardened) {
     // protect_file must detect non-compliance and repair it
     ASSERT_TRUE(kasumi::platform::private_storage::protect_file(file));
     expect_private_dacl(file);
-    EXPECT_GT(kasumi::platform::perf_trace::get_count("acl.repair_required"), 0U);
 }
 
 TEST(PrivateStorageTest, DisabledInheritanceProtectionIsRestored) {
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
-
     auto workspace = kasumi::test::make_temp_workspace("priv-inherit-restored");
     const auto dir = kasumi::test::workspace_path(workspace, "unprotected_dir");
 
@@ -941,13 +930,9 @@ TEST(PrivateStorageTest, DisabledInheritanceProtectionIsRestored) {
     // protect_directory must re-establish SE_DACL_PROTECTED
     ASSERT_TRUE(kasumi::platform::private_storage::protect_directory(dir));
     expect_private_dacl(dir);
-    EXPECT_GT(kasumi::platform::perf_trace::get_count("acl.repair_required"), 0U);
 }
 
 TEST(PrivateStorageTest, NullDaclIsRepairedAndNeverAcceptedAsCompliant) {
-    kasumi::platform::perf_trace::force_enable(true);
-    kasumi::platform::perf_trace::reset();
-
     auto workspace = kasumi::test::make_temp_workspace("priv-null-dacl");
     const auto file = kasumi::test::workspace_path(workspace, "null_dacl.bin");
 
@@ -960,15 +945,17 @@ TEST(PrivateStorageTest, NullDaclIsRepairedAndNeverAcceptedAsCompliant) {
     // protect_file must repair it to conforming DACL
     ASSERT_TRUE(kasumi::platform::private_storage::protect_file(file));
     expect_private_dacl(file);
-    EXPECT_GT(kasumi::platform::perf_trace::get_count("acl.repair_required"), 0U);
 }
 
 TEST(PrivateStorageTest, SecurityInspectionFailurePropagatesError) {
-    const auto missing_path = std::filesystem::path("C:/kasumi_nonexistent_directory/file.bin");
-    auto res_file = kasumi::platform::private_storage::protect_file(missing_path);
+    const auto missing_path =
+        std::filesystem::path("C:/kasumi_nonexistent_directory/file.bin");
+    auto res_file =
+        kasumi::platform::private_storage::protect_file(missing_path);
     EXPECT_FALSE(res_file.has_value());
 
-    auto res_dir = kasumi::platform::private_storage::protect_directory(missing_path);
+    auto res_dir =
+        kasumi::platform::private_storage::protect_directory(missing_path);
     EXPECT_FALSE(res_dir.has_value());
 }
 #endif

@@ -10,8 +10,8 @@
 #include "crypto/key_derivation.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/hash_mutation.hpp"
-#include "kasumi/test/provider_scenarios.hpp"
 #include "kasumi/test/history_reconciliation.hpp"
+#include "kasumi/test/provider_scenarios.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
@@ -241,8 +241,6 @@ void expect_converged(Scenario& scenario,
         ASSERT_TRUE(stored->has_value());
         EXPECT_EQ((*stored)->commit_id, observed->logical_heads.front());
         EXPECT_EQ((*stored)->tree, observed->effective_tree);
-
-
     }
 }
 
@@ -288,8 +286,10 @@ void expect_fixed_point(Scenario& scenario, const Client& client) {
             std::get_if<kasumi::application::PlanReport>(&report->data);
         ASSERT_NE(plan, nullptr);
         EXPECT_TRUE(plan->items.empty());
-        EXPECT_TRUE(std::ranges::all_of(
-            plan->action_counts, [](std::uint32_t count) { return count == 0; }));
+        EXPECT_TRUE(
+            std::ranges::all_of(plan->action_counts, [](std::uint32_t count) {
+                return count == 0;
+            }));
         EXPECT_EQ(plan->upload_bytes, 0U);
         EXPECT_EQ(plan->download_bytes, 0U);
         EXPECT_FALSE(plan->has_conflicts);
@@ -433,7 +433,8 @@ void exercise_managed_to_ignored_residual(bool rename_remote_file) {
     ASSERT_TRUE(sync_succeeds(a));
 
     expect_file(a, "Projetos/arquivo.bak", backup_contents);
-    EXPECT_TRUE(std::filesystem::is_directory(client_local_dir(a) / "Projetos"));
+    EXPECT_TRUE(
+        std::filesystem::is_directory(client_local_dir(a) / "Projetos"));
     expect_absent(a, "Projetos/main.cpp");
     auto accepted = state(a);
     ASSERT_TRUE(accepted.has_value()) << accepted.error();
@@ -459,6 +460,29 @@ void exercise_managed_to_ignored_residual(bool rename_remote_file) {
     expect_fixed_point(scenario, b);
 }
 
+std::pair<Client, Client> make_client_pair(Scenario& scenario,
+                                           std::string first_name = "a",
+                                           std::string second_name = "b") {
+    return {make_client(scenario, std::move(first_name)),
+            make_client(scenario, std::move(second_name))};
+}
+
+void expect_converged_pair(Scenario& scenario,
+                           const Client& first,
+                           const Client& second) {
+    expect_converged(scenario, {&first, &second});
+    expect_fixed_point(scenario, first);
+    expect_fixed_point(scenario, second);
+}
+
+[[nodiscard]] ::testing::AssertionResult
+sync_pair_succeeds(const Client& first, const Client& second) {
+    if (const auto r1 = sync_succeeds(first); !r1) {
+        return r1;
+    }
+    return sync_succeeds(second);
+}
+
 void expect_no_transaction_artifacts(
     const kasumi::runtime::RuntimeData& runtime) {
     const auto profile = runtime.database_path.parent_path();
@@ -476,8 +500,7 @@ void expect_no_transaction_artifacts(
 
 TEST(H3LocalSyncTest, OfflineCrissCrossReconcilesThroughRealSync) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "offline");
-    const auto b = make_client(scenario, "left");
+    const auto [a, b] = make_client_pair(scenario, "offline", "left");
     const auto c = make_client(scenario, "right");
     const std::array clients{
         kasumi::test::scenarios::SyncScenarioClient{
@@ -512,8 +535,7 @@ TEST(H3LocalSyncTest, OfflineCrissCrossReconcilesThroughRealSync) {
 
 TEST(H3LocalSyncTest, BootstrapAndNestedTreeConverge) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
 
     const auto unicode_dir = kasumi::platform::path::from_utf8("pasta-日本");
     const auto unicode_file =
@@ -582,8 +604,7 @@ TEST(H3LocalSyncTest, BootstrapAndNestedTreeConverge) {
     // Reverse path B -> A: modify on B and sync to A
     kasumi::test::write_text(b_unicode, "unicode-v2");
 
-    ASSERT_TRUE(sync_succeeds(b));
-    ASSERT_TRUE(sync_succeeds(a));
+    ASSERT_TRUE(sync_pair_succeeds(b, a));
 
     ASSERT_TRUE(std::filesystem::is_regular_file(a_unicode));
     EXPECT_EQ(kasumi::test::read_text(a_unicode), "unicode-v2");
@@ -597,15 +618,12 @@ TEST(H3LocalSyncTest, BootstrapAndNestedTreeConverge) {
     ASSERT_NE(v2_file, nullptr);
     EXPECT_EQ(v2_file->path, expected_file_utf8);
 
-    expect_converged(scenario, {&a, &b});
-    expect_fixed_point(scenario, a);
-    expect_fixed_point(scenario, b);
+    expect_converged_pair(scenario, a, b);
 }
 
 TEST(H3LocalSyncTest, UnicodeSupplementaryAndExtendedSync) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
     constexpr std::array<std::pair<std::string_view, std::string_view>, 4>
         files{{
             {"高松灯/カード💝.png", "card from A"},
@@ -619,8 +637,7 @@ TEST(H3LocalSyncTest, UnicodeSupplementaryAndExtendedSync) {
                                  contents);
     }
 
-    ASSERT_TRUE(sync_succeeds(a));
-    ASSERT_TRUE(sync_succeeds(b));
+    ASSERT_TRUE(sync_pair_succeeds(a, b));
     for (const auto& [path, contents] : files) {
         SCOPED_TRACE(path);
         expect_file(b, path, contents);
@@ -635,8 +652,7 @@ TEST(H3LocalSyncTest, UnicodeSupplementaryAndExtendedSync) {
                                  kasumi::platform::path::from_utf8(added),
                              "new file from B");
 
-    ASSERT_TRUE(sync_succeeds(b));
-    ASSERT_TRUE(sync_succeeds(a));
+    ASSERT_TRUE(sync_pair_succeeds(b, a));
     expect_file(a, modified, "card updated on B with Unicode path");
     expect_file(a, added, "new file from B");
     for (const auto& [path, contents] : files) {
@@ -645,15 +661,12 @@ TEST(H3LocalSyncTest, UnicodeSupplementaryAndExtendedSync) {
             expect_file(a, path, contents);
         }
     }
-    expect_converged(scenario, {&a, &b});
-    expect_fixed_point(scenario, a);
-    expect_fixed_point(scenario, b);
+    expect_converged_pair(scenario, a, b);
 }
 
 TEST(H3LocalSyncTest, CreatesSubtreesAndEmptyDirectoriesInBothDirections) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
 
     kasumi::test::write_text(client_local_dir(a) / "keep.txt", "keep");
     ASSERT_TRUE(sync(a));
@@ -672,15 +685,12 @@ TEST(H3LocalSyncTest, CreatesSubtreesAndEmptyDirectoriesInBothDirections) {
     ASSERT_TRUE(sync(b));
     ASSERT_TRUE(sync(a));
     expect_file(a, "from-b.txt", "from B");
-    expect_converged(scenario, {&a, &b});
-    expect_fixed_point(scenario, a);
-    expect_fixed_point(scenario, b);
+    expect_converged_pair(scenario, a, b);
 }
 
 TEST(H3LocalSyncTest, BidirectionalUpdatesConverge) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
     const auto result = kasumi::test::scenarios::bidirectional_update(
         shared_scenario(scenario, a, b, "bidirectional-update"));
     ASSERT_TRUE(result.has_value()) << result.error();
@@ -688,8 +698,7 @@ TEST(H3LocalSyncTest, BidirectionalUpdatesConverge) {
 
 TEST(H3LocalSyncTest, DeletesRootFilesAndPreservesAnEmptyRoot) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
     const auto result = kasumi::test::scenarios::logical_delete(
         shared_scenario(scenario, a, b, "logical-delete"));
     ASSERT_TRUE(result.has_value()) << result.error();
@@ -699,8 +708,7 @@ TEST(H3LocalSyncTest, DeletesRootFilesAndPreservesAnEmptyRoot) {
 
 TEST(H3LocalSyncTest, DeletesEmptyNestedDeepAndMixedDirectories) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
 
     make_directory(client_local_dir(a) / "empty");
     kasumi::test::write_text(client_local_dir(a) / "single/file.txt", "single");
@@ -745,8 +753,7 @@ TEST(H3LocalSyncTest, DeletesEmptyNestedDeepAndMixedDirectories) {
 
 TEST(H3LocalSyncTest, StructuralChangesFailClosedAtTypeBoundary) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
 
     kasumi::test::write_text(client_local_dir(a) / "node", "file");
     ASSERT_TRUE(sync(a));
@@ -779,8 +786,7 @@ TEST(H3LocalSyncTest, StructuralChangesFailClosedAtTypeBoundary) {
 
 TEST(H3LocalSyncTest, IgnoreFilesStayLocalAcrossRemoteDeletes) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
 
     kasumi::test::write_text(client_local_dir(a) / ".kasumiignore",
                              "ignored.txt\n");
@@ -804,8 +810,7 @@ TEST(H3LocalSyncTest, IgnoreFilesStayLocalAcrossRemoteDeletes) {
 
 TEST(H3LocalSyncTest, RemoteDirectoryDeletePreservesIgnoredDescendants) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
 
     kasumi::test::write_text(client_local_dir(a) / "Projetos/main.cpp",
                              "managed");
@@ -831,7 +836,8 @@ TEST(H3LocalSyncTest, RemoteDirectoryDeletePreservesIgnoredDescendants) {
 
     expect_absent(a, "Projetos/main.cpp");
     expect_file(a, "Projetos/teste.cache", "local-only cache");
-    EXPECT_TRUE(std::filesystem::is_directory(client_local_dir(a) / "Projetos"));
+    EXPECT_TRUE(
+        std::filesystem::is_directory(client_local_dir(a) / "Projetos"));
     auto observed = remote(scenario);
     ASSERT_TRUE(observed.has_value()) << observed.error();
     expect_remote_absent(*observed, "Projetos");
@@ -841,8 +847,7 @@ TEST(H3LocalSyncTest, RemoteDirectoryDeletePreservesIgnoredDescendants) {
 
 TEST(H3LocalSyncTest, RemoteDirectoryRenamePreservesIgnoredDescendants) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
 
     kasumi::test::write_text(client_local_dir(a) / "Projetos/main.cpp",
                              "managed");
@@ -860,7 +865,8 @@ TEST(H3LocalSyncTest, RemoteDirectoryRenamePreservesIgnoredDescendants) {
     ASSERT_TRUE(ignore_b.has_value()) << ignore_b.error();
 
     std::error_code error;
-    std::filesystem::create_directories(client_local_dir(b) / "Projects", error);
+    std::filesystem::create_directories(client_local_dir(b) / "Projects",
+                                        error);
     ASSERT_FALSE(error) << error.message();
     std::filesystem::rename(client_local_dir(b) / "Projetos/main.cpp",
                             client_local_dir(b) / "Projects/main.cpp",
@@ -881,8 +887,7 @@ TEST(H3LocalSyncTest, RemoteDirectoryRenamePreservesIgnoredDescendants) {
     expect_fixed_point(scenario, a);
 }
 
-TEST(H3LocalSyncTest,
-     ManagedFileBecomingIgnoredSurvivesRemoteDirectoryRename) {
+TEST(H3LocalSyncTest, ManagedFileBecomingIgnoredSurvivesRemoteDirectoryRename) {
     exercise_managed_to_ignored_residual(true);
 }
 
@@ -945,8 +950,7 @@ TEST(H3LocalSyncTest, EmptyDirectoryRemainsManaged) {
 
 TEST(H3LocalSyncTest, RemoteDirectoryIsKeptForIgnoredOnlyLocalChildren) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
 
     kasumi::test::write_text(client_local_dir(a) / "dados/seed.txt", "seed");
     ASSERT_TRUE(sync(a));
@@ -972,10 +976,10 @@ TEST(H3LocalSyncTest, RemoteDirectoryIsKeptForIgnoredOnlyLocalChildren) {
     expect_fixed_point(scenario, a);
 }
 
-TEST(H3LocalSyncTest, MoveOfLastManagedFileLeavesNestedIgnoredDirectoriesLocal) {
+TEST(H3LocalSyncTest,
+     MoveOfLastManagedFileLeavesNestedIgnoredDirectoriesLocal) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
 
     kasumi::test::write_text(client_local_dir(a) / "antigo/src/main.cpp",
                              "managed");
@@ -990,7 +994,8 @@ TEST(H3LocalSyncTest, MoveOfLastManagedFileLeavesNestedIgnoredDirectoriesLocal) 
     ASSERT_TRUE(sync(b));
 
     std::error_code error;
-    std::filesystem::create_directories(client_local_dir(b) / "novo/src", error);
+    std::filesystem::create_directories(client_local_dir(b) / "novo/src",
+                                        error);
     ASSERT_FALSE(error) << error.message();
     std::filesystem::rename(client_local_dir(b) / "antigo/src/main.cpp",
                             client_local_dir(b) / "novo/src/main.cpp",
@@ -1026,7 +1031,8 @@ TEST(H3LocalSyncTest, MoveOfLastManagedFileLeavesNestedIgnoredDirectoriesLocal) 
     expect_file(a, "novo/src/main.cpp", "managed");
     expect_file(a, "antigo/src/backup/arquivo.bak", "local-only backup");
     EXPECT_TRUE(std::filesystem::is_directory(client_local_dir(a) / "antigo"));
-    EXPECT_TRUE(std::filesystem::is_directory(client_local_dir(a) / "antigo/src"));
+    EXPECT_TRUE(
+        std::filesystem::is_directory(client_local_dir(a) / "antigo/src"));
     auto observed = remote(scenario);
     ASSERT_TRUE(observed.has_value()) << observed.error();
     expect_remote_present(*observed, "novo/src/main.cpp");
@@ -1038,8 +1044,7 @@ TEST(H3LocalSyncTest, MoveOfLastManagedFileLeavesNestedIgnoredDirectoriesLocal) 
 TEST(H3LocalSyncTest,
      IgnoredFileModifiedRemotelyDoesNotCauseCompositionMismatch) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
 
     // Initially both sync desktop.ini and file.txt
     kasumi::test::write_text(client_local_dir(a) / "desktop.ini",
@@ -1192,13 +1197,15 @@ TEST(H3LocalSyncTest, FreshClientPreexistingRemoteIgnoredDirectoryConverges) {
     EXPECT_EQ(std::ranges::find(*identifiers_after, ignored_content_id),
               identifiers_after->end())
         << "first sync must not upload local-only ignored content";
-    auto materialized = kasumi::application::observation::collect_local_tree(
-        client_local_dir(fresh), input->ignore_list);
+    auto materialized =
+        kasumi::application::observation::collect_local_observation(
+            client_local_dir(fresh), input->ignore_list);
     ASSERT_TRUE(materialized.has_value());
-    ASSERT_EQ(materialized->rows.size(),
+    ASSERT_EQ(materialized->snapshot.rows.size(),
               preview->candidate_shared_tree.rows.size());
-    for (std::size_t index = 0; index < materialized->rows.size(); ++index) {
-        const auto& actual = materialized->rows[index];
+    for (std::size_t index = 0; index < materialized->snapshot.rows.size();
+         ++index) {
+        const auto& actual = materialized->snapshot.rows[index];
         const auto& expected = preview->candidate_shared_tree.rows[index];
         EXPECT_EQ(actual.path, expected.path);
         EXPECT_EQ(actual.hash, expected.hash);
@@ -1427,14 +1434,13 @@ TEST(H3LocalSyncTest, UploadsFromLongRootPath) {
     const auto source = client_local_dir(client) / "hello.txt";
     constexpr std::string_view contents = "long path upload content";
     kasumi::test::write_text(source, contents);
-    const auto profile = client_environment(client).app_data_dir / "profiles" /
-                         "smoke";
+    const auto profile =
+        client_environment(client).app_data_dir / "profiles" / "smoke";
     const auto staged = profile / ".transactions" / std::string(32, 'a') /
                         "upload-batches" / "0" / std::string(64, 'b');
-    SCOPED_TRACE("source path characters=" +
-                 std::to_string(source.native().size()) +
-                 ", staged path characters=" +
-                 std::to_string(staged.native().size()));
+    SCOPED_TRACE(
+        "source path characters=" + std::to_string(source.native().size()) +
+        ", staged path characters=" + std::to_string(staged.native().size()));
     EXPECT_GE(source.native().size(), 117U);
     EXPECT_EQ(staged.native().size(), 260U);
 
@@ -1456,16 +1462,16 @@ TEST(SyncPathTest, LongTemporaryCiphertextPathIsHandledSafely) {
     const auto source = client_local_dir(client) / "long.txt";
     kasumi::test::write_text(source, contents);
 
-    const auto profile = client_environment(client).app_data_dir / "profiles" /
-                         "long-staging";
-    const auto previous_staging =
-        profile / ".transactions" / std::string(32, 'a') / "upload-batches" /
-        "0" / std::string(64, 'b');
+    const auto profile =
+        client_environment(client).app_data_dir / "profiles" / "long-staging";
+    const auto previous_staging = profile / ".transactions" /
+                                  std::string(32, 'a') / "upload-batches" /
+                                  "0" / std::string(64, 'b');
     const auto database = profile / "state.db";
-    SCOPED_TRACE("database path characters=" +
-                 std::to_string(database.native().size()) +
-                 ", previous ciphertext staging path characters=" +
-                 std::to_string(previous_staging.native().size()));
+    SCOPED_TRACE(
+        "database path characters=" + std::to_string(database.native().size()) +
+        ", previous ciphertext staging path characters=" +
+        std::to_string(previous_staging.native().size()));
     ASSERT_LT(database.native().size(), 260U);
     ASSERT_GE(previous_staging.native().size(), 300U);
     std::cerr << "SYNC_PATH_EVIDENCE {\"database_path_chars\":"
@@ -1493,16 +1499,15 @@ TEST(H3LocalSyncTest, UploadsBeforeWindowsLegacyPathLimit) {
     kasumi::test::write_text(source, contents);
     const auto long_name = std::string(128, 'n') + ".txt";
     kasumi::test::write_text(client_local_dir(client) / long_name, "name");
-    kasumi::test::write_text(client_local_dir(client) / "nested" / "deep" /
-                                 "file.txt",
-                             "nested");
-    const auto unicode_path = kasumi::platform::path::from_utf8(
-        "pasta-日本/usuário-☁.txt");
-    kasumi::test::write_text(client_local_dir(client) / unicode_path, "unicode");
-    const auto staged =
-        client_environment(client).app_data_dir / "profiles" / "smoke" /
-        ".transactions" / std::string(32, 'a') / "upload-batches" / "0" /
-        std::string(64, 'b');
+    kasumi::test::write_text(
+        client_local_dir(client) / "nested" / "deep" / "file.txt", "nested");
+    const auto unicode_path =
+        kasumi::platform::path::from_utf8("pasta-日本/usuário-☁.txt");
+    kasumi::test::write_text(client_local_dir(client) / unicode_path,
+                             "unicode");
+    const auto staged = client_environment(client).app_data_dir / "profiles" /
+                        "smoke" / ".transactions" / std::string(32, 'a') /
+                        "upload-batches" / "0" / std::string(64, 'b');
     EXPECT_EQ(staged.native().size(), 259U);
 
     ASSERT_TRUE(sync_succeeds(client));
@@ -1512,11 +1517,12 @@ TEST(H3LocalSyncTest, UploadsBeforeWindowsLegacyPathLimit) {
     ASSERT_NE(row, nullptr);
     EXPECT_EQ(row->size, contents.size());
     EXPECT_NE(kasumi::find_row(observed->effective_tree, long_name), nullptr);
-    EXPECT_NE(kasumi::find_row(observed->effective_tree, "nested/deep/file.txt"),
-              nullptr);
-    EXPECT_NE(kasumi::find_row(observed->effective_tree,
-                               "pasta-日本/usuário-☁.txt"),
-              nullptr);
+    EXPECT_NE(
+        kasumi::find_row(observed->effective_tree, "nested/deep/file.txt"),
+        nullptr);
+    EXPECT_NE(
+        kasumi::find_row(observed->effective_tree, "pasta-日本/usuário-☁.txt"),
+        nullptr);
 }
 
 TEST(H3LocalSyncTest, HundredMiBContentRoundTripAndLocalSync) {
@@ -1524,8 +1530,8 @@ TEST(H3LocalSyncTest, HundredMiBContentRoundTripAndLocalSync) {
     const auto first = make_client_at_root_length(scenario, "a", 104);
     const auto second = make_client_at_root_length(scenario, "b", 104);
     const auto payload = client_local_dir(first) / "large.bin";
-    const auto scratch = kasumi::test::workspace_path(
-        std::get<0>(scenario), "large-file-crypto");
+    const auto scratch = kasumi::test::workspace_path(std::get<0>(scenario),
+                                                      "large-file-crypto");
     make_directory(scratch);
     const auto encrypted = scratch / "large.enc";
     const auto decrypted = scratch / "large.dec";
@@ -1553,11 +1559,9 @@ TEST(H3LocalSyncTest, HundredMiBContentRoundTripAndLocalSync) {
     const auto updated_hash = kasumi::crypto::content::hash_file(payload);
     ASSERT_TRUE(updated_hash.has_value());
     ASSERT_NE(*updated_hash, *original_hash);
-    ASSERT_TRUE(sync_succeeds(first));
-    ASSERT_TRUE(sync_succeeds(second));
-    const auto materialized_hash =
-        kasumi::crypto::content::hash_file(client_local_dir(second) /
-                                           "large.bin");
+    ASSERT_TRUE(sync_pair_succeeds(first, second));
+    const auto materialized_hash = kasumi::crypto::content::hash_file(
+        client_local_dir(second) / "large.bin");
     ASSERT_TRUE(materialized_hash.has_value());
     EXPECT_EQ(*materialized_hash, *updated_hash);
     auto updated_remote = remote(scenario);
@@ -1611,8 +1615,7 @@ TEST(ScannerPropagationTest, HybridObservationFailsBeforeRemoteMutation) {
 TEST(H3LocalSyncTest, RemoteDeletePreservesLocalConcurrentModification) {
     {
         auto scenario = make_scenario();
-        const auto a = make_client(scenario, "a");
-        const auto b = make_client(scenario, "b");
+        const auto [a, b] = make_client_pair(scenario);
 
         kasumi::test::write_text(client_local_dir(a) / "dir/file.txt", "V1");
         ASSERT_TRUE(sync(a));
@@ -1636,8 +1639,7 @@ TEST(H3LocalSyncTest, RemoteDeletePreservesLocalConcurrentModification) {
 
     {
         auto scenario = make_scenario();
-        const auto a = make_client(scenario, "a");
-        const auto b = make_client(scenario, "b");
+        const auto [a, b] = make_client_pair(scenario);
 
         kasumi::test::write_text(client_local_dir(a) / "root.txt", "R1");
         ASSERT_TRUE(sync(a));
@@ -1655,8 +1657,7 @@ TEST(H3LocalSyncTest, RemoteDeletePreservesLocalConcurrentModification) {
 
 TEST(H3LocalSyncTest, SameFileModifyModifyPreservesBothVersions) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
     const auto result = kasumi::test::scenarios::two_client_conflict(
         shared_scenario(scenario, a, b, "two-client-conflict"));
     ASSERT_TRUE(result.has_value()) << result.error();
@@ -1664,8 +1665,7 @@ TEST(H3LocalSyncTest, SameFileModifyModifyPreservesBothVersions) {
 
 TEST(H3LocalSyncTest, IndependentFileChangesConvergeWithoutFalseConflict) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
 
     kasumi::test::write_text(client_local_dir(a) / "a.txt", "A1");
     kasumi::test::write_text(client_local_dir(a) / "b.txt", "B1");
@@ -1695,15 +1695,12 @@ TEST(H3LocalSyncTest, IndependentFileChangesConvergeWithoutFalseConflict) {
     expect_remote_present(*observed_remote, "a.txt");
     expect_remote_present(*observed_remote, "b.txt");
 
-    expect_converged(scenario, {&a, &b});
-    expect_fixed_point(scenario, a);
-    expect_fixed_point(scenario, b);
+    expect_converged_pair(scenario, a, b);
 }
 
 TEST(H3LocalSyncTest, RemoteModifyAndLocalDeletePreservesRemoteContent) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
 
     kasumi::test::write_text(client_local_dir(a) / "file.txt", "BASE");
     ASSERT_TRUE(sync(a));
@@ -1727,15 +1724,12 @@ TEST(H3LocalSyncTest, RemoteModifyAndLocalDeletePreservesRemoteContent) {
     ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
     expect_remote_present(*observed_remote, "file.txt");
 
-    expect_converged(scenario, {&a, &b});
-    expect_fixed_point(scenario, a);
-    expect_fixed_point(scenario, b);
+    expect_converged_pair(scenario, a, b);
 }
 
 TEST(H3LocalSyncTest, PersistentStateSurvivesIndependentApplicationExecutions) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
 
     kasumi::test::write_text(client_local_dir(a) / "before.txt", "before");
     ASSERT_TRUE(sync(a));
@@ -1757,8 +1751,7 @@ TEST(H3LocalSyncTest, PersistentStateSurvivesIndependentApplicationExecutions) {
 
 TEST(H3LocalSyncTest, StaleClientCatchesUpAcrossMultipleGenerations) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
 
     kasumi::test::write_text(client_local_dir(a) / "alpha.txt", "A1");
     kasumi::test::write_text(client_local_dir(a) / "old.txt", "old");
@@ -1785,8 +1778,7 @@ TEST(H3LocalSyncTest, StaleClientCatchesUpAcrossMultipleGenerations) {
 
 TEST(H3LocalSyncTest, ThreePersistentClientsConvergeBidirectionally) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
     const auto c = make_client(scenario, "c");
 
     kasumi::test::write_text(client_local_dir(a) / "base.txt", "base");
@@ -1813,8 +1805,7 @@ TEST(H3LocalSyncTest, ThreePersistentClientsConvergeBidirectionally) {
 
 TEST(H3LocalSyncTest, ConcurrentDirectoryDeletePreservesModifiedDescendant) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
 
     kasumi::test::write_text(client_local_dir(a) / "docs/changed.txt",
                              "BASE-CHANGED");
@@ -1852,9 +1843,7 @@ TEST(H3LocalSyncTest, ConcurrentDirectoryDeletePreservesModifiedDescendant) {
     EXPECT_EQ(changed_row->hash, kasumi::hasher::hash_string("A-MODIFIED"));
     expect_remote_absent(*observed_remote, "docs/obsolete.txt");
 
-    expect_converged(scenario, {&a, &b});
-    expect_fixed_point(scenario, a);
-    expect_fixed_point(scenario, b);
+    expect_converged_pair(scenario, a, b);
 }
 
 std::vector<std::pair<std::string, std::string>>
@@ -1885,8 +1874,7 @@ std::vector<std::string> payload_contents(
 
 TEST(H3LocalSyncTest, ThreeConcurrentModificationsPreserveAllVersions) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
     const auto c = make_client(scenario, "c");
 
     // 1. Establish baseline
@@ -2045,15 +2033,12 @@ void verify_file_and_directory_branches_preserved(Scenario& scenario,
 
     EXPECT_TRUE(kasumi::valid_snapshot(observed_remote->effective_tree, false));
 
-    expect_converged(scenario, {&a, &b});
-    expect_fixed_point(scenario, a);
-    expect_fixed_point(scenario, b);
+    expect_converged_pair(scenario, a, b);
 }
 
 TEST(H3LocalSyncTest, ConcurrentFileDirectoryCreationPreservesBothBranches) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
 
     // 1. Establish an empty shared baseline
     ASSERT_TRUE(sync(a));
@@ -2127,8 +2112,7 @@ TEST(H3LocalSyncTest, ConcurrentFileDirectoryCreationPreservesBothBranches) {
 
 TEST(H3LocalSyncTest, ConcurrentDirectoryFileCreationPreservesBothBranches) {
     auto scenario = make_scenario();
-    const auto a = make_client(scenario, "a");
-    const auto b = make_client(scenario, "b");
+    const auto [a, b] = make_client_pair(scenario);
 
     // 1. Establish an empty shared baseline
     ASSERT_TRUE(sync(a));

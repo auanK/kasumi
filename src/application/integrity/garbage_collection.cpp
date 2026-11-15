@@ -1,10 +1,11 @@
+#include "application/detail.hpp"
 #include "application/history_storage/content_reachability.hpp"
+#include "application/history_storage/detail.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/reachability.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/integrity/maintenance.hpp"
 #include "platform/cancellation.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <array>
@@ -17,9 +18,6 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <tuple>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -30,148 +28,6 @@ namespace history_storage = application::history_storage;
 namespace protocol = application::history_storage::maintenance_protocol;
 using KeySpan = std::span<const std::uint8_t, crypto::KEY_SIZE>;
 constexpr std::size_t gc_delete_batch_size = 8;
-
-std::string_view phase_metric(GarbageCollectStage stage) noexcept {
-    switch (stage) {
-        case GarbageCollectStage::Preparing:
-            return "gc.preparing_us";
-        case GarbageCollectStage::Analyzing:
-            return "gc.analyzing_us";
-        case GarbageCollectStage::Applying:
-            return "gc.applying_us";
-        case GarbageCollectStage::Finalizing:
-            return "gc.finalizing_us";
-    }
-    return "gc.unknown_stage_us";
-}
-
-class PerfTimer {
-public:
-    explicit PerfTimer(std::string_view name) noexcept
-        : name_(name), token_(platform::perf_trace::begin()) {
-    }
-
-    ~PerfTimer() {
-        platform::perf_trace::finish(name_, token_);
-    }
-
-    PerfTimer(const PerfTimer&) = delete;
-    PerfTimer& operator=(const PerfTimer&) = delete;
-
-private:
-    std::string_view name_;
-    platform::perf_trace::Token token_;
-};
-
-class GarbageCollectionTrace {
-public:
-    GarbageCollectionTrace() noexcept
-        : total_(platform::perf_trace::begin()),
-          phase_(platform::perf_trace::begin()) {
-    }
-
-    ~GarbageCollectionTrace() { finish(); }
-
-    void enter(GarbageCollectStage stage) noexcept {
-        if (stage == stage_ || finished_) {
-            return;
-        }
-        platform::perf_trace::finish(phase_metric(stage_), phase_);
-        stage_ = stage;
-        phase_ = platform::perf_trace::begin();
-    }
-
-    void finish() noexcept {
-        if (finished_) {
-            return;
-        }
-        platform::perf_trace::finish(phase_metric(stage_), phase_);
-        platform::perf_trace::finish("gc.total_us", total_);
-        finished_ = true;
-    }
-
-private:
-    platform::perf_trace::Token total_;
-    platform::perf_trace::Token phase_;
-    GarbageCollectStage stage_ = GarbageCollectStage::Preparing;
-    bool finished_ = false;
-};
-
-enum class CandidateKind {
-    CommitVariant,
-    Content,
-};
-
-struct Candidate {
-    CandidateKind kind = CandidateKind::Content;
-    std::string identifier;
-    std::string commit_id;
-
-    bool operator==(const Candidate&) const = default;
-};
-
-// Built once from the authenticated observation and consumed as-is by Apply.
-// The maintenance barrier excludes cooperative writers; there is no distributed
-// CAS, so later non-cooperative mutation is outside this contract.
-struct DeletionPlan {
-    std::vector<Candidate> candidates;
-    std::vector<std::string> protected_objects;
-};
-
-struct Observation {
-    std::vector<std::string> logical_heads;
-    std::vector<std::string> reachable_commits;
-    std::vector<std::string> reachable_content;
-    DeletionPlan plan;
-};
-
-// Attributes transport reads to the phase that performed them. Perf tracing is
-// optional; when disabled every read returns zero.
-class PhaseTraffic {
-public:
-    explicit PhaseTraffic(std::string_view prefix)
-        : prefix_(prefix),
-          get_start_(platform::perf_trace::get_count("transport get")),
-          list_start_(platform::perf_trace::get_count("transport list") +
-                      platform::perf_trace::get_count("transport list prefix")),
-          presence_start_(
-              platform::perf_trace::get_count("transport presence")) {
-    }
-
-    ~PhaseTraffic() { finish(); }
-
-    PhaseTraffic(const PhaseTraffic&) = delete;
-    PhaseTraffic& operator=(const PhaseTraffic&) = delete;
-
-    void finish() noexcept {
-        if (finished_) {
-            return;
-        }
-        finished_ = true;
-        if (!platform::perf_trace::enabled()) {
-            return;
-        }
-        platform::perf_trace::count(
-            std::string{prefix_} + "get_calls",
-            platform::perf_trace::get_count("transport get") - get_start_);
-        platform::perf_trace::count(
-            std::string{prefix_} + "list_calls",
-            platform::perf_trace::get_count("transport list") +
-                platform::perf_trace::get_count("transport list prefix") -
-                list_start_);
-        platform::perf_trace::count(
-            std::string{prefix_} + "presence_calls",
-            platform::perf_trace::get_count("transport presence") -
-                presence_start_);
-    }
-
-private:
-    std::string_view prefix_;
-    std::uint64_t get_start_ = 0;
-    std::uint64_t list_start_ = 0;
-    std::uint64_t presence_start_ = 0;
-    bool finished_ = false;
-};
 
 Error make_error(ErrorCode code,
                  std::string detail,
@@ -267,8 +123,6 @@ struct BarrierCleanup {
     }
 
     std::expected<void, Error> release_once() {
-        platform::perf_trace::count("gc.barrier_cleanup_attempts");
-        PerfTimer cleanup_trace{"gc.barrier_cleanup_us"};
         if (cleanup_started) {
             if (release_confirmed) {
                 return {};
@@ -322,16 +176,6 @@ struct BarrierCleanup {
     }
 };
 
-std::filesystem::path
-maintenance_workspace_root(const runtime::RuntimeData& runtime_data) {
-    auto root = runtime_data.database_path.parent_path();
-    std::error_code error;
-    if (root.empty() || !std::filesystem::exists(root, error)) {
-        root = runtime_data.local_dir.parent_path();
-    }
-    return root;
-}
-
 void notify(const GarbageCollectProgressCallback& on_progress,
             GarbageCollectStage stage,
             std::optional<std::size_t> candidate_count,
@@ -358,28 +202,36 @@ std::optional<Error> cancellation_error() {
 }
 
 std::expected<void, Error>
+fail_if_nonempty(const std::vector<std::string>& items,
+                 std::string_view label) {
+    if (items.empty()) {
+        return {};
+    }
+    return std::unexpected(
+        make_error(ErrorCode::IntegrityFailure,
+                   std::string(label) + ": " + join_values(items)));
+}
+
+std::expected<void, Error>
 validate_history(const history_storage::ReachabilityInventory& inventory) {
     if (inventory.logical_heads.empty()) {
         return std::unexpected(
             make_error(ErrorCode::IntegrityFailure, "remote history absent"));
     }
-    if (!inventory.unknown_history_objects.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::IntegrityFailure,
-                       "unknown history objects: " +
-                           join_values(inventory.unknown_history_objects)));
+    if (auto ok = fail_if_nonempty(inventory.unknown_history_objects,
+                                   "unknown history objects");
+        !ok) {
+        return ok;
     }
-    if (!inventory.missing_parent_ids.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::IntegrityFailure,
-                       "missing parent commits: " +
-                           join_values(inventory.missing_parent_ids)));
+    if (auto ok = fail_if_nonempty(inventory.missing_parent_ids,
+                                   "missing parent commits");
+        !ok) {
+        return ok;
     }
-    if (!inventory.invalid_parent_ids.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::IntegrityFailure,
-                       "invalid parent commits: " +
-                           join_values(inventory.invalid_parent_ids)));
+    if (auto ok = fail_if_nonempty(inventory.invalid_parent_ids,
+                                   "invalid parent commits");
+        !ok) {
+        return ok;
     }
 
     std::vector<std::string> invalid_markers;
@@ -388,10 +240,9 @@ validate_history(const history_storage::ReachabilityInventory& inventory) {
             invalid_markers.push_back(marker.identifier);
         }
     }
-    if (!invalid_markers.empty()) {
-        return std::unexpected(make_error(ErrorCode::IntegrityFailure,
-                                          "invalid head markers: " +
-                                              join_values(invalid_markers)));
+    if (auto ok = fail_if_nonempty(invalid_markers, "invalid head markers");
+        !ok) {
+        return ok;
     }
 
     std::vector<std::string> invalid_commits;
@@ -403,21 +254,15 @@ validate_history(const history_storage::ReachabilityInventory& inventory) {
             invalid_commits.push_back(commit.commit_id);
         }
     }
-    if (!invalid_commits.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::IntegrityFailure,
-                       "invalid commits: " + join_values(invalid_commits)));
-    }
-    return {};
+    return fail_if_nonempty(invalid_commits, "invalid commits");
 }
 
 std::expected<void, Error> validate_content(
     const history_storage::ContentReachabilityInventory& inventory) {
-    if (!inventory.unknown_storage_objects.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::IntegrityFailure,
-                       "unknown physical identifiers: " +
-                           join_values(inventory.unknown_storage_objects)));
+    if (auto ok = fail_if_nonempty(inventory.unknown_storage_objects,
+                                   "unknown physical identifiers");
+        !ok) {
+        return ok;
     }
     std::vector<std::string> damaged;
     for (const auto& content : inventory.contents) {
@@ -426,13 +271,7 @@ std::expected<void, Error> validate_content(
             damaged.push_back(content.content_id);
         }
     }
-    if (!damaged.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::IntegrityFailure,
-                       "reachable contents missing or corrupted: " +
-                           join_values(damaged)));
-    }
-    return {};
+    return fail_if_nonempty(damaged, "reachable contents missing or corrupted");
 }
 
 std::vector<std::string>
@@ -449,9 +288,7 @@ required_variants(const history_storage::ReachabilityInventory& inventory,
         required.push_back(
             history_storage::commit_object(layout, *marker.reference));
     }
-    std::ranges::sort(marked_commits);
-    marked_commits.erase(std::ranges::unique(marked_commits).begin(),
-                         marked_commits.end());
+    history_storage::detail::sort_unique(marked_commits);
 
     for (const auto& commit : inventory.commits) {
         if (!commit.reachable ||
@@ -469,191 +306,56 @@ required_variants(const history_storage::ReachabilityInventory& inventory,
         }
     }
 
-    std::ranges::sort(required);
-    required.erase(std::ranges::unique(required).begin(), required.end());
+    history_storage::detail::sort_unique(required);
     return required;
 }
 
-std::expected<void, Error> validate_deletion_plan(
-    const DeletionPlan& plan,
-    const history_storage::ReachabilityInventory& history,
-    const std::vector<std::string>& orphan_contents,
-    const history_storage::RemoteLayout& layout) {
-    platform::perf_trace::count("gc.plan_validations");
-    PerfTimer validation_trace{"gc.plan_validation_us"};
-    for (std::size_t index = 1; index < plan.candidates.size(); ++index) {
-        const auto& previous = plan.candidates[index - 1];
-        const auto& current = plan.candidates[index];
-        if (!(std::tie(previous.kind, previous.identifier) <
-              std::tie(current.kind, current.identifier))) {
-            return std::unexpected(make_error(
-                ErrorCode::IntegrityFailure,
-                "deletion plan candidates are not sorted and unique"));
-        }
-    }
-
-    const std::unordered_set<std::string> protected_objects(
-        plan.protected_objects.begin(), plan.protected_objects.end());
-    std::unordered_set<std::string> deletions;
-    deletions.reserve(plan.candidates.size());
-    for (const auto& candidate : plan.candidates) {
-        if (candidate.identifier.empty() ||
-            history_storage::maintenance_protocol::is_control_object(
-                layout, candidate.identifier) ||
-            protected_objects.contains(candidate.identifier) ||
-            !deletions.insert(candidate.identifier).second) {
-            return std::unexpected(make_error(
-                ErrorCode::IntegrityFailure,
-                "deletion plan intersects protected or control objects",
-                candidate.identifier));
-        }
-        if (candidate.kind == CandidateKind::Content) {
-            if (!std::ranges::binary_search(orphan_contents,
-                                            candidate.identifier)) {
-                return std::unexpected(make_error(
-                    ErrorCode::IntegrityFailure,
-                    "deletion plan contains an unclassified content object",
-                    candidate.identifier));
-            }
-            continue;
-        }
-        const auto commit =
-            std::ranges::find(history.commits,
-                              candidate.commit_id,
-                              &history_storage::ReachabilityCommit::commit_id);
-        if (commit == history.commits.end() || !commit->reachable ||
-            !commit->valid) {
-            return std::unexpected(make_error(
-                ErrorCode::IntegrityFailure,
-                "deletion plan contains an unclassified commit variant",
-                candidate.identifier));
-        }
-        const auto variant =
-            std::ranges::find(commit->variants,
-                              candidate.identifier,
-                              &history_storage::ReachabilityVariant::identifier);
-        if (variant == commit->variants.end() ||
-            variant->state != history_storage::detail::VariantState::Valid) {
-            return std::unexpected(make_error(
-                ErrorCode::IntegrityFailure,
-                "deletion plan contains an unclassified commit variant",
-                candidate.identifier));
-        }
-    }
-
-    for (const auto& commit : history.commits) {
-        if (!commit.reachable) {
-            continue;
-        }
-        const bool preserves_alternative = std::ranges::any_of(
-            commit.variants, [&](const auto& variant) {
-                return !variant.identifier.empty() &&
-                       variant.state ==
-                           history_storage::detail::VariantState::Valid &&
-                       !deletions.contains(variant.identifier);
-            });
-        if (!preserves_alternative) {
-            return std::unexpected(make_error(
-                ErrorCode::IntegrityFailure,
-                "deletion plan removes every valid variant of a reachable commit",
-                commit.commit_id));
-        }
-    }
-
-    for (const auto& marker : history.markers) {
-        if (marker.state != history_storage::ReachabilityMarkerState::Valid ||
-            !marker.reference.has_value()) {
-            continue;
-        }
-        const auto identifier =
-            history_storage::commit_object(layout, *marker.reference);
-        if (deletions.contains(identifier)) {
-            return std::unexpected(make_error(
-                ErrorCode::IntegrityFailure,
-                "deletion plan removes a head-selected variant", identifier));
-        }
-    }
-    return {};
-}
-
-std::expected<Observation, Error>
+std::expected<std::vector<std::string>, Error>
 observe(transport::Transport& storage,
         KeySpan key,
         const std::filesystem::path& workspace_root) {
-    PhaseTraffic analysis_traffic{"gc.analysis_"};
-    platform::perf_trace::count("gc.analysis_observations");
-    PerfTimer observation_trace{"gc.observation_us"};
-    auto listing = [&] {
-        PerfTimer trace{"gc.analysis_list_us"};
-        return transport::list(storage);
-    }();
+    auto listing = transport::list(storage);
     if (!listing) {
         return std::unexpected(
             transport_error(listing.error(), "could not list remote objects"));
     }
-    platform::perf_trace::count("gc.physical_object_count", listing->size());
     std::ranges::sort(*listing);
 
     const auto layout = history_storage::derive_remote_layout(key);
-    platform::perf_trace::count("gc.history_reconstruction_attempts");
-    auto history = [&] {
-        PerfTimer trace{"gc.history_reconstruction_us"};
-        return history_storage::inventory_reachability(
-            storage, key, *listing, workspace_root);
-    }();
+    auto history = history_storage::inventory_reachability(
+        storage, key, *listing, workspace_root);
     if (!history) {
         return std::unexpected(history_error(history.error()));
     }
-    platform::perf_trace::count("gc.history_reconstructions");
     if (auto valid = validate_history(*history); !valid) {
         return std::unexpected(valid.error());
     }
 
-    auto content = [&] {
-        PerfTimer trace{"gc.content_classification_us"};
-        PhaseTraffic traffic{"gc.content_"};
-        return history_storage::inventory_content_reachability(
-            storage, key, *listing, *history, workspace_root, false);
-    }();
+    auto content = history_storage::inventory_content_reachability(
+        storage, key, *listing, *history, workspace_root, false);
     if (!content) {
         return std::unexpected(history_error(content.error()));
     }
     if (auto valid = validate_content(*content); !valid) {
         return std::unexpected(valid.error());
     }
-    platform::perf_trace::count("gc.physical_content_count",
-                                content->contents.size());
-    platform::perf_trace::count("gc.protected_content_count",
-                                content->reachable_content_ids.size());
 
-    const auto plan_trace = platform::perf_trace::begin();
     std::vector<std::string> orphan_ids = content->orphan_content_ids;
-    std::ranges::sort(orphan_ids);
-    orphan_ids.erase(std::ranges::unique(orphan_ids).begin(), orphan_ids.end());
+    history_storage::detail::sort_unique(orphan_ids);
 
-    DeletionPlan plan;
-    plan.protected_objects = required_variants(*history, layout);
-    plan.protected_objects.insert(plan.protected_objects.end(),
-                                  content->reachable_content_ids.begin(),
-                                  content->reachable_content_ids.end());
-    plan.protected_objects.insert(plan.protected_objects.end(),
-                                  history->valid_epochs.begin(),
-                                  history->valid_epochs.end());
-    plan.protected_objects.insert(plan.protected_objects.end(),
-                                  history->orphan_epochs.begin(),
-                                  history->orphan_epochs.end());
-    std::ranges::sort(plan.protected_objects);
-    plan.protected_objects.erase(
-        std::ranges::unique(plan.protected_objects).begin(),
-        plan.protected_objects.end());
+    auto protected_objects = required_variants(*history, layout);
+    protected_objects.insert(protected_objects.end(),
+                             content->reachable_content_ids.begin(),
+                             content->reachable_content_ids.end());
+    protected_objects.insert(protected_objects.end(),
+                             history->valid_epochs.begin(),
+                             history->valid_epochs.end());
+    protected_objects.insert(protected_objects.end(),
+                             history->orphan_epochs.begin(),
+                             history->orphan_epochs.end());
+    history_storage::detail::sort_unique(protected_objects);
 
-    for (const auto& identifier : orphan_ids) {
-        plan.candidates.push_back(Candidate{
-            .kind = CandidateKind::Content,
-            .identifier = identifier,
-            .commit_id = {},
-        });
-    }
+    std::vector<std::string> candidates;
     for (const auto& commit : history->commits) {
         if (!commit.reachable) {
             continue;
@@ -661,49 +363,39 @@ observe(transport::Transport& storage,
         for (const auto& variant : commit.variants) {
             if (variant.identifier.empty() ||
                 variant.state != history_storage::detail::VariantState::Valid ||
-                std::ranges::binary_search(plan.protected_objects,
+                std::ranges::binary_search(protected_objects,
                                            variant.identifier)) {
                 continue;
             }
-            plan.candidates.push_back(Candidate{
-                .kind = CandidateKind::CommitVariant,
-                .identifier = variant.identifier,
-                .commit_id = commit.commit_id,
-            });
+            if (protocol::is_control_object(layout, variant.identifier)) {
+                return std::unexpected(
+                    make_error(ErrorCode::IntegrityFailure,
+                               "deletion candidate intersects control objects",
+                               variant.identifier));
+            }
+            candidates.push_back(variant.identifier);
         }
     }
-    std::ranges::sort(plan.candidates,
-                      [](const auto& left, const auto& right) {
-                          return std::tie(left.kind, left.identifier) <
-                                 std::tie(right.kind, right.identifier);
-                      });
-    plan.candidates.erase(
-        std::ranges::unique(plan.candidates)
-            .begin(),
-        plan.candidates.end());
+    history_storage::detail::sort_unique(candidates);
 
-    platform::perf_trace::finish("gc.plan_build_us", plan_trace);
-    platform::perf_trace::count("gc.protected_object_count",
-                                plan.protected_objects.size());
-    if (auto valid =
-            validate_deletion_plan(plan, *history, orphan_ids, layout);
-        !valid) {
-        return std::unexpected(valid.error());
+    for (const auto& identifier : orphan_ids) {
+        if (identifier.empty() ||
+            protocol::is_control_object(layout, identifier) ||
+            std::ranges::binary_search(protected_objects, identifier)) {
+            return std::unexpected(make_error(
+                ErrorCode::IntegrityFailure,
+                "deletion candidate intersects protected or control objects",
+                identifier));
+        }
+        candidates.push_back(identifier);
     }
 
-    return Observation{
-        .logical_heads = std::move(history->logical_heads),
-        .reachable_commits = std::move(history->reachable_commits),
-        .reachable_content = std::move(content->reachable_content_ids),
-        .plan = std::move(plan),
-    };
+    return candidates;
 }
 
 std::expected<void, Error>
 require_no_writers(transport::Transport& storage,
                    const history_storage::RemoteLayout& layout) {
-    platform::perf_trace::count("gc.writer_checks");
-    PerfTimer writers_trace{"gc.writer_check_us"};
     auto writers = protocol::active_writers(storage, layout);
     if (!writers) {
         return std::unexpected(protocol_error(writers.error()));
@@ -719,8 +411,6 @@ require_no_writers(transport::Transport& storage,
 
 std::expected<void, Error>
 require_barrier_ownership(const protocol::RegistrationState& barrier) {
-    platform::perf_trace::count("gc.barrier_ownership_checks");
-    PerfTimer ownership_trace{"gc.barrier_ownership_check_us"};
     if (!protocol::registration_active(barrier)) {
         return std::unexpected(make_error(ErrorCode::ConcurrentChange,
                                           "maintenance barrier lost"));
@@ -737,12 +427,12 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                      transport::Transport& storage,
                      KeySpan key,
                      GarbageCollectProgressCallback on_progress) {
-    GarbageCollectionTrace trace;
     if (!transport::valid(storage)) {
         return std::unexpected(
             make_error(ErrorCode::InvalidInput, "invalid transport"));
     }
-    const auto workspace_root = maintenance_workspace_root(runtime_data);
+    const auto workspace_root =
+        application::detail::maintenance_workspace_root(runtime_data);
     if (workspace_root.empty()) {
         return std::unexpected(
             make_error(ErrorCode::InvalidInput, "invalid workspace"));
@@ -756,11 +446,8 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
     }
 
     const auto layout = history_storage::derive_remote_layout(key);
-    platform::perf_trace::count("gc.initial_barrier_presence_checks");
-    auto barrier_presence = [&] {
-        PerfTimer timer{"gc.initial_barrier_presence_us"};
-        return transport::presence(storage, layout.barrier_identifier);
-    }();
+    auto barrier_presence =
+        transport::presence(storage, layout.barrier_identifier);
     if (!barrier_presence) {
         return std::unexpected(transport_error(
             barrier_presence.error(), "could not inspect maintenance barrier"));
@@ -771,31 +458,15 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                        "another maintenance barrier is already present"));
     }
 
-    platform::perf_trace::count("gc.barrier_acquisition_attempts");
-    auto barrier = [&] {
-        PerfTimer timer{"gc.barrier_acquisition_us"};
-        return protocol::establish_barrier(storage, layout, workspace_root);
-    }();
+    auto barrier = protocol::establish_barrier(storage, layout, workspace_root);
     if (!barrier) {
         return std::unexpected(protocol_error(barrier.error()));
     }
     BarrierCleanup cleanup{std::move(*barrier)};
-    for (const auto name : {"gc.candidate_remove_attempts",
-                            "gc.candidate_remove_acknowledged",
-                            "gc.candidate_remove_errors",
-                            "gc.barrier_cleanup_errors",
-                            "gc.errors"}) {
-        platform::perf_trace::count(name, 0);
-    }
 
-    bool candidate_count_known = false;
-    const auto finish = [&cleanup,
-                         &failure_diagnostic,
-                         &trace,
-                         &candidate_count_known](
+    const auto finish = [&cleanup, &failure_diagnostic](
                             std::expected<GarbageCollectResult, Error> outcome)
         -> std::expected<GarbageCollectResult, Error> {
-        trace.enter(GarbageCollectStage::Finalizing);
         std::optional<Error> cleanup_failure;
         try {
             auto released = cleanup.release_once();
@@ -815,20 +486,9 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
         failure_diagnostic.barrier_release_confirmed =
             cleanup.release_confirmed;
         if (cleanup_failure.has_value()) {
-            platform::perf_trace::count("gc.barrier_cleanup_errors");
             failure_diagnostic.barrier_cleanup_error = cleanup_failure->detail;
             failure_diagnostic.barrier_cleanup_transport_error =
                 cleanup_failure->transport_failure;
-        }
-        if (candidate_count_known) {
-            platform::perf_trace::count("gc.candidate_count",
-                                        failure_diagnostic.candidate_objects);
-            platform::perf_trace::count("gc.confirmed_removed",
-                                        failure_diagnostic.confirmed_removed);
-        }
-        trace.finish();
-        if (!outcome || cleanup_failure.has_value()) {
-            platform::perf_trace::count("gc.errors");
         }
 
         if (!outcome.has_value()) {
@@ -851,6 +511,23 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
     };
 
     bool mutation_in_flight = false;
+    const auto fail_exception = [&](std::string_view what) {
+        if (mutation_in_flight) {
+            failure_diagnostic.mutation_state =
+                GarbageCollectMutationState::Uncertain;
+        }
+        std::string detail =
+            failure_diagnostic.stage == GarbageCollectStage::Applying
+                ? "garbage collection failed during apply"
+                : "garbage collection failed";
+        if (!what.empty()) {
+            detail += ": ";
+            detail += what;
+        }
+        return finish(std::unexpected(
+            make_error(ErrorCode::StateFailure, std::move(detail))));
+    };
+
     try {
         if (auto verified = require_barrier_ownership(cleanup.registration);
             !verified) {
@@ -860,44 +537,22 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             return finish(std::unexpected(writers.error()));
         }
 
-        platform::perf_trace::count("gc.visibility_probe_attempts");
-        auto online = [&] {
-            PerfTimer timer{"gc.visibility_probe_us"};
-            return protocol::supports_online_collection(
-                storage, layout, workspace_root);
-        }();
+        auto online = protocol::supports_online_collection(
+            storage, layout, workspace_root);
         if (!online) {
             return finish(std::unexpected(protocol_error(online.error())));
         }
 
         failure_diagnostic.stage = GarbageCollectStage::Analyzing;
-        trace.enter(GarbageCollectStage::Analyzing);
         notify(on_progress, GarbageCollectStage::Analyzing, std::nullopt, 0);
-        auto snapshot = [&] {
-            PerfTimer timer{"gc.first_observation_us"};
-            return observe(storage, key, workspace_root);
-        }();
-        if (!snapshot) {
-            return finish(std::unexpected(snapshot.error()));
+        auto observed_candidates = observe(storage, key, workspace_root);
+        if (!observed_candidates) {
+            return finish(std::unexpected(observed_candidates.error()));
         }
 
-        const auto candidate_count = snapshot->plan.candidates.size();
+        const auto& candidates = *observed_candidates;
+        const auto candidate_count = candidates.size();
         failure_diagnostic.candidate_objects = candidate_count;
-        candidate_count_known = true;
-        if (platform::perf_trace::enabled()) {
-            platform::perf_trace::count(
-                "gc.candidate_content_count",
-                static_cast<std::uint64_t>(std::ranges::count_if(
-                    snapshot->plan.candidates, [](const auto& candidate) {
-                        return candidate.kind == CandidateKind::Content;
-                    })));
-            platform::perf_trace::count(
-                "gc.candidate_variant_count",
-                static_cast<std::uint64_t>(std::ranges::count_if(
-                    snapshot->plan.candidates, [](const auto& candidate) {
-                        return candidate.kind == CandidateKind::CommitVariant;
-                    })));
-        }
 
         if (!*online) {
             failure_diagnostic.stage = GarbageCollectStage::Finalizing;
@@ -913,26 +568,38 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
         }
 
         failure_diagnostic.stage = GarbageCollectStage::Applying;
-        trace.enter(GarbageCollectStage::Applying);
         notify(on_progress, GarbageCollectStage::Applying, candidate_count, 0);
         auto apply = [&]() -> std::expected<std::size_t, Error> {
-            auto verified = [&] {
-                PerfTimer timer{"gc.pre_apply_ownership_us"};
-                return require_barrier_ownership(cleanup.registration);
-            }();
+            auto verified = require_barrier_ownership(cleanup.registration);
             if (!verified) {
                 return std::unexpected(verified.error());
             }
-            PhaseTraffic apply_traffic{"gc.apply_"};
             std::size_t acknowledged_removals = 0;
-            bool fallback_sequential = (storage.storage.remove_batch == nullptr);
-            if (fallback_sequential) {
-                platform::perf_trace::count("gc.remove_batch_fallback_used", 1);
-            }
+            bool fallback_sequential =
+                (storage.storage.remove_batch == nullptr);
 
             std::size_t chunk_start = 0;
-            const auto& candidates = snapshot->plan.candidates;
             const std::size_t total_candidates = candidates.size();
+
+            const auto fail_uncertain = [&](std::optional<std::string> id,
+                                            transport::Error error,
+                                            std::string_view detail) {
+                failure_diagnostic.failed_identifier = std::move(id);
+                failure_diagnostic.transport_error = error;
+                failure_diagnostic.mutation_state =
+                    GarbageCollectMutationState::Uncertain;
+                return std::unexpected(transport_error(error, detail));
+            };
+            const auto record_acknowledged = [&](std::size_t count) {
+                acknowledged_removals += count;
+                failure_diagnostic.confirmed_removed = acknowledged_removals;
+                failure_diagnostic.mutation_state =
+                    GarbageCollectMutationState::Confirmed;
+                notify(on_progress,
+                       GarbageCollectStage::Applying,
+                       candidate_count,
+                       acknowledged_removals);
+            };
 
             while (chunk_start < total_candidates) {
                 failure_diagnostic.failed_identifier.reset();
@@ -946,169 +613,96 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                 }
 
                 if (!fallback_sequential) {
-                    const std::size_t chunk_size =
-                        std::min(gc_delete_batch_size, total_candidates - chunk_start);
+                    const std::size_t chunk_size = std::min(
+                        gc_delete_batch_size, total_candidates - chunk_start);
 
                     transport::RemoveBatch batch;
                     batch.concurrency = gc_delete_batch_size;
                     batch.items.reserve(chunk_size);
                     for (std::size_t i = 0; i < chunk_size; ++i) {
                         batch.items.push_back(transport::RemoveBatchItem{
-                            .identifier = candidates[chunk_start + i].identifier,
+                            .identifier = candidates[chunk_start + i],
                         });
                     }
 
-                    platform::perf_trace::count("gc.remove_batches_submitted", 1);
-                    platform::perf_trace::count(
-                        "gc.remove_batch_items_submitted", chunk_size);
-
                     mutation_in_flight = true;
-                    auto batch_result = [&] {
-                        PerfTimer timer{"gc.remove_batch_us"};
-                        return transport::remove_batch(storage, batch);
-                    }();
+                    auto batch_result = transport::remove_batch(storage, batch);
                     mutation_in_flight = false;
 
                     if (!batch_result) {
                         const auto err = batch_result.error();
                         if (err.code == transport::ErrorCode::Unsupported) {
                             fallback_sequential = true;
-                            platform::perf_trace::count(
-                                "gc.remove_batch_fallback_used", 1);
                             continue;
                         }
-
-                        platform::perf_trace::count("gc.remove_attempts", chunk_size);
-                        platform::perf_trace::count(
-                            "gc.candidate_remove_attempts", chunk_size);
-                        platform::perf_trace::count("gc.candidate_remove_errors", 1);
-                        platform::perf_trace::count(
-                            "gc.remove_batch_transport_errors", 1);
-                        failure_diagnostic.failed_identifier.reset();
-                        failure_diagnostic.transport_error = err;
-                        failure_diagnostic.mutation_state =
-                            GarbageCollectMutationState::Uncertain;
-                        return std::unexpected(
-                            transport_error(err, "batch object removal failed"));
+                        return fail_uncertain(
+                            std::nullopt, err, "batch object removal failed");
                     }
-
-                    platform::perf_trace::count("gc.remove_attempts", chunk_size);
-                    platform::perf_trace::count(
-                        "gc.candidate_remove_attempts", chunk_size);
 
                     const auto& report = *batch_result;
-                    bool report_valid = (report.items.size() == chunk_size);
-                    std::unordered_map<std::string_view,
-                                       const transport::RemoveBatchItemResult*>
-                        result_by_id;
-                    if (report_valid) {
-                        result_by_id.reserve(chunk_size);
-                        for (const auto& item_result : report.items) {
-                            if (!result_by_id.emplace(item_result.identifier, &item_result)
-                                     .second) {
-                                report_valid = false;
-                                break;
-                            }
-                        }
-                        if (report_valid) {
-                            for (std::size_t i = 0; i < chunk_size; ++i) {
-                                if (!result_by_id.contains(
-                                        candidates[chunk_start + i].identifier)) {
-                                    report_valid = false;
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                    const auto requested =
+                        std::span{candidates}.subspan(chunk_start, chunk_size);
+                    const bool report_valid =
+                        report.items.size() == chunk_size &&
+                        std::ranges::all_of(requested, [&](const auto& id) {
+                            return std::ranges::count(
+                                       report.items,
+                                       id,
+                                       &transport::RemoveBatchItemResult::
+                                           identifier) == 1;
+                        });
 
                     if (!report_valid) {
-                        platform::perf_trace::count("gc.candidate_remove_errors", 1);
-                        platform::perf_trace::count(
-                            "gc.remove_batch_transport_errors", 1);
-                        failure_diagnostic.failed_identifier.reset();
-                        failure_diagnostic.transport_error = transport::Error{
-                            .code = transport::ErrorCode::ProtocolFailure,
-                            .message = "invalid or incomplete remove batch report",
-                        };
-                        failure_diagnostic.mutation_state =
-                            GarbageCollectMutationState::Uncertain;
-                        return std::unexpected(transport_error(
-                            *failure_diagnostic.transport_error,
-                            "invalid remove batch report"));
+                        return fail_uncertain(
+                            std::nullopt,
+                            transport::Error{
+                                .code = transport::ErrorCode::ProtocolFailure,
+                                .message =
+                                    "invalid or incomplete remove batch report",
+                            },
+                            "invalid remove batch report");
                     }
 
                     std::size_t batch_acknowledged = 0;
-                    std::size_t batch_errors = 0;
-                    const transport::RemoveBatchItemResult* first_failure = nullptr;
+                    const transport::RemoveBatchItemResult* first_failure =
+                        nullptr;
                     std::string first_failed_identifier;
 
                     for (std::size_t i = 0; i < chunk_size; ++i) {
-                        const auto& cand_id = candidates[chunk_start + i].identifier;
-                        const auto* res = result_by_id.at(cand_id);
+                        const auto& cand_id = candidates[chunk_start + i];
+                        const auto* res = &*std::ranges::find(
+                            report.items,
+                            cand_id,
+                            &transport::RemoveBatchItemResult::identifier);
                         if (res->result.has_value()) {
                             ++batch_acknowledged;
-                        } else {
-                            ++batch_errors;
-                            if (first_failure == nullptr) {
-                                first_failure = res;
-                                first_failed_identifier = cand_id;
-                            }
+                        } else if (first_failure == nullptr) {
+                            first_failure = res;
+                            first_failed_identifier = cand_id;
                         }
                     }
 
-                    acknowledged_removals += batch_acknowledged;
                     if (batch_acknowledged > 0) {
-                        platform::perf_trace::count(
-                            "gc.candidate_remove_acknowledged", batch_acknowledged);
-                        failure_diagnostic.confirmed_removed = acknowledged_removals;
-                        failure_diagnostic.mutation_state =
-                            GarbageCollectMutationState::Confirmed;
-                        notify(on_progress,
-                               GarbageCollectStage::Applying,
-                               candidate_count,
-                               acknowledged_removals);
+                        record_acknowledged(batch_acknowledged);
                     }
-
-                    if (batch_errors > 0) {
-                        platform::perf_trace::count(
-                            "gc.candidate_remove_errors", batch_errors);
-                        failure_diagnostic.failed_identifier = first_failed_identifier;
-                        failure_diagnostic.transport_error = first_failure->result.error();
-                        failure_diagnostic.mutation_state =
-                            GarbageCollectMutationState::Uncertain;
-                        return std::unexpected(transport_error(
-                            first_failure->result.error(), "object removal failed"));
+                    if (first_failure != nullptr) {
+                        return fail_uncertain(first_failed_identifier,
+                                              first_failure->result.error(),
+                                              "object removal failed");
                     }
-
                     chunk_start += chunk_size;
                 } else {
                     const auto& candidate = candidates[chunk_start];
-                    failure_diagnostic.failed_identifier = candidate.identifier;
-                    platform::perf_trace::count("gc.remove_attempts");
-                    platform::perf_trace::count("gc.candidate_remove_attempts");
+                    failure_diagnostic.failed_identifier = candidate;
                     mutation_in_flight = true;
-                    auto removed = [&] {
-                        PerfTimer timer{"gc.remove_us"};
-                        return transport::remove(storage, candidate.identifier);
-                    }();
+                    auto removed = transport::remove(storage, candidate);
                     mutation_in_flight = false;
                     if (!removed) {
-                        platform::perf_trace::count("gc.candidate_remove_errors");
-                        failure_diagnostic.mutation_state =
-                            GarbageCollectMutationState::Uncertain;
-                        return std::unexpected(transport_error(
-                            removed.error(), "object removal failed"));
+                        return fail_uncertain(candidate,
+                                              removed.error(),
+                                              "object removal failed");
                     }
-
-                    ++acknowledged_removals;
-                    platform::perf_trace::count("gc.candidate_remove_acknowledged");
-                    failure_diagnostic.confirmed_removed = acknowledged_removals;
-                    failure_diagnostic.mutation_state =
-                        GarbageCollectMutationState::Confirmed;
-                    notify(on_progress,
-                           GarbageCollectStage::Applying,
-                           candidate_count,
-                           acknowledged_removals);
+                    record_acknowledged(1);
                     ++chunk_start;
                 }
             }
@@ -1120,7 +714,6 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
         const auto removed_objects = *apply;
 
         failure_diagnostic.stage = GarbageCollectStage::Finalizing;
-        trace.enter(GarbageCollectStage::Finalizing);
         failure_diagnostic.failed_identifier.reset();
         failure_diagnostic.transport_error.reset();
         failure_diagnostic.mutation_state =
@@ -1137,31 +730,9 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             .analysis_only = false,
         });
     } catch (const std::exception& error) {
-        if (mutation_in_flight) {
-            platform::perf_trace::count("gc.candidate_remove_errors");
-            failure_diagnostic.mutation_state =
-                GarbageCollectMutationState::Uncertain;
-        }
-        auto detail = std::string{"garbage collection failed: "};
-        if (failure_diagnostic.stage == GarbageCollectStage::Applying) {
-            detail = "garbage collection failed during apply: ";
-        }
-        detail += error.what();
-        return finish(std::unexpected(
-            make_error(ErrorCode::StateFailure, std::move(detail))));
+        return fail_exception(error.what());
     } catch (...) {
-        if (mutation_in_flight) {
-            platform::perf_trace::count("gc.candidate_remove_errors");
-            failure_diagnostic.mutation_state =
-                GarbageCollectMutationState::Uncertain;
-        }
-        if (failure_diagnostic.stage == GarbageCollectStage::Applying) {
-            return finish(std::unexpected(
-                make_error(ErrorCode::StateFailure,
-                           "garbage collection failed during apply")));
-        }
-        return finish(std::unexpected(
-            make_error(ErrorCode::StateFailure, "garbage collection failed")));
+        return fail_exception({});
     }
 }
 

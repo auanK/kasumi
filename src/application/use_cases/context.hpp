@@ -9,8 +9,10 @@
 
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <string>
 #include <unordered_set>
+#include <utility>
 
 namespace kasumi::application::detail {
 
@@ -30,6 +32,32 @@ struct OperationContext {
     ProgressCallback on_progress{};
     std::unordered_set<std::string> initial_content_identifiers;
 };
+
+inline Error make_error(const OperationContext& context,
+                        ErrorCode code,
+                        std::string detail,
+                        std::optional<SyncStage> stage = std::nullopt) {
+    return Error{.operation = context.operation,
+                 .code = code,
+                 .detail = std::move(detail),
+                 .runtime = context.summary,
+                 .stage = stage};
+}
+
+inline std::unexpected<Error>
+fail_app(const OperationContext& context,
+         ErrorCode code,
+         std::string detail,
+         std::optional<SyncStage> stage = std::nullopt) {
+    return std::unexpected(make_error(context, code, std::move(detail), stage));
+}
+
+inline Response make_response(const OperationContext& context,
+                              ResponseData data) {
+    return Response{.operation = context.operation,
+                    .runtime = context.summary,
+                    .data = std::move(data)};
+}
 
 // Validates input and prepares profile, key, and transport.
 std::expected<void, Error> prepare_operation(const ExecutionInput& input,

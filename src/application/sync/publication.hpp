@@ -18,23 +18,9 @@
 
 namespace kasumi::application::sync::publication {
 
-// Failure categories when publishing history.
-enum class ErrorCode {
-    InvalidInput,
-    InvalidCommit,
-    HistoryStorageFailure,
-    ObservationFailure,
-    TransportFailure,
-    WorkspaceFailure,
-    LimitExceeded,
-    VerificationFailure,
-};
-
-// Detailed publication failure.
-struct Error {
-    ErrorCode code = ErrorCode::InvalidInput;
-    std::string detail;
-};
+// Types used by publication stages (aliased to history_storage errors).
+using ErrorCode = history_storage::ErrorCode;
+using Error = history_storage::Error;
 
 // Commit and identifier used in publication.
 struct PreparedCommit {
@@ -50,12 +36,10 @@ struct PruneResult {
 // Types used by publication stages.
 using PrepareResult = std::expected<PreparedCommit, Error>;
 using PublishResult = std::expected<history_storage::PublishedCommit, Error>;
-using PublishObjectResult =
-    std::expected<history_storage::PublishedCommitObject, Error>;
-using PublishHeadResult =
-    std::expected<history_storage::PublishedHeadMarker, Error>;
-using HeadMarkerState = history_storage::HeadMarkerState;
-using HeadMarkerInspection = std::expected<HeadMarkerState, Error>;
+using history_storage::HeadMarkerInspection;
+using history_storage::HeadMarkerState;
+using history_storage::PublishHeadResult;
+using history_storage::PublishObjectResult;
 using ReachableResult =
     std::expected<std::optional<history::LoadedCommit>, Error>;
 using PruneMarkersResult = std::expected<PruneResult, Error>;
@@ -100,26 +84,18 @@ verify_commit_object(transport::Transport& storage,
                      std::string_view local_physical_hash = {});
 
 // Publishes the marker that makes the commit visible.
-PublishHeadResult
+inline PublishHeadResult
 publish_head_marker(transport::Transport& storage,
                     const history_storage::RemoteLayout& layout,
                     const history_storage::HeadReference& reference,
-                    const std::filesystem::path& workspace_root);
+                    const std::filesystem::path& workspace_root) {
+    return history_storage::publish_head_marker_scoped(
+        storage, layout, reference, workspace_root);
+}
 
-// Confirms integrity of the published marker.
-std::expected<void, Error>
-verify_head_marker(transport::Transport& storage,
-                   const history_storage::RemoteLayout& layout,
-                   const history_storage::HeadReference& reference,
-                   const std::filesystem::path& workspace_root,
-                   std::string_view local_physical_hash = {});
-
-// Inspects the current state of a marker.
-HeadMarkerInspection
-inspect_head_marker(transport::Transport& storage,
-                    const history_storage::RemoteLayout& layout,
-                    const history_storage::HeadReference& reference,
-                    const std::filesystem::path& workspace_root);
+using history_storage::inspect_head_marker;
+using history_storage::list_remote_head_commit_ids;
+using history_storage::verify_head_marker;
 
 // Publishes the commit object and its marker.
 PublishResult
@@ -147,9 +123,6 @@ PruneMarkersResult prune_observed_parent_markers(
     const history_storage::RemoteLayout& layout,
     std::span<const std::string> parent_ids,
     std::span<const std::string> observed_marker_identifiers);
-
-// Queries remote head commit identifiers from storage.
-using history_storage::list_remote_head_commit_ids;
 
 } // namespace kasumi::application::sync::publication
 

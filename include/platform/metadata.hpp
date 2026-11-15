@@ -23,7 +23,8 @@ file_time_from_unix_nanoseconds(std::int64_t value) noexcept;
 bool filesystem_equivalent(std::int64_t left_ns,
                            std::int64_t right_ns) noexcept;
 
-// Reads last write time at native filesystem resolution; rejects symbolic links.
+// Reads last write time at native filesystem resolution; rejects symbolic
+// links.
 std::expected<std::filesystem::file_time_type, std::string>
 last_write_time(const std::filesystem::path& path);
 

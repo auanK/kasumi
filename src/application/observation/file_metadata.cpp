@@ -1,5 +1,7 @@
 #include "application/observation/file_metadata.hpp"
 
+#include "platform/private_storage.hpp"
+
 #include <cerrno>
 #include <cstring>
 #include <limits>
@@ -15,6 +17,17 @@
 #endif
 
 namespace kasumi::application::observation::cache {
+namespace {
+
+FileMetadataError make_metadata_error(FileMetadataErrorCode code, int err) {
+    return FileMetadataError{
+        .code = code,
+        .os_error = static_cast<std::uint32_t>(err),
+        .message = std::system_category().message(err),
+    };
+}
+
+} // namespace
 
 const char* describe_metadata_error(FileMetadataErrorCode code) noexcept {
     switch (code) {
@@ -31,7 +44,8 @@ const char* describe_metadata_error(FileMetadataErrorCode code) noexcept {
 }
 
 std::optional<std::int64_t>
-posix_timespec_to_unix_nanoseconds(std::int64_t sec, std::int64_t nsec) noexcept {
+posix_timespec_to_unix_nanoseconds(std::int64_t sec,
+                                   std::int64_t nsec) noexcept {
     if (nsec < 0 || nsec >= 1'000'000'000LL) {
         return std::nullopt;
     }
@@ -50,7 +64,8 @@ posix_timespec_to_unix_nanoseconds(std::int64_t sec, std::int64_t nsec) noexcept
         if (nsec < kMinNsecForMinSec) {
             return std::nullopt;
         }
-        return std::numeric_limits<std::int64_t>::min() + (nsec - kMinNsecForMinSec);
+        return std::numeric_limits<std::int64_t>::min() +
+               (nsec - kMinNsecForMinSec);
     }
     return sec * 1'000'000'000LL + nsec;
 }
@@ -61,10 +76,13 @@ windows_filetime_to_unix_nanoseconds(std::uint64_t filetime_ticks) noexcept {
     constexpr std::uint64_t kMaxTicksSinceEpoch = 92'233'720'368'547'758ULL;
     constexpr std::uint64_t kMinTicksSinceEpoch = 92'233'720'368'547'758ULL;
 
-    constexpr std::uint64_t kMaxFiletimeTicks = kEpochOffset + kMaxTicksSinceEpoch;
-    constexpr std::uint64_t kMinFiletimeTicks = kEpochOffset - kMinTicksSinceEpoch;
+    constexpr std::uint64_t kMaxFiletimeTicks =
+        kEpochOffset + kMaxTicksSinceEpoch;
+    constexpr std::uint64_t kMinFiletimeTicks =
+        kEpochOffset - kMinTicksSinceEpoch;
 
-    if (filetime_ticks < kMinFiletimeTicks || filetime_ticks > kMaxFiletimeTicks) {
+    if (filetime_ticks < kMinFiletimeTicks ||
+        filetime_ticks > kMaxFiletimeTicks) {
         return std::nullopt;
     }
 
@@ -85,28 +103,20 @@ read_file_metadata(const std::filesystem::path& physical_path,
     if (::lstat(physical_path.c_str(), &st) != 0) {
         const int err = errno;
         if (err == ENOENT || err == ENOTDIR) {
-            return std::unexpected(FileMetadataError{
-                .code = FileMetadataErrorCode::NotFound,
-                .os_error = static_cast<std::uint32_t>(err),
-                .message = std::system_category().message(err),
-            });
+            return std::unexpected(
+                make_metadata_error(FileMetadataErrorCode::NotFound, err));
         }
         if (err == EACCES || err == EPERM) {
-            return std::unexpected(FileMetadataError{
-                .code = FileMetadataErrorCode::PermissionDenied,
-                .os_error = static_cast<std::uint32_t>(err),
-                .message = std::system_category().message(err),
-            });
+            return std::unexpected(make_metadata_error(
+                FileMetadataErrorCode::PermissionDenied, err));
         }
-        return std::unexpected(FileMetadataError{
-            .code = FileMetadataErrorCode::IoError,
-            .os_error = static_cast<std::uint32_t>(err),
-            .message = std::system_category().message(err),
-        });
+        return std::unexpected(
+            make_metadata_error(FileMetadataErrorCode::IoError, err));
     }
 
     // Only regular files produce reusable cache metadata.
-    // Directories, symlinks, FIFOs, sockets, block/char devices return std::nullopt.
+    // Directories, symlinks, FIFOs, sockets, block/char devices return
+    // std::nullopt.
     if (!S_ISREG(st.st_mode)) {
         return std::nullopt;
     }
@@ -144,31 +154,6 @@ read_file_metadata(const std::filesystem::path& physical_path,
 }
 #else
 namespace {
-struct ScopedHandle {
-    HANDLE handle = INVALID_HANDLE_VALUE;
-
-    explicit ScopedHandle(HANDLE h = INVALID_HANDLE_VALUE) noexcept : handle(h) {}
-    ~ScopedHandle() noexcept {
-        if (handle != INVALID_HANDLE_VALUE && handle != nullptr) {
-            ::CloseHandle(handle);
-        }
-    }
-    ScopedHandle(const ScopedHandle&) = delete;
-    ScopedHandle& operator=(const ScopedHandle&) = delete;
-    ScopedHandle(ScopedHandle&& other) noexcept : handle(other.handle) {
-        other.handle = INVALID_HANDLE_VALUE;
-    }
-    ScopedHandle& operator=(ScopedHandle&& other) noexcept {
-        if (this != &other) {
-            if (handle != INVALID_HANDLE_VALUE && handle != nullptr) {
-                ::CloseHandle(handle);
-            }
-            handle = other.handle;
-            other.handle = INVALID_HANDLE_VALUE;
-        }
-        return *this;
-    }
-};
 
 bool is_unsupported_id_error(DWORD error) noexcept {
     return error == ERROR_NOT_SUPPORTED || error == ERROR_INVALID_FUNCTION ||
@@ -179,49 +164,39 @@ bool is_unsupported_id_error(DWORD error) noexcept {
 std::expected<std::optional<FileMetadata>, FileMetadataError>
 read_file_metadata(const std::filesystem::path& physical_path,
                    std::string_view logical_path) {
-    const HANDLE raw_handle = ::CreateFileW(
-        physical_path.c_str(),
-        FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-        nullptr);
+    const HANDLE raw_handle =
+        ::CreateFileW(physical_path.c_str(),
+                      FILE_READ_ATTRIBUTES,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                      nullptr,
+                      OPEN_EXISTING,
+                      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                      nullptr);
 
     if (raw_handle == INVALID_HANDLE_VALUE) {
         const DWORD err = ::GetLastError();
         if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
-            return std::unexpected(FileMetadataError{
-                .code = FileMetadataErrorCode::NotFound,
-                .os_error = err,
-                .message = std::system_category().message(static_cast<int>(err)),
-            });
+            return std::unexpected(make_metadata_error(
+                FileMetadataErrorCode::NotFound, static_cast<int>(err)));
         }
         if (err == ERROR_ACCESS_DENIED || err == ERROR_SHARING_VIOLATION) {
-            return std::unexpected(FileMetadataError{
-                .code = FileMetadataErrorCode::PermissionDenied,
-                .os_error = err,
-                .message = std::system_category().message(static_cast<int>(err)),
-            });
+            return std::unexpected(
+                make_metadata_error(FileMetadataErrorCode::PermissionDenied,
+                                    static_cast<int>(err)));
         }
-        return std::unexpected(FileMetadataError{
-            .code = FileMetadataErrorCode::IoError,
-            .os_error = err,
-            .message = std::system_category().message(static_cast<int>(err)),
-        });
+        return std::unexpected(make_metadata_error(
+            FileMetadataErrorCode::IoError, static_cast<int>(err)));
     }
 
-    const ScopedHandle handle{raw_handle};
+    const platform::private_storage::PrivateHandle handle{
+        reinterpret_cast<std::intptr_t>(raw_handle)};
 
     FILE_BASIC_INFO basic{};
     if (!::GetFileInformationByHandleEx(
-            handle.handle, FileBasicInfo, &basic, sizeof(basic))) {
-        const DWORD err = ::GetLastError();
-        return std::unexpected(FileMetadataError{
-            .code = FileMetadataErrorCode::IoError,
-            .os_error = err,
-            .message = std::system_category().message(static_cast<int>(err)),
-        });
+            raw_handle, FileBasicInfo, &basic, sizeof(basic))) {
+        return std::unexpected(
+            make_metadata_error(FileMetadataErrorCode::IoError,
+                                static_cast<int>(::GetLastError())));
     }
 
     if ((basic.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
@@ -237,13 +212,10 @@ read_file_metadata(const std::filesystem::path& physical_path,
 
     FILE_STANDARD_INFO standard{};
     if (!::GetFileInformationByHandleEx(
-            handle.handle, FileStandardInfo, &standard, sizeof(standard))) {
-        const DWORD err = ::GetLastError();
-        return std::unexpected(FileMetadataError{
-            .code = FileMetadataErrorCode::IoError,
-            .os_error = err,
-            .message = std::system_category().message(static_cast<int>(err)),
-        });
+            raw_handle, FileStandardInfo, &standard, sizeof(standard))) {
+        return std::unexpected(
+            make_metadata_error(FileMetadataErrorCode::IoError,
+                                static_cast<int>(::GetLastError())));
     }
 
     if (standard.Directory || standard.EndOfFile.QuadPart < 0) {
@@ -261,7 +233,7 @@ read_file_metadata(const std::filesystem::path& physical_path,
 
     FILE_ID_INFO id{};
     if (::GetFileInformationByHandleEx(
-            handle.handle, FileIdInfo, &id, sizeof(id))) {
+            raw_handle, FileIdInfo, &id, sizeof(id))) {
         FileIdentity file_identity{};
         file_identity.volume = id.VolumeSerialNumber;
         std::memcpy(&file_identity.file_low,
@@ -274,11 +246,8 @@ read_file_metadata(const std::filesystem::path& physical_path,
     } else {
         const DWORD err = ::GetLastError();
         if (!is_unsupported_id_error(err)) {
-            return std::unexpected(FileMetadataError{
-                .code = FileMetadataErrorCode::IoError,
-                .os_error = err,
-                .message = std::system_category().message(static_cast<int>(err)),
-            });
+            return std::unexpected(make_metadata_error(
+                FileMetadataErrorCode::IoError, static_cast<int>(err)));
         }
     }
 

@@ -42,31 +42,21 @@ metadata_restore_paths(const transaction::Record& record,
         }
         const auto& operation = record.plan.operations[index];
         const auto path = platform::path::to_logical_utf8(operation.path);
-        switch (operation.action) {
-            case Action::Download:
-            case Action::CreateLocalDirectory:
-                add_path_and_ancestors(paths, path, true);
-                break;
-            case Action::DeleteLocal:
-            case Action::DeleteIgnoredLocalFile:
-            case Action::DeleteLocalDirectory:
-                add_path_and_ancestors(paths, row_parent(path), true);
-                break;
-            case Action::RenameLocal:
-            case Action::MoveLocal:
-            case Action::CopyLocal:
-                add_path_and_ancestors(paths, path, true);
-                add_path_and_ancestors(
-                    paths,
-                    platform::path::to_logical_utf8(operation.alt_path),
-                    true);
-                break;
-            case Action::Upload:
-            case Action::CreateRemoteDirectory:
-            case Action::DeleteRemote:
-            case Action::DeleteRemoteDirectory:
-            case Action::Count:
-                break;
+        if (operation.action == Action::Download ||
+            operation.action == Action::CreateLocalDirectory) {
+            add_path_and_ancestors(paths, path, true);
+        } else if (operation.action == Action::DeleteLocal ||
+                   operation.action == Action::DeleteIgnoredLocalFile ||
+                   operation.action == Action::DeleteLocalDirectory) {
+            add_path_and_ancestors(paths, row_parent(path), true);
+        } else if (operation.action == Action::RenameLocal ||
+                   operation.action == Action::MoveLocal ||
+                   operation.action == Action::CopyLocal) {
+            add_path_and_ancestors(paths, path, true);
+            add_path_and_ancestors(
+                paths,
+                platform::path::to_logical_utf8(operation.alt_path),
+                true);
         }
     }
 

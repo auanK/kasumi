@@ -66,8 +66,8 @@ inventory loading; it does not treat the siblings as corruption or serialize
 their publishers.
 
 The authenticated branches are then resolved by the merge-base rules below.
-This history frontier is distinct from the file-hash cache and the private
-complete-history inspection cache; neither can bypass ancestry validation.
+This history frontier is distinct from the file-hash cache and cannot bypass
+ancestry validation.
 
 ### Selecting the merge base
 

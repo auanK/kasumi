@@ -40,18 +40,20 @@ enum class InspectFaultStage {
 inline thread_local CloneFaultStage g_clone_fault_stage = CloneFaultStage::None;
 extern thread_local std::function<void(CloneFaultStage)> g_clone_fault_observer;
 
-inline thread_local InspectFaultStage g_inspect_fault_stage = InspectFaultStage::None;
-extern thread_local std::function<void(InspectFaultStage)> g_inspect_fault_observer;
+inline thread_local InspectFaultStage g_inspect_fault_stage =
+    InspectFaultStage::None;
+extern thread_local std::function<void(InspectFaultStage)>
+    g_inspect_fault_observer;
 extern thread_local std::filesystem::path g_inspect_fault_path;
 inline thread_local bool g_inspect_cleanup_failure_consumed = false;
 inline thread_local bool g_inspect_identity_failure_consumed = false;
 inline thread_local std::size_t g_inspect_cleanup_attempts = 0;
 
-// Simulates one transient cleanup failure so the owner must retain ownership and
-// retry. The old implementation cleared ownership before confirming cleanup.
+// Simulates one transient cleanup failure so the owner must retain ownership
+// and retry. The old implementation cleared ownership before confirming
+// cleanup.
 inline bool inject_cleanup_failure_once(InspectFaultStage stage) {
-    if (g_inspect_fault_stage == stage &&
-        !g_inspect_cleanup_failure_consumed) {
+    if (g_inspect_fault_stage == stage && !g_inspect_cleanup_failure_consumed) {
         g_inspect_cleanup_failure_consumed = true;
         return true;
     }
@@ -72,7 +74,8 @@ struct ScopedCloneFaultInjection {
     }
 
     ScopedCloneFaultInjection(const ScopedCloneFaultInjection&) = delete;
-    ScopedCloneFaultInjection& operator=(const ScopedCloneFaultInjection&) = delete;
+    ScopedCloneFaultInjection&
+    operator=(const ScopedCloneFaultInjection&) = delete;
 };
 
 struct ScopedInspectFaultInjection {
@@ -98,7 +101,8 @@ struct ScopedInspectFaultInjection {
     }
 
     ScopedInspectFaultInjection(const ScopedInspectFaultInjection&) = delete;
-    ScopedInspectFaultInjection& operator=(const ScopedInspectFaultInjection&) = delete;
+    ScopedInspectFaultInjection&
+    operator=(const ScopedInspectFaultInjection&) = delete;
 };
 
 } // namespace kasumi::application::fault_test

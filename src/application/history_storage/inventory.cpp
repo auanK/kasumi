@@ -1,6 +1,5 @@
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -26,35 +25,90 @@ bool valid_hex_id(std::string_view id) noexcept {
     return history::valid_commit_id(id);
 }
 
-} // namespace kasumi::application::history_storage::detail
-
-namespace kasumi::application::history_storage {
-} // namespace kasumi::application::history_storage
-
-namespace kasumi::application::history_storage::detail {
-} // namespace kasumi::application::history_storage::detail
-
-namespace kasumi::application::history_storage {
-} // namespace kasumi::application::history_storage
-
-namespace kasumi::application::history_storage::detail {
-
 void sort_unique(std::vector<HeadReference>& references) {
     std::ranges::sort(references);
     references.erase(std::ranges::unique(references).begin(), references.end());
 }
 
+void sort_unique(std::vector<std::string>& values) {
+    std::ranges::sort(values);
+    values.erase(std::ranges::unique(values).begin(), values.end());
+}
+
+transport::ListingResult
+list_transport_identifiers(transport::Transport& storage,
+                           std::string_view prefix) {
+    const auto trimmed = trim_trailing_slash(prefix);
+    const bool fallback =
+        !trimmed.empty() && storage.storage.list_prefix == nullptr;
+    auto listed = trimmed.empty() || fallback
+                      ? transport::list(storage)
+                      : transport::list(storage, trimmed);
+    if (!listed) {
+        if (listed.error().code == transport::ErrorCode::StorageNotFound) {
+            return std::vector<std::string>{};
+        }
+        return std::unexpected(listed.error());
+    }
+    if (fallback) {
+        const auto full_prefix = std::string{trimmed} + '/';
+        std::vector<std::string> children;
+        for (const auto& identifier : *listed) {
+            if (!identifier.starts_with(full_prefix)) {
+                continue;
+            }
+            const auto name = identifier.substr(full_prefix.size());
+            if (name.find('/') == std::string::npos) {
+                children.push_back(name);
+            }
+        }
+        std::ranges::sort(children);
+        return children;
+    }
+    return std::move(*listed);
+}
+
+std::expected<std::vector<std::string>, Error>
+list_identifiers(transport::Transport& storage, std::string_view prefix) {
+    auto listed = list_transport_identifiers(storage, prefix);
+    if (!listed) {
+        return std::unexpected(transport_error(listed.error()));
+    }
+    return std::move(*listed);
+}
+
+std::expected<void, Error>
+finalize_history_inventory(HistoryInventory& inventory) {
+    if (inventory.identifiers.size() > maximum_history_object_count) {
+        return std::unexpected(
+            error(ErrorCode::LimitExceeded, "too many storage objects"));
+    }
+    for (auto* objects :
+         {&inventory.commit_variants, &inventory.marker_variants}) {
+        for (auto& entry : *objects) {
+            sort_unique(entry.second);
+            if (entry.second.size() > maximum_ciphertext_variants_per_commit) {
+                return std::unexpected(error(ErrorCode::LimitExceeded,
+                                             "too many ciphertext variants"));
+            }
+        }
+    }
+    if (inventory.marker_variants.size() > history::maximum_marked_head_count) {
+        return std::unexpected(
+            error(ErrorCode::LimitExceeded, "too many logical heads"));
+    }
+    return {};
+}
+
 std::expected<HistoryInventory, Error>
 build_history_inventory(transport::Transport& storage,
                         const RemoteLayout& layout) {
-    auto listing = transport::list(storage);
-    if (!listing) {
-        if (listing.error().code == transport::ErrorCode::StorageNotFound) {
-            return HistoryInventory{};
-        }
-        return std::unexpected(transport_error(listing.error()));
+    auto listing = list_identifiers(storage);
+    if (!listing || listing->empty()) {
+        return listing
+                   ? std::expected<HistoryInventory, Error>{HistoryInventory{}}
+                   : std::unexpected(listing.error());
     }
-
     return build_history_inventory(*listing, layout);
 }
 
@@ -69,15 +123,11 @@ build_history_inventory(std::span<const std::string> identifiers,
             inventory.identifiers.push_back(identifier);
         }
     }
-    std::ranges::sort(inventory.identifiers);
-    auto [first, last] = std::ranges::unique(inventory.identifiers);
-    inventory.identifiers.erase(first, last);
-
+    sort_unique(inventory.identifiers);
     if (inventory.identifiers.size() > maximum_history_object_count) {
         return std::unexpected(
             error(ErrorCode::LimitExceeded, "too many storage objects"));
     }
-
     for (const auto& identifier : inventory.identifiers) {
         if (auto commit_reference = parse_commit_object(layout, identifier)) {
             inventory.commit_variants[commit_reference->commit_id].push_back(
@@ -88,20 +138,8 @@ build_history_inventory(std::span<const std::string> identifiers,
                 std::move(*marker_reference));
         }
     }
-    for (auto* objects :
-         {&inventory.commit_variants, &inventory.marker_variants}) {
-        for (auto& [unused, variants] : *objects) {
-            static_cast<void>(unused);
-            sort_unique(variants);
-            if (variants.size() > maximum_ciphertext_variants_per_commit) {
-                return std::unexpected(error(ErrorCode::LimitExceeded,
-                                             "too many ciphertext variants"));
-            }
-        }
-    }
-    if (inventory.marker_variants.size() > history::maximum_marked_head_count) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "too many logical heads"));
+    if (auto finalized = finalize_history_inventory(inventory); !finalized) {
+        return std::unexpected(finalized.error());
     }
     return inventory;
 }
@@ -137,30 +175,24 @@ validate_publication_budget(const HistoryInventory& inventory,
                   "publication exceeds history object limit"));
     }
 
-    const auto commit_count =
-        inventory.commit_variants.contains(reference.commit_id)
-            ? inventory.commit_variants.at(reference.commit_id).size()
-            : 0U;
-    const auto commit_capacity =
-        maximum_ciphertext_variants_per_commit -
-        std::min(commit_count, maximum_ciphertext_variants_per_commit);
-    if ((delta.adds_commit_object ? 1U : 0U) > commit_capacity) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded,
-                  "publication exceeds commit variant limit"));
+    if (delta.adds_commit_object) {
+        const auto it = inventory.commit_variants.find(reference.commit_id);
+        if (it != inventory.commit_variants.end() &&
+            it->second.size() >= maximum_ciphertext_variants_per_commit) {
+            return std::unexpected(
+                error(ErrorCode::LimitExceeded,
+                      "publication exceeds commit variant limit"));
+        }
     }
 
-    const auto marker_count =
-        inventory.marker_variants.contains(reference.commit_id)
-            ? inventory.marker_variants.at(reference.commit_id).size()
-            : 0U;
-    const auto marker_capacity =
-        maximum_ciphertext_variants_per_commit -
-        std::min(marker_count, maximum_ciphertext_variants_per_commit);
-    if ((delta.adds_marker_object ? 1U : 0U) > marker_capacity) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded,
-                  "publication exceeds marker variant limit"));
+    if (delta.adds_marker_object) {
+        const auto it = inventory.marker_variants.find(reference.commit_id);
+        if (it != inventory.marker_variants.end() &&
+            it->second.size() >= maximum_ciphertext_variants_per_commit) {
+            return std::unexpected(
+                error(ErrorCode::LimitExceeded,
+                      "publication exceeds marker variant limit"));
+        }
     }
 
     if (delta.adds_marked_commit && inventory.marker_variants.size() >=

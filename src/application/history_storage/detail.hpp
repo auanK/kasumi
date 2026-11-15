@@ -12,11 +12,13 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <new>
 #include <optional>
 #include <set>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace kasumi::application::history_storage::detail {
@@ -64,8 +66,40 @@ Error history_error(const history::Error& source);
 
 // Validates a canonical hexadecimal identifier.
 bool valid_hex_id(std::string_view id) noexcept;
-// Sorts and removes duplicate references.
+// Sorts and removes duplicate references or identifiers.
 void sort_unique(std::vector<HeadReference>& references);
+void sort_unique(std::vector<std::string>& values);
+
+// Strips any single trailing slash from a prefix when building directory names.
+inline std::string_view trim_trailing_slash(std::string_view value) noexcept {
+    if (value.ends_with('/')) {
+        value.remove_suffix(1);
+    }
+    return value;
+}
+
+// Translates allocation failures into uniform LimitExceeded results.
+template <typename Fn> auto guard_alloc(Fn&& fn) -> decltype(fn()) {
+    try {
+        return std::forward<Fn>(fn)();
+    } catch (const std::bad_alloc&) {
+        return std::unexpected(
+            error(ErrorCode::LimitExceeded, "allocation failed"));
+    }
+}
+
+// Lists remote identifiers (or children under a prefix), returning empty on
+// StorageNotFound.
+transport::ListingResult
+list_transport_identifiers(transport::Transport& storage,
+                           std::string_view prefix);
+std::expected<std::vector<std::string>, Error>
+list_identifiers(transport::Transport& storage, std::string_view prefix = {});
+
+// Enforces inventory budgets and canonicalizes variants; identifiers are
+// unique.
+std::expected<void, Error>
+finalize_history_inventory(HistoryInventory& inventory);
 
 // Builds an inventory of all remote history objects.
 std::expected<HistoryInventory, Error>
@@ -76,6 +110,23 @@ build_history_inventory(transport::Transport& storage,
 std::expected<HistoryInventory, Error>
 build_history_inventory(std::span<const std::string> identifiers,
                         const RemoteLayout& layout);
+
+// Prefetches all commit variants into workspace via batch transport when
+// available and meeting the minimum object threshold.
+std::expected<void, Error>
+prefetch_commit_batch(transport::Transport& storage,
+                      const RemoteLayout& layout,
+                      const ObjectMap& commit_variants,
+                      const std::filesystem::path& destination_root,
+                      std::size_t min_objects = 1);
+
+// Verifies remote SHA-256 against local_hash; returns false when the backend
+// does not support remote physical hashing.
+std::expected<bool, Error>
+verify_remote_physical_hash(transport::Transport& storage,
+                            std::string_view identifier,
+                            std::string_view local_hash,
+                            std::string_view mismatch_detail);
 
 // Computes new objects required by the publication.
 PublicationDelta publication_delta(const HistoryInventory& inventory,
@@ -143,8 +194,8 @@ inspect_marker(transport::Transport& storage,
 // Verifies the BLAKE3 identifier of the ciphertext.
 std::expected<bool, Error> ciphertext_matches(const std::filesystem::path& path,
                                               std::string_view ciphertext_id);
-// Enforces the maximum size of an encrypted commit.
-std::expected<void, Error>
+// Enforces the maximum size of an encrypted commit and returns its size.
+std::expected<std::uintmax_t, Error>
 validate_ciphertext_size(const std::filesystem::path& path);
 
 // Validation state of an encrypted variant.
@@ -173,25 +224,10 @@ try_load_variant(transport::Transport& storage,
                  const std::filesystem::path& workspace,
                  std::size_t sequence);
 
-VariantResult
-try_load_variant(transport::Transport& storage,
-                 std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                 const HeadReference& reference,
-                 const std::filesystem::path& workspace,
-                 std::size_t sequence);
-
 // Returns the first valid variant of the commit.
 std::expected<history::LoadedCommit, Error>
 try_load_variants(transport::Transport& storage,
                   const RemoteLayout& layout,
-                  std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                  std::vector<HeadReference> references,
-                  const std::filesystem::path& workspace,
-                  std::size_t& sequence,
-                  HeadReference* authenticated_reference = nullptr);
-
-std::expected<history::LoadedCommit, Error>
-try_load_variants(transport::Transport& storage,
                   std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                   std::vector<HeadReference> references,
                   const std::filesystem::path& workspace,
@@ -208,19 +244,12 @@ verify_published_commit(transport::Transport& storage,
                         const std::filesystem::path& workspace,
                         std::size_t& sequence);
 
-std::expected<void, Error>
-verify_published_commit(transport::Transport& storage,
-                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                        const history::Commit& expected,
-                        const HeadReference& reference,
-                        const std::filesystem::path& workspace,
-                        std::size_t& sequence);
-
 // Implements full publication of a commit.
 PublishResult publish_impl(transport::Transport& storage,
                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                            const history::Commit& commit,
-                           const std::filesystem::path& workspace_root);
+                           const std::filesystem::path& workspace_root,
+                           bool scoped = false);
 
 // Implements full or scoped history loading.
 LoadResult load_impl(

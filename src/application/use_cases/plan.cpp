@@ -2,7 +2,6 @@
 
 #include "application/observation/state.hpp"
 #include "application/use_cases/context.hpp"
-#include "application/use_cases/error_mapping.hpp"
 #include "application/use_cases/plan_support.hpp"
 #include "core/operation.hpp"
 #include "platform/path.hpp"
@@ -18,35 +17,11 @@ namespace {
 
 std::expected<PlanAction, std::string>
 core_action_to_plan_action(Action action) {
-    switch (action) {
-        case Action::RenameLocal:
-            return PlanAction::RenameLocal;
-        case Action::Upload:
-            return PlanAction::Upload;
-        case Action::CreateLocalDirectory:
-            return PlanAction::CreateLocalDirectory;
-        case Action::CreateRemoteDirectory:
-            return PlanAction::CreateRemoteDirectory;
-        case Action::MoveLocal:
-            return PlanAction::MoveLocal;
-        case Action::Download:
-            return PlanAction::Download;
-        case Action::DeleteLocal:
-            return PlanAction::DeleteLocal;
-        case Action::DeleteLocalDirectory:
-            return PlanAction::DeleteLocalDirectory;
-        case Action::DeleteRemote:
-            return PlanAction::DeleteRemote;
-        case Action::DeleteRemoteDirectory:
-            return PlanAction::DeleteRemoteDirectory;
-        case Action::CopyLocal:
-            return PlanAction::CopyLocal;
-        case Action::DeleteIgnoredLocalFile:
-            return PlanAction::DeleteIgnoredLocalFile;
-        case Action::Count:
-            return std::unexpected("count action is not a valid plan");
+    static_assert(PLAN_ACTION_COUNT == ActionCount);
+    if (!is_valid_action(action)) {
+        return std::unexpected("count action is not a valid plan");
     }
-    std::unreachable();
+    return static_cast<PlanAction>(action_index(action));
 }
 
 std::expected<PlanReport, std::string>
@@ -113,11 +88,13 @@ std::string describe_reconciliation_error(const reconciliation::Error& error) {
 }
 
 std::expected<Response, Error> run_plan(OperationContext& context) {
-    if (context.on_progress) {
-        context.on_progress(SyncProgress{
-            .stage = SyncStage::Observing,
-        });
-    }
+    const auto notify = [&](SyncStage stage) {
+        if (context.on_progress) {
+            context.on_progress(SyncProgress{.stage = stage});
+        }
+    };
+
+    notify(SyncStage::Observing);
 
     observation::LocalObservationSession observation_session;
     observation_session.database_path = context.runtime.database_path;
@@ -130,37 +107,30 @@ std::expected<Response, Error> run_plan(OperationContext& context) {
                                                   {},
                                                   &observation_session);
     if (!collected) {
-        auto err = plan_error(
-            context.operation, collected.error().detail, context.summary);
-        err.stage = SyncStage::Observing;
-        return std::unexpected(err);
+        return fail_app(context,
+                        ErrorCode::PlanFailure,
+                        collected.error().detail,
+                        SyncStage::Observing);
     }
 
-    if (context.on_progress) {
-        context.on_progress(SyncProgress{
-            .stage = SyncStage::Calculating,
-        });
-    }
+    notify(SyncStage::Calculating);
 
     auto reconciled = reconciliation::reconcile(*collected);
     if (!reconciled) {
-        auto err = plan_error(context.operation,
-                              describe_reconciliation_error(reconciled.error()),
-                              context.summary);
-        err.stage = SyncStage::Calculating;
-        return std::unexpected(err);
+        return fail_app(context,
+                        ErrorCode::PlanFailure,
+                        describe_reconciliation_error(reconciled.error()),
+                        SyncStage::Calculating);
     }
 
     auto report = reconciliation_to_report(*collected, *reconciled);
     if (!report) {
-        auto err =
-            plan_error(context.operation, report.error(), context.summary);
-        err.stage = SyncStage::Calculating;
-        return std::unexpected(err);
+        return fail_app(context,
+                        ErrorCode::PlanFailure,
+                        report.error(),
+                        SyncStage::Calculating);
     }
-    return Response{.operation = context.operation,
-                    .runtime = context.summary,
-                    .data = std::move(*report)};
+    return make_response(context, std::move(*report));
 }
 
 } // namespace kasumi::application::detail

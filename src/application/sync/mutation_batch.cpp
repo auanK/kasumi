@@ -1,16 +1,13 @@
 #include "application/sync/mutation_batch.hpp"
 
+#include "application/concurrency.hpp"
 #include "application/sync/mutation_detail.hpp"
 #include "crypto/content.hpp"
-#include "platform/perf_trace.hpp"
 #include "platform/workspace.hpp"
 #include "transport/transport.hpp"
 
 #include <algorithm>
-#include <condition_variable>
-#include <mutex>
 #include <system_error>
-#include <thread>
 #include <unordered_set>
 
 namespace kasumi::application::sync::mutation {
@@ -34,7 +31,8 @@ create_batch_staging_directory(const platform::Workspace& workspace,
                        first_index));
     }
 
-    // shortcut: process death can leave encrypted temp batches; add journal ownership if crash cleanup becomes a requirement.
+    // shortcut: process death can leave encrypted temp batches; add journal
+    // ownership if crash cleanup becomes a requirement.
     auto staging = platform::create_workspace("upload-batch");
     if (!staging) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
@@ -46,11 +44,11 @@ create_batch_staging_directory(const platform::Workspace& workspace,
             platform::validate_non_redirecting_directory(staging->root);
         !valid) {
         platform::cleanup_workspace(*staging);
-        return std::unexpected(make_error(
-            MutationErrorCode::UnsafePath,
-            "batch staging directory is unsafe: " + valid.error(),
-            staging->root,
-            first_index));
+        return std::unexpected(
+            make_error(MutationErrorCode::UnsafePath,
+                       "batch staging directory is unsafe: " + valid.error(),
+                       staging->root,
+                       first_index));
     }
     return staging->root;
 }
@@ -101,6 +99,16 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
 
     StagedUploadBatch batch;
     batch.root = *root;
+    bool commit_batch = false;
+    struct BatchGuard {
+        StagedUploadBatch& batch;
+        bool& commit_batch;
+        ~BatchGuard() noexcept {
+            if (!commit_batch) {
+                static_cast<void>(cleanup_upload_batch(batch));
+            }
+        }
+    } batch_guard{batch, commit_batch};
 
     for (const auto index : operation_indices) {
         const auto& operation = record.plan.operations[index];
@@ -133,14 +141,13 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
                 return std::unexpected(source.error());
             }
 
-            auto source_status = read_status(*source, index);
-            if (!source_status || std::filesystem::is_symlink(*source_status) ||
-                !std::filesystem::is_regular_file(*source_status)) {
-                return std::unexpected(
-                    make_error(MutationErrorCode::IntegrityMismatch,
-                               "duplicate source is not a regular file",
-                               *source,
-                               index));
+            if (auto ok = detail::require_regular_file(
+                    *source,
+                    MutationErrorCode::IntegrityMismatch,
+                    "duplicate source is not a regular file",
+                    index);
+                !ok) {
+                return std::unexpected(ok.error());
             }
 
             auto verified = crypto::content::verify_file(
@@ -159,13 +166,13 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
             auto staged = stage_upload_to_path(
                 operation, index, local_root, destination, identifier, key);
             if (!staged) {
-                static_cast<void>(cleanup_upload_batch(batch));
                 return std::unexpected(staged.error());
             }
             batch.objects.push_back(std::move(*staged));
         }
     }
 
+    commit_batch = true;
     return batch;
 }
 
@@ -175,9 +182,6 @@ MutationResult transfer_upload_batch(const StagedUploadBatch& batch,
     if (batch.objects.empty()) {
         return {};
     }
-    platform::perf_trace::count("content transfer strategy batch");
-    platform::perf_trace::count("content transfer selected objects",
-                                batch.objects.size());
 
     transport::PutBatch request;
     request.source_root = batch.root;
@@ -202,14 +206,6 @@ MutationResult transfer_upload_batch(const StagedUploadBatch& batch,
     return {};
 }
 
-struct VerificationState {
-    std::mutex mutex;
-    std::size_t next_index = 0;
-    std::size_t active_workers = 0;
-    std::size_t peak_in_flight = 0;
-    std::vector<std::optional<MutationError>> errors;
-};
-
 MutationResult verify_upload_batch_individually(
     const StagedUploadBatch& batch,
     transport::Transport& storage,
@@ -220,66 +216,31 @@ MutationResult verify_upload_batch_individually(
         return {};
     }
 
-    VerificationState state;
-    state.errors.resize(batch.objects.size());
-
-    const auto effective_parallelism = std::max<std::size_t>(1, parallelism);
-    const auto worker_count =
-        std::min(effective_parallelism, batch.objects.size());
-    std::vector<std::jthread> threads;
-    threads.reserve(worker_count);
-
-    for (std::size_t w = 0; w < worker_count; ++w) {
-        threads.emplace_back([&](std::stop_token stop) {
-            while (!stop.stop_requested()) {
-                std::size_t index = 0;
-                {
-                    std::lock_guard lock(state.mutex);
-                    if (state.next_index >= batch.objects.size()) {
-                        break;
-                    }
-                    index = state.next_index++;
-                    ++state.active_workers;
-                    state.peak_in_flight =
-                        std::max(state.peak_in_flight, state.active_workers);
-                }
-
-                const auto& object = batch.objects[index];
-                const auto operation_index = object.operation_indices.front();
-                auto result = detail::verify_uploaded_content_object(
-                    storage,
-                    key,
-                    object.identifier,
-                    object.plaintext_hash,
-                    object.plaintext_size,
-                    workspace,
-                    operation_index,
-                    object.ciphertext_sha256);
-
-                {
-                    std::lock_guard lock(state.mutex);
-                    --state.active_workers;
-                    if (!result) {
-                        state.errors[index] = result.error();
-                    }
-                }
+    std::vector<std::optional<MutationError>> errors(batch.objects.size());
+    application::parallel_for_indexed(
+        batch.objects.size(), parallelism, [&](std::size_t index) {
+            const auto& object = batch.objects[index];
+            auto result = detail::verify_uploaded_content_object(
+                storage,
+                key,
+                object.identifier,
+                object.plaintext_hash,
+                object.plaintext_size,
+                workspace,
+                object.operation_indices.front(),
+                object.ciphertext_sha256);
+            if (!result) {
+                errors[index] = std::move(result.error());
             }
         });
-    }
-
-    for (auto& t : threads) {
-        t.join();
-    }
 
     // Deterministically finds the error with the smallest operation_index.
     std::optional<MutationError> deterministic_error;
-    for (const auto& opt_error : state.errors) {
-        if (opt_error) {
-            if (!deterministic_error ||
-                opt_error->operation_index <
-                    deterministic_error->operation_index) {
-                deterministic_error = *opt_error;
-            }
+    for (const auto& opt_error : errors) {
+        if (opt_error && (!deterministic_error ||
+                          opt_error->operation_index <
+                              deterministic_error->operation_index)) {
+            deterministic_error = *opt_error;
         }
     }
 
@@ -364,16 +325,9 @@ verify_upload_batch(const StagedUploadBatch& batch,
 
     if (!transport::prefers_physical_hash_batch(storage,
                                                 batch.objects.size())) {
-        platform::perf_trace::count("content verification strategy individual");
-        platform::perf_trace::count("content verification selected objects",
-                                    batch.objects.size());
         return verify_upload_batch_individually(
             batch, storage, key, workspace, parallelism);
     }
-
-    platform::perf_trace::count("content verification strategy bulk");
-    platform::perf_trace::count("content verification selected objects",
-                                batch.objects.size());
 
     transport::PhysicalHashBatchRequest request;
     request.scratch_root = batch.root;
@@ -386,7 +340,6 @@ verify_upload_batch(const StagedUploadBatch& batch,
         });
     }
 
-    platform::perf_trace::count("content bulk check calls");
     auto bulk = transport::physical_hash_batch(storage, request);
     if (bulk) {
         if (auto failure = bulk_verification_error(batch, *bulk)) {
@@ -411,16 +364,17 @@ MutationResult cleanup_upload_batch(const StagedUploadBatch& batch) {
         return {};
     }
 
+    const std::size_t operation_index =
+        batch.objects.empty() ? 0
+                              : batch.objects.front().operation_indices.front();
     std::error_code ec;
     if (!std::filesystem::exists(batch.root, ec)) {
         if (ec) {
-            return std::unexpected(detail::make_error(
-                MutationErrorCode::LocalIo,
-                "stat failed before cleanup",
-                batch.root,
-                batch.objects.empty()
-                    ? 0
-                    : batch.objects.front().operation_indices.front()));
+            return std::unexpected(
+                detail::make_error(MutationErrorCode::LocalIo,
+                                   "stat failed before cleanup",
+                                   batch.root,
+                                   operation_index));
         }
         return {};
     }
@@ -431,9 +385,7 @@ MutationResult cleanup_upload_batch(const StagedUploadBatch& batch) {
             MutationErrorCode::UnsafePath,
             "directory is redirected (TOCTOU violation detected)",
             batch.root,
-            batch.objects.empty()
-                ? 0
-                : batch.objects.front().operation_indices.front()));
+            operation_index));
     }
 
     std::filesystem::remove_all(batch.root, ec);
@@ -442,9 +394,7 @@ MutationResult cleanup_upload_batch(const StagedUploadBatch& batch) {
             MutationErrorCode::LocalIo,
             "failed to safely cleanup batch staging directory",
             batch.root,
-            batch.objects.empty()
-                ? 0
-                : batch.objects.front().operation_indices.front()));
+            operation_index));
     }
 
     return {};

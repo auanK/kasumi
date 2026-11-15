@@ -53,6 +53,7 @@ acquire_profile_lock(const std::filesystem::path& lock_path) {
     }
 #endif
 
+    std::intptr_t acquired = invalid_profile_lock;
 #ifdef _WIN32
     const auto open_lock = [&] {
         return CreateFileW(lock_path.c_str(),
@@ -64,8 +65,8 @@ acquire_profile_lock(const std::filesystem::path& lock_path) {
                            nullptr);
     };
     auto handle = open_lock();
-    DWORD open_error = (handle == INVALID_HANDLE_VALUE) ? GetLastError()
-                                                        : ERROR_SUCCESS;
+    DWORD open_error =
+        (handle == INVALID_HANDLE_VALUE) ? GetLastError() : ERROR_SUCCESS;
     if (handle == INVALID_HANDLE_VALUE &&
         (open_error == ERROR_FILE_NOT_FOUND ||
          open_error == ERROR_PATH_NOT_FOUND)) {
@@ -77,8 +78,8 @@ acquire_profile_lock(const std::filesystem::path& lock_path) {
             private_storage::close_private_file(*created);
         }
         handle = open_lock();
-        open_error = (handle == INVALID_HANDLE_VALUE) ? GetLastError()
-                                                      : ERROR_SUCCESS;
+        open_error =
+            (handle == INVALID_HANDLE_VALUE) ? GetLastError() : ERROR_SUCCESS;
     }
     if (handle == INVALID_HANDLE_VALUE) {
         if (open_error == ERROR_SHARING_VIOLATION ||
@@ -86,33 +87,23 @@ acquire_profile_lock(const std::filesystem::path& lock_path) {
             return std::unexpected(
                 "profile is already in use by another execution");
         }
-        const auto error =
-            std::error_code{static_cast<int>(open_error),
-                            std::system_category()};
+        const auto error = std::error_code{static_cast<int>(open_error),
+                                           std::system_category()};
         return std::unexpected("could not lock profile: " + error.message());
     }
     FILE_ATTRIBUTE_TAG_INFO attributes{};
     const BOOL queried = GetFileInformationByHandleEx(
         handle, FileAttributeTagInfo, &attributes, sizeof(attributes));
-    if (!queried ||
-        (attributes.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT |
-                                      FILE_ATTRIBUTE_DIRECTORY |
-                                      FILE_ATTRIBUTE_DEVICE)) != 0) {
+    if (!queried || (attributes.FileAttributes &
+                     (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY |
+                      FILE_ATTRIBUTE_DEVICE)) != 0) {
         const auto code = queried ? ERROR_INVALID_DATA : GetLastError();
         CloseHandle(handle);
         return std::unexpected(
             "profile lock is not a regular file (native_code=" +
             std::to_string(code) + ")");
     }
-    auto secured = private_storage::protect_directory(parent_path);
-    if (secured) {
-        secured = private_storage::protect_file(lock_path);
-    }
-    if (!secured) {
-        CloseHandle(handle);
-        return std::unexpected(secured.error());
-    }
-    return reinterpret_cast<std::intptr_t>(handle);
+    acquired = reinterpret_cast<std::intptr_t>(handle);
 #else
     int flags = O_RDONLY | O_CREAT;
 #ifdef O_CLOEXEC
@@ -121,7 +112,7 @@ acquire_profile_lock(const std::filesystem::path& lock_path) {
 #ifdef O_NOFOLLOW
     flags |= O_NOFOLLOW;
 #endif
-    struct stat path_status {};
+    struct stat path_status{};
     if (::lstat(lock_path.c_str(), &path_status) == 0) {
         if (!S_ISREG(path_status.st_mode)) {
             return std::unexpected("profile lock is not a regular file");
@@ -137,7 +128,7 @@ acquire_profile_lock(const std::filesystem::path& lock_path) {
             "could not open profile lock: " +
             std::error_code{errno, std::generic_category()}.message());
     }
-    struct stat lock_status {};
+    struct stat lock_status{};
     if (::fstat(handle, &lock_status) != 0) {
         const auto code = errno;
         static_cast<void>(::close(handle));
@@ -167,16 +158,17 @@ acquire_profile_lock(const std::filesystem::path& lock_path) {
             "could not lock profile: " +
             std::error_code{code, std::generic_category()}.message());
     }
+    acquired = handle;
+#endif
     auto secured = private_storage::protect_directory(parent_path);
     if (secured) {
         secured = private_storage::protect_file(lock_path);
     }
     if (!secured) {
-        static_cast<void>(::close(handle));
+        release_profile_lock(acquired);
         return std::unexpected(secured.error());
     }
-    return handle;
-#endif
+    return acquired;
 }
 
 } // namespace kasumi::platform

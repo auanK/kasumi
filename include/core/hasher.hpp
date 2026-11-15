@@ -34,6 +34,9 @@ std::string hash_hex(const Hash& hash);
 // Accepts exactly HASH_HEX_SIZE hexadecimal digits.
 std::expected<Hash, std::string> hash_from_hex(std::string_view text);
 
+// Returns true when text contains only lowercase hexadecimal digits.
+bool is_lowercase_hex(std::string_view text) noexcept;
+
 namespace hasher {
 
 // Computes the BLAKE3 hash of a memory region.

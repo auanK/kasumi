@@ -5,11 +5,11 @@
 #include "core/hasher.hpp"
 #include "core/history.hpp"
 #include "core/wire.hpp"
-#include "platform/perf_trace.hpp"
 
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstring>
 #include <exception>
 #include <limits>
 #include <monocypher.h>
@@ -33,11 +33,16 @@ Error error(ErrorCode code, std::string detail) {
 }
 
 bool valid_id(std::string_view value) noexcept {
-    return value.size() == HASH_HEX_SIZE &&
-           std::ranges::all_of(value, [](char character) {
-               return (character >= '0' && character <= '9') ||
-                      (character >= 'a' && character <= 'f');
-           });
+    return history::valid_commit_id(value);
+}
+
+template <typename Fn> auto guard_alloc(Fn&& fn) -> decltype(fn()) {
+    try {
+        return std::forward<Fn>(fn)();
+    } catch (const std::bad_alloc&) {
+        return std::unexpected(
+            error(ErrorCode::LimitExceeded, "allocation failed"));
+    }
 }
 
 std::expected<void, Error> validate(const Epoch& value) {
@@ -98,13 +103,7 @@ std::expected<Hash, Error> id_bytes(std::string_view identifier) {
 
 std::array<std::uint8_t, nonce_size> nonce_from_id(const Hash& identifier) {
     std::array<std::uint8_t, nonce_size> nonce{};
-    std::transform(identifier.begin(),
-                   identifier.begin() +
-                       static_cast<std::ptrdiff_t>(nonce.size()),
-                   nonce.begin(),
-                   [](std::byte value) {
-                       return std::to_integer<std::uint8_t>(value);
-                   });
+    std::memcpy(nonce.data(), identifier.data(), nonce.size());
     return nonce;
 }
 
@@ -151,17 +150,10 @@ std::expected<EpochInventory, Error> discover_epoch_inventory(
             }
         }
     } else {
-        const auto directory = layout.epochs_prefix.ends_with('/')
-                                   ? layout.epochs_prefix.substr(
-                                         0, layout.epochs_prefix.size() - 1)
-                                   : layout.epochs_prefix;
-        auto listed = transport::list(storage, directory);
+        auto listed = detail::list_identifiers(storage, layout.epochs_prefix);
         if (!listed) {
-            if (listed.error().code == transport::ErrorCode::StorageNotFound) {
-                return EpochInventory{};
-            }
-            return std::unexpected(error(ErrorCode::TransportFailure,
-                                         transport::describe(listed.error())));
+            return std::unexpected(
+                error(ErrorCode::TransportFailure, listed.error().detail));
         }
         identifiers.reserve(listed->size());
         for (const auto& name : *listed) {
@@ -238,11 +230,7 @@ load_exact_reference(transport::Transport& storage,
     }
     const auto copy =
         temporary->workspace.root / ("epoch-" + std::to_string(request_index));
-    platform::perf_trace::count("epoch.get_calls", 1);
-    const auto get_trace = platform::perf_trace::begin();
     auto downloaded = detail::download(storage, *identifier, copy);
-
-    platform::perf_trace::finish("rc/get_epoch", get_trace);
     if (!downloaded) {
         return std::unexpected(
             error(ErrorCode::TransportFailure, downloaded.error().detail));
@@ -253,12 +241,7 @@ load_exact_reference(transport::Transport& storage,
         return std::unexpected(
             error(ErrorCode::WorkspaceFailure, bytes.error().detail));
     }
-    platform::perf_trace::count("epoch.bytes_downloaded", bytes->size());
-    auto opened = open(*bytes, reference, master_key);
-    if (opened) {
-        platform::perf_trace::count("epoch.authenticated_count", 1);
-    }
-    return opened;
+    return open(*bytes, reference, master_key);
 }
 
 LatestResult
@@ -267,83 +250,78 @@ load_latest_impl(transport::Transport& storage,
                  const std::filesystem::path& workspace_root,
                  std::optional<std::span<const std::string>> known_identifiers,
                  std::optional<Reference> trusted_ancestor) {
-    struct EpochTraceGuard {
-        platform::perf_trace::Token token{platform::perf_trace::begin()};
-        ~EpochTraceGuard() noexcept {
-            platform::perf_trace::finish("epoch loading", token);
+    return guard_alloc([&]() -> LatestResult {
+        const auto layout = derive_remote_layout(master_key);
+        auto inventory =
+            discover_epoch_inventory(storage, layout, known_identifiers);
+        if (!inventory) {
+            return std::unexpected(inventory.error());
         }
-    } epoch_guard;
-
-    const auto layout = derive_remote_layout(master_key);
-    auto inventory =
-        discover_epoch_inventory(storage, layout, known_identifiers);
-    if (!inventory) {
-        return std::unexpected(inventory.error());
-    }
-    platform::perf_trace::count("epoch.candidates_observed",
-                                inventory->references.size());
-    if (inventory->references.empty()) {
-        return std::optional<VerifiedEpoch>{};
-    }
-    const auto& latest_reference = inventory->references.back();
-    if (trusted_ancestor &&
-        (trusted_ancestor->sequence > latest_reference.sequence ||
-         (trusted_ancestor->sequence == latest_reference.sequence &&
-          trusted_ancestor->epoch_id != latest_reference.epoch_id))) {
-        return std::unexpected(
-            error(ErrorCode::Conflict,
-                  "remote epoch regressed from exact local checkpoint"));
-    }
-    auto temporary = detail::make_workspace(workspace_root);
-    if (!temporary) {
-        return std::unexpected(
-            error(ErrorCode::WorkspaceFailure, temporary.error().detail));
-    }
-
-    std::size_t request_index = 0;
-    auto latest = load_exact_reference(storage,
-                                       layout,
-                                       master_key,
-                                       *temporary,
-                                       latest_reference,
-                                       request_index++);
-    if (!latest) {
-        return std::unexpected(latest.error());
-    }
-    const auto& contract = latest->value;
-    auto current = *latest;
-    std::size_t index = inventory->references.size() - 1;
-    while (current.reference.sequence != 0 &&
-           (!trusted_ancestor ||
-            current.reference.sequence > trusted_ancestor->sequence)) {
-        if (index == 0 || current.value.previous_epoch_id !=
-                              inventory->references[index - 1].epoch_id) {
-            return std::unexpected(error(
-                ErrorCode::Conflict, "epoch ancestry has invalid predecessor"));
+        if (inventory->references.empty()) {
+            return std::optional<VerifiedEpoch>{};
         }
-        --index;
-        auto previous = load_exact_reference(storage,
-                                             layout,
-                                             master_key,
-                                             *temporary,
-                                             inventory->references[index],
-                                             request_index++);
-        if (!previous) {
-            return std::unexpected(previous.error());
-        }
-        if (previous->value.vault_id != contract.vault_id ||
-            previous->value.policy != contract.policy) {
+        const auto& latest_reference = inventory->references.back();
+        if (trusted_ancestor &&
+            (trusted_ancestor->sequence > latest_reference.sequence ||
+             (trusted_ancestor->sequence == latest_reference.sequence &&
+              trusted_ancestor->epoch_id != latest_reference.epoch_id))) {
             return std::unexpected(
                 error(ErrorCode::Conflict,
-                      "epoch ancestry diverges from authenticated contract"));
+                      "remote epoch regressed from exact local checkpoint"));
         }
-        current = std::move(*previous);
-    }
-    if (trusted_ancestor && current.reference != *trusted_ancestor) {
-        return std::unexpected(error(
-            ErrorCode::Conflict, "ancestry does not reach exact checkpoint"));
-    }
-    return std::optional<VerifiedEpoch>{std::move(*latest)};
+        auto temporary = detail::make_workspace(workspace_root);
+        if (!temporary) {
+            return std::unexpected(
+                error(ErrorCode::WorkspaceFailure, temporary.error().detail));
+        }
+
+        std::size_t request_index = 0;
+        auto latest = load_exact_reference(storage,
+                                           layout,
+                                           master_key,
+                                           *temporary,
+                                           latest_reference,
+                                           request_index++);
+        if (!latest) {
+            return std::unexpected(latest.error());
+        }
+        const auto& contract = latest->value;
+        auto current = *latest;
+        std::size_t index = inventory->references.size() - 1;
+        while (current.reference.sequence != 0 &&
+               (!trusted_ancestor ||
+                current.reference.sequence > trusted_ancestor->sequence)) {
+            if (index == 0 || current.value.previous_epoch_id !=
+                                  inventory->references[index - 1].epoch_id) {
+                return std::unexpected(
+                    error(ErrorCode::Conflict,
+                          "epoch ancestry has invalid predecessor"));
+            }
+            --index;
+            auto previous = load_exact_reference(storage,
+                                                 layout,
+                                                 master_key,
+                                                 *temporary,
+                                                 inventory->references[index],
+                                                 request_index++);
+            if (!previous) {
+                return std::unexpected(previous.error());
+            }
+            if (previous->value.vault_id != contract.vault_id ||
+                previous->value.policy != contract.policy) {
+                return std::unexpected(error(
+                    ErrorCode::Conflict,
+                    "epoch ancestry diverges from authenticated contract"));
+            }
+            current = std::move(*previous);
+        }
+        if (trusted_ancestor && current.reference != *trusted_ancestor) {
+            return std::unexpected(
+                error(ErrorCode::Conflict,
+                      "ancestry does not reach exact checkpoint"));
+        }
+        return std::optional<VerifiedEpoch>{std::move(*latest)};
+    });
 }
 
 ChainResult
@@ -631,8 +609,7 @@ parse_object_identifier(const RemoteLayout& layout,
         return std::unexpected(
             error(ErrorCode::InvalidInput, "invalid epoch object name"));
     }
-    return Reference{.sequence = parsed->sequence,
-                     .epoch_id = std::move(parsed->epoch_id)};
+    return *parsed;
 }
 
 std::expected<VerifiedEpoch, Error>
@@ -642,10 +619,7 @@ select_latest(std::span<const VerifiedEpoch> epochs) {
             error(ErrorCode::NotFound, "no epochs available"));
     }
     const auto& contract = epochs.front().value;
-    std::vector<const VerifiedEpoch*> unique;
-    unique.reserve(epochs.size());
-    std::unordered_map<std::uint64_t, const VerifiedEpoch*> sequences;
-    sequences.reserve(epochs.size());
+    std::map<std::uint64_t, const VerifiedEpoch*> unique;
     for (const auto& candidate : epochs) {
         if (auto valid = validate_verified(candidate); !valid) {
             return std::unexpected(valid.error());
@@ -656,38 +630,31 @@ select_latest(std::span<const VerifiedEpoch> epochs) {
                 ErrorCode::Conflict, "epochs belong to different contracts"));
         }
         const auto [known, inserted] =
-            sequences.emplace(candidate.reference.sequence, &candidate);
-        if (!inserted) {
-            if (candidate != *known->second) {
-                return std::unexpected(
-                    error(ErrorCode::Conflict, "epoch sequence has conflict"));
-            }
-            continue;
+            unique.emplace(candidate.reference.sequence, &candidate);
+        if (!inserted && candidate != *known->second) {
+            return std::unexpected(
+                error(ErrorCode::Conflict, "epoch sequence has conflict"));
         }
-        unique.push_back(&candidate);
     }
-    std::ranges::sort(unique, [](const auto* left, const auto* right) {
-        return left->reference.sequence < right->reference.sequence;
-    });
-    if (unique.front()->reference.sequence != 0) {
+    if (unique.begin()->first != 0) {
         return std::unexpected(
             error(ErrorCode::Conflict, "epoch chain missing genesis"));
     }
-    for (std::size_t index = 1; index < unique.size(); ++index) {
-        const auto previous = unique[index - 1];
-        const auto current = unique[index];
-        if (previous->reference.sequence ==
-            std::numeric_limits<std::uint64_t>::max()) {
+    auto previous = unique.begin();
+    for (auto current = std::next(previous); current != unique.end();
+         previous = current++) {
+        if (previous->first == std::numeric_limits<std::uint64_t>::max()) {
             return std::unexpected(error(
                 ErrorCode::Conflict, "epoch chain exceeds maximum sequence"));
         }
-        if (current->reference.sequence != previous->reference.sequence + 1 ||
-            current->value.previous_epoch_id != previous->reference.epoch_id) {
+        if (current->first != previous->first + 1 ||
+            current->second->value.previous_epoch_id !=
+                previous->second->reference.epoch_id) {
             return std::unexpected(
                 error(ErrorCode::Conflict, "epoch chain has discontinuity"));
         }
     }
-    return *unique.back();
+    return *unique.rbegin()->second;
 }
 
 std::expected<void, Error>
@@ -711,8 +678,8 @@ publish(transport::Transport& storage,
         return std::unexpected(
             error(ErrorCode::WorkspaceFailure, written.error().detail));
     }
-    auto uploaded = transport::put(storage, source, *identifier);
-    if (!uploaded) {
+    if (auto uploaded = transport::put(storage, source, *identifier);
+        !uploaded) {
         return std::unexpected(error(ErrorCode::TransportFailure,
                                      transport::describe(uploaded.error())));
     }
@@ -735,33 +702,25 @@ verify(transport::Transport& storage,
        std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
        const std::filesystem::path& workspace_root) {
     const auto layout = derive_remote_layout(master_key);
-    auto identifier = object_identifier(layout, reference);
-    if (!identifier) {
-        return std::unexpected(identifier.error());
-    }
     auto temporary = detail::make_workspace(workspace_root);
     if (!temporary) {
         return std::unexpected(
             error(ErrorCode::WorkspaceFailure, temporary.error().detail));
     }
-    const auto copy = (*temporary)->workspace.root / "epoch.copy";
-    if (auto downloaded = detail::download(storage, *identifier, copy);
-        !downloaded) {
+    auto verified = load_exact_reference(
+        storage, layout, master_key, *temporary, reference, 0);
+    if (!verified) {
+        if (verified.error().code == ErrorCode::TransportFailure ||
+            verified.error().code == ErrorCode::WorkspaceFailure ||
+            verified.error().code == ErrorCode::InvalidInput) {
+            return std::unexpected(verified.error());
+        }
         return std::unexpected(
-            error(ErrorCode::TransportFailure, downloaded.error().detail));
+            error(ErrorCode::VerificationFailure, verified.error().detail));
     }
-    auto bytes = detail::read_file(
-        copy, envelope_header.size() + mac_size + maximum_encoded_size);
-    if (!bytes) {
-        return std::unexpected(
-            error(ErrorCode::WorkspaceFailure, bytes.error().detail));
-    }
-    auto verified = open(*bytes, reference, master_key);
-    if (!verified || verified->value != expected) {
+    if (verified->value != expected) {
         return std::unexpected(error(ErrorCode::VerificationFailure,
-                                     verified
-                                         ? "remote epoch diverges from expected"
-                                         : verified.error().detail));
+                                     "remote epoch diverges from expected"));
     }
     return {};
 }
@@ -769,45 +728,13 @@ verify(transport::Transport& storage,
 LatestResult
 load_latest(transport::Transport& storage,
             std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
-            const std::filesystem::path& workspace_root) {
-    try {
-        return load_latest_impl(
-            storage, master_key, workspace_root, std::nullopt, std::nullopt);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
-}
-
-LatestResult
-load_latest(transport::Transport& storage,
-            std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
-            const std::filesystem::path& workspace_root,
-            std::span<const std::string> identifiers) {
-    try {
-        return load_latest_impl(
-            storage, master_key, workspace_root, identifiers, std::nullopt);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
-}
-
-LatestResult
-load_latest(transport::Transport& storage,
-            std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
             const std::filesystem::path& workspace_root,
             std::optional<Reference> trusted_ancestor) {
-    try {
-        return load_latest_impl(storage,
-                                master_key,
-                                workspace_root,
-                                std::nullopt,
-                                std::move(trusted_ancestor));
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    return load_latest_impl(storage,
+                            master_key,
+                            workspace_root,
+                            std::nullopt,
+                            std::move(trusted_ancestor));
 }
 
 LatestResult
@@ -816,29 +743,21 @@ load_latest(transport::Transport& storage,
             const std::filesystem::path& workspace_root,
             std::span<const std::string> identifiers,
             std::optional<Reference> trusted_ancestor) {
-    try {
-        return load_latest_impl(storage,
-                                master_key,
-                                workspace_root,
-                                identifiers,
-                                std::move(trusted_ancestor));
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    return load_latest_impl(storage,
+                            master_key,
+                            workspace_root,
+                            identifiers,
+                            std::move(trusted_ancestor));
 }
 
 ChainResult
 load_chain(transport::Transport& storage,
            std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
            const std::filesystem::path& workspace_root) {
-    try {
+    return guard_alloc([&] {
         return load_chain_impl(
             storage, master_key, workspace_root, std::nullopt);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 ChainResult
@@ -846,13 +765,10 @@ load_chain(transport::Transport& storage,
            std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
            const std::filesystem::path& workspace_root,
            std::span<const std::string> identifiers) {
-    try {
+    return guard_alloc([&] {
         return load_chain_impl(
             storage, master_key, workspace_root, identifiers);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 LatestResult
@@ -860,38 +776,15 @@ load_by_id(transport::Transport& storage,
            std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
            const std::filesystem::path& workspace_root,
            std::string_view epoch_id) {
-    try {
+    return guard_alloc([&]() -> LatestResult {
         if (!valid_id(epoch_id)) {
             return std::unexpected(
                 error(ErrorCode::InvalidInput, "invalid epoch ID"));
         }
 
         const auto layout = derive_remote_layout(master_key);
-        const auto directory = layout.epochs_prefix.ends_with('/')
-                                   ? layout.epochs_prefix.substr(
-                                         0, layout.epochs_prefix.size() - 1)
-                                   : layout.epochs_prefix;
-        auto listed = transport::list(storage, directory);
-        if (!listed) {
-            if (listed.error().code == transport::ErrorCode::StorageNotFound) {
-                return std::optional<VerifiedEpoch>{};
-            }
-            return std::unexpected(error(ErrorCode::TransportFailure,
-                                         transport::describe(listed.error())));
-        }
-        std::vector<std::string> identifiers;
-        identifiers.reserve(listed->size());
-        for (const auto& name : *listed) {
-            identifiers.push_back(name.starts_with(layout.epochs_prefix)
-                                      ? name
-                                      : layout.epochs_prefix + name);
-        }
-        auto inventory = discover_epoch_inventory(
-            storage,
-            layout,
-            std::optional<std::span<const std::string>>{
-                std::span<const std::string>{identifiers}},
-            false);
+        auto inventory =
+            discover_epoch_inventory(storage, layout, std::nullopt, false);
         if (!inventory) {
             return std::unexpected(inventory.error());
         }
@@ -913,10 +806,7 @@ load_by_id(transport::Transport& storage,
             return std::unexpected(loaded.error());
         }
         return std::optional<VerifiedEpoch>{std::move(*loaded)};
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            error(ErrorCode::LimitExceeded, "allocation failed"));
-    }
+    });
 }
 
 PruneResult plan_pruning(std::span<const kasumi::history::LoadedCommit> commits,
@@ -925,117 +815,102 @@ PruneResult plan_pruning(std::span<const kasumi::history::LoadedCommit> commits,
         return std::unexpected(NoPrune{"defensive limit exceeded"});
     }
 
-    std::unordered_map<std::string, const kasumi::history::LoadedCommit*> by_id;
-    std::unordered_set<std::string> has_parents;
+    std::unordered_map<std::string_view, const kasumi::history::LoadedCommit*>
+        by_id;
+    std::unordered_set<std::string_view> has_children;
+    by_id.reserve(commits.size());
+    has_children.reserve(commits.size());
     for (const auto& c : commits) {
         by_id[c.id] = &c;
         for (const auto& p : c.commit.parents) {
-            has_parents.insert(p);
+            has_children.insert(p);
         }
     }
 
-    std::vector<std::string> heads;
-    for (const auto& c : commits) {
-        if (!has_parents.contains(c.id)) {
-            heads.push_back(c.id);
-        }
-    }
+    std::unordered_map<std::string_view, std::uint64_t> shortest_depth;
+    shortest_depth.reserve(commits.size());
+    std::vector<const kasumi::history::LoadedCommit*> queue;
+    std::int64_t newest_authenticated_head = 0;
 
     for (const auto& c : commits) {
         for (const auto& parent : c.commit.parents) {
-            const auto parent_it = by_id.find(parent);
-            if (parent_it != by_id.end() &&
-                parent_it->second->commit.created_at > c.commit.created_at) {
+            if (const auto it = by_id.find(parent);
+                it != by_id.end() &&
+                it->second->commit.created_at > c.commit.created_at) {
                 return std::unexpected(
                     NoPrune{"timestamp regression detected"});
             }
         }
-    }
-
-    std::int64_t newest_authenticated_head = 0;
-    for (const auto& head : heads) {
-        const auto head_it = by_id.find(head);
-        if (head_it != by_id.end()) {
-            newest_authenticated_head = std::max(
-                newest_authenticated_head, head_it->second->commit.created_at);
+        if (!has_children.contains(c.id)) {
+            newest_authenticated_head =
+                std::max(newest_authenticated_head, c.commit.created_at);
+            shortest_depth[c.id] = 0;
+            queue.push_back(&c);
         }
     }
     if (newest_authenticated_head <= 0) {
         return std::unexpected(NoPrune{"no authenticated commit timestamp"});
     }
 
-    std::unordered_map<std::string, std::uint64_t> shortest_depth;
-    std::vector<std::string> queue = heads;
-    for (const auto& h : heads) {
-        shortest_depth[h] = 0;
-    }
-
-    std::size_t head_ptr = 0;
-    while (head_ptr < queue.size()) {
-        const auto current_id = queue[head_ptr++];
-        const auto depth = shortest_depth[current_id];
-        auto it = by_id.find(current_id);
-        if (it != by_id.end()) {
-            for (const auto& p : it->second->commit.parents) {
-                if (!shortest_depth.contains(p) ||
-                    shortest_depth[p] > depth + 1) {
-                    shortest_depth[p] = depth + 1;
-                    queue.push_back(p);
+    for (std::size_t head_ptr = 0; head_ptr < queue.size(); ++head_ptr) {
+        const auto* current = queue[head_ptr];
+        const auto next_depth = shortest_depth[current->id] + 1;
+        for (const auto& p : current->commit.parents) {
+            if (auto [it, inserted] = shortest_depth.try_emplace(p, next_depth);
+                inserted || it->second > next_depth) {
+                it->second = next_depth;
+                if (const auto parent_it = by_id.find(p);
+                    parent_it != by_id.end()) {
+                    queue.push_back(parent_it->second);
                 }
             }
         }
     }
 
-    std::unordered_set<std::string> prunable;
+    std::unordered_set<std::string_view> prunable;
     const auto age_limit_seconds =
         static_cast<std::int64_t>(policy.min_history_age_hours) * 3600LL;
     for (const auto& c : commits) {
-        if (shortest_depth.contains(c.id)) {
-            const auto depth = shortest_depth[c.id];
-            if (depth >= policy.min_history_depth && c.commit.created_at > 0 &&
-                c.commit.created_at <= newest_authenticated_head &&
-                newest_authenticated_head - c.commit.created_at >=
-                    age_limit_seconds) {
-                prunable.insert(c.id);
-            }
+        if (const auto it = shortest_depth.find(c.id);
+            it != shortest_depth.end() &&
+            it->second >= policy.min_history_depth && c.commit.created_at > 0 &&
+            c.commit.created_at <= newest_authenticated_head &&
+            newest_authenticated_head - c.commit.created_at >=
+                age_limit_seconds) {
+            prunable.insert(c.id);
         }
     }
-
-    std::vector<Anchor> anchors;
-    for (const auto& c : commits) {
-        if (!prunable.contains(c.id)) {
-            for (const auto& p : c.commit.parents) {
-                if (prunable.contains(p)) {
-                    auto parent_it = by_id.find(p);
-                    if (parent_it != by_id.end()) {
-                        anchors.push_back(
-                            Anchor{.commit_id = p,
-                                   .height = parent_it->second->commit.height});
-                    }
-                }
-            }
-        }
-    }
-
     if (prunable.empty()) {
         return std::unexpected(NoPrune{"no commits reached retention limits"});
     }
 
-    std::vector<std::string> pruned_list;
-    for (const auto& id : prunable)
-        pruned_list.push_back(id);
-    std::ranges::sort(pruned_list);
+    std::map<std::string_view, std::uint64_t> anchor_heights;
+    for (const auto& c : commits) {
+        if (prunable.contains(c.id)) {
+            continue;
+        }
+        for (const auto& p : c.commit.parents) {
+            if (prunable.contains(p)) {
+                if (const auto parent_it = by_id.find(p);
+                    parent_it != by_id.end()) {
+                    anchor_heights.emplace(p, parent_it->second->commit.height);
+                }
+            }
+        }
+    }
 
-    std::ranges::sort(anchors, [](const Anchor& a, const Anchor& b) {
-        return a.commit_id < b.commit_id;
-    });
-    auto last =
-        std::ranges::unique(anchors, [](const Anchor& a, const Anchor& b) {
-            return a.commit_id == b.commit_id;
-        });
-    anchors.erase(last.begin(), last.end());
-
-    return EpochPlan{.anchors = anchors, .prunable_commits = pruned_list};
+    EpochPlan plan;
+    plan.prunable_commits.reserve(prunable.size());
+    for (const auto id : prunable) {
+        plan.prunable_commits.emplace_back(id);
+    }
+    std::ranges::sort(plan.prunable_commits);
+    plan.anchors.reserve(anchor_heights.size());
+    for (const auto& [id, height] : anchor_heights) {
+        plan.anchors.push_back(
+            Anchor{.commit_id = std::string{id}, .height = height});
+    }
+    return plan;
 }
 
 } // namespace kasumi::application::history_storage::epoch

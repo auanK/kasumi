@@ -118,9 +118,13 @@ inline std::expected<void, std::string> reset(Statement& statement) {
 // Binds text to a 1-based positional parameter.
 inline std::expected<void, std::string>
 bind(Statement& statement, int index, std::string_view value) {
+    if (value.size() >
+        static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
+        return std::unexpected("sqlite text binding exceeds integer size");
+    }
     if (sqlite3_bind_text(statement.get(),
                           index,
-                          value.data(),
+                          value.empty() ? "" : value.data(),
                           static_cast<int>(value.size()),
                           SQLITE_TRANSIENT) != SQLITE_OK) {
         return std::unexpected(error(sqlite3_db_handle(statement.get())));
