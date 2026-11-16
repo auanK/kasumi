@@ -132,6 +132,10 @@ struct KnownHistoryAnchor {
 struct KnownHistoryFrontier {
     std::vector<KnownHistoryAnchor> anchors;
     std::optional<epoch::Reference> accepted_epoch;
+    // Address hints only; all objects are read and authenticated again.
+    std::vector<HeadReference> observed_variants;
+    std::vector<std::string> observed_markers;
+    std::optional<epoch::Reference> observed_epoch;
 };
 
 // Result of publishing a commit.

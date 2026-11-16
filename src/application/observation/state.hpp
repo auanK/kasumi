@@ -1,6 +1,7 @@
 #ifndef KASUMI_APPLICATION_OBSERVATION_STATE_HPP
 #define KASUMI_APPLICATION_OBSERVATION_STATE_HPP
 
+#include "application/history_storage/history_storage.hpp"
 #include "core/ignore.hpp"
 #include "core/reconciliation/types.hpp"
 #include "crypto/file_crypto.hpp"
@@ -26,6 +27,8 @@ struct LocalObservationSession {
     bool cache_loaded = false;
     // Indicates that reusable data must be persisted.
     bool cache_dirty = false;
+    std::string history_namespace;
+    history_storage::KnownHistoryFrontier history_reads;
 };
 
 // Managed snapshot and transient physical facts from the same local scan.

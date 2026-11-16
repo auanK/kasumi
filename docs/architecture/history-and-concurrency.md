@@ -71,7 +71,10 @@ their publishers.
 
 The authenticated branches are then resolved by the merge-base rules below.
 This history frontier is distinct from the file-hash cache and cannot bypass
-ancestry validation.
+ancestry validation. Within a command, stabilization reobservation can reuse the
+previously authenticated `Commit ID -> Ciphertext ID` variant addresses when the
+observed HEAD marker set and Epoch are unchanged, rereading and re-authenticating
+the physical objects in bounded batches without per-ancestor prefix listings.
 
 ### Selecting the merge base
 

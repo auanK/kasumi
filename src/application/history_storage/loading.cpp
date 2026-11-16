@@ -779,6 +779,39 @@ LoadResult load_impl(transport::Transport& storage,
         return LoadedHistory{};
     }
 
+    std::map<std::string, std::size_t> read_positions;
+    std::set<std::string> prefetch_attempted;
+    // Previous addresses shorten discovery, never the authenticated graph.
+    if (scoped && frontier &&
+        (discovered_epoch ? std::optional{discovered_epoch->reference}
+                          : std::nullopt) == frontier->observed_epoch) {
+        std::vector<std::string> markers;
+        for (const auto& [id, references] : marker_candidates) {
+            static_cast<void>(id);
+            for (const auto& reference : references) {
+                markers.push_back(marker_object(layout, reference));
+            }
+        }
+        sort_unique(markers);
+        if (markers == frontier->observed_markers) {
+            if (frontier->observed_variants.size() >
+                history::maximum_loaded_commit_count) {
+                return std::unexpected(error(ErrorCode::LimitExceeded,
+                                             "too many observed variants"));
+            }
+            for (std::size_t i = 0; i < frontier->observed_variants.size();
+                 ++i) {
+                const auto& reference = frontier->observed_variants[i];
+                if (!valid(reference) ||
+                    !read_positions.emplace(reference.commit_id, i).second) {
+                    return std::unexpected(error(ErrorCode::InvalidInput,
+                                                 "invalid observed variant"));
+                }
+                inventory->commit_variants[reference.commit_id] = {reference};
+            }
+        }
+    }
+
     std::map<std::string, history::LoadedCommit> loaded;
     std::vector<HeadReference> authenticated_commit_variants;
     std::vector<std::pair<std::string, std::size_t>> pending;
@@ -806,8 +839,40 @@ LoadResult load_impl(transport::Transport& storage,
                                          "history contains too many commits"));
         }
 
+        if (auto position = read_positions.find(commit_id);
+            position != read_positions.end() &&
+            !prefetch_attempted.contains(commit_id)) {
+            ObjectMap window;
+            for (std::size_t i = position->second;
+                 i < frontier->observed_variants.size() && window.size() < 8;
+                 ++i) {
+                const auto& reference = frontier->observed_variants[i];
+                if (!loaded.contains(reference.commit_id) &&
+                    (!cached_anchor ||
+                     reference.commit_id != cached_anchor->commit_id) &&
+                    prefetch_attempted.insert(reference.commit_id).second) {
+                    window[reference.commit_id].push_back(reference);
+                }
+            }
+            auto fetched = prefetch_commit_batch(
+                storage, layout, window, (*temporary)->workspace.root, 2);
+            if (!fetched) {
+                // Classify stale/missing variants through the normal loader.
+                for (const auto& [id, references] : window) {
+                    for (const auto& reference : references) {
+                        remove_file((*temporary)->workspace.root / id /
+                                    reference.ciphertext_id);
+                    }
+                }
+            }
+            if (auto cancel = cancelled(true)) {
+                return std::unexpected(*cancel);
+            }
+        }
+
         const auto marker_found = marker_candidates.find(commit_id);
-        if (scoped && marker_found == marker_candidates.end()) {
+        if (scoped && marker_found == marker_candidates.end() &&
+            !inventory->commit_variants.contains(commit_id)) {
             auto discovered = discover_scoped_commit_variants(
                 storage, layout, commit_id, *inventory);
             if (!discovered) {
@@ -838,7 +903,7 @@ LoadResult load_impl(transport::Transport& storage,
         };
 
         auto commit = attempt_load();
-        if (!commit && scoped && marker_found != marker_candidates.end() &&
+        if (!commit && scoped &&
             (commit.error().code == ErrorCode::MissingCommit ||
              commit.error().code == ErrorCode::InvalidCiphertext ||
              commit.error().code == ErrorCode::InvalidCommit)) {

@@ -2030,4 +2030,201 @@ TEST(HistoryStorageTest, ScopedNoopOverlapsHeadsAndEpochAndDrainsFailures) {
     }
 }
 
+namespace {
+
+std::mutex reobservation_reads_mutex;
+
+kasumi::transport::Result
+reobservation_locked_get(void* context,
+                         std::string_view id,
+                         const std::filesystem::path& destination) {
+    std::lock_guard lock(reobservation_reads_mutex);
+    return fake_get(context, id, destination);
+}
+
+kasumi::transport::ListingResult
+reobservation_locked_list(void* context, std::string_view prefix) {
+    std::lock_guard lock(reobservation_reads_mutex);
+    return fake_list_prefix(context, prefix);
+}
+
+kasumi::transport::Result
+reobservation_read_batch(void* context,
+                         const kasumi::transport::GetBatch& batch) {
+    std::lock_guard lock(reobservation_reads_mutex);
+    ++fake_state(context)->get_batch_count;
+    EXPECT_LE(batch.identifiers.size(), 8U);
+    for (const auto& id : batch.identifiers) {
+        auto result = fake_get(context,
+                               batch.source_prefix + "/" + id,
+                               batch.destination_root / id);
+        if (!result) {
+            return result;
+        }
+    }
+    return {};
+}
+
+struct ReobservationChainFixture {
+    TempWorkspace workspace =
+        kasumi::test::make_temp_workspace("history-reobs");
+    FakeState* state = nullptr;
+    kasumi::transport::Transport storage = make_fake_transport(state);
+    std::vector<Commit> commits;
+    std::vector<HeadReference> references;
+    kasumi::application::history_storage::epoch::Reference epoch;
+};
+
+ReobservationChainFixture make_reobservation_chain(std::size_t count) {
+    ReobservationChainFixture fixture;
+    const auto root = kasumi::test::workspace_root(fixture.workspace);
+    auto first =
+        kasumi::history::make_bootstrap(make_tree("file", "base"), 0).value();
+    fixture.commits.push_back(first);
+    fixture.references.push_back(
+        publish_object(fixture.storage, fixture.workspace, first, "initial"));
+    kasumi::application::history_storage::epoch::Epoch epoch{
+        .vault_id = fixture.references.front().commit_id,
+        .sequence = 0,
+        .issued_at = 1,
+        .anchors = {{fixture.references.front().commit_id, 0}}};
+    auto sealed =
+        kasumi::application::history_storage::epoch::seal(epoch, test_key())
+            .value();
+    fixture.epoch = sealed.reference;
+    EXPECT_TRUE(kasumi::application::history_storage::epoch::publish(
+        fixture.storage, test_key(), sealed, root));
+    for (std::size_t i = 1; i <= count; ++i) {
+        auto commit = make_commit(i,
+                                  {fixture.references.back().commit_id},
+                                  "file",
+                                  std::to_string(i))
+                          .value();
+        auto object =
+            kasumi::application::history_storage::publish_commit_object_scoped(
+                fixture.storage, test_layout(), test_key(), commit, root)
+                .value();
+        EXPECT_TRUE(
+            kasumi::application::history_storage::publish_head_marker_scoped(
+                fixture.storage, test_layout(), object.head, root));
+        fixture.state->objects.erase(marker_path(fixture.references.back()));
+        fixture.references.push_back(object.head);
+        fixture.commits.push_back(std::move(commit));
+    }
+    reset_fake_traffic(*fixture.state);
+    return fixture;
+}
+
+kasumi::application::history_storage::KnownHistoryFrontier
+reobservation_frontier(const ReobservationChainFixture& fixture) {
+    return {.anchors = {{fixture.references.front().commit_id,
+                         0,
+                         fixture.commits.front().tree}},
+            .accepted_epoch = fixture.epoch};
+}
+
+} // namespace
+
+TEST(HistoryStorageTest,
+     ReobservationRereadsInBoundedWindowsWithoutAncestorLists) {
+    auto fixture = make_reobservation_chain(33);
+    auto known = reobservation_frontier(fixture);
+    const auto root = kasumi::test::workspace_root(fixture.workspace);
+    auto first = kasumi::application::history_storage::load_history_scoped(
+        fixture.storage, test_key(), root, &known);
+    ASSERT_TRUE(first);
+    known.observed_variants = first->authenticated_commit_variants;
+    known.observed_markers = first->marked_head_identifiers;
+    known.observed_epoch = first->epoch->reference;
+    fixture.storage.storage.get = reobservation_locked_get;
+    fixture.storage.storage.list_prefix = reobservation_locked_list;
+    fixture.storage.storage.get_batch = reobservation_read_batch;
+    reset_fake_traffic(*fixture.state);
+    auto second = kasumi::application::history_storage::load_history_scoped(
+        fixture.storage, test_key(), root, &known);
+    ASSERT_TRUE(second) << second.error().detail;
+    EXPECT_EQ(second->commits.size(), first->commits.size());
+    EXPECT_EQ(fixture.state->prefix_list_count, 2U);
+    EXPECT_EQ(fixture.state->get_batch_count, 4U);
+    EXPECT_EQ(fixture.state->commit_get_count, 33U);
+}
+
+TEST(HistoryStorageTest, ReobservationDoesNotHideMissingOrReplacedVariants) {
+    for (const bool replacement : {false, true}) {
+        auto fixture = make_reobservation_chain(8);
+        auto known = reobservation_frontier(fixture);
+        const auto root = kasumi::test::workspace_root(fixture.workspace);
+        auto first = kasumi::application::history_storage::load_history_scoped(
+            fixture.storage, test_key(), root, &known);
+        ASSERT_TRUE(first);
+        known.observed_variants = first->authenticated_commit_variants;
+        known.observed_markers = first->marked_head_identifiers;
+        known.observed_epoch = first->epoch->reference;
+        ASSERT_TRUE(kasumi::transport::remove(
+            fixture.storage, object_path(fixture.references[4])));
+        if (replacement) {
+            publish_object(fixture.storage,
+                           fixture.workspace,
+                           fixture.commits[4],
+                           "replacement",
+                           false);
+        }
+        fixture.storage.storage.get = reobservation_locked_get;
+        fixture.storage.storage.list_prefix = reobservation_locked_list;
+        fixture.storage.storage.get_batch = reobservation_read_batch;
+        auto second = kasumi::application::history_storage::load_history_scoped(
+            fixture.storage, test_key(), root, &known);
+        EXPECT_EQ(second.has_value(), replacement);
+        if (second) {
+            EXPECT_EQ(second->commits.size(), 9U);
+        }
+    }
+}
+
+TEST(HistoryStorageTest, ReobservationInvalidatesHintsWhenHeadOrEpochChanges) {
+    for (const bool epoch_change : {true, false}) {
+        auto fixture = make_reobservation_chain(8);
+        auto known = reobservation_frontier(fixture);
+        const auto root = kasumi::test::workspace_root(fixture.workspace);
+        auto first = kasumi::application::history_storage::load_history_scoped(
+            fixture.storage, test_key(), root, &known);
+        ASSERT_TRUE(first);
+        known.observed_variants = first->authenticated_commit_variants;
+        known.observed_markers = first->marked_head_identifiers;
+        known.observed_epoch = first->epoch->reference;
+        if (epoch_change) {
+            kasumi::application::history_storage::epoch::Epoch next{
+                .vault_id = fixture.references.front().commit_id,
+                .sequence = 1,
+                .issued_at = 2,
+                .anchors = {{fixture.references.front().commit_id, 0}},
+                .previous_epoch_id = fixture.epoch.epoch_id};
+            auto sealed = kasumi::application::history_storage::epoch::seal(
+                              next, test_key())
+                              .value();
+            ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
+                fixture.storage, test_key(), sealed, root));
+        } else {
+            auto next = make_commit(9,
+                                    {fixture.references.back().commit_id},
+                                    "file",
+                                    "new head")
+                            .value();
+            publish_object(
+                fixture.storage, fixture.workspace, next, "new-head");
+            fixture.state->objects.erase(
+                marker_path(fixture.references.back()));
+        }
+        fixture.storage.storage.get = reobservation_locked_get;
+        fixture.storage.storage.list_prefix = reobservation_locked_list;
+        fixture.storage.storage.get_batch = reobservation_read_batch;
+        reset_fake_traffic(*fixture.state);
+        auto second = kasumi::application::history_storage::load_history_scoped(
+            fixture.storage, test_key(), root, &known);
+        ASSERT_TRUE(second) << second.error().detail;
+        EXPECT_EQ(fixture.state->get_batch_count, 0U);
+        EXPECT_GE(fixture.state->prefix_list_count, 9U);
+    }
+}
+
 } // namespace
