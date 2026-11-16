@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.11.1]
+
+### Changed
+
+- Scoped rclone batch SHA-256 verification (`FilesFromRaw` and `NoTraverse`) to the requested objects instead of listing unrelated remote Content and history, and overlapped scoped HEAD discovery with Epoch listing and read on batch-capable backends.
+- Configured rclone uploads to skip redundant copy-layer destination checks (`NoCheckDest`) while keeping provider PUT semantics and post-upload physical verification unchanged.
+- Reused authenticated physical Commit variant addresses during in-command stabilization reobservation when HEAD markers and Epoch are unchanged, reading ancestors in bounded batches without per-ancestor prefix listings.
+
+### Fixed
+
+- Reduced redundant Argon2id derivations in the CLI process integration test so ASan/UBSan runs complete reliably within subprocess timeouts.
+
+### Upgrade Notes
+
+- Remote formats, SQLite schema, and supported journal formats remain unchanged from v0.11.0. Use the same release on all clients and follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi).
+
 ## [0.11.0]
 
 ### Added
