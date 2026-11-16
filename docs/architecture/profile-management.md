@@ -4,6 +4,11 @@
 
 ## Ownership and credentials
 
+Deleting a profile in the wizard requires explicit confirmation, defaulting to
+No. Before confirmation it shows the selected profile and its paths, and explains
+that configuration, key, and local state are removed while synchronized files
+and remote data remain intact. EOF or cancellation preserves the profile.
+
 `kasumi list` prints only configured profile names, one per line. `kasumi show <profile>`
 shows the selected profile's local path, remote destination, retention settings,
 and local state. Neither query contacts remote storage or changes persistent

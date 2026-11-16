@@ -325,7 +325,8 @@
     "prompt_source_profile": "Source profile: ",
     "profile_cloned": "Profile \"{}\" created from \"{}\".",
     "profile_list_header": "Name                     State",
-    "profile_details": "Profile: {}\nLocal: {}\nRemote: {}\nState: {}\nHistory depth: {}\nHistory age: {} h"
+    "profile_details": "Profile: {}\nLocal: {}\nRemote: {}\nState: {}\nHistory depth: {}\nHistory age: {} h",
+    "confirm_delete": "\nDelete profile '{}'?\nLocal: {}\nRemote: {}\nRemoves local configuration, key, and profile state.\nSynchronized files and remote data are preserved.\nConfirm [y/N]: "
   },
   "manual_barrier_removal": {
     "warning": "Kasumi cannot determine whether an active garbage collection or maintenance operation is still running on other devices. Its barrier check cannot guarantee that no operations are running. Verify that no garbage collection or maintenance operation is active before removal.",

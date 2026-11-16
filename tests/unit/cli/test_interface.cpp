@@ -350,7 +350,7 @@ TEST_F(CliInterfaceTest,
         profile,
         kasumi::application::MasterKeyHex{std::string(64, '1')}));
     struct CancelAtEof : std::stringbuf {
-        CancelAtEof() : std::stringbuf("d\nexisting") {
+        CancelAtEof() : std::stringbuf("d\nexisting\n") {
         }
         int_type underflow() override {
             if (!raised) {

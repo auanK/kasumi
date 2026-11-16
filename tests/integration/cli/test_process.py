@@ -358,10 +358,14 @@ class CliProcessTest(unittest.TestCase):
         self.assertEqual(renamed_db.read_bytes(), source_db_bytes)
         self.assertEqual((renamed_dir / "key.bin").read_bytes(), source_key_bytes)
 
-        deleted = self.invoke("config", input=b"d\ncopy\nq\n")
+        before_delete = self._tree_snapshot(data)
+        for confirmation in (b"", b"n"):
+            self.invoke("config", input=b"d\ncopy\n" + confirmation + b"\nq\n")
+            self.assertEqual(self._tree_snapshot(data), before_delete)
+        deleted = self.invoke("config", input=b"d\ncopy\ny\nq\n")
         self.assertIn(b"'copy' removed", deleted)
         self.assertFalse(clone_dir.exists())
-        deleted = self.invoke("config", input=b"d\nrenamed\nq\n")
+        deleted = self.invoke("config", input=b"d\nrenamed\ny\nq\n")
         self.assertIn(b"'renamed' removed", deleted)
         self.assertFalse(renamed_dir.exists())
         self.assertEqual(sentinel.read_bytes(), local_snapshot)

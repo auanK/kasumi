@@ -325,7 +325,8 @@
     "prompt_source_profile": "Perfil de origem: ",
     "profile_cloned": "Perfil \"{}\" criado a partir de \"{}\".",
     "profile_list_header": "Nome                     Estado",
-    "profile_details": "Perfil: {}\nLocal: {}\nDestino: {}\nEstado: {}\nProfundidade do histórico: {}\nIdade do histórico: {} h"
+    "profile_details": "Perfil: {}\nLocal: {}\nDestino: {}\nEstado: {}\nProfundidade do histórico: {}\nIdade do histórico: {} h",
+    "confirm_delete": "\nExcluir perfil '{}'?\nLocal: {}\nDestino: {}\nRemove configuração, chave e estado local do perfil.\nArquivos sincronizados e dados remotos serão preservados.\nConfirmar [s/N]: "
   },
   "manual_barrier_removal": {
     "warning": "O Kasumi não pode determinar se uma coleta de lixo ou manutenção ainda está ativa em outros dispositivos. A verificação da barreira não pode garantir que nenhuma operação esteja em execução. Certifique-se de que nenhuma coleta ou manutenção esteja ativa antes da remoção.",

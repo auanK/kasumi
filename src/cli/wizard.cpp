@@ -187,6 +187,29 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                              target)) {
                 break;
             }
+            const auto selected = std::ranges::find(
+                profiles, target, &application::Profile::name);
+            if (selected == profiles.end()) {
+                print_error_line(i18n::tr(i18n::Key::WizardProfileNotFound));
+                continue;
+            }
+            std::string confirmation;
+            if (!prompt_line(
+                    i18n::format(i18n::Key::WizardConfirmDelete,
+                                 selected->name,
+                                 platform::path::to_utf8(selected->local_dir),
+                                 selected->remote_dir),
+                    confirmation)) {
+                break;
+            }
+            std::ranges::transform(
+                confirmation, confirmation.begin(), [](unsigned char c) {
+                    return static_cast<char>(std::tolower(c));
+                });
+            if (confirmation != "y" && confirmation != "yes" &&
+                confirmation != "s" && confirmation != "sim") {
+                continue;
+            }
             report_result(
                 application::delete_profile(environment, target),
                 i18n::format(i18n::Key::WizardProfileDeleted, target));
