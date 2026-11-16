@@ -353,7 +353,8 @@
     "problem_cleanup": "The temporary inspection directory could not be safely removed.",
     "problem_reason": "Reason: {}",
     "invalid_profile_name": "Use only letters, digits, '_' or '-' for the profile name.",
-    "invalid_remote_path": "Invalid destination. Use an absolute local path or remote:folder (no '..' or trailing '/' in the remote folder)."
+    "invalid_remote_path": "Invalid destination. Use an absolute local path or remote:folder (no '..' or trailing '/' in the remote folder).",
+    "confirm_edit": "\nChange paths for profile '{0}'?\nLocal: {1} -> {2}\nRemote: {3} -> {4}\nFiles will not be moved; remote data will not be migrated.\nAn empty local folder can cause deletions on the next Sync.\nReview 'kasumi status {0}' before syncing.\nSave changes [y/N]: "
   },
   "manual_barrier_removal": {
     "warning": "Kasumi cannot determine whether an active garbage collection or maintenance operation is still running on other devices. Its barrier check cannot guarantee that no operations are running. Verify that no garbage collection or maintenance operation is active before removal.",

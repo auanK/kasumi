@@ -9,6 +9,13 @@ No. Before confirmation it shows the selected profile and its paths, and explain
 that configuration, key, and local state are removed while synchronized files
 and remote data remain intact. EOF or cancellation preserves the profile.
 
+Editing paths shows the old and new local and remote destinations before asking
+to save, defaulting to No. Changing settings does not move local files or migrate
+remote data; selecting an empty local folder can plan deletions during a later
+Sync. Review `kasumi status <profile>` before syncing after a path change.
+Declining, EOF, or cancellation leaves configuration and profile state intact.
+Keeping both paths unchanged does not rewrite the configuration.
+
 Clone, rename, edit, and delete validate the selected existing profile before
 asking for later fields. An unknown name repeats the selection prompt without
 discarding other accepted input or changing profile data.

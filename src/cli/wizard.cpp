@@ -84,6 +84,18 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         }
         return !platform::cancellation::requested();
     };
+    const auto confirm_change = [&](std::string_view message) {
+        std::string confirmation;
+        if (!prompt_line(message, confirmation)) {
+            return false;
+        }
+        std::ranges::transform(
+            confirmation, confirmation.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+        return confirmation == "y" || confirmation == "yes" ||
+               confirmation == "s" || confirmation == "sim";
+    };
     const auto report_result =
         [&](const std::expected<void, application::ProfileError>& result,
             std::string_view ok_message) {
@@ -238,21 +250,11 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 print_error_line(i18n::tr(i18n::Key::WizardProfileNotFound));
                 continue;
             }
-            std::string confirmation;
-            if (!prompt_line(
+            if (!confirm_change(
                     i18n::format(i18n::Key::WizardConfirmDelete,
                                  selected->name,
                                  platform::path::to_utf8(selected->local_dir),
-                                 selected->remote_dir),
-                    confirmation)) {
-                break;
-            }
-            std::ranges::transform(
-                confirmation, confirmation.begin(), [](unsigned char c) {
-                    return static_cast<char>(std::tolower(c));
-                });
-            if (confirmation != "y" && confirmation != "yes" &&
-                confirmation != "s" && confirmation != "sim") {
+                                 selected->remote_dir))) {
                 continue;
             }
             report_result(
@@ -298,6 +300,19 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                     edit_remote,
                     it->min_history_depth,
                     it->min_history_age_hours};
+                if (updated.local_dir == it->local_dir &&
+                    updated.remote_dir == it->remote_dir) {
+                    continue;
+                }
+                if (!confirm_change(
+                        i18n::format(i18n::Key::WizardConfirmEdit,
+                                     target,
+                                     platform::path::to_utf8(it->local_dir),
+                                     edit_local,
+                                     it->remote_dir,
+                                     edit_remote))) {
+                    continue;
+                }
                 report_result(
                     application::update_profile(environment, updated),
                     i18n::format(i18n::Key::WizardProfileEdited, target));

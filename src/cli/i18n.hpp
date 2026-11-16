@@ -406,6 +406,7 @@ enum class Key {
     WizardProfileNotFound,
     WizardPromptProfileToDelete,
     WizardConfirmDelete,
+    WizardConfirmEdit,
     WizardProfileDeleted,
     WizardPromptProfileToEdit,
     WizardPromptNewLocalPath,
