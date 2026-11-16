@@ -136,7 +136,13 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 if (auto valid =
                         application::validate_profile_field(field, value);
                     !valid) {
-                    print_error_line(valid.error().detail);
+                    const auto key =
+                        field == application::ProfileField::Name
+                            ? i18n::Key::WizardInvalidProfileName
+                        : field == application::ProfileField::LocalPath
+                            ? i18n::Key::WizardLocalPathMustBeAbsolute
+                            : i18n::Key::WizardInvalidRemotePath;
+                    print_error_line(i18n::tr(key));
                     continue;
                 }
                 if (field == application::ProfileField::Name &&

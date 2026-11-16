@@ -291,10 +291,15 @@ TEST(CliWizardTest, CreatesProfileWithHiddenRetentionDefaults) {
                                                           "salt-password-long");
     const auto local = kasumi::test::workspace_path(workspace, "local");
     const auto remote = kasumi::test::workspace_path(workspace, "remote");
+    kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::Portuguese);
     const auto output =
         run_wizard_out(environment,
                        "n\nbad/name\nnew-profile\nrelative\n" + local.string() +
                            "\ngdrive:../invalid\n" + remote.string() + "\nq\n");
+    kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
+    EXPECT_EQ(output.find("invalid profile name"), std::string::npos);
+    EXPECT_EQ(output.find("local path must be absolute"), std::string::npos);
+    EXPECT_NE(output.find("Destino inválido"), std::string::npos);
     ASSERT_EQ(output.find("Profundidade mínima do histórico"),
               std::string::npos);
     ASSERT_EQ(output.find("Retenção mínima em horas"), std::string::npos);

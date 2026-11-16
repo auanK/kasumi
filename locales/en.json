@@ -351,7 +351,9 @@
     "problem_workspace": "A private temporary inspection directory could not be safely created or accessed.",
     "problem_snapshot": "A consistent readable snapshot of the local database could not be obtained.",
     "problem_cleanup": "The temporary inspection directory could not be safely removed.",
-    "problem_reason": "Reason: {}"
+    "problem_reason": "Reason: {}",
+    "invalid_profile_name": "Use only letters, digits, '_' or '-' for the profile name.",
+    "invalid_remote_path": "Invalid destination. Use an absolute local path or remote:folder (no '..' or trailing '/' in the remote folder)."
   },
   "manual_barrier_removal": {
     "warning": "Kasumi cannot determine whether an active garbage collection or maintenance operation is still running on other devices. Its barrier check cannot guarantee that no operations are running. Verify that no garbage collection or maintenance operation is active before removal.",

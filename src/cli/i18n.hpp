@@ -399,6 +399,8 @@ enum class Key {
     WizardPromptLocalPath,
     WizardPromptRemotePath,
     WizardLocalPathMustBeAbsolute,
+    WizardInvalidProfileName,
+    WizardInvalidRemotePath,
     WizardRemotePathMustBeAbsolute,
     WizardProfileCreated,
     WizardProfileNotFound,

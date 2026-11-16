@@ -351,7 +351,9 @@
     "problem_workspace": "Não foi possível criar ou acessar com segurança o diretório temporário de inspeção.",
     "problem_snapshot": "Não foi possível obter uma cópia consistente e legível do banco local.",
     "problem_cleanup": "Não foi possível remover com segurança o diretório temporário de inspeção.",
-    "problem_reason": "Motivo: {}"
+    "problem_reason": "Motivo: {}",
+    "invalid_profile_name": "Use apenas letras, números, '_' ou '-' no nome do perfil.",
+    "invalid_remote_path": "Destino inválido. Use um caminho local absoluto ou remoto:pasta (sem '..' ou '/' no final da pasta remota)."
   },
   "manual_barrier_removal": {
     "warning": "O Kasumi não pode determinar se uma coleta de lixo ou manutenção ainda está ativa em outros dispositivos. A verificação da barreira não pode garantir que nenhuma operação esteja em execução. Certifique-se de que nenhuma coleta ou manutenção esteja ativa antes da remoção.",
