@@ -359,6 +359,7 @@ enum class Key {
     PromptSalt,
     PromptConfirmSalt,
     PasswordsDoNotMatch,
+    PasswordTooShort,
     SaltsDoNotMatch,
 
     // Wizard

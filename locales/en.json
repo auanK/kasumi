@@ -378,5 +378,6 @@
     "singular": "resolved 1 missing path",
     "plural": "resolved {} missing paths",
     "none": "no unresolved missing paths to resolve"
-  }
+  },
+  "password_too_short": "Use at least {} bytes."
 }

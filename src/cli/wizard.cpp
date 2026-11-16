@@ -101,50 +101,61 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 std::tolower(static_cast<unsigned char>(choice[0])));
         }
 
+        const auto prompt_field = [&](std::string_view label,
+                                      application::ProfileField field,
+                                      std::string& value,
+                                      std::string_view fallback = {}) {
+            while (prompt_line(label, value)) {
+                if (value.empty() && !fallback.empty()) {
+                    value = fallback;
+                }
+                if (auto valid =
+                        application::validate_profile_field(field, value);
+                    !valid) {
+                    print_error_line(valid.error().detail);
+                    continue;
+                }
+                if (field == application::ProfileField::Name &&
+                    std::ranges::any_of(profiles, [&](const auto& profile) {
+                        return profile.name == value;
+                    })) {
+                    print_error_line(i18n::format(
+                        i18n::Key::WizardProfileAlreadyExists, value));
+                    continue;
+                }
+                return true;
+            }
+            return false;
+        };
+
         const auto prompt_pair = [&](i18n::Key first_key,
                                      std::string& first,
                                      std::string& second) {
             return prompt_line(i18n::tr(first_key), first) &&
-                   prompt_line(i18n::tr(i18n::Key::WizardPromptNewProfileName),
-                               second);
+                   prompt_field(i18n::tr(i18n::Key::WizardPromptNewProfileName),
+                                application::ProfileField::Name,
+                                second);
         };
 
         if (choice == "q") {
             break;
         } else if (choice == "n") {
             std::string new_profile, new_local, new_remote;
-            if (!prompt_line(i18n::tr(i18n::Key::WizardPromptProfileName),
-                             new_profile)) {
+            if (!prompt_field(i18n::tr(i18n::Key::WizardPromptProfileName),
+                              application::ProfileField::Name,
+                              new_profile)) {
                 break;
             }
             std::println();
-            if (std::ranges::any_of(profiles, [&](const auto& profile) {
-                    return profile.name == new_profile;
-                })) {
-                print_error_line(i18n::format(
-                    i18n::Key::WizardProfileAlreadyExists, new_profile));
-                continue;
-            }
-
-            if (!prompt_line(i18n::tr(i18n::Key::WizardPromptLocalPath),
-                             new_local) ||
-                !prompt_line(i18n::tr(i18n::Key::WizardPromptRemotePath),
-                             new_remote)) {
+            if (!prompt_field(i18n::tr(i18n::Key::WizardPromptLocalPath),
+                              application::ProfileField::LocalPath,
+                              new_local) ||
+                !prompt_field(i18n::tr(i18n::Key::WizardPromptRemotePath),
+                              application::ProfileField::RemotePath,
+                              new_remote)) {
                 break;
             }
             std::println();
-            if (!platform::path::from_utf8(new_local).is_absolute()) {
-                print_error_line(
-                    i18n::tr(i18n::Key::WizardLocalPathMustBeAbsolute));
-                continue;
-            }
-            if (new_remote.find(':') == std::string::npos &&
-                !platform::path::from_utf8(new_remote).is_absolute()) {
-                print_error_line(
-                    i18n::tr(i18n::Key::WizardRemotePathMustBeAbsolute));
-                continue;
-            }
-
             application::ProfileCredentials creds =
                 credentials::read_password_pair();
             if (platform::cancellation::requested()) {
@@ -195,13 +206,13 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 const auto prompt_default = [&](i18n::Key key,
                                                 const std::string& fallback,
                                                 std::string& out) {
-                    if (!prompt_line(i18n::format(key, fallback), out)) {
-                        return false;
-                    }
-                    if (out.empty()) {
-                        out = fallback;
-                    }
-                    return true;
+                    return prompt_field(
+                        i18n::format(key, fallback),
+                        key == i18n::Key::WizardPromptNewLocalPath
+                            ? application::ProfileField::LocalPath
+                            : application::ProfileField::RemotePath,
+                        out,
+                        fallback);
                 };
                 std::string edit_local, edit_remote;
                 if (!prompt_default(i18n::Key::WizardPromptNewLocalPath,

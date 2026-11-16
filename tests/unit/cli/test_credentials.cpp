@@ -80,14 +80,15 @@ TEST(CliCredentialsTest, RepeatsPasswordAndSaltUntilConfirmed) {
                                                           std::nullopt);
     kasumi::platform::cancellation::reset();
     const std::vector<std::string> answers{
-        "password",
+        "tiny",
+        "password-long",
         "wrong",
-        "password",
-        "password",
-        "salt",
+        "password-long",
+        "password-long",
+        "salt-password-long",
         "wrong",
-        "salt",
-        "salt",
+        "salt-password-long",
+        "salt-password-long",
     };
     std::size_t next = 0;
     kasumi::application::PasswordPair result;
@@ -98,8 +99,8 @@ TEST(CliCredentialsTest, RepeatsPasswordAndSaltUntilConfirmed) {
             });
     });
 
-    EXPECT_EQ(result.password, "password");
-    EXPECT_EQ(result.salt_password, "salt");
+    EXPECT_EQ(result.password, "password-long");
+    EXPECT_EQ(result.salt_password, "salt-password-long");
     EXPECT_EQ(next, answers.size());
     EXPECT_NE(output.find("Passwords do not match"), std::string::npos);
     EXPECT_NE(output.find("Password salt values do not match"),
@@ -112,8 +113,10 @@ TEST(CliCredentialsTest, UsesPasswordSaltTerminologyInPrompts) {
     auto salt = kasumi::test::scoped_environment_variable("KASUMI_PASSWORD2",
                                                           std::nullopt);
     kasumi::platform::cancellation::reset();
-    const std::vector<std::string> answers{
-        "password-long", "password-long", "salt-password", "salt-password"};
+    const std::vector<std::string> answers{"password-long",
+                                           "password-long",
+                                           "salt-password-long",
+                                           "salt-password-long"};
     std::size_t next = 0;
     const auto result = kasumi::cli::credentials::read_password_pair(
         [&](const std::string& prompt) {
@@ -125,7 +128,7 @@ TEST(CliCredentialsTest, UsesPasswordSaltTerminologyInPrompts) {
         });
 
     EXPECT_EQ(result.password, "password-long");
-    EXPECT_EQ(result.salt_password, "salt-password");
+    EXPECT_EQ(result.salt_password, "salt-password-long");
     EXPECT_EQ(next, answers.size());
 }
 
@@ -272,7 +275,7 @@ TEST(CliWizardTest, RejectsDuplicateNameBeforeOtherPrompts) {
         environment,
         profile,
         kasumi::application::MasterKeyHex{std::string(64, '1')}));
-    const auto output = run_wizard_out(environment, "n\nexisting\nq\n");
+    const auto output = run_wizard_out(environment, "n\nexisting\n");
     EXPECT_NE(output.find("The profile 'existing' already exists"),
               std::string::npos);
     EXPECT_EQ(output.find("Synchronized local path"), std::string::npos);
@@ -288,9 +291,10 @@ TEST(CliWizardTest, CreatesProfileWithHiddenRetentionDefaults) {
                                                           "salt-password-long");
     const auto local = kasumi::test::workspace_path(workspace, "local");
     const auto remote = kasumi::test::workspace_path(workspace, "remote");
-    const auto output = run_wizard_out(environment,
-                                       "n\nnew-profile\n" + local.string() +
-                                           "\n" + remote.string() + "\nq\n");
+    const auto output =
+        run_wizard_out(environment,
+                       "n\nbad/name\nnew-profile\nrelative\n" + local.string() +
+                           "\ngdrive:../invalid\n" + remote.string() + "\nq\n");
     ASSERT_EQ(output.find("Profundidade mínima do histórico"),
               std::string::npos);
     ASSERT_EQ(output.find("Retenção mínima em horas"), std::string::npos);

@@ -624,17 +624,13 @@ auto find_profile(std::vector<runtime::ProfileData>& profiles,
 
 std::expected<void, ProfileError>
 validate_profile_locations(const Profile& profile) {
-    if (!profile.local_dir.is_absolute()) {
-        return fail_profile(ProfileErrorCode::StorageFailure,
-                            "local path must be absolute");
+    if (auto valid =
+            validate_profile_field(ProfileField::LocalPath,
+                                   platform::path::to_utf8(profile.local_dir));
+        !valid) {
+        return valid;
     }
-    const auto valid_storage =
-        transport::validate_transport_location(profile.remote_dir);
-    if (!valid_storage) {
-        return fail_profile(ProfileErrorCode::StorageFailure,
-                            transport::describe(valid_storage.error()));
-    }
-    return {};
+    return validate_profile_field(ProfileField::RemotePath, profile.remote_dir);
 }
 
 struct LockedConfig {
@@ -691,6 +687,26 @@ struct KeyBytesWiper {
     }
 };
 } // namespace
+
+std::expected<void, ProfileError>
+validate_profile_field(ProfileField field, std::string_view value) {
+    if (field == ProfileField::Name) {
+        if (!runtime::is_valid_profile_name(value)) {
+            return fail_profile(ProfileErrorCode::InvalidName,
+                                "invalid profile name");
+        }
+    } else if (field == ProfileField::LocalPath) {
+        if (!platform::path::from_utf8(value).is_absolute()) {
+            return fail_profile(ProfileErrorCode::StorageFailure,
+                                "local path must be absolute");
+        }
+    } else if (auto valid = transport::validate_transport_location(value);
+               !valid) {
+        return fail_profile(ProfileErrorCode::StorageFailure,
+                            transport::describe(valid.error()));
+    }
+    return {};
+}
 
 std::expected<std::vector<Profile>, ProfileError>
 list_profiles(const ExecutionEnvironment& environment) {

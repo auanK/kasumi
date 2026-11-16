@@ -41,6 +41,14 @@ struct ProfileError {
     std::string detail;
 };
 
+enum class ProfileField {
+    Name,
+    LocalPath,
+    RemotePath
+};
+std::expected<void, ProfileError>
+validate_profile_field(ProfileField field, std::string_view value);
+
 // Lists configured profiles.
 std::expected<std::vector<Profile>, ProfileError>
 list_profiles(const ExecutionEnvironment& environment);

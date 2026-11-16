@@ -42,6 +42,10 @@ s3:my-bucket/kasumi-vault
 
 ## Configuration File
 
+The wizard validates names, paths, and minimum password sizes as they are entered.
+Invalid input repeats only that field; accepted values are retained. Passwords and
+password salts remain hidden and require confirmation.
+
 Profiles are stored in `config.toml` within Kasumi's data directory.
 * **Windows**: `%APPDATA%/kasumi`
 * **Linux**: `$XDG_CONFIG_HOME/kasumi` or `$HOME/.config/kasumi`

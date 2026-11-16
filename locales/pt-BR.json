@@ -378,5 +378,6 @@
     "singular": "1 caminho ausente resolvido",
     "plural": "{} caminhos ausentes resolvidos",
     "none": "Nenhum caminho ausente pendente para resolver"
-  }
+  },
+  "password_too_short": "Use pelo menos {} bytes."
 }

@@ -241,7 +241,8 @@ application::PasswordPair read_password_pair(const SecretPrompt& prompt) {
     const auto confirmed = [&](const char* environment_name,
                                const std::string& first_prompt,
                                const std::string& confirmation_prompt,
-                               const std::string& mismatch) {
+                               const std::string& mismatch,
+                               std::size_t minimum_size) {
         std::string accepted;
         if (const char* value = std::getenv(environment_name)) {
             accepted = value;
@@ -252,6 +253,11 @@ application::PasswordPair read_password_pair(const SecretPrompt& prompt) {
             if (platform::cancellation::requested()) {
                 wipe(first);
                 return accepted;
+            }
+            if (first.size() < minimum_size) {
+                wipe(first);
+                i18n::println(i18n::Key::PasswordTooShort, minimum_size);
+                continue;
             }
             auto confirmation = prompt(confirmation_prompt);
             const bool matches =
@@ -273,7 +279,8 @@ application::PasswordPair read_password_pair(const SecretPrompt& prompt) {
         confirmed("KASUMI_PASSWORD",
                   std::string{i18n::tr(i18n::Key::PromptPassword)},
                   std::string{i18n::tr(i18n::Key::PromptConfirmPassword)},
-                  std::string{i18n::tr(i18n::Key::PasswordsDoNotMatch)});
+                  std::string{i18n::tr(i18n::Key::PasswordsDoNotMatch)},
+                  application::minimum_password_size());
     if (platform::cancellation::requested()) {
         wipe(password);
         return application::PasswordPair{};
@@ -281,7 +288,8 @@ application::PasswordPair read_password_pair(const SecretPrompt& prompt) {
     auto salt = confirmed("KASUMI_PASSWORD2",
                           std::string{i18n::tr(i18n::Key::PromptSalt)},
                           std::string{i18n::tr(i18n::Key::PromptConfirmSalt)},
-                          std::string{i18n::tr(i18n::Key::SaltsDoNotMatch)});
+                          std::string{i18n::tr(i18n::Key::SaltsDoNotMatch)},
+                          application::minimum_password_salt_size());
 
     application::PasswordPair pair{std::move(password), std::move(salt)};
     wipe(password);

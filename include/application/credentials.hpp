@@ -1,6 +1,7 @@
 #ifndef KASUMI_APPLICATION_CREDENTIALS_HPP
 #define KASUMI_APPLICATION_CREDENTIALS_HPP
 
+#include <cstddef>
 #include <string>
 #include <variant>
 
@@ -28,6 +29,9 @@ using Credentials = std::variant<NoCredentials, MasterKeyHex>;
 
 // Accepted forms only during profile creation.
 using ProfileCredentials = std::variant<MasterKeyHex, PasswordPair>;
+
+std::size_t minimum_password_size() noexcept;
+std::size_t minimum_password_salt_size() noexcept;
 
 // Wipes sensitive data from memory by zeroing strings.
 void wipe_credentials(Credentials& credentials) noexcept;
