@@ -835,14 +835,18 @@ rclone_physical_hash_batch(void* context,
 
     std::ranges::sort(expectations, {}, &PhysicalHashExpectation::identifier);
     const auto manifest = *root / ".kasumi-batch-verify.sha256";
-    const auto manifest_status =
-        std::filesystem::symlink_status(manifest, status_error);
-    if (status_error && status_error != std::errc::no_such_file_or_directory) {
-        return std::unexpected(filesystem_error(status_error));
-    }
-    if (!status_error && std::filesystem::exists(manifest_status)) {
-        return std::unexpected(make_error(
-            ErrorCode::InvalidContext, "verification manifest already exists"));
+    const auto files = *root / ".kasumi-batch-verify.files";
+    for (const auto& path : {manifest, files}) {
+        const auto status = std::filesystem::symlink_status(path, status_error);
+        if (status_error &&
+            status_error != std::errc::no_such_file_or_directory) {
+            return std::unexpected(filesystem_error(status_error));
+        }
+        if (!status_error && std::filesystem::exists(status)) {
+            return std::unexpected(make_error(
+                ErrorCode::InvalidContext,
+                "verification manifest or file list already exists"));
+        }
     }
 
     {
@@ -851,14 +855,27 @@ rclone_physical_hash_batch(void* context,
             return std::unexpected(make_error(
                 ErrorCode::Io, "failed to create verification manifest"));
         }
-        for (const auto& object : expectations) {
-            output << object.expected_hash << "  " << object.identifier << '\n';
-        }
-        if (!output.good()) {
+        std::ofstream file_list(files, std::ios::binary);
+        if (!file_list) {
+            output.close();
             std::error_code ignored;
             std::filesystem::remove(manifest, ignored);
             return std::unexpected(make_error(
-                ErrorCode::Io, "failed to write verification manifest"));
+                ErrorCode::Io, "failed to create verification file list"));
+        }
+        for (const auto& object : expectations) {
+            output << object.expected_hash << "  " << object.identifier << '\n';
+            file_list << object.identifier << '\n';
+        }
+        output.close();
+        file_list.close();
+        if (!output || !file_list) {
+            std::error_code ignored;
+            std::filesystem::remove(manifest, ignored);
+            std::filesystem::remove(files, ignored);
+            return std::unexpected(make_error(
+                ErrorCode::Io,
+                "failed to write verification manifest or file list"));
         }
     }
 
@@ -877,15 +894,23 @@ rclone_physical_hash_batch(void* context,
             {"match", true},
             {"differ", true},
             {"error", true},
+            {"_config", {{"NoTraverse", true}}},
+            // Restrict names: oneWay alone still scans the remote.
+            {"_filter", {{"FilesFromRaw", {platform::path::to_utf8(files)}}}},
         },
         maximum_check_response_size,
         transfer_timeout);
-    std::error_code manifest_error;
-    const bool manifest_removed =
-        std::filesystem::remove(manifest, manifest_error);
-    if (manifest_error || !manifest_removed) {
-        return std::unexpected(make_error(
-            ErrorCode::Io, "failed to remove verification manifest"));
+    bool cleanup_failed = false;
+    for (const auto& path : {manifest, files}) {
+        std::error_code cleanup_error;
+        if (!std::filesystem::remove(path, cleanup_error) || cleanup_error) {
+            cleanup_failed = true;
+        }
+    }
+    if (cleanup_failed) {
+        return std::unexpected(
+            make_error(ErrorCode::Io,
+                       "failed to remove verification manifest or file list"));
     }
     if (!response) {
         if (unsupported_endpoint(response.error(), "operations/check") ||

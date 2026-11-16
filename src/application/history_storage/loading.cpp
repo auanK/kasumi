@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <future>
 #include <limits>
 #include <system_error>
 #include <thread>
@@ -546,21 +547,6 @@ LoadResult load_impl(transport::Transport& storage,
         return std::unexpected(temporary.error());
     }
     const auto layout = derive_remote_layout(key);
-    auto inventory = [&]() {
-        if (scoped) {
-            return build_scoped_history_inventory(storage, layout);
-        }
-        return identifiers ? build_history_inventory(*identifiers, layout)
-                           : build_history_inventory(storage, layout);
-    }();
-    if (!inventory) {
-        return std::unexpected(inventory.error());
-    }
-
-    std::optional<epoch::VerifiedEpoch> discovered_epoch;
-    std::map<std::string, std::vector<HeadReference>> marker_candidates;
-    std::map<std::string, std::uint64_t> epoch_anchors;
-    const KnownHistoryAnchor* cached_anchor = nullptr;
 
     auto cancelled = [&](bool check_cancellation) -> std::optional<Error> {
         if (check_cancellation && platform::cancellation::requested()) {
@@ -604,6 +590,31 @@ LoadResult load_impl(transport::Transport& storage,
         }
         return *raw_epoch;
     };
+
+    std::future<std::expected<std::optional<epoch::VerifiedEpoch>, Error>>
+        scoped_epoch;
+    // Native batch backends already support concurrent history reads.
+    if (scoped && storage.storage.get_batch != nullptr) {
+        scoped_epoch = std::async(std::launch::async, [&] {
+            return load_latest_epoch(
+                frontier ? frontier->accepted_epoch : std::nullopt, true);
+        });
+    }
+    auto inventory = [&]() {
+        if (scoped) {
+            return build_scoped_history_inventory(storage, layout);
+        }
+        return identifiers ? build_history_inventory(*identifiers, layout)
+                           : build_history_inventory(storage, layout);
+    }();
+    if (!inventory) {
+        return std::unexpected(inventory.error());
+    }
+
+    std::optional<epoch::VerifiedEpoch> discovered_epoch;
+    std::map<std::string, std::vector<HeadReference>> marker_candidates;
+    std::map<std::string, std::uint64_t> epoch_anchors;
+    const KnownHistoryAnchor* cached_anchor = nullptr;
 
     auto load_markers = [&](const std::filesystem::path& workspace_dir,
                             bool check_cancellation)
@@ -732,9 +743,14 @@ LoadResult load_impl(transport::Transport& storage,
         const auto accepted_epoch = frontier
                                         ? frontier->accepted_epoch
                                         : std::optional<epoch::Reference>{};
-        auto raw_epoch = load_latest_epoch(accepted_epoch, false);
+        auto raw_epoch = scoped_epoch.valid()
+                             ? scoped_epoch.get()
+                             : load_latest_epoch(accepted_epoch, false);
         if (!raw_epoch) {
             return std::unexpected(raw_epoch.error());
+        }
+        if (auto cancel = cancelled(scoped)) {
+            return std::unexpected(*cancel);
         }
         discovered_epoch = *raw_epoch;
         const bool unchanged_accepted_epoch =

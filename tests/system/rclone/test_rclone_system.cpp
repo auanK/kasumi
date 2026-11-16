@@ -1540,6 +1540,24 @@ TEST(RcloneSystemTest, BulkPhysicalHashUsesOneCheckManifest) {
     EXPECT_TRUE(verified->errors.empty());
     EXPECT_FALSE(
         std::filesystem::exists(source_root / ".kasumi-batch-verify.sha256"));
+    EXPECT_FALSE(
+        std::filesystem::exists(source_root / ".kasumi-batch-verify.files"));
+
+    ASSERT_TRUE(
+        kasumi::transport::remove(*storage, request.objects[0].identifier));
+    const auto corrupt = plain_root / "corrupt";
+    kasumi::test::write_text(corrupt, "corrupted ciphertext");
+    ASSERT_TRUE(kasumi::transport::put(
+        *storage, corrupt, request.objects[1].identifier));
+    const auto damaged =
+        kasumi::transport::physical_hash_batch(*storage, request);
+    ASSERT_TRUE(damaged.has_value()) << damaged.error().message;
+    EXPECT_EQ(damaged->missing,
+              (std::vector<std::string>{request.objects[0].identifier}));
+    EXPECT_EQ(damaged->mismatched,
+              (std::vector<std::string>{request.objects[1].identifier}));
+    EXPECT_EQ(damaged->matched.size(), request.objects.size() - 2);
+    EXPECT_TRUE(damaged->errors.empty());
 }
 
 } // namespace
