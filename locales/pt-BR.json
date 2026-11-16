@@ -338,7 +338,20 @@
     "profile_cloned": "Perfil \"{}\" criado a partir de \"{}\".",
     "profile_list_header": "Nome                     Estado",
     "profile_details": "Perfil: {}\nLocal: {}\nDestino: {}\nEstado: {}\nProfundidade do histórico: {}\nIdade do histórico: {} h",
-    "confirm_delete": "\nExcluir perfil '{}'?\nLocal: {}\nDestino: {}\nRemove configuração, chave e estado local do perfil.\nArquivos sincronizados e dados remotos serão preservados.\nConfirmar [s/N]: "
+    "confirm_delete": "\nExcluir perfil '{}'?\nLocal: {}\nDestino: {}\nRemove configuração, chave e estado local do perfil.\nArquivos sincronizados e dados remotos serão preservados.\nConfirmar [s/N]: ",
+    "problem_unspecified": "Não foi possível inspecionar o estado local do perfil.",
+    "problem_name": "O nome do perfil é inválido.",
+    "problem_paths": "Não foi possível resolver os caminhos privados do perfil.",
+    "problem_directory": "Um diretório privado do perfil está ausente, inacessível ou inseguro.",
+    "problem_key": "A chave do perfil está ausente, inválida, inacessível ou insegura.",
+    "problem_database": "O banco local está ausente, corrompido, incompatível, inacessível ou inseguro.",
+    "problem_lock": "O perfil está em uso ou seu bloqueio local não pôde ser inspecionado com segurança.",
+    "problem_sidecar": "Um arquivo auxiliar do SQLite está inacessível, ilegível ou inseguro.",
+    "problem_journal": "O journal de transação é inválido ou não pôde ser inspecionado com segurança.",
+    "problem_workspace": "Não foi possível criar ou acessar com segurança o diretório temporário de inspeção.",
+    "problem_snapshot": "Não foi possível obter uma cópia consistente e legível do banco local.",
+    "problem_cleanup": "Não foi possível remover com segurança o diretório temporário de inspeção.",
+    "problem_reason": "Motivo: {}"
   },
   "manual_barrier_removal": {
     "warning": "O Kasumi não pode determinar se uma coleta de lixo ou manutenção ainda está ativa em outros dispositivos. A verificação da barreira não pode garantir que nenhuma operação esteja em execução. Certifique-se de que nenhuma coleta ou manutenção esteja ativa antes da remoção.",

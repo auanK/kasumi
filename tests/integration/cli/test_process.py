@@ -416,6 +416,14 @@ class CliProcessTest(unittest.TestCase):
         self.assertRegex(output, rb"\bready\s+Ready\b")
         self.assertRegex(output, rb"\bpending\s+Pending\b")
         self.assertRegex(output, rb"\bproblem\s+Problem\b")
+        for language, label, database_word in (
+            ("en", b"Reason:", b"database"),
+            ("pt-BR", b"Motivo:", b"banco"),
+        ):
+            shown = self.invoke_raw("--lang", language, "show", "problem")
+            self.assertEqual(shown.returncode, 0, shown.stderr)
+            self.assertIn(label, shown.stdout)
+            self.assertIn(database_word, shown.stdout)
         self.assertEqual(self._tree_snapshot(data), persistent_before)
         self.assertEqual(
             {name: self._tree_snapshot(self.root / f"remote-{name}") for name in profiles},

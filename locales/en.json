@@ -338,7 +338,20 @@
     "profile_cloned": "Profile \"{}\" created from \"{}\".",
     "profile_list_header": "Name                     State",
     "profile_details": "Profile: {}\nLocal: {}\nRemote: {}\nState: {}\nHistory depth: {}\nHistory age: {} h",
-    "confirm_delete": "\nDelete profile '{}'?\nLocal: {}\nRemote: {}\nRemoves local configuration, key, and profile state.\nSynchronized files and remote data are preserved.\nConfirm [y/N]: "
+    "confirm_delete": "\nDelete profile '{}'?\nLocal: {}\nRemote: {}\nRemoves local configuration, key, and profile state.\nSynchronized files and remote data are preserved.\nConfirm [y/N]: ",
+    "problem_unspecified": "Local profile state could not be inspected.",
+    "problem_name": "The profile name is invalid.",
+    "problem_paths": "Private profile paths could not be resolved.",
+    "problem_directory": "A private profile directory is missing, inaccessible, or unsafe.",
+    "problem_key": "The profile key is missing, invalid, inaccessible, or unsafe.",
+    "problem_database": "The local database is missing, corrupt, unsupported, inaccessible, or unsafe.",
+    "problem_lock": "The profile is in use, or its local lock cannot be safely inspected.",
+    "problem_sidecar": "A SQLite sidecar is inaccessible, unreadable, or unsafe.",
+    "problem_journal": "The transaction journal is invalid or cannot be safely inspected.",
+    "problem_workspace": "A private temporary inspection directory could not be safely created or accessed.",
+    "problem_snapshot": "A consistent readable snapshot of the local database could not be obtained.",
+    "problem_cleanup": "The temporary inspection directory could not be safely removed.",
+    "problem_reason": "Reason: {}"
   },
   "manual_barrier_removal": {
     "warning": "Kasumi cannot determine whether an active garbage collection or maintenance operation is still running on other devices. Its barrier check cannot guarantee that no operations are running. Verify that no garbage collection or maintenance operation is active before removal.",

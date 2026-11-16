@@ -1345,15 +1345,25 @@ clone_profile(const ExecutionEnvironment& environment,
 
 ProfileLocalState
 inspect_profile_local_state(const ExecutionEnvironment& environment,
-                            std::string_view profile_name) {
-    if (!runtime::is_valid_profile_name(profile_name)) {
+                            std::string_view profile_name,
+                            ProfileLocalProblem* problem) {
+    if (problem) {
+        *problem = ProfileLocalProblem::None;
+    }
+    const auto fail_inspection = [&](ProfileLocalProblem reason) {
+        if (problem) {
+            *problem = reason;
+        }
         return ProfileLocalState::Problem;
+    };
+    if (!runtime::is_valid_profile_name(profile_name)) {
+        return fail_inspection(ProfileLocalProblem::InvalidName);
     }
 
     auto paths =
         runtime::resolve_profile_paths(environment.app_data_dir, profile_name);
     if (!paths) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Paths);
     }
 
     const auto profiles_dir = paths->profile_dir.parent_path();
@@ -1361,29 +1371,29 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
          {environment.app_data_dir, profiles_dir, paths->profile_dir}) {
         const auto entry = query_entry(directory);
         if (!entry.is_plain_dir()) {
-            return ProfileLocalState::Problem;
+            return fail_inspection(ProfileLocalProblem::Directory);
         }
     }
 
     const auto key = query_entry(paths->key_path);
     if (!key.is_plain_file() || key.size != crypto::KEY_SIZE) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Key);
     }
     auto key_bytes = runtime::vault::read_only(paths->key_path);
     if (!key_bytes) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Key);
     }
     KeyBytesWiper key_wiper{*key_bytes};
 
     const auto database = query_entry(paths->database_path);
     if (!database.is_plain_file()) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Database);
     }
 
     const auto lock_path = environment.app_data_dir /
                            ("profile-" + std::string(profile_name) + ".lock");
     if (probe_profile_lock(lock_path) != LockProbe::Inactive) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Lock);
     }
 
     const auto auxiliary_corrupt = [](const auto& entry) {
@@ -1401,23 +1411,23 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
 
     const auto wal = query_entry(sidecars[0]);
     if (auxiliary_corrupt(wal)) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Sidecar);
     }
     if (auxiliary_corrupt(query_entry(sidecars[1]))) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Sidecar);
     }
     const auto rollback = query_entry(rollback_path);
     if (rollback_corrupt(rollback)) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Sidecar);
     }
 
     auto journal_paths = sync::journal::make_paths(paths->profile_dir);
     if (!journal_paths) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Journal);
     }
     const auto journal = sync::journal::inspect(*journal_paths, *key_bytes);
     if (journal == sync::journal::InspectionResult::Corrupted) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Journal);
     }
     const bool active_journal =
         journal == sync::journal::InspectionResult::Active;
@@ -1432,13 +1442,13 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
     }
 #endif
     if (!random_id || random_id->empty()) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Workspace);
     }
 
     std::error_code temp_error;
     const auto temp_root = std::filesystem::temp_directory_path(temp_error);
     if (temp_error) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Workspace);
     }
 
     std::filesystem::path candidate;
@@ -1455,10 +1465,10 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
     candidate = temp_root / ("kasumi_insp_" + *random_id);
 #endif
     if (query_entry(candidate).state != EntryState::Absent) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Workspace);
     }
     if (!platform::private_storage::create_directory(candidate)) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Workspace);
     }
     InspectionTempDirectory temporary{candidate};
     temporary.owns = true;
@@ -1472,7 +1482,7 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
     }
 #endif
     if (!temporary.identity.valid) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Workspace);
     }
 #ifdef KASUMI_MUTATION_FAULT_TESTS
     if (fault_test::g_inspect_fault_observer &&
@@ -1485,7 +1495,7 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
         const auto entry = query_entry(candidate);
         if (!entry.is_plain_dir() ||
             !(query_directory_identity(candidate) == temporary.identity)) {
-            return ProfileLocalState::Problem;
+            return fail_inspection(ProfileLocalProblem::Workspace);
         }
     }
 
@@ -1494,48 +1504,48 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
             fault_test::InspectFaultStage::FailSnapshot ||
         fault_test::g_inspect_fault_stage ==
             fault_test::InspectFaultStage::FailSqliteCopy) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Snapshot);
     }
 #endif
 
     const auto copy_path = candidate / "db.sqlite";
     if (query_entry(copy_path).state != EntryState::Absent) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Snapshot);
     }
     if (!take_sqlite_snapshot(paths->database_path,
                               copy_path,
                               wal.state == EntryState::Present,
                               active_rollback_journal)) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Snapshot);
     }
 
 #ifdef KASUMI_MUTATION_FAULT_TESTS
     if (fault_test::g_inspect_fault_stage ==
         fault_test::InspectFaultStage::SimulateConcurrentModification) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Snapshot);
     }
 #endif
 
     auto loaded = state_storage::load_state(copy_path);
     if (!loaded.has_value()) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Database);
     }
 
     const auto final_journal =
         sync::journal::inspect(*journal_paths, *key_bytes);
     if (final_journal == sync::journal::InspectionResult::Corrupted) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Journal);
     }
     const auto final_rollback = query_entry(rollback_path);
     if (rollback_corrupt(final_rollback)) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Sidecar);
     }
     active_rollback_journal = active_rollback_journal ||
                               (final_rollback.state == EntryState::Present &&
                                final_rollback.size > 0);
 
     if (!temporary.perform_cleanup()) {
-        return ProfileLocalState::Problem;
+        return fail_inspection(ProfileLocalProblem::Cleanup);
     }
 
     if (active_journal || active_rollback_journal ||

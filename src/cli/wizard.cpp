@@ -8,6 +8,7 @@
 #include "platform/path.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <iostream>
 #include <print>
@@ -26,15 +27,38 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
         if (profile_name.empty()) {
             std::println("{}", profile.name);
         } else if (profile.name == profile_name) {
-            i18n::println(
-                i18n::Key::WizardProfileDetails,
-                profile.name,
-                platform::path::to_utf8(profile.local_dir),
-                profile.remote_dir,
-                application::to_string(application::inspect_profile_local_state(
-                    environment, profile.name)),
-                profile.min_history_depth,
-                profile.min_history_age_hours);
+            application::ProfileLocalProblem problem;
+            const auto state = application::inspect_profile_local_state(
+                environment, profile.name, &problem);
+            i18n::println(i18n::Key::WizardProfileDetails,
+                          profile.name,
+                          platform::path::to_utf8(profile.local_dir),
+                          profile.remote_dir,
+                          application::to_string(state),
+                          profile.min_history_depth,
+                          profile.min_history_age_hours);
+            if (state == application::ProfileLocalState::Problem) {
+                static constexpr auto problem_keys = std::to_array<i18n::Key>({
+                    i18n::Key::WizardProblemUnspecified,
+                    i18n::Key::WizardProblemName,
+                    i18n::Key::WizardProblemPaths,
+                    i18n::Key::WizardProblemDirectory,
+                    i18n::Key::WizardProblemKey,
+                    i18n::Key::WizardProblemDatabase,
+                    i18n::Key::WizardProblemLock,
+                    i18n::Key::WizardProblemSidecar,
+                    i18n::Key::WizardProblemJournal,
+                    i18n::Key::WizardProblemWorkspace,
+                    i18n::Key::WizardProblemSnapshot,
+                    i18n::Key::WizardProblemCleanup,
+                });
+                static_assert(problem_keys.size() ==
+                              static_cast<std::size_t>(
+                                  application::ProfileLocalProblem::Count));
+                i18n::println(
+                    i18n::Key::WizardProblemReason,
+                    i18n::tr(problem_keys[static_cast<std::size_t>(problem)]));
+            }
             return 0;
         }
     }

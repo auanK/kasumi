@@ -2206,7 +2206,11 @@ TEST(ApplicationProfileTest,
 TEST(ApplicationProfileTest, InspectLocalStateReadyHasConsistentAcceptedState) {
     ProfileFixture fixture{"app-profile-state-ready"};
     ASSERT_TRUE(save_height(fixture.database_path(), 1));
-    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Ready);
+    auto problem = kasumi::application::ProfileLocalProblem::Key;
+    EXPECT_EQ(
+        inspect_profile_local_state(fixture.environment, "main", &problem),
+        ProfileLocalState::Ready);
+    EXPECT_EQ(problem, kasumi::application::ProfileLocalProblem::None);
 }
 
 TEST(ApplicationProfileTest,
@@ -2445,20 +2449,30 @@ TEST(ApplicationProfileTest,
 TEST(ApplicationProfileTest,
      InspectLocalStateMissingOrCorruptedArtifactsIsProblem) {
     ProfileFixture fixture{"app-profile-state-corrupt"};
+    auto problem = kasumi::application::ProfileLocalProblem::None;
     std::filesystem::remove(fixture.key_path());
-    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
+    EXPECT_EQ(
+        inspect_profile_local_state(fixture.environment, "main", &problem),
+        ProfileLocalState::Problem);
+    EXPECT_EQ(problem, kasumi::application::ProfileLocalProblem::Key);
 
     std::ofstream bad_key(fixture.key_path(), std::ios::binary);
     bad_key << std::string(31, 'a');
     bad_key.close();
-    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
+    EXPECT_EQ(
+        inspect_profile_local_state(fixture.environment, "main", &problem),
+        ProfileLocalState::Problem);
+    EXPECT_EQ(problem, kasumi::application::ProfileLocalProblem::Key);
 
     std::ofstream good_key(fixture.key_path(), std::ios::binary);
     good_key << std::string(32, 'a');
     good_key.close();
 
     std::filesystem::remove(fixture.database_path());
-    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
+    EXPECT_EQ(
+        inspect_profile_local_state(fixture.environment, "main", &problem),
+        ProfileLocalState::Problem);
+    EXPECT_EQ(problem, kasumi::application::ProfileLocalProblem::Database);
 }
 
 TEST(ApplicationProfileTest, InspectLocalStateJunctionIsProblem) {
