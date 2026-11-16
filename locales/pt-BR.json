@@ -1,5 +1,5 @@
 {
-  "help_text": "Uso: kasumi [--lang <código>] <comando> [subcomando] [argumentos] [opções]\n\nComandos:\n  kasumi config                                Assistente de perfis.\n  kasumi update                               Verifica e instala a versão compatível mais recente.\n  kasumi sync <perfil> [--full]                         Sincroniza com o remoto.\n  kasumi sync <perfil> --dry-run               Simula sem alterar nada.\n  kasumi sync <perfil> --initial               Inicializa banco local ausente (bootstrap ou ingresso).\n  kasumi sync <perfil> --initial --trust-existing-content\n                                               Bootstrap confiando em conteúdo remoto pré-existente sem download.\n  kasumi sync <perfil> --audit-inventory       Sincroniza e audita o inventário remoto.\n  kasumi status <perfil> [--full]                       Mostra mudanças pendentes.\n  kasumi fsck <perfil>                         Audita integridade remota.\n  kasumi gc <perfil>                           Analisa candidatos à coleta de lixo e remove objetos seguros.\n  kasumi gc remove-writer <perfil> <writer-id>\n                                               Remove um marker específico; verifique se o processo está inativo.\n  kasumi gc remove-barrier <perfil> --confirm-abandoned\n                                               Remove barrier abandonada após verificação manual.\n  kasumi resolve-missing <perfil>              Resolve conteúdo indisponível como exclusão.\n\nInspeção remota (somente leitura):\n  kasumi remote heads <perfil>                 Heads lógicas atuais.\n  kasumi remote tree <perfil> [--head <id>]    Árvore de uma head.\n  kasumi remote commits <perfil>               Commits alcançáveis.\n  kasumi remote summary <perfil>               Resumo geral do vault.\n  kasumi remote stat <perfil> <path>           Propriedades de um caminho.\n  kasumi remote commit <perfil> <id>           Detalhes de um commit.\n  kasumi remote get <perfil> <path> <dst>      Baixa um arquivo autenticado.\n  kasumi remote epochs <perfil>                Cadeia de Epochs.\n  kasumi remote epoch <perfil> <id>            Detalhes de um Epoch.\n  kasumi remote contents <perfil>              Conteúdos por metadados.\n  kasumi remote contents <perfil> --audit      Auditoria criptográfica.\n  kasumi remote content <perfil> <id>          Detalhes de um conteúdo.\n  kasumi remote markers <perfil>               Classifica markers físicos.\n  kasumi remote objects <perfil>               Namespace físico.\n  kasumi remote orphans <perfil>               Lista órfãos; não executa GC.\n  kasumi remote writers <perfil>               Writers e barrier.\n  kasumi remote health <perfil>                Faz o diagnóstico remoto completo.\n\nOpções gerais:\n  -h, --help                             Exibe esta ajuda.\n  -v, --version                       Exibe a versão do Kasumi.\n  --lang <código>                           Seleciona o idioma antes do comando.\n\nUse kasumi <comando> [subcomando] --help para ajuda específica.\n",
+  "help_text": "Uso: kasumi [--lang <código>] <comando> [subcomando] [argumentos] [opções]\n\nComandos:\n  kasumi config                                Assistente de perfis.\n  kasumi list                                  Lista os nomes dos perfis.\n  kasumi show <perfil>                         Mostra configurações e estado local do perfil.\n  kasumi update                               Verifica e instala a versão compatível mais recente.\n  kasumi sync <perfil> [--full]                         Sincroniza com o remoto.\n  kasumi sync <perfil> --dry-run               Simula sem alterar nada.\n  kasumi sync <perfil> --initial               Inicializa banco local ausente (bootstrap ou ingresso).\n  kasumi sync <perfil> --initial --trust-existing-content\n                                               Bootstrap confiando em conteúdo remoto pré-existente sem download.\n  kasumi sync <perfil> --audit-inventory       Sincroniza e audita o inventário remoto.\n  kasumi status <perfil> [--full]                       Mostra mudanças pendentes.\n  kasumi fsck <perfil>                         Audita integridade remota.\n  kasumi gc <perfil>                           Analisa candidatos à coleta de lixo e remove objetos seguros.\n  kasumi gc remove-writer <perfil> <writer-id>\n                                               Remove um marker específico; verifique se o processo está inativo.\n  kasumi gc remove-barrier <perfil> --confirm-abandoned\n                                               Remove barrier abandonada após verificação manual.\n  kasumi resolve-missing <perfil>              Resolve conteúdo indisponível como exclusão.\n\nInspeção remota (somente leitura):\n  kasumi remote heads <perfil>                 Heads lógicas atuais.\n  kasumi remote tree <perfil> [--head <id>]    Árvore de uma head.\n  kasumi remote commits <perfil>               Commits alcançáveis.\n  kasumi remote summary <perfil>               Resumo geral do vault.\n  kasumi remote stat <perfil> <path>           Propriedades de um caminho.\n  kasumi remote commit <perfil> <id>           Detalhes de um commit.\n  kasumi remote get <perfil> <path> <dst>      Baixa um arquivo autenticado.\n  kasumi remote epochs <perfil>                Cadeia de Epochs.\n  kasumi remote epoch <perfil> <id>            Detalhes de um Epoch.\n  kasumi remote contents <perfil>              Conteúdos por metadados.\n  kasumi remote contents <perfil> --audit      Auditoria criptográfica.\n  kasumi remote content <perfil> <id>          Detalhes de um conteúdo.\n  kasumi remote markers <perfil>               Classifica markers físicos.\n  kasumi remote objects <perfil>               Namespace físico.\n  kasumi remote orphans <perfil>               Lista órfãos; não executa GC.\n  kasumi remote writers <perfil>               Writers e barrier.\n  kasumi remote health <perfil>                Faz o diagnóstico remoto completo.\n\nOpções gerais:\n  -h, --help                             Exibe esta ajuda.\n  -v, --version                       Exibe a versão do Kasumi.\n  --lang <código>                           Seleciona o idioma antes do comando.\n\nUse kasumi <comando> [subcomando] --help para ajuda específica.\n",
   "version_text": "kasumi version {}\n",
   "update": {
     "checking": "Verificando atualizações...\n",
@@ -77,7 +77,19 @@
     "plan_stage_observing": "[1/2] Observando estado local e remoto...",
     "plan_stage_calculating": "[2/2] Calculando alterações...",
     "preview_starting": "Simulando sincronização de \"{}\"...\n",
-    "status_starting": "Verificando status de \"{}\"...\n"
+    "status_starting": "Verificando status de \"{}\"...\n",
+    "action_rename_local": "Renomear arquivo local",
+    "action_upload": "Enviar",
+    "action_create_local_directory": "Criar pasta local",
+    "action_create_remote_directory": "Criar pasta remota",
+    "action_move_local": "Mover arquivo local",
+    "action_download": "Baixar",
+    "action_delete_local": "Excluir arquivo local",
+    "action_delete_local_directory": "Excluir pasta local",
+    "action_delete_remote": "Excluir arquivo remoto",
+    "action_delete_remote_directory": "Excluir pasta remota",
+    "action_copy_local": "Copiar arquivo local",
+    "action_delete_ignored_local_file": "Excluir arquivo ignorado descartável"
   },
   "manual_writer_removal": {
     "warning": "O Kasumi não consegue determinar se o processo associado a este writer ainda está ativo. A verificação da barrier não garante que não há operações em andamento. Verifique se não há Sync ou operação de manutenção antes de removê-lo.",
@@ -301,11 +313,11 @@
   "wizard": {
     "header": "\n=== Perfis Kasumi ===",
     "no_profiles": "Nenhum perfil cadastrado.",
-    "profile_list_entry": "- {} [{}]  [ Local: {} | Destino: {} ]",
+    "profile_list_entry": "{:<24} {}",
     "menu": "\n[e] Editar  [n] Novo  [c] Clonar  [d] Deletar  [r] Renomear  [q] Sair\n\n> ",
     "prompt_profile_name": "Nome do Perfil: ",
     "profile_already_exists": "O perfil '{}' ja existe.",
-    "prompt_local_path": "Caminho local sincronizado (ex: C:/MeusDados): ",
+    "prompt_local_path": "Caminho local sincronizado (ex: C:/MeusDados ou /home/usuario/MeusDados): ",
     "prompt_remote_path": "Caminho do destino rclone/local (ex: gdrive:backup): ",
     "local_path_must_be_absolute": "O caminho local deve ser absoluto.",
     "remote_path_must_be_absolute": "O destino local deve ser absoluto.",
@@ -323,7 +335,26 @@
     "invalid_option": "Opção inválida.",
     "config_read_failed": "Falha ao ler config: {}",
     "prompt_source_profile": "Perfil de origem: ",
-    "profile_cloned": "Perfil \"{}\" criado a partir de \"{}\"."
+    "profile_cloned": "Perfil \"{}\" criado a partir de \"{}\".",
+    "profile_list_header": "Nome                     Estado",
+    "profile_details": "Perfil: {}\nLocal: {}\nDestino: {}\nEstado: {}\nProfundidade do histórico: {}\nIdade do histórico: {} h",
+    "confirm_delete": "\nExcluir perfil '{}'?\nLocal: {}\nDestino: {}\nRemove configuração, chave e estado local do perfil.\nArquivos sincronizados e dados remotos serão preservados.\nConfirmar [s/N]: ",
+    "problem_unspecified": "Não foi possível inspecionar o estado local do perfil.",
+    "problem_name": "O nome do perfil é inválido.",
+    "problem_paths": "Não foi possível resolver os caminhos privados do perfil.",
+    "problem_directory": "Um diretório privado do perfil está ausente, inacessível ou inseguro.",
+    "problem_key": "A chave do perfil está ausente, inválida, inacessível ou insegura.",
+    "problem_database": "O banco local está ausente, corrompido, incompatível, inacessível ou inseguro.",
+    "problem_lock": "O perfil está em uso ou seu bloqueio local não pôde ser inspecionado com segurança.",
+    "problem_sidecar": "Um arquivo auxiliar do SQLite está inacessível, ilegível ou inseguro.",
+    "problem_journal": "O journal de transação é inválido ou não pôde ser inspecionado com segurança.",
+    "problem_workspace": "Não foi possível criar ou acessar com segurança o diretório temporário de inspeção.",
+    "problem_snapshot": "Não foi possível obter uma cópia consistente e legível do banco local.",
+    "problem_cleanup": "Não foi possível remover com segurança o diretório temporário de inspeção.",
+    "problem_reason": "Motivo: {}",
+    "invalid_profile_name": "Use apenas letras, números, '_' ou '-' no nome do perfil.",
+    "invalid_remote_path": "Destino inválido. Use um caminho local absoluto ou remoto:pasta (sem '..' ou '/' no final da pasta remota).",
+    "confirm_edit": "\nAlterar caminhos do perfil '{0}'?\nLocal: {1} -> {2}\nDestino: {3} -> {4}\nArquivos não serão movidos; dados remotos não serão migrados.\nUma pasta local vazia pode causar exclusões no próximo Sync.\nConfira 'kasumi status {0}' antes de sincronizar.\nSalvar alterações [s/N]: "
   },
   "manual_barrier_removal": {
     "warning": "O Kasumi não pode determinar se uma coleta de lixo ou manutenção ainda está ativa em outros dispositivos. A verificação da barreira não pode garantir que nenhuma operação esteja em execução. Certifique-se de que nenhuma coleta ou manutenção esteja ativa antes da remoção.",
@@ -368,11 +399,14 @@
     "remote_orphans": "Uso: kasumi remote orphans <perfil>\n\nLista órfãos; não executa GC nem remove objetos.\n",
     "remote_writers": "Uso: kasumi remote writers <perfil>\n\nLista writers e a barrier de manutenção.\n",
     "remote_health": "Uso: kasumi remote health <perfil>\n\nDiagnóstico remoto completo. Achados retornam 0; falha de inspeção retorna 1.\nNão substitui auditoria de conteúdo do fsck.\n",
-    "options": "\nOpção global: --lang <código>, antes do comando (en ou pt-BR).\nAjuda: -h, --help. Opções repetidas, desconhecidas ou sem valor são rejeitadas.\n"
+    "options": "\nOpção global: --lang <código>, antes do comando (en ou pt-BR).\nAjuda: -h, --help. Opções repetidas, desconhecidas ou sem valor são rejeitadas.\n",
+    "list": "Uso: kasumi list\n\nLista os nomes dos perfis configurados, um por linha.\n",
+    "show": "Uso: kasumi show <perfil>\n\nMostra configurações e estado local do perfil sem acessar o remoto.\n"
   },
   "resolve_missing": {
     "singular": "1 caminho ausente resolvido",
     "plural": "{} caminhos ausentes resolvidos",
     "none": "Nenhum caminho ausente pendente para resolver"
-  }
+  },
+  "password_too_short": "Use pelo menos {} bytes."
 }

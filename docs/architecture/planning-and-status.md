@@ -6,6 +6,10 @@ changes display truncation only. Neither command is a shortened Sync execution.
 
 ## Lifecycle
 
+Plan rows and action totals use translated descriptions that distinguish local
+and remote changes, files and directories, and disposable ignored files. These
+display labels do not change operation identifiers or execution behavior.
+
 1. Runtime resolution validates the profile and retention, acquires the
    **local** exclusive profile lock, resolves the persisted or supplied matching
    master key, and opens the configured transport. See [Application and Runtime](application-and-runtime.md).

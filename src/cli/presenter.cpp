@@ -203,24 +203,27 @@ void render_plan_report(const application::PlanReport& report,
 
     i18n::println(i18n::Key::SyncPlanHeader, report.items.size());
 
-    constexpr const char* ACTION_NAMES[] = {"RenameLocal",
-                                            "Upload",
-                                            "CreateLocalDirectory",
-                                            "CreateRemoteDirectory",
-                                            "MoveLocal",
-                                            "Download",
-                                            "DeleteLocal",
-                                            "DeleteLocalDirectory",
-                                            "DeleteRemote",
-                                            "DeleteRemoteDirectory",
-                                            "CopyLocal",
-                                            "DeleteIgnoredLocalFile"};
+    static constexpr auto action_keys = std::to_array<i18n::Key>({
+        i18n::Key::SyncActionRenameLocal,
+        i18n::Key::SyncActionUpload,
+        i18n::Key::SyncActionCreateLocalDirectory,
+        i18n::Key::SyncActionCreateRemoteDirectory,
+        i18n::Key::SyncActionMoveLocal,
+        i18n::Key::SyncActionDownload,
+        i18n::Key::SyncActionDeleteLocal,
+        i18n::Key::SyncActionDeleteLocalDirectory,
+        i18n::Key::SyncActionDeleteRemote,
+        i18n::Key::SyncActionDeleteRemoteDirectory,
+        i18n::Key::SyncActionCopyLocal,
+        i18n::Key::SyncActionDeleteIgnoredLocalFile,
+    });
+    static_assert(action_keys.size() == application::PLAN_ACTION_COUNT);
 
     auto print_item = [&](const application::PlanItem& item) {
         auto idx = static_cast<std::size_t>(item.action);
-        if (idx < std::size(ACTION_NAMES)) {
+        if (idx < action_keys.size()) {
             std::print("  - [{}] {}",
-                       ACTION_NAMES[idx],
+                       i18n::tr(action_keys[idx]),
                        platform::path::to_utf8(item.path));
             if (item.action == application::PlanAction::RenameLocal ||
                 item.action == application::PlanAction::MoveLocal ||
@@ -247,9 +250,10 @@ void render_plan_report(const application::PlanReport& report,
     i18n::println(i18n::Key::SyncSummaryHeader);
     for (std::size_t i = 0; i < report.action_counts.size(); ++i) {
         if (report.action_counts[i] > 0) {
-            if (i < std::size(ACTION_NAMES)) {
-                std::println(
-                    "  {}: {}", ACTION_NAMES[i], report.action_counts[i]);
+            if (i < action_keys.size()) {
+                std::println("  {}: {}",
+                             i18n::tr(action_keys[i]),
+                             report.action_counts[i]);
             }
         }
     }

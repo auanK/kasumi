@@ -1,8 +1,16 @@
 #include "application/credentials.hpp"
 
 #include "crypto/secure_memory.hpp"
+#include "runtime/vault.hpp"
 
 namespace kasumi::application {
+
+std::size_t minimum_password_size() noexcept {
+    return runtime::vault::MINIMUM_PASSWORD_SIZE;
+}
+std::size_t minimum_password_salt_size() noexcept {
+    return runtime::vault::MINIMUM_PASSWORD_SALT_SIZE;
+}
 
 namespace {
 

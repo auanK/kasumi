@@ -42,6 +42,10 @@ s3:my-bucket/kasumi-vault
 
 ## Configuration File
 
+The wizard validates names, paths, and minimum password sizes as they are entered.
+Invalid input repeats only that field; accepted values are retained. Passwords and
+password salts remain hidden and require confirmation.
+
 Profiles are stored in `config.toml` within Kasumi's data directory.
 * **Windows**: `%APPDATA%/kasumi`
 * **Linux**: `$XDG_CONFIG_HOME/kasumi` or `$HOME/.config/kasumi`
@@ -71,6 +75,8 @@ Use `kasumi <command> --help` for the complete arguments, options and examples.
 | Purpose | Command |
 |---|---|
 | Manage local profiles | `kasumi config` |
+| List profile names | `kasumi list` |
+| Show profile settings and local state | `kasumi show <profile>` |
 | Inspect the current plan | `kasumi status <profile>` or `kasumi sync <profile> --dry-run` |
 | Synchronize | `kasumi sync <profile>` |
 | Audit referenced payloads | `kasumi fsck <profile>` |
@@ -188,7 +194,7 @@ kasumi [--lang <code>] <command> [subcommand] [arguments] [options]
 
 `--lang <code>` is the optional global prefix, before the command. Command
 options follow required arguments; `--full` is available only to Sync and Status.
-`config` and `update` take no profile.
+`config`, `list`, and `update` take no profile.
 
 `kasumi --help` (`-h`) shows global Help. Add `--help` or `-h` after a command,
 subcommand or otherwise valid invocation for contextual Help. Help returns 0
@@ -205,14 +211,16 @@ change the domain rules for profile names or synchronized paths.
 
 ## Operation Output
 
-Each executed public operation prints one final elapsed-time line on stdout:
+Executed operations, except `list` and `show`, print one final elapsed-time line on stdout:
 `Duration: 12.614 s` (English) or `Duração: 12.614 s` (Portuguese). A monotonic
 clock measures real elapsed time in seconds with three decimal places, including
 success, failure, pending results and cancellation. Sync has one duration line;
 internal operational metrics are separate. Help, version and invalid invocations
 have no operation duration.
 
-Operation messages and errors use stdout; invocation diagnostics use stderr. Interpret the [exit code](#exit-codes) with the
+`list` prints only names, and `show` prints profile details, without elapsed-time
+lines. Their errors go to stderr with a nonzero exit code, leaving stdout empty.
+Other operation messages and errors use stdout; invocation diagnostics use stderr. Interpret the [exit code](#exit-codes) with the
 output; partial results are not full success.
 
 ## Language Selection (i18n)

@@ -4,6 +4,33 @@
 
 ## Ownership and credentials
 
+Deleting a profile in the wizard requires explicit confirmation, defaulting to
+No. Before confirmation it shows the selected profile and its paths, and explains
+that configuration, key, and local state are removed while synchronized files
+and remote data remain intact. EOF or cancellation preserves the profile.
+
+Editing paths shows the old and new local and remote destinations before asking
+to save, defaulting to No. Changing settings does not move local files or migrate
+remote data; selecting an empty local folder can plan deletions during a later
+Sync. Review `kasumi status <profile>` before syncing after a path change.
+Declining, EOF, or cancellation leaves configuration and profile state intact.
+Keeping both paths unchanged does not rewrite the configuration.
+
+Clone, rename, edit, and delete validate the selected existing profile before
+asking for later fields. An unknown name repeats the selection prompt without
+discarding other accepted input or changing profile data.
+
+`kasumi list` prints only configured profile names, one per line. `kasumi show <profile>`
+shows the selected profile's local path, remote destination, retention settings,
+and local state. Neither query contacts remote storage or changes persistent
+profile data; credentials are never displayed. The wizard lists names and states
+in a compact table; paths and retention details are available through `show`.
+
+When `show` reports `Problem`, it also explains the first issue detected during
+that same local inspection, such as an unavailable key, invalid database, busy
+profile lock, unsafe sidecar, or inspection-workspace failure. This diagnostic
+does not repair state or imply that no other problems exist.
+
 `config.toml` at the application data root owns named profiles: absolute synchronized `local_dir`, local or rclone `remote_dir`, and positive history-retention depth/age. Each profile has a separate `profiles/<name>/` private directory, `key.bin`, SQLite state, and local operation lock. A profile name must be safe for a child of `profiles/`. Configuration is saved by atomic private-file replacement; loading it may enforce owner-focused permissions. Configuration mutations are serialized by `config.lock` at the application data root, with a bounded acquisition wait. This lock is distinct from per-profile execution locks; configuration reads do not acquire it. Separate profiles do not implicitly share an accepted base or key; to use one vault on another machine, configure the same remote destination and master key. Creating a profile does not publish remote history.
 
 The creation API accepts either a 32-byte master key encoded as hex or a Password/Password Salt pair; the interactive wizard prompts for the pair and derives the key with Argon2id. It writes `key.bin` using reversible masking plus filesystem access controls, **not** encryption at rest. Routine operations read `key.bin` or a matching `KASUMI_MASTER_KEY`; passwords are not rederived or checked after creation. See [Security](../security.md).

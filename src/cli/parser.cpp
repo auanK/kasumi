@@ -100,6 +100,17 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                    ? std::expected<Invocation, ParseError>{UpdateInvocation{}}
                    : std::unexpected(ParseError{});
     }
+    if (command == "list") {
+        return argc == 2
+                   ? std::expected<Invocation, ParseError>{ListInvocation{}}
+                   : std::unexpected(ParseError{});
+    }
+    if (command == "show") {
+        return argc == 3 && operand(argv[2])
+                   ? std::expected<Invocation, ParseError>{ShowInvocation{
+                         argv[2]}}
+                   : std::unexpected(ParseError{});
+    }
     if (command == "config") {
         return argc == 2 ? std::expected<Invocation,
                                          ParseError>{ConfigureInvocation{}}

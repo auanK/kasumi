@@ -41,6 +41,14 @@ struct ProfileError {
     std::string detail;
 };
 
+enum class ProfileField {
+    Name,
+    LocalPath,
+    RemotePath
+};
+std::expected<void, ProfileError>
+validate_profile_field(ProfileField field, std::string_view value);
+
 // Lists configured profiles.
 std::expected<std::vector<Profile>, ProfileError>
 list_profiles(const ExecutionEnvironment& environment);
@@ -83,12 +91,30 @@ enum class ProfileLocalState {
     Problem
 };
 
+enum class ProfileLocalProblem {
+    None,
+    InvalidName,
+    Paths,
+    Directory,
+    Key,
+    Database,
+    Lock,
+    Sidecar,
+    Journal,
+    Workspace,
+    Snapshot,
+    Cleanup,
+    Count
+};
+
 // Inspects the local state of a profile based exclusively on local evidence.
 // Does not access remote storage, does not initialize SQLite, does not create
 // files.
+// If supplied, problem receives the first detected issue, or None on success.
 ProfileLocalState
 inspect_profile_local_state(const ExecutionEnvironment& environment,
-                            std::string_view profile_name);
+                            std::string_view profile_name,
+                            ProfileLocalProblem* problem = nullptr);
 
 // Returns a canonical string representation for the profile local state.
 std::string_view to_string(ProfileLocalState state) noexcept;

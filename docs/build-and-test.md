@@ -165,6 +165,25 @@ Specific test labels include:
 
 The `kasumi_architecture_dag` test validates internal architectural dependency rules enforced by the dependency DAG checker script.
 
+## Sanitizers
+
+Ubuntu CI also runs the existing suite in Debug with Clang, AddressSanitizer
+(ASan), and UndefinedBehaviorSanitizer (UBSan). This checks memory errors,
+leaks, and undefined behavior independently of the normal compiler matrix.
+To run the same checks locally with a compatible Clang toolchain and its
+sanitizer runtimes installed:
+
+```sh
+CC=clang CXX=clang++ cmake -S . -B build-sanitizers -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
+  -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+  -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+cmake --build build-sanitizers --parallel 2
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+  ctest --test-dir build-sanitizers --output-on-failure --no-tests=error
+```
+
 ## Rclone System Tests
 
 System tests exercise integration with an active rclone installation:

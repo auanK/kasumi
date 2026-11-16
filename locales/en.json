@@ -1,5 +1,5 @@
 {
-  "help_text": "Usage: kasumi [--lang <code>] <command> [subcommand] [arguments] [options]\n\nCommands:\n  kasumi config                                Interactive profile wizard.\n  kasumi update                               Check and install the latest supported release.\n  kasumi sync <profile> [--full]                        Synchronize with remote storage.\n  kasumi sync <profile> --dry-run              Simulate without altering data.\n  kasumi sync <profile> --initial              Initialize a missing local database (bootstrap or enroll).\n  kasumi sync <profile> --initial --trust-existing-content\n                                               Bootstrap trusting pre-existing remote content without download.\n  kasumi sync <profile> --audit-inventory      Sync, then structurally audit remote inventory.\n  kasumi status <profile> [--full]                      Show pending local changes.\n  kasumi fsck <profile>                        Audit remote integrity.\n  kasumi gc <profile>                          Analyze garbage collection candidates and remove safe objects.\n  kasumi gc remove-writer <profile> <writer-id>\n                                               Remove one exact writer marker; verify its process is inactive.\n  kasumi gc remove-barrier <profile> --confirm-abandoned\n                                               Remove an abandoned maintenance barrier after manual verification.\n  kasumi resolve-missing <profile>             Resolve unavailable content as deleted.\n\nRemote inspection (read-only):\n  kasumi remote heads <profile>                Current logical heads.\n  kasumi remote tree <profile> [--head <id>]   Tree of a specific head.\n  kasumi remote commits <profile>              Reachable commits.\n  kasumi remote summary <profile>              General vault summary.\n  kasumi remote stat <profile> <path>          Properties of a specific path.\n  kasumi remote commit <profile> <id>          Commit details.\n  kasumi remote get <profile> <path> <dst>     Download authenticated file.\n  kasumi remote epochs <profile>               Epoch chain.\n  kasumi remote epoch <profile> <id>           Epoch details.\n  kasumi remote contents <profile>             Contents by metadata.\n  kasumi remote contents <profile> --audit     Cryptographic audit.\n  kasumi remote content <profile> <id>         Content details.\n  kasumi remote markers <profile>              Classify physical markers.\n  kasumi remote objects <profile>              Physical namespace.\n  kasumi remote orphans <profile>              List orphans; does not run GC.\n  kasumi remote writers <profile>              Writers and barrier.\n  kasumi remote health <profile>               Full remote health diagnostic.\n\nGeneral options:\n  -h, --help                             Show this help message.\n  -v, --version                       Show Kasumi version.\n  --lang <code>                             Select language before the command.\n\nUse kasumi <command> [subcommand] --help for command-specific help.\n",
+  "help_text": "Usage: kasumi [--lang <code>] <command> [subcommand] [arguments] [options]\n\nCommands:\n  kasumi config                                Interactive profile wizard.\n  kasumi list                                  List profile names.\n  kasumi show <profile>                        Show profile settings and local state.\n  kasumi update                               Check and install the latest supported release.\n  kasumi sync <profile> [--full]                        Synchronize with remote storage.\n  kasumi sync <profile> --dry-run              Simulate without altering data.\n  kasumi sync <profile> --initial              Initialize a missing local database (bootstrap or enroll).\n  kasumi sync <profile> --initial --trust-existing-content\n                                               Bootstrap trusting pre-existing remote content without download.\n  kasumi sync <profile> --audit-inventory      Sync, then structurally audit remote inventory.\n  kasumi status <profile> [--full]                      Show pending local changes.\n  kasumi fsck <profile>                        Audit remote integrity.\n  kasumi gc <profile>                          Analyze garbage collection candidates and remove safe objects.\n  kasumi gc remove-writer <profile> <writer-id>\n                                               Remove one exact writer marker; verify its process is inactive.\n  kasumi gc remove-barrier <profile> --confirm-abandoned\n                                               Remove an abandoned maintenance barrier after manual verification.\n  kasumi resolve-missing <profile>             Resolve unavailable content as deleted.\n\nRemote inspection (read-only):\n  kasumi remote heads <profile>                Current logical heads.\n  kasumi remote tree <profile> [--head <id>]   Tree of a specific head.\n  kasumi remote commits <profile>              Reachable commits.\n  kasumi remote summary <profile>              General vault summary.\n  kasumi remote stat <profile> <path>          Properties of a specific path.\n  kasumi remote commit <profile> <id>          Commit details.\n  kasumi remote get <profile> <path> <dst>     Download authenticated file.\n  kasumi remote epochs <profile>               Epoch chain.\n  kasumi remote epoch <profile> <id>           Epoch details.\n  kasumi remote contents <profile>             Contents by metadata.\n  kasumi remote contents <profile> --audit     Cryptographic audit.\n  kasumi remote content <profile> <id>         Content details.\n  kasumi remote markers <profile>              Classify physical markers.\n  kasumi remote objects <profile>              Physical namespace.\n  kasumi remote orphans <profile>              List orphans; does not run GC.\n  kasumi remote writers <profile>              Writers and barrier.\n  kasumi remote health <profile>               Full remote health diagnostic.\n\nGeneral options:\n  -h, --help                             Show this help message.\n  -v, --version                       Show Kasumi version.\n  --lang <code>                             Select language before the command.\n\nUse kasumi <command> [subcommand] --help for command-specific help.\n",
   "version_text": "kasumi version {}\n",
   "update": {
     "checking": "Checking for updates...\n",
@@ -77,7 +77,19 @@
     "plan_stage_observing": "[1/2] Observing local and remote state...",
     "plan_stage_calculating": "[2/2] Calculating changes...",
     "preview_starting": "Simulating synchronization of \"{}\"...\n",
-    "status_starting": "Checking status of \"{}\"...\n"
+    "status_starting": "Checking status of \"{}\"...\n",
+    "action_rename_local": "Rename local file",
+    "action_upload": "Upload",
+    "action_create_local_directory": "Create local directory",
+    "action_create_remote_directory": "Create remote directory",
+    "action_move_local": "Move local file",
+    "action_download": "Download",
+    "action_delete_local": "Delete local file",
+    "action_delete_local_directory": "Delete local directory",
+    "action_delete_remote": "Delete remote file",
+    "action_delete_remote_directory": "Delete remote directory",
+    "action_copy_local": "Copy local file",
+    "action_delete_ignored_local_file": "Delete disposable ignored file"
   },
   "manual_writer_removal": {
     "warning": "Kasumi cannot determine whether this writer's process is still active. Its barrier check cannot guarantee that no operations are running. Verify that no Sync or maintenance operation is active before removal.",
@@ -301,11 +313,11 @@
   "wizard": {
     "header": "\n=== Kasumi Profiles ===",
     "no_profiles": "No profiles registered.",
-    "profile_list_entry": "- {} [{}]  [ Local: {} | Remote: {} ]",
+    "profile_list_entry": "{:<24} {}",
     "menu": "\n[e] Edit  [n] New  [c] Clone  [d] Delete  [r] Rename  [q] Quit\n\n> ",
     "prompt_profile_name": "Profile name: ",
     "profile_already_exists": "The profile '{}' already exists.",
-    "prompt_local_path": "Synchronized local path (e.g. C:/MyData): ",
+    "prompt_local_path": "Synchronized local path (e.g. C:/MyData or /home/user/MyData): ",
     "prompt_remote_path": "rclone/local destination path (e.g. gdrive:backup): ",
     "local_path_must_be_absolute": "Local path must be absolute.",
     "remote_path_must_be_absolute": "Local destination path must be absolute.",
@@ -323,7 +335,26 @@
     "invalid_option": "Invalid option.",
     "config_read_failed": "Failed to read config: {}",
     "prompt_source_profile": "Source profile: ",
-    "profile_cloned": "Profile \"{}\" created from \"{}\"."
+    "profile_cloned": "Profile \"{}\" created from \"{}\".",
+    "profile_list_header": "Name                     State",
+    "profile_details": "Profile: {}\nLocal: {}\nRemote: {}\nState: {}\nHistory depth: {}\nHistory age: {} h",
+    "confirm_delete": "\nDelete profile '{}'?\nLocal: {}\nRemote: {}\nRemoves local configuration, key, and profile state.\nSynchronized files and remote data are preserved.\nConfirm [y/N]: ",
+    "problem_unspecified": "Local profile state could not be inspected.",
+    "problem_name": "The profile name is invalid.",
+    "problem_paths": "Private profile paths could not be resolved.",
+    "problem_directory": "A private profile directory is missing, inaccessible, or unsafe.",
+    "problem_key": "The profile key is missing, invalid, inaccessible, or unsafe.",
+    "problem_database": "The local database is missing, corrupt, unsupported, inaccessible, or unsafe.",
+    "problem_lock": "The profile is in use, or its local lock cannot be safely inspected.",
+    "problem_sidecar": "A SQLite sidecar is inaccessible, unreadable, or unsafe.",
+    "problem_journal": "The transaction journal is invalid or cannot be safely inspected.",
+    "problem_workspace": "A private temporary inspection directory could not be safely created or accessed.",
+    "problem_snapshot": "A consistent readable snapshot of the local database could not be obtained.",
+    "problem_cleanup": "The temporary inspection directory could not be safely removed.",
+    "problem_reason": "Reason: {}",
+    "invalid_profile_name": "Use only letters, digits, '_' or '-' for the profile name.",
+    "invalid_remote_path": "Invalid destination. Use an absolute local path or remote:folder (no '..' or trailing '/' in the remote folder).",
+    "confirm_edit": "\nChange paths for profile '{0}'?\nLocal: {1} -> {2}\nRemote: {3} -> {4}\nFiles will not be moved; remote data will not be migrated.\nAn empty local folder can cause deletions on the next Sync.\nReview 'kasumi status {0}' before syncing.\nSave changes [y/N]: "
   },
   "manual_barrier_removal": {
     "warning": "Kasumi cannot determine whether an active garbage collection or maintenance operation is still running on other devices. Its barrier check cannot guarantee that no operations are running. Verify that no garbage collection or maintenance operation is active before removal.",
@@ -368,11 +399,14 @@
     "remote_orphans": "Usage: kasumi remote orphans <profile>\n\nList orphans; does not run GC or remove objects.\n",
     "remote_writers": "Usage: kasumi remote writers <profile>\n\nList writers and the maintenance barrier.\n",
     "remote_health": "Usage: kasumi remote health <profile>\n\nFull remote health diagnostic. Findings still return 0; inspection failure returns 1.\nDoes not replace the fsck payload audit.\n",
-    "options": "\nGlobal option: --lang <code>, before the command (en or pt-BR).\nHelp: -h, --help. Duplicate, unknown or valueless options are rejected.\n"
+    "options": "\nGlobal option: --lang <code>, before the command (en or pt-BR).\nHelp: -h, --help. Duplicate, unknown or valueless options are rejected.\n",
+    "list": "Usage: kasumi list\n\nList configured profile names, one per line.\n",
+    "show": "Usage: kasumi show <profile>\n\nShow local profile settings and state without contacting remote storage.\n"
   },
   "resolve_missing": {
     "singular": "resolved 1 missing path",
     "plural": "resolved {} missing paths",
     "none": "no unresolved missing paths to resolve"
-  }
+  },
+  "password_too_short": "Use at least {} bytes."
 }

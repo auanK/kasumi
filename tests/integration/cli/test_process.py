@@ -78,6 +78,9 @@ class CliProcessTest(unittest.TestCase):
             ("unknown-command",),
             ("remote", "contents"),
             ("remote", "get", "demo", "source"),
+            ("list", "demo"),
+            ("show",),
+            ("show", "demo", "extra"),
             ("sync", "demo", "--unknown"),
             ("sync", "demo", "--full", "--full"),
             ("sync", "demo", "--dry-run", "--initial"),
@@ -282,14 +285,29 @@ class CliProcessTest(unittest.TestCase):
         profiles = tomllib.loads(config.read_text(encoding="utf-8"))["profiles"]
         self.assertEqual(Path(profiles["demo"]["local_dir"]), local)
         self.assertEqual(profiles["demo"]["remote_dir"], str(remote))
+        before = self._tree_snapshot(data)
+        names = self.invoke_raw("list")
+        self.assertEqual(names.returncode, 0, names.stderr)
+        self.assertEqual(names.stdout.splitlines(), [b"demo"])
+        details = self.invoke_raw("show", "demo")
+        self.assertEqual(details.returncode, 0, details.stderr)
+        self.assertIn(str(local).encode(), details.stdout)
+        self.assertIn(str(remote).encode(), details.stdout)
+        self.assertNotIn(source_key.read_bytes(), details.stdout)
+        missing = self.invoke_raw("show", "absent")
+        self.assertEqual(missing.returncode, 1)
+        self.assertEqual(missing.stdout, b"")
+        self.assertIn(b"[ERROR]", missing.stderr)
+        self.assertEqual(self._tree_snapshot(data), before)
+        self.assertFalse(remote.exists())
         listed = self.invoke("config", input=b"q\n")
-        self.assertIn(b"- demo [Initialized]", listed)
+        self.assertRegex(listed, rb"\bdemo\s+Initialized\b")
         self.invoke("status", "demo", "--full")
 
         self.invoke("sync", "demo")
         self.invoke("remote", "contents", "demo", "--audit")
         listed = self.invoke("config", input=b"q\n")
-        self.assertIn(b"- demo [Ready]", listed)
+        self.assertRegex(listed, rb"\bdemo\s+Ready\b")
         remote_snapshot = self._tree_snapshot(remote)
         source_key_bytes = source_key.read_bytes()
         source_db_bytes = source_db.read_bytes()
@@ -298,7 +316,7 @@ class CliProcessTest(unittest.TestCase):
         without_passwords.pop("KASUMI_PASSWORD")
         without_passwords.pop("KASUMI_PASSWORD2")
         cloned = self.invoke(
-            "config", input=b"c\ndemo\ncopy\nq\n",
+            "config", input=b"c\nabsent\ndemo\ncopy\nq\n",
             environment=without_passwords,
         )
         clone_dir = data / "profiles" / "copy"
@@ -309,7 +327,7 @@ class CliProcessTest(unittest.TestCase):
         self.assertEqual(clone_key.read_bytes(), source_key_bytes)
         self.assertTrue(clone_db.is_file())
         self.assertFalse(source_db.samefile(clone_db))
-        self.assertIn(b"- copy [Initialized]", cloned)
+        self.assertRegex(cloned, rb"\bcopy\s+Initialized\b")
         profiles = tomllib.loads(config.read_text(encoding="utf-8"))["profiles"]
         self.assertEqual(profiles["copy"]["local_dir"], str(local))
         self.assertEqual(profiles["copy"]["remote_dir"], str(remote))
@@ -323,8 +341,17 @@ class CliProcessTest(unittest.TestCase):
 
         new_local = self.root / "edited-local"
         new_remote = self.root / "edited-remote"
+        before_edit = self._tree_snapshot(data)
+        # Unchanged input, rejected changes, and EOF must preserve profile data.
+        self.invoke("config", input=b"e\ndemo\n\n\nq\n")
+        self.assertEqual(self._tree_snapshot(data), before_edit)
+        for confirmation in ("", "n"):
+            self.invoke("config", input=f"e\ndemo\n{new_local}\n{new_remote}\n{confirmation}\nq\n".encode())
+            self.assertEqual(self._tree_snapshot(data), before_edit)
+        self.invoke("config", input=f"e\ndemo\n{new_local}\n{new_remote}\n".encode(), expected=130)
+        self.assertEqual(self._tree_snapshot(data), before_edit)
         edited = self.invoke(
-            "config", input=f"e\ndemo\n{new_local}\n{new_remote}\nq\n".encode(),
+            "config", input=f"e\ndemo\n{new_local}\n{new_remote}\ny\nq\n".encode(),
         )
         self.assertIn(b"Profile 'demo' edited successfully.", edited)
         profiles = tomllib.loads(config.read_text(encoding="utf-8"))["profiles"]
@@ -334,7 +361,7 @@ class CliProcessTest(unittest.TestCase):
         self.assertFalse(new_remote.exists())
 
         source_identity = source_db.stat()
-        renamed = self.invoke("config", input=b"r\ndemo\nrenamed\nq\n")
+        renamed = self.invoke("config", input=b"r\nabsent\ndemo\nrenamed\nq\n")
         renamed_dir = data / "profiles" / "renamed"
         renamed_db = renamed_dir / "db.sqlite"
         self.assertIn(b"Profile renamed", renamed)
@@ -343,14 +370,27 @@ class CliProcessTest(unittest.TestCase):
         self.assertEqual(renamed_db.read_bytes(), source_db_bytes)
         self.assertEqual((renamed_dir / "key.bin").read_bytes(), source_key_bytes)
 
-        deleted = self.invoke("config", input=b"d\ncopy\nq\n")
+        before_delete = self._tree_snapshot(data)
+        for confirmation in (b"", b"n"):
+            self.invoke("config", input=b"d\ncopy\n" + confirmation + b"\nq\n")
+            self.assertEqual(self._tree_snapshot(data), before_delete)
+        deleted = self.invoke("config", input=b"d\ncopy\ny\nq\n")
         self.assertIn(b"'copy' removed", deleted)
         self.assertFalse(clone_dir.exists())
-        deleted = self.invoke("config", input=b"d\nrenamed\nq\n")
+        deleted = self.invoke("config", input=b"d\nrenamed\ny\nq\n")
         self.assertIn(b"'renamed' removed", deleted)
         self.assertFalse(renamed_dir.exists())
         self.assertEqual(sentinel.read_bytes(), local_snapshot)
         self.assertEqual(self._tree_snapshot(remote), remote_snapshot)
+
+        config.write_text("[invalid", encoding="utf-8")
+        broken = self._tree_snapshot(data)
+        for arguments in (("list",), ("show", "renamed")):
+            result = self.invoke_raw(*arguments)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, b"")
+            self.assertIn(b"[ERROR]", result.stderr)
+        self.assertEqual(self._tree_snapshot(data), broken)
 
     def test_wizard_presents_all_local_states_without_mutating_storage(self):
         data = self.root / "kasumi"
@@ -393,10 +433,18 @@ class CliProcessTest(unittest.TestCase):
         }
         output = self.invoke("--lang", "pt-BR", "config", input=b"q\n")
         self.assertIn("Perfis Kasumi".encode(), output)
-        self.assertIn("- initialized [Initialized]".encode(), output)
-        self.assertIn("- ready [Ready]".encode(), output)
-        self.assertIn("- pending [Pending]".encode(), output)
-        self.assertIn("- problem [Problem]".encode(), output)
+        self.assertRegex(output, rb"\binitialized\s+Initialized\b")
+        self.assertRegex(output, rb"\bready\s+Ready\b")
+        self.assertRegex(output, rb"\bpending\s+Pending\b")
+        self.assertRegex(output, rb"\bproblem\s+Problem\b")
+        for language, label, database_word in (
+            ("en", b"Reason:", b"database"),
+            ("pt-BR", b"Motivo:", b"banco"),
+        ):
+            shown = self.invoke_raw("--lang", language, "show", "problem")
+            self.assertEqual(shown.returncode, 0, shown.stderr)
+            self.assertIn(label, shown.stdout)
+            self.assertIn(database_word, shown.stdout)
         self.assertEqual(self._tree_snapshot(data), persistent_before)
         self.assertEqual(
             {name: self._tree_snapshot(self.root / f"remote-{name}") for name in profiles},

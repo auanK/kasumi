@@ -55,6 +55,38 @@ jobs:
         run: |
           ctest --test-dir build --output-on-failure
 
+  sanitizers:
+    name: Clang 19 (ASan + UBSan)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CC: clang-19
+      CXX: clang++-19
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang-19 clang-tools-19 libclang-rt-19-dev libstdc++-14-dev git unzip
+
+      - name: Configure (Debug, ASan + UBSan)
+        run: |
+          cmake -S . -B build-sanitizers -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+
+      - name: Build
+        run: cmake --build build-sanitizers --parallel 2
+
+      - name: Run Tests
+        run: ctest --test-dir build-sanitizers --output-on-failure --no-tests=error
+
   clang:
     name: Clang 19
     runs-on: ubuntu-24.04
