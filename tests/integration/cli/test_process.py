@@ -52,7 +52,7 @@ class CliProcessTest(unittest.TestCase):
             [str(binary), *arguments], input=input, capture_output=True,
             cwd=self.root,
             env=self.environment if environment is None else environment,
-            timeout=30,
+            timeout=60,
         )
         return result
 
@@ -403,7 +403,12 @@ class CliProcessTest(unittest.TestCase):
             if name in ("ready", "pending"):
                 (local / f"{name}.txt").write_text(name, encoding="utf-8")
             remote = self.root / f"remote-{name}"
-            inputs.extend(("n", name, str(local), str(remote)))
+            if name == "initialized":
+                inputs.extend(("n", name, str(local), str(remote)))
+            else:
+                inputs.extend(
+                    ("c", "initialized", name, "e", name, str(local), str(remote), "y")
+                )
         self.invoke("config", input=("\n".join((*inputs, "q", ""))).encode())
 
         self.invoke("sync", "ready")

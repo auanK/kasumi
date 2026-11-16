@@ -379,6 +379,19 @@ collect_reconciliation_input(
                 ? trusted_marker_identifiers
                 : std::span<const std::string>{derived_trusted_markers};
     }
+    const auto history_namespace =
+        history_storage::derive_remote_layout(key).history_prefix;
+    if (session && !audit_storage_objects &&
+        session->history_namespace == history_namespace) {
+        if (!hints.frontier) {
+            hints.frontier.emplace();
+        }
+        hints.frontier->observed_variants =
+            session->history_reads.observed_variants;
+        hints.frontier->observed_markers =
+            session->history_reads.observed_markers;
+        hints.frontier->observed_epoch = session->history_reads.observed_epoch;
+    }
     auto observed =
         history::observe(storage,
                          key,
@@ -399,6 +412,16 @@ collect_reconciliation_input(
         return std::unexpected(
             state_error(reconciliation::ErrorCode::InvalidStorageTree,
                         observed.error().detail));
+    }
+    if (session && !audit_storage_objects) {
+        session->history_namespace = history_namespace;
+        session->history_reads.observed_variants =
+            observed->authenticated_commit_variants;
+        session->history_reads.observed_markers =
+            observed->marked_head_identifiers;
+        session->history_reads.observed_epoch =
+            observed->epoch ? std::optional{observed->epoch->reference}
+                            : std::nullopt;
     }
     input.storage = to_storage_state(*observed);
     if (input.base_state_present) {

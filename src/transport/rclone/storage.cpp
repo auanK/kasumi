@@ -353,15 +353,18 @@ Result copyfile_object(State& state,
                        std::string_view src_remote,
                        std::string_view dst_fs,
                        std::string_view dst_remote,
+                       bool no_check_destination,
                        std::string_view not_found_message = {}) {
+    nlohmann::json payload{{"srcFs", std::string{src_fs}},
+                           {"srcRemote", std::string{src_remote}},
+                           {"dstFs", std::string{dst_fs}},
+                           {"dstRemote", std::string{dst_remote}}};
+    if (no_check_destination) {
+        payload["_config"] = {{"NoCheckDest", true}};
+    }
     const auto copied = request_json(state,
                                      "operations/copyfile",
-                                     nlohmann::json{
-                                         {"srcFs", std::string{src_fs}},
-                                         {"srcRemote", std::string{src_remote}},
-                                         {"dstFs", std::string{dst_fs}},
-                                         {"dstRemote", std::string{dst_remote}},
-                                     },
+                                     payload,
                                      maximum_response_size,
                                      transfer_timeout);
     if (!copied) {
@@ -415,7 +418,8 @@ Result rclone_put(void* context,
                            local->parent,
                            local->name,
                            rooted_remote_fs(**state),
-                           identifier);
+                           identifier,
+                           true);
 }
 
 Result sync_copy_batch(State& state,
@@ -476,7 +480,9 @@ Result rclone_put_batch(void* context, const PutBatch& batch) {
                            rooted_remote_fs(**state),
                            batch.identifiers,
                            batch.max_parallel_transfers,
-                           {{"NoTraverse", true}, {"NoUpdateModTime", true}},
+                           {{"NoTraverse", true},
+                            {"NoUpdateModTime", true},
+                            {"NoCheckDest", true}},
                            false);
 }
 
@@ -514,6 +520,7 @@ Result rclone_get(void* context,
                                             identifier,
                                             local->parent,
                                             local->name,
+                                            false,
                                             "remote object does not exist");
         !copied) {
         return copied;
@@ -835,14 +842,18 @@ rclone_physical_hash_batch(void* context,
 
     std::ranges::sort(expectations, {}, &PhysicalHashExpectation::identifier);
     const auto manifest = *root / ".kasumi-batch-verify.sha256";
-    const auto manifest_status =
-        std::filesystem::symlink_status(manifest, status_error);
-    if (status_error && status_error != std::errc::no_such_file_or_directory) {
-        return std::unexpected(filesystem_error(status_error));
-    }
-    if (!status_error && std::filesystem::exists(manifest_status)) {
-        return std::unexpected(make_error(
-            ErrorCode::InvalidContext, "verification manifest already exists"));
+    const auto files = *root / ".kasumi-batch-verify.files";
+    for (const auto& path : {manifest, files}) {
+        const auto status = std::filesystem::symlink_status(path, status_error);
+        if (status_error &&
+            status_error != std::errc::no_such_file_or_directory) {
+            return std::unexpected(filesystem_error(status_error));
+        }
+        if (!status_error && std::filesystem::exists(status)) {
+            return std::unexpected(make_error(
+                ErrorCode::InvalidContext,
+                "verification manifest or file list already exists"));
+        }
     }
 
     {
@@ -851,14 +862,27 @@ rclone_physical_hash_batch(void* context,
             return std::unexpected(make_error(
                 ErrorCode::Io, "failed to create verification manifest"));
         }
-        for (const auto& object : expectations) {
-            output << object.expected_hash << "  " << object.identifier << '\n';
-        }
-        if (!output.good()) {
+        std::ofstream file_list(files, std::ios::binary);
+        if (!file_list) {
+            output.close();
             std::error_code ignored;
             std::filesystem::remove(manifest, ignored);
             return std::unexpected(make_error(
-                ErrorCode::Io, "failed to write verification manifest"));
+                ErrorCode::Io, "failed to create verification file list"));
+        }
+        for (const auto& object : expectations) {
+            output << object.expected_hash << "  " << object.identifier << '\n';
+            file_list << object.identifier << '\n';
+        }
+        output.close();
+        file_list.close();
+        if (!output || !file_list) {
+            std::error_code ignored;
+            std::filesystem::remove(manifest, ignored);
+            std::filesystem::remove(files, ignored);
+            return std::unexpected(make_error(
+                ErrorCode::Io,
+                "failed to write verification manifest or file list"));
         }
     }
 
@@ -877,15 +901,23 @@ rclone_physical_hash_batch(void* context,
             {"match", true},
             {"differ", true},
             {"error", true},
+            {"_config", {{"NoTraverse", true}}},
+            // Restrict names: oneWay alone still scans the remote.
+            {"_filter", {{"FilesFromRaw", {platform::path::to_utf8(files)}}}},
         },
         maximum_check_response_size,
         transfer_timeout);
-    std::error_code manifest_error;
-    const bool manifest_removed =
-        std::filesystem::remove(manifest, manifest_error);
-    if (manifest_error || !manifest_removed) {
-        return std::unexpected(make_error(
-            ErrorCode::Io, "failed to remove verification manifest"));
+    bool cleanup_failed = false;
+    for (const auto& path : {manifest, files}) {
+        std::error_code cleanup_error;
+        if (!std::filesystem::remove(path, cleanup_error) || cleanup_error) {
+            cleanup_failed = true;
+        }
+    }
+    if (cleanup_failed) {
+        return std::unexpected(
+            make_error(ErrorCode::Io,
+                       "failed to remove verification manifest or file list"));
     }
     if (!response) {
         if (unsupported_endpoint(response.error(), "operations/check") ||

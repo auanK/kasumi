@@ -10,6 +10,15 @@ The required operation table does not imply a consistency model. Online destruct
 
 **Physical hash** means SHA-256 of stored ciphertext or marker bytes, distinct from a plaintext BLAKE3 **logical hash**, a keyed Content/Commit ID, and a BLAKE3 Ciphertext ID. When a provider returns remote SHA-256, publication and maintenance compare it with a locally computed expected hash. This is a provider-supplied transport check, not proof against a malicious provider; protected payloads are authenticated when loaded. If the capability is `Unsupported`, the verified fallback downloads bytes and compares physical bytes or authenticates/decrypts according to the object type. A malformed hash, mismatch, missing object, or other transport failure is not treated as successful verification.
 
+Rclone batch SHA-256 verification uses an exact file list with `FilesFromRaw` and
+`NoTraverse`, alongside its checksum manifest. It queries only the requested
+objects instead of recursively listing unrelated Content and history. Both
+temporary files are removed after the request, including failed responses.
+
+Rclone uploads use `NoCheckDest` to avoid the copy layer's redundant destination
+lookup. Provider PUT semantics still apply, and Kasumi's physical verification
+after upload is unchanged. Downloads retain their existing copy options.
+
 ## Control Read Batches
 
 `control_read_batch` aggregates read-only remote checks during observation and writer admission into single backend requests (such as rclone `job/batch`). Batches containing directory prefix listings (`list_prefixes`) preserve strict sequential execution (`concurrency = 1`) to uphold writer admission ordering (`LIST writers -> STAT barrier`). Independent content presence checks (`presence_identifiers` only) are partitioned into bounded chunks of up to 128 items executed with bounded concurrency (8 workers) to prevent request deadlines from expiring on large vaults. Results are correlated positionally, and any transport, parse, or timeout error fails closed without converting failures into false content absences.

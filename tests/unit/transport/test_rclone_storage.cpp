@@ -612,11 +612,13 @@ TEST(RcloneStorageTest, PreservesUnicodeLocalPathsInCopyRequests) {
     EXPECT_EQ(requests[0].at("srcRemote"), "カード💝.png");
     EXPECT_EQ(requests[0].at("dstFs"), "test:root");
     EXPECT_EQ(requests[0].at("dstRemote"), "object");
+    EXPECT_EQ(requests[0].at("_config").at("NoCheckDest"), true);
     EXPECT_EQ(requests[1].at("srcFs"), "test:root");
     EXPECT_EQ(requests[1].at("srcRemote"), "object");
     EXPECT_EQ(requests[1].at("dstFs"),
               kasumi::platform::path::to_utf8(destination.parent_path()));
     EXPECT_EQ(requests[1].at("dstRemote"), "𝑬𝒎𝒊𝒍𝒊𝒂-𓆩🌸𓆪.txt");
+    EXPECT_FALSE(requests[1].contains("_config"));
     EXPECT_EQ(kasumi::test::read_text(destination), "unicode payload");
 }
 
@@ -705,7 +707,8 @@ TEST(RcloneStorageTest, StorageRequestsAreScopedToConfiguredRemoteRoot) {
          {{"srcFs", source_parent},
           {"srcRemote", "source.bin"},
           {"dstFs", root},
-          {"dstRemote", "uploads/object"}}},
+          {"dstRemote", "uploads/object"},
+          {"_config", {{"NoCheckDest", true}}}}},
         {"operations/copyfile",
          {{"srcFs", root},
           {"srcRemote", "downloads/object"},
@@ -878,7 +881,7 @@ TEST(RcloneStorageTest, DownloadsExactBatchWithOneSequentialCopy) {
     EXPECT_NE(request.find("/b/two"), std::string::npos);
 }
 
-TEST(RcloneStorageTest, UploadsBatchWithNoTraverseAndNoUpdateModTime) {
+TEST(RcloneStorageTest, UploadsBatchWithoutRedundantDestinationChecks) {
     RcServerState remote;
     std::vector<nlohmann::json> requests;
     remote.server.Post(
@@ -921,6 +924,7 @@ TEST(RcloneStorageTest, UploadsBatchWithNoTraverseAndNoUpdateModTime) {
         const auto& config = req.at("_config");
         EXPECT_EQ(config.at("NoTraverse"), true);
         EXPECT_EQ(config.at("NoUpdateModTime"), true);
+        EXPECT_EQ(config.at("NoCheckDest"), true);
         EXPECT_FALSE(config.contains("Transfers"));
         EXPECT_FALSE(config.contains("CheckSum"));
         EXPECT_FALSE(config.contains("IgnoreExisting"));
@@ -934,6 +938,7 @@ TEST(RcloneStorageTest, UploadsBatchWithNoTraverseAndNoUpdateModTime) {
         const auto& config = req.at("_config");
         EXPECT_EQ(config.at("NoTraverse"), true);
         EXPECT_EQ(config.at("NoUpdateModTime"), true);
+        EXPECT_EQ(config.at("NoCheckDest"), true);
         EXPECT_EQ(config.at("Transfers"), 3);
         EXPECT_FALSE(config.contains("CheckSum"));
         EXPECT_FALSE(config.contains("IgnoreExisting"));
@@ -1007,6 +1012,7 @@ TEST(RcloneStorageTest, PhysicalHashBatchAcceptsNestedArchiveIdentifier) {
     std::atomic_int check_calls = 0;
     nlohmann::json check_request;
     std::string manifest_contents;
+    std::string file_list_contents;
     remote.server.Post(
         "/rc/operations/check",
         [&](const httplib::Request& input, httplib::Response& response) {
@@ -1018,6 +1024,12 @@ TEST(RcloneStorageTest, PhysicalHashBatchAcceptsNestedArchiveIdentifier) {
                 kasumi::platform::path::from_utf8(
                     check_request.at("checkFileRemote").get<std::string>());
             manifest_contents = kasumi::test::read_text(manifest);
+            const auto files =
+                kasumi::platform::path::from_utf8(check_request.at("_filter")
+                                                      .at("FilesFromRaw")
+                                                      .at(0)
+                                                      .get<std::string>());
+            file_list_contents = kasumi::test::read_text(files);
             response.set_content(
                 nlohmann::json{{"differ", nlohmann::json::array()},
                                {"error", nlohmann::json::array()},
@@ -1046,6 +1058,108 @@ TEST(RcloneStorageTest, PhysicalHashBatchAcceptsNestedArchiveIdentifier) {
     EXPECT_EQ(check_request.at("dstFs"), "test:root");
     EXPECT_EQ(manifest_contents,
               std::string(64, 'b') + "  " + archive_id + "\n");
+    EXPECT_EQ(check_request.at("_config").at("NoTraverse"), true);
+    EXPECT_EQ(file_list_contents, archive_id + "\n");
+    EXPECT_FALSE(std::filesystem::exists(request.scratch_root /
+                                         ".kasumi-batch-verify.sha256"));
+    EXPECT_FALSE(std::filesystem::exists(request.scratch_root /
+                                         ".kasumi-batch-verify.files"));
+}
+
+TEST(RcloneStorageTest, PhysicalHashBatchPreservesLiteralNamesInFileList) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("rclone-batch-literal-names");
+    RcServerState remote;
+    std::string names;
+    remote.server.Post(
+        "/rc/operations/check",
+        [&](const httplib::Request& input, httplib::Response& response) {
+            const auto body = nlohmann::json::parse(input.body);
+            names = kasumi::test::read_text(
+                kasumi::platform::path::from_utf8(body.at("_filter")
+                                                      .at("FilesFromRaw")
+                                                      .at(0)
+                                                      .get<std::string>()));
+            response.set_content(
+                R"({"differ":[],"error":[],"hashType":"sha256","match":["#literal [1]","folder/a b"],"missingOnDst":[],"success":true})",
+                "application/json");
+        });
+    auto& state = start_configured_state(remote);
+    auto transport = make_preflight_transport(state);
+    const auto result = kasumi::transport::physical_hash_batch(
+        transport,
+        {.scratch_root = kasumi::test::workspace_root(workspace),
+         .objects = {{"folder/a b", std::string(64, 'a')},
+                     {"#literal [1]", std::string(64, 'b')}},
+         .algorithm = "sha256"});
+    stop_rc_server(remote);
+    ASSERT_TRUE(result.has_value()) << result.error().message;
+    EXPECT_EQ(names, "#literal [1]\nfolder/a b\n");
+}
+
+TEST(RcloneStorageTest,
+     PhysicalHashBatchPreservesExistingScratchFilesBeforeRc) {
+    RcServerState remote;
+    std::atomic_int calls = 0;
+    remote.server.Post("/rc/operations/check",
+                       [&](const httplib::Request&, httplib::Response&) {
+                           ++calls;
+                       });
+    auto& state = start_configured_state(remote);
+    auto transport = make_preflight_transport(state);
+    for (const auto* existing :
+         {".kasumi-batch-verify.sha256", ".kasumi-batch-verify.files"}) {
+        auto workspace =
+            kasumi::test::make_temp_workspace("rclone-batch-existing-file");
+        const auto root = kasumi::test::workspace_root(workspace);
+        kasumi::test::write_text(root / existing, "keep");
+        auto request = batch_request();
+        request.scratch_root = root;
+        const auto result =
+            kasumi::transport::physical_hash_batch(transport, request);
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code,
+                  kasumi::transport::ErrorCode::InvalidContext);
+        EXPECT_EQ(kasumi::test::read_text(root / existing), "keep");
+        EXPECT_EQ(std::distance(std::filesystem::directory_iterator(root),
+                                std::filesystem::directory_iterator{}),
+                  1);
+    }
+    stop_rc_server(remote);
+    EXPECT_EQ(calls.load(), 0);
+}
+
+TEST(RcloneStorageTest, PhysicalHashBatchCleansScratchFilesAfterRcFailure) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("rclone-batch-failed-check");
+    const auto root = kasumi::test::workspace_root(workspace);
+    RcServerState remote;
+    std::atomic_int status = 500;
+    remote.server.Post(
+        "/rc/operations/check",
+        [&](const httplib::Request&, httplib::Response& response) {
+            response.status = status.load();
+            response.set_content(
+                status == 404
+                    ? R"({"error":"couldn't find method \"operations/check\""})"
+                    : "{}",
+                "application/json");
+        });
+    auto& state = start_configured_state(remote);
+    auto transport = make_preflight_transport(state);
+    auto request = batch_request();
+    request.scratch_root = root;
+    for (const auto failure : {500, 200, 404}) {
+        status = failure;
+        const auto result =
+            kasumi::transport::physical_hash_batch(transport, request);
+        EXPECT_FALSE(result.has_value());
+        EXPECT_FALSE(
+            std::filesystem::exists(root / ".kasumi-batch-verify.sha256"));
+        EXPECT_FALSE(
+            std::filesystem::exists(root / ".kasumi-batch-verify.files"));
+    }
+    stop_rc_server(remote);
 }
 
 TEST(RcloneStorageTest, PhysicalHashBatchMatchesGenericPathNormalizationEdges) {

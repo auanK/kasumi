@@ -52,6 +52,10 @@ The client's accepted Commit can supply a `cached_anchor`: its already accepted
 Snapshot and height bound history loading without rereading that tree's entire
 ancestry. Scoped observation limits remote discovery to the HEADs and ancestry
 needed for the current view; it still authenticates newly loaded history.
+On backends with native batch GET support, scoped HEAD discovery overlaps the
+Epoch listing and authenticated read. All reads finish before using their
+results, including on failure or cancellation; other backends remain sequential.
+An unchanged Epoch is still downloaded and authenticated on each observation.
 An unchanged accepted Epoch permits considering the shortcut. A changed Epoch
 uses its authenticated retention frontier instead.
 
@@ -67,7 +71,10 @@ their publishers.
 
 The authenticated branches are then resolved by the merge-base rules below.
 This history frontier is distinct from the file-hash cache and cannot bypass
-ancestry validation.
+ancestry validation. Within a command, stabilization reobservation can reuse the
+previously authenticated `Commit ID -> Ciphertext ID` variant addresses when the
+observed HEAD marker set and Epoch are unchanged, rereading and re-authenticating
+the physical objects in bounded batches without per-ancestor prefix listings.
 
 ### Selecting the merge base
 
