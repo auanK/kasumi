@@ -294,7 +294,10 @@ class CliProcessTest(unittest.TestCase):
         self.assertIn(str(local).encode(), details.stdout)
         self.assertIn(str(remote).encode(), details.stdout)
         self.assertNotIn(source_key.read_bytes(), details.stdout)
-        self.assertEqual(self.invoke_raw("show", "absent").returncode, 1)
+        missing = self.invoke_raw("show", "absent")
+        self.assertEqual(missing.returncode, 1)
+        self.assertEqual(missing.stdout, b"")
+        self.assertIn(b"[ERROR]", missing.stderr)
         self.assertEqual(self._tree_snapshot(data), before)
         self.assertFalse(remote.exists())
         listed = self.invoke("config", input=b"q\n")
@@ -370,6 +373,15 @@ class CliProcessTest(unittest.TestCase):
         self.assertFalse(renamed_dir.exists())
         self.assertEqual(sentinel.read_bytes(), local_snapshot)
         self.assertEqual(self._tree_snapshot(remote), remote_snapshot)
+
+        config.write_text("[invalid", encoding="utf-8")
+        broken = self._tree_snapshot(data)
+        for arguments in (("list",), ("show", "renamed")):
+            result = self.invoke_raw(*arguments)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, b"")
+            self.assertIn(b"[ERROR]", result.stderr)
+        self.assertEqual(self._tree_snapshot(data), broken)
 
     def test_wizard_presents_all_local_states_without_mutating_storage(self):
         data = self.root / "kasumi"

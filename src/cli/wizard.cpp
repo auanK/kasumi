@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdio>
 #include <iostream>
 #include <print>
 #include <string>
@@ -18,10 +19,13 @@ namespace kasumi::cli {
 
 int run_profile_query(const application::ExecutionEnvironment& environment,
                       std::string_view profile_name) {
+    const auto fail_query = [](std::string_view message) {
+        std::println(stderr, "{} {}", i18n::tr(i18n::Key::LabelError), message);
+        return 1;
+    };
     auto profiles = application::list_profiles(environment);
     if (!profiles) {
-        print_error_line(profiles.error().detail);
-        return 1;
+        return fail_query(profiles.error().detail);
     }
     for (const auto& profile : *profiles) {
         if (profile_name.empty()) {
@@ -63,8 +67,7 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
         }
     }
     if (!profile_name.empty()) {
-        print_error_line(i18n::tr(i18n::Key::WizardProfileNotFound));
-        return 1;
+        return fail_query(i18n::tr(i18n::Key::WizardProfileNotFound));
     }
     return 0;
 }
