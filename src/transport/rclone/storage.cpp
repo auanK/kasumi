@@ -353,15 +353,18 @@ Result copyfile_object(State& state,
                        std::string_view src_remote,
                        std::string_view dst_fs,
                        std::string_view dst_remote,
+                       bool no_check_destination,
                        std::string_view not_found_message = {}) {
+    nlohmann::json payload{{"srcFs", std::string{src_fs}},
+                           {"srcRemote", std::string{src_remote}},
+                           {"dstFs", std::string{dst_fs}},
+                           {"dstRemote", std::string{dst_remote}}};
+    if (no_check_destination) {
+        payload["_config"] = {{"NoCheckDest", true}};
+    }
     const auto copied = request_json(state,
                                      "operations/copyfile",
-                                     nlohmann::json{
-                                         {"srcFs", std::string{src_fs}},
-                                         {"srcRemote", std::string{src_remote}},
-                                         {"dstFs", std::string{dst_fs}},
-                                         {"dstRemote", std::string{dst_remote}},
-                                     },
+                                     payload,
                                      maximum_response_size,
                                      transfer_timeout);
     if (!copied) {
@@ -415,7 +418,8 @@ Result rclone_put(void* context,
                            local->parent,
                            local->name,
                            rooted_remote_fs(**state),
-                           identifier);
+                           identifier,
+                           true);
 }
 
 Result sync_copy_batch(State& state,
@@ -476,7 +480,9 @@ Result rclone_put_batch(void* context, const PutBatch& batch) {
                            rooted_remote_fs(**state),
                            batch.identifiers,
                            batch.max_parallel_transfers,
-                           {{"NoTraverse", true}, {"NoUpdateModTime", true}},
+                           {{"NoTraverse", true},
+                            {"NoUpdateModTime", true},
+                            {"NoCheckDest", true}},
                            false);
 }
 
@@ -514,6 +520,7 @@ Result rclone_get(void* context,
                                             identifier,
                                             local->parent,
                                             local->name,
+                                            false,
                                             "remote object does not exist");
         !copied) {
         return copied;

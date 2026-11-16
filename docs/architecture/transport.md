@@ -15,6 +15,10 @@ Rclone batch SHA-256 verification uses an exact file list with `FilesFromRaw` an
 objects instead of recursively listing unrelated Content and history. Both
 temporary files are removed after the request, including failed responses.
 
+Rclone uploads use `NoCheckDest` to avoid the copy layer's redundant destination
+lookup. Provider PUT semantics still apply, and Kasumi's physical verification
+after upload is unchanged. Downloads retain their existing copy options.
+
 ## Control Read Batches
 
 `control_read_batch` aggregates read-only remote checks during observation and writer admission into single backend requests (such as rclone `job/batch`). Batches containing directory prefix listings (`list_prefixes`) preserve strict sequential execution (`concurrency = 1`) to uphold writer admission ordering (`LIST writers -> STAT barrier`). Independent content presence checks (`presence_identifiers` only) are partitioned into bounded chunks of up to 128 items executed with bounded concurrency (8 workers) to prevent request deadlines from expiring on large vaults. Results are correlated positionally, and any transport, parse, or timeout error fails closed without converting failures into false content absences.

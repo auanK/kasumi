@@ -389,6 +389,13 @@ TEST(RcloneSystemTest, RealTransportSmokeUsesAnIsolatedRcProcess) {
               kasumi::transport::Presence::Present);
     ASSERT_TRUE(kasumi::transport::get(*storage, "smoke/object", destination));
     EXPECT_EQ(kasumi::test::read_text(destination), "rclone smoke");
+    ASSERT_TRUE(kasumi::transport::put(*storage, source, "smoke/object"));
+    const auto source_time = std::filesystem::last_write_time(source);
+    kasumi::test::write_text(source, "rclone retry");
+    std::filesystem::last_write_time(source, source_time);
+    ASSERT_TRUE(kasumi::transport::put(*storage, source, "smoke/object"));
+    ASSERT_TRUE(kasumi::transport::get(*storage, "smoke/object", destination));
+    EXPECT_EQ(kasumi::test::read_text(destination), "rclone retry");
     const auto listing = kasumi::transport::list(*storage);
     ASSERT_TRUE(listing.has_value());
     EXPECT_NE(std::ranges::find(*listing, "smoke/object"), listing->end());
@@ -1439,12 +1446,23 @@ TEST(RcloneSystemTest, RcloneBatchUploadPreservesDestinationIsolation) {
     // 8. Idempotência: rodar de novo
     ASSERT_TRUE(kasumi::transport::put_batch(*storage, batch).has_value());
 
+    const auto changed_source = source_root / batch.identifiers[0];
+    const auto source_time = std::filesystem::last_write_time(changed_source);
+    kasumi::test::write_text(changed_source, "changed 0");
+    std::filesystem::last_write_time(changed_source, source_time);
+    batch.max_parallel_transfers = 3;
+    const auto replaced = kasumi::transport::put_batch(*storage, batch);
+    ASSERT_TRUE(replaced) << kasumi::transport::describe(replaced.error());
+    const auto listed = kasumi::transport::list(*storage, "batch");
+    ASSERT_TRUE(listed);
+    EXPECT_EQ(listed->size(), batch.identifiers.size());
+
     EXPECT_EQ(kasumi::transport::presence(*storage, outside_identifier).value(),
               kasumi::transport::Presence::Present);
     ASSERT_TRUE(
         kasumi::transport::get(*storage, batch.identifiers[0], verify_dest)
             .has_value());
-    EXPECT_EQ(kasumi::test::read_text(verify_dest), "content 0");
+    EXPECT_EQ(kasumi::test::read_text(verify_dest), "changed 0");
 }
 
 TEST(RcloneSystemTest, RcReadinessUsesPidWithoutVersionProbe) {

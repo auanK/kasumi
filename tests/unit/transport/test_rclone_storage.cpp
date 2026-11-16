@@ -612,11 +612,13 @@ TEST(RcloneStorageTest, PreservesUnicodeLocalPathsInCopyRequests) {
     EXPECT_EQ(requests[0].at("srcRemote"), "カード💝.png");
     EXPECT_EQ(requests[0].at("dstFs"), "test:root");
     EXPECT_EQ(requests[0].at("dstRemote"), "object");
+    EXPECT_EQ(requests[0].at("_config").at("NoCheckDest"), true);
     EXPECT_EQ(requests[1].at("srcFs"), "test:root");
     EXPECT_EQ(requests[1].at("srcRemote"), "object");
     EXPECT_EQ(requests[1].at("dstFs"),
               kasumi::platform::path::to_utf8(destination.parent_path()));
     EXPECT_EQ(requests[1].at("dstRemote"), "𝑬𝒎𝒊𝒍𝒊𝒂-𓆩🌸𓆪.txt");
+    EXPECT_FALSE(requests[1].contains("_config"));
     EXPECT_EQ(kasumi::test::read_text(destination), "unicode payload");
 }
 
@@ -705,7 +707,8 @@ TEST(RcloneStorageTest, StorageRequestsAreScopedToConfiguredRemoteRoot) {
          {{"srcFs", source_parent},
           {"srcRemote", "source.bin"},
           {"dstFs", root},
-          {"dstRemote", "uploads/object"}}},
+          {"dstRemote", "uploads/object"},
+          {"_config", {{"NoCheckDest", true}}}}},
         {"operations/copyfile",
          {{"srcFs", root},
           {"srcRemote", "downloads/object"},
@@ -878,7 +881,7 @@ TEST(RcloneStorageTest, DownloadsExactBatchWithOneSequentialCopy) {
     EXPECT_NE(request.find("/b/two"), std::string::npos);
 }
 
-TEST(RcloneStorageTest, UploadsBatchWithNoTraverseAndNoUpdateModTime) {
+TEST(RcloneStorageTest, UploadsBatchWithoutRedundantDestinationChecks) {
     RcServerState remote;
     std::vector<nlohmann::json> requests;
     remote.server.Post(
@@ -921,6 +924,7 @@ TEST(RcloneStorageTest, UploadsBatchWithNoTraverseAndNoUpdateModTime) {
         const auto& config = req.at("_config");
         EXPECT_EQ(config.at("NoTraverse"), true);
         EXPECT_EQ(config.at("NoUpdateModTime"), true);
+        EXPECT_EQ(config.at("NoCheckDest"), true);
         EXPECT_FALSE(config.contains("Transfers"));
         EXPECT_FALSE(config.contains("CheckSum"));
         EXPECT_FALSE(config.contains("IgnoreExisting"));
@@ -934,6 +938,7 @@ TEST(RcloneStorageTest, UploadsBatchWithNoTraverseAndNoUpdateModTime) {
         const auto& config = req.at("_config");
         EXPECT_EQ(config.at("NoTraverse"), true);
         EXPECT_EQ(config.at("NoUpdateModTime"), true);
+        EXPECT_EQ(config.at("NoCheckDest"), true);
         EXPECT_EQ(config.at("Transfers"), 3);
         EXPECT_FALSE(config.contains("CheckSum"));
         EXPECT_FALSE(config.contains("IgnoreExisting"));
