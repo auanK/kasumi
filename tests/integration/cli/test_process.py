@@ -316,7 +316,7 @@ class CliProcessTest(unittest.TestCase):
         without_passwords.pop("KASUMI_PASSWORD")
         without_passwords.pop("KASUMI_PASSWORD2")
         cloned = self.invoke(
-            "config", input=b"c\ndemo\ncopy\nq\n",
+            "config", input=b"c\nabsent\ndemo\ncopy\nq\n",
             environment=without_passwords,
         )
         clone_dir = data / "profiles" / "copy"
@@ -352,7 +352,7 @@ class CliProcessTest(unittest.TestCase):
         self.assertFalse(new_remote.exists())
 
         source_identity = source_db.stat()
-        renamed = self.invoke("config", input=b"r\ndemo\nrenamed\nq\n")
+        renamed = self.invoke("config", input=b"r\nabsent\ndemo\nrenamed\nq\n")
         renamed_dir = data / "profiles" / "renamed"
         renamed_db = renamed_dir / "db.sqlite"
         self.assertIn(b"Profile renamed", renamed)

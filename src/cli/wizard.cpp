@@ -161,10 +161,22 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             return false;
         };
 
+        const auto prompt_existing = [&](i18n::Key key, std::string& name) {
+            while (prompt_line(i18n::tr(key), name)) {
+                if (std::ranges::find(
+                        profiles, name, &application::Profile::name) !=
+                    profiles.end()) {
+                    return true;
+                }
+                print_error_line(i18n::tr(i18n::Key::WizardProfileNotFound));
+            }
+            return false;
+        };
+
         const auto prompt_pair = [&](i18n::Key first_key,
                                      std::string& first,
                                      std::string& second) {
-            return prompt_line(i18n::tr(first_key), first) &&
+            return prompt_existing(first_key, first) &&
                    prompt_field(i18n::tr(i18n::Key::WizardPromptNewProfileName),
                                 application::ProfileField::Name,
                                 second);
@@ -216,8 +228,8 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
 
         } else if (choice == "d") {
             std::string target;
-            if (!prompt_line(i18n::tr(i18n::Key::WizardPromptProfileToDelete),
-                             target)) {
+            if (!prompt_existing(i18n::Key::WizardPromptProfileToDelete,
+                                 target)) {
                 break;
             }
             const auto selected = std::ranges::find(
@@ -249,8 +261,8 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
 
         } else if (choice == "e") {
             std::string target;
-            if (!prompt_line(i18n::tr(i18n::Key::WizardPromptProfileToEdit),
-                             target)) {
+            if (!prompt_existing(i18n::Key::WizardPromptProfileToEdit,
+                                 target)) {
                 break;
             }
 
