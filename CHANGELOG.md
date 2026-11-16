@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.11.0]
+
+### Added
+
+- Added `kasumi list` for profile names and `kasumi show <profile>` for settings, retention, local state, and inspection diagnostics, without contacting remote storage or displaying credentials.
+
+### Changed
+
+- Simplified the profile wizard with a compact list, grouped credential prompts, and per-field validation that preserves accepted input.
+- Profile deletion and path edits require explicit confirmation, defaulting to No. Path edits show the old and new destinations and explain that files are not moved or remote data migrated.
+- Status and dry-run plans use translated action descriptions that distinguish local and remote changes, files and directories, and disposable ignored files.
+
+### Development
+
+- Added Ubuntu CI coverage with AddressSanitizer and UndefinedBehaviorSanitizer using the existing test suite.
+
+### Upgrade Notes
+
+- Update scripted wizard input for the new confirmations. `list` and `show` omit duration lines and send errors to stderr.
+- Remote formats, SQLite schema, and supported journal formats remain unchanged from v0.10.0. Use the same release on all clients and follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi).
+
 ## [0.10.0]
 
 ### Changed

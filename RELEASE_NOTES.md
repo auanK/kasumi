@@ -1,19 +1,16 @@
-# Kasumi v0.10.0
+# Kasumi v0.11.0
 
-Maintenance release focused on structural simplification, safer file handling, and transaction recovery.
+Profile usability release with simpler configuration and clearer local diagnostics.
 
 ## Highlights
 
-- Consolidated duplicated code across Sync, history, storage, cryptography, and the CLI.
-- Replaced runtime translation-catalog parsing with generated compile-time tables.
-- Hardened local file access, credential-buffer cleanup, and rclone identifier filters.
-
-## Removed
-
-- Auxiliary Fsck checkpoints and the persistent remote-inspection history cache. Fsck still downloads and authenticates every referenced payload; remote inspection may fetch history again without its former cache.
-- Standalone benchmark and provider-certification runners. Performance tracing was reduced.
+- `kasumi list` prints only profile names. `kasumi show <profile>` displays settings, retention, local state, and the reason for inspection problems, without displaying credentials or contacting remote storage.
+- The configuration wizard uses a compact list, grouped credential prompts, and per-field validation. Deleting profiles or changing paths requires explicit confirmation, defaulting to No.
+- Status and dry-run plans use translated descriptions for local and remote actions, directories, and disposable ignored files.
+- Ubuntu CI runs the existing test suite with AddressSanitizer and UndefinedBehaviorSanitizer.
 
 ## Compatibility
 
-- Remote object formats, encryption schemes, and the SQLite schema remain unchanged from v0.9.4. The journal writer remains format 10; readers accept formats 9 and 10.
-- Use the same release on all clients. Follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi), complete pending recovery, stop all clients, and retain independent backups before replacing binaries. `kasumi update` replaces only the executable and does not migrate data or guarantee compatibility across 0.x releases.
+- Scripted wizard input must account for the new confirmations. `list` and `show` have no duration line and report errors on stderr.
+- Remote formats, encryption schemes, and the SQLite schema remain unchanged from v0.10.0. The journal writer remains format 10; readers accept formats 9 and 10.
+- Use the same release on all clients and follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi). `kasumi update` replaces only the executable and does not migrate data or guarantee cross-release compatibility.
