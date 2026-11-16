@@ -77,7 +77,19 @@
     "plan_stage_observing": "[1/2] Observing local and remote state...",
     "plan_stage_calculating": "[2/2] Calculating changes...",
     "preview_starting": "Simulating synchronization of \"{}\"...\n",
-    "status_starting": "Checking status of \"{}\"...\n"
+    "status_starting": "Checking status of \"{}\"...\n",
+    "action_rename_local": "Rename local file",
+    "action_upload": "Upload",
+    "action_create_local_directory": "Create local directory",
+    "action_create_remote_directory": "Create remote directory",
+    "action_move_local": "Move local file",
+    "action_download": "Download",
+    "action_delete_local": "Delete local file",
+    "action_delete_local_directory": "Delete local directory",
+    "action_delete_remote": "Delete remote file",
+    "action_delete_remote_directory": "Delete remote directory",
+    "action_copy_local": "Copy local file",
+    "action_delete_ignored_local_file": "Delete disposable ignored file"
   },
   "manual_writer_removal": {
     "warning": "Kasumi cannot determine whether this writer's process is still active. Its barrier check cannot guarantee that no operations are running. Verify that no Sync or maintenance operation is active before removal.",

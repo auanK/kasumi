@@ -62,9 +62,19 @@ TEST(CliPresenterTest, PresentsEmptyAndPopulatedPlansWithTrafficAndRename) {
     const auto output = present_out(response(report));
     EXPECT_NE(output.find("modificações independentes"), std::string::npos);
     EXPECT_NE(output.find("old -> new"), std::string::npos);
-    EXPECT_NE(output.find("Upload"), std::string::npos);
-    EXPECT_NE(output.find("DeleteIgnoredLocalFile"), std::string::npos);
+    EXPECT_NE(output.find("Enviar"), std::string::npos);
+    EXPECT_NE(output.find("Excluir arquivo ignorado descartável"),
+              std::string::npos);
     EXPECT_NE(output.find("20 bytes"), std::string::npos);
+    {
+        const ScopedLanguage english{Language::English};
+        const auto english_output = present_out(response(report));
+        EXPECT_NE(english_output.find("Rename local file"), std::string::npos);
+        EXPECT_NE(english_output.find("Delete disposable ignored file"),
+                  std::string::npos);
+        EXPECT_EQ(english_output.find("DeleteIgnoredLocalFile"),
+                  std::string::npos);
+    }
 }
 
 TEST(CliPresenterTest, PresentsSuccessfulResponseVariants) {

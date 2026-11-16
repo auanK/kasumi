@@ -77,7 +77,19 @@
     "plan_stage_observing": "[1/2] Observando estado local e remoto...",
     "plan_stage_calculating": "[2/2] Calculando alterações...",
     "preview_starting": "Simulando sincronização de \"{}\"...\n",
-    "status_starting": "Verificando status de \"{}\"...\n"
+    "status_starting": "Verificando status de \"{}\"...\n",
+    "action_rename_local": "Renomear arquivo local",
+    "action_upload": "Enviar",
+    "action_create_local_directory": "Criar pasta local",
+    "action_create_remote_directory": "Criar pasta remota",
+    "action_move_local": "Mover arquivo local",
+    "action_download": "Baixar",
+    "action_delete_local": "Excluir arquivo local",
+    "action_delete_local_directory": "Excluir pasta local",
+    "action_delete_remote": "Excluir arquivo remoto",
+    "action_delete_remote_directory": "Excluir pasta remota",
+    "action_copy_local": "Copiar arquivo local",
+    "action_delete_ignored_local_file": "Excluir arquivo ignorado descartável"
   },
   "manual_writer_removal": {
     "warning": "O Kasumi não consegue determinar se o processo associado a este writer ainda está ativo. A verificação da barrier não garante que não há operações em andamento. Verifique se não há Sync ou operação de manutenção antes de removê-lo.",
