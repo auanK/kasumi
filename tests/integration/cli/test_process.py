@@ -37,14 +37,20 @@ class CliProcessTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         self.assertEqual(result.stderr, b"")
-        self.assertRegex(
-            result.stdout,
-            rb"(?:Duration|Dura\xc3\xa7\xc3\xa3o): [0-9]+\.[0-9]{3} s\r?\n",
+        command = (
+            arguments[2]
+            if len(arguments) >= 3 and arguments[0] == "--lang"
+            else arguments[0]
         )
-        self.assertEqual(
-            result.stdout.count(b"Duration:") +
-            result.stdout.count("Duração:".encode()), 1,
-        )
+        if command not in ("config", "list", "show"):
+            self.assertRegex(
+                result.stdout,
+                rb"(?:Duration|Dura\xc3\xa7\xc3\xa3o): [0-9]+\.[0-9]{3} s\r?\n",
+            )
+            self.assertEqual(
+                result.stdout.count(b"Duration:") +
+                result.stdout.count("Duração:".encode()), 1,
+            )
         return result.stdout
 
     def invoke_raw(self, *arguments, input=None, environment=None):
@@ -244,10 +250,6 @@ class CliProcessTest(unittest.TestCase):
         self.assertEqual(process.returncode, 130, bytes(output) + error)
         self.assertEqual(error, b"")
         self.assertIn(b"Operation cancelled by user.", output)
-        self.assertRegex(
-            output,
-            rb"Duration: [0-9]+\.[0-9]{3} s\r?\n",
-        )
         self.assertFalse((self.root / "kasumi").exists())
 
     def test_unicode_profile_reaches_the_cli_unchanged(self):

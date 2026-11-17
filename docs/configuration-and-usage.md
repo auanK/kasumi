@@ -211,15 +211,16 @@ change the domain rules for profile names or synchronized paths.
 
 ## Operation Output
 
-Executed operations, except `list` and `show`, print one final elapsed-time line on stdout:
+Executed operations, except `config`, `list`, and `show`, print one final elapsed-time line on stdout:
 `Duration: 12.614 s` (English) or `Duração: 12.614 s` (Portuguese). A monotonic
 clock measures real elapsed time in seconds with three decimal places, including
 success, failure, pending results and cancellation. Sync has one duration line;
 internal operational metrics are separate. Help, version and invalid invocations
 have no operation duration.
 
-`list` prints only names, and `show` prints profile details, without elapsed-time
-lines. Their errors go to stderr with a nonzero exit code, leaving stdout empty.
+`list` prints only names, and `show` prints profile details; neither command nor
+`config` prints elapsed-time lines. `list` and `show` errors go to stderr with a
+nonzero exit code, leaving stdout empty.
 Other operation messages and errors use stdout; invocation diagnostics use stderr. Interpret the [exit code](#exit-codes) with the
 output; partial results are not full success.
 

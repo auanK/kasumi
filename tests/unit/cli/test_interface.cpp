@@ -289,15 +289,13 @@ TEST_F(CliInterfaceTest,
     EXPECT_EQ(output.out.find("[options]"), std::string::npos);
 }
 
-TEST_F(CliInterfaceTest,
-       WizardSuccessAndTerminalFailureHaveDurationAndCorrectExitCodes) {
+TEST_F(CliInterfaceTest, WizardSuccessAndTerminalFailureKeepExitCodes) {
     std::istringstream input{"q\n"};
     auto* previous = std::cin.rdbuf(input.rdbuf());
     const auto success = run({"kasumi", "config"});
     std::cin.rdbuf(previous);
     std::cin.clear();
     EXPECT_EQ(success.code, 0);
-    EXPECT_NE(success.out.find("Duration:"), std::string::npos);
 
     kasumi::test::write_text(
         kasumi::test::workspace_path(workspace, "kasumi/config.toml"),
@@ -305,10 +303,9 @@ TEST_F(CliInterfaceTest,
     const auto failure = run({"kasumi", "config"});
     EXPECT_EQ(failure.code, 1);
     EXPECT_NE(failure.out.find("[ERROR]"), std::string::npos);
-    EXPECT_NE(failure.out.find("Duration:"), std::string::npos);
 }
 
-TEST_F(CliInterfaceTest, WizardCancellationHasDurationAndExit130) {
+TEST_F(CliInterfaceTest, WizardCancellationReturnsExit130) {
     struct CancelInput : std::streambuf {
         int_type underflow() override {
             std::raise(SIGINT);
@@ -321,7 +318,6 @@ TEST_F(CliInterfaceTest, WizardCancellationHasDurationAndExit130) {
     std::cin.clear();
     EXPECT_EQ(output.code, 130);
     EXPECT_NE(output.out.find("cancelled"), std::string::npos);
-    EXPECT_NE(output.out.find("Duration:"), std::string::npos);
 }
 
 TEST_F(CliInterfaceTest, WizardEndOfInputIsCancellation) {
@@ -332,7 +328,6 @@ TEST_F(CliInterfaceTest, WizardEndOfInputIsCancellation) {
     std::cin.clear();
     EXPECT_EQ(output.code, 130);
     EXPECT_NE(output.out.find("Operation cancelled"), std::string::npos);
-    EXPECT_NE(output.out.find("Duration:"), std::string::npos);
     EXPECT_TRUE(
         std::filesystem::is_empty(kasumi::test::workspace_root(workspace)));
 }

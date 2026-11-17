@@ -147,9 +147,9 @@ int run(int argc, char* argv[]) {
 
     if (std::holds_alternative<ConfigureInvocation>(*parse_result)) {
         const int code = run_config_wizard(environment);
-        return finish(
-            code == 130 ? present_cancellation(application::Operation::Preview)
-                        : code);
+        return code == 130
+                   ? present_cancellation(application::Operation::Preview)
+                   : code;
     }
     if (std::holds_alternative<application::InspectionRequest>(*parse_result)) {
         auto request = std::get<application::InspectionRequest>(*parse_result);
