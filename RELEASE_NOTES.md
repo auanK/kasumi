@@ -1,13 +1,10 @@
-# Kasumi v0.11.1
+# Kasumi v0.11.2
 
-Performance maintenance release reducing remote round trips during rclone uploads, batch verification, and history reobservation.
+Minor CLI output fix omitting the elapsed-time line from the interactive configuration wizard.
 
 ## Highlights
 
-- **Scoped batch verification & overlapped discovery:** Rclone batch SHA-256 verification restricts checks to the exact requested objects using `FilesFromRaw` and `NoTraverse`, and scoped HEAD discovery overlaps Epoch listing and read on batch-capable backends.
-- **Reduced upload destination lookups:** Rclone uploads use `NoCheckDest` to skip redundant copy-layer destination queries while preserving post-upload physical verification.
-- **Batched stabilization reobservation:** Within a command, stabilization reuses authenticated `Commit ID -> Ciphertext ID` addresses when HEAD markers and Epoch remain unchanged, rereading and re-authenticating ancestors in bounded batches without per-ancestor prefix listings.
-- **CI test reliability:** The CLI process integration test avoids redundant Argon2id derivations during multi-profile setup so ASan/UBSan runs stay well within subprocess timeouts.
+- **`kasumi config` output:** Omitted the final `Duration` / `Duração` line from the interactive configuration wizard, keeping elapsed-time output on sync, maintenance, remote, and update operations (`config`, `list`, and `show` omit it).
 
 ## Compatibility
 

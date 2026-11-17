@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.11.2]
+
+### Fixed
+
+- Omitted the final `Duration` / `Duração` line from `kasumi config`, keeping elapsed-time reporting limited to sync, maintenance, remote, and update operations.
+
+### Upgrade Notes
+
+- Remote formats, SQLite schema, and supported journal formats remain unchanged from v0.11.0. Use the same release on all clients and follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi).
+
 ## [0.11.1]
 
 ### Changed
