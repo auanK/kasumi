@@ -28,6 +28,7 @@
 #include "platform/durability.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
+#include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
 #include "platform/workspace.hpp"
@@ -1816,41 +1817,11 @@ build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
             }
 
             if (op.size > crypto::pack::FASTCDC_FILE_THRESHOLD) {
-                const auto src = resolve_pre_mutation_source_path(
-                    runtime_data.local_dir,
-                    op,
-                    *op_hash,
-                    observed_input.local_tree,
-                    index);
-                auto cdc = crypto::pack::chunk_file_fastcdc(src);
-                if (!cdc) {
-                    return std::unexpected(detail::make_error(
-                        ErrorCode::ConcurrentModification,
-                        "failed to chunk upload source: " + cdc.error(),
-                        index));
-                }
-                if (cdc->file_hash != *op_hash || cdc->file_size != op.size ||
-                    cdc->chunks.empty() ||
-                    cdc->chunks.size() > history::maximum_chunks_per_file) {
-                    return std::unexpected(detail::make_error(
-                        ErrorCode::ConcurrentModification,
-                        "large upload source changed before publication",
-                        index));
-                }
-                history::ChunkedFileEntry entry{.file_hash = *op_hash,
-                                                .file_size = op.size,
-                                                .chunks = {}};
-                entry.chunks.reserve(cdc->chunks.size());
-                for (const auto& c : cdc->chunks) {
-                    entry.chunks.push_back(
-                        history::ChunkSlice{.hash = c.hash, .size = c.size});
-                }
-                layout.target_manifest.chunked_files.push_back(std::move(entry));
                 layout.chunked_uploads.push_back(PlannedChunkUpload{
                     .file_hash = *op_hash,
                     .file_size = op.size,
                     .primary_op_index = index,
-                    .chunks = std::move(cdc->chunks),
+                    .chunks = {},
                     .operation_indices = {index},
                 });
             } else if (op.size <= crypto::pack::MAX_MICRO_PACK_BLOB_SIZE) {
@@ -1859,6 +1830,63 @@ build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
                     .size = static_cast<std::uint32_t>(op.size),
                     .op_index = index,
                 });
+            }
+        }
+
+        auto& chunked = layout.chunked_uploads;
+        if (!chunked.empty()) {
+            std::vector<std::optional<Error>> errors(chunked.size());
+            const auto started = platform::perf_trace::begin();
+            application::parallel_for_indexed(
+                chunked.size(),
+                application::content_concurrency(),
+                [&](std::size_t slot) {
+                    auto& job = chunked[slot];
+                    const auto index = job.primary_op_index;
+                    const auto src = resolve_pre_mutation_source_path(
+                        runtime_data.local_dir,
+                        record.plan.operations[index],
+                        job.file_hash,
+                        observed_input.local_tree,
+                        index);
+                    auto cdc = crypto::pack::chunk_file_fastcdc(
+                        src,
+                        crypto::pack::fastcdc_profile_for_size(job.file_size));
+                    if (!cdc) {
+                        errors[slot] = detail::make_error(
+                            ErrorCode::ConcurrentModification,
+                            "failed to chunk upload source: " + cdc.error(),
+                            index);
+                    } else if (cdc->file_hash != job.file_hash ||
+                               cdc->file_size != job.file_size ||
+                               cdc->chunks.empty() ||
+                               cdc->chunks.size() >
+                                   history::maximum_chunks_per_file) {
+                        errors[slot] = detail::make_error(
+                            ErrorCode::ConcurrentModification,
+                            "large upload source changed before publication",
+                            index);
+                    } else {
+                        job.chunks = std::move(cdc->chunks);
+                    }
+                });
+            platform::perf_trace::finish("sync/fastcdc-layout", started);
+
+            for (std::size_t slot = 0; slot < chunked.size(); ++slot) {
+                if (errors[slot]) {
+                    return std::unexpected(std::move(*errors[slot]));
+                }
+                const auto& job = chunked[slot];
+                history::ChunkedFileEntry entry{.file_hash = job.file_hash,
+                                                .file_size = job.file_size,
+                                                .chunks = {}};
+                entry.chunks.reserve(job.chunks.size());
+                for (const auto& chunk : job.chunks) {
+                    entry.chunks.push_back(
+                        {.hash = chunk.hash, .size = chunk.size});
+                }
+                layout.target_manifest.chunked_files.push_back(
+                    std::move(entry));
             }
         }
 
@@ -2670,7 +2698,7 @@ prefetch_manifest_downloads(const history::StorageManifest& manifest,
         namespace ps = platform::private_storage;
         const auto read_seed = [&](const ChunkSource& seed,
                                    const history::ChunkSlice& chunk,
-                                   ps::PrivateOutputFile* out) {
+                                   const auto& append) {
             const auto source_matches = [&]() {
                 return !ps::is_reparse_or_symlink(seed.source_path) &&
                        ps::query_file_identity(seed.source_path) == seed.identity;
@@ -2685,9 +2713,7 @@ prefetch_manifest_downloads(const history::StorageManifest& manifest,
                 seed.source_path, copy_buf,
                 [&](std::span<const std::uint8_t> slab) {
                     blake3_hasher_update(&hasher, slab.data(), slab.size());
-                    return out == nullptr ||
-                           ps::write_private_file(*out, slab.data(), slab.size())
-                               .has_value();
+                    return append(slab);
                 },
                 std::nullopt,
                 ps::FileSlice{seed.offset, seed.size});
@@ -2707,7 +2733,9 @@ prefetch_manifest_downloads(const history::StorageManifest& manifest,
                 const auto seed = local_seeds.find(chunk.hash);
                 if (seed != local_seeds.end() &&
                     !seed_hits.contains(chunk.hash)) {
-                    if (read_seed(seed->second, chunk, nullptr)) {
+                    if (read_seed(seed->second, chunk, [](auto) {
+                            return true;
+                        })) {
                         seed_hits.insert(chunk.hash);
                     } else {
                         local_seeds.erase(seed);
@@ -2735,6 +2763,17 @@ prefetch_manifest_downloads(const history::StorageManifest& manifest,
                                 private_out.error().message);
             }
 
+            blake3_hasher file_hash;
+            blake3_hasher_init(&file_hash);
+            crypto::secure_memory::WipeGuard wipe_hash{file_hash};
+            auto append = [&](std::span<const std::uint8_t> slab) {
+                if (!ps::write_private_file(
+                        *private_out, slab.data(), slab.size())) {
+                    return false;
+                }
+                blake3_hasher_update(&file_hash, slab.data(), slab.size());
+                return true;
+            };
             std::uint64_t offset = 0;
             for (std::span<const history::ChunkSlice> pending{
                      job.entry->chunks};
@@ -2836,9 +2875,8 @@ prefetch_manifest_downloads(const history::StorageManifest& manifest,
                                          chunk_plain_dir);
                 for (const auto& chunk : window) {
                     if (seed_hits.contains(chunk.hash)) {
-                        if (!read_seed(local_seeds.at(chunk.hash),
-                                       chunk,
-                                       &*private_out)) {
+                        if (!read_seed(
+                                local_seeds.at(chunk.hash), chunk, append)) {
                             return fail(
                                 mutation::MutationErrorCode::IntegrityMismatch,
                                 "local FastCDC seed changed or could not be "
@@ -2849,7 +2887,7 @@ prefetch_manifest_downloads(const history::StorageManifest& manifest,
                     } else if (const auto prior =
                                    downloaded_slices.find(chunk.hash);
                                prior != downloaded_slices.end()) {
-                        if (!read_seed(prior->second, chunk, &*private_out)) {
+                        if (!read_seed(prior->second, chunk, append)) {
                             return fail(
                                 mutation::MutationErrorCode::IntegrityMismatch,
                                 "previously staged FastCDC chunk changed");
@@ -2858,15 +2896,7 @@ prefetch_manifest_downloads(const history::StorageManifest& manifest,
                         const auto path =
                             chunk_plain_dir / (hash_hex(chunk.hash) + ".chunk");
                         const auto copied = ps::stream_regular_file(
-                            path,
-                            copy_buf,
-                            [&](std::span<const std::uint8_t> slab) {
-                                return ps::write_private_file(*private_out,
-                                                              slab.data(),
-                                                              slab.size())
-                                    .has_value();
-                            },
-                            chunk.size);
+                            path, copy_buf, append, chunk.size);
                         if (!copied) {
                             return fail(mutation::MutationErrorCode::LocalIo,
                                         "failed to concatenate FastCDC chunk");
@@ -2892,8 +2922,12 @@ prefetch_manifest_downloads(const history::StorageManifest& manifest,
                 }
             }
             ps::close_private_file(*private_out);
-            if (!crypto::content::verify_file(
-                    out_path, job.file_hex, job.file_size)) {
+            Hash digest{};
+            blake3_hasher_finalize(
+                &file_hash,
+                reinterpret_cast<std::uint8_t*>(digest.data()),
+                digest.size());
+            if (offset != job.file_size || digest != job.entry->file_hash) {
                 return fail(mutation::MutationErrorCode::IntegrityMismatch,
                             "reassembled FastCDC file failed verification");
             }
