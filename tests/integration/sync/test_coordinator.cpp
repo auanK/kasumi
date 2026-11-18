@@ -5074,6 +5074,9 @@ TEST(ReobservationTest,
     // File initially has "AAAA" (4 bytes). Scan it to get real metadata and
     // cache.
     kasumi::test::write_text(local_file, "AAAA");
+    ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(
+        local_file,
+        std::filesystem::file_time_type::clock::now() - std::chrono::seconds{1}));
     const auto initial_scan = app_obs::scanner::scan_result(
         local, {}, app_obs::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(initial_scan.has_value());
@@ -5203,6 +5206,9 @@ TEST(ReobservationTest,
     // File initially has "AAAA" (4 bytes). Scan it to get real metadata and
     // cache.
     kasumi::test::write_text(local_file, "AAAA");
+    ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(
+        local_file,
+        std::filesystem::file_time_type::clock::now() - std::chrono::seconds{1}));
     const auto initial_scan = app_obs::scanner::scan_result(
         local, {}, app_obs::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(initial_scan.has_value());

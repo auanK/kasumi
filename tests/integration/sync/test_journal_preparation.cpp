@@ -474,7 +474,7 @@ build_legacy_v091_recovery_payload(std::string_view op_id,
 }
 
 TEST(JournalPreparationTest,
-     RecoversHistoricalV091JournalRecordThroughCoordinator) {
+     RejectsHistoricalV091JournalWithoutChangingFiles) {
     auto owner = kasumi::test::make_temp_workspace("v091-historical-recovery");
     const auto profile = kasumi::test::workspace_path(owner, "profile");
     const auto local = kasumi::test::workspace_path(owner, "local");
@@ -534,12 +534,10 @@ TEST(JournalPreparationTest,
                      12,
                      reinterpret_cast<const std::uint8_t*>(payload.data()),
                      payload.size());
-    kasumi::test::write_binary(
-        paths->final_path,
-        std::vector<std::byte>{
-            reinterpret_cast<const std::byte*>(encrypted.data()),
-            reinterpret_cast<const std::byte*>(encrypted.data() +
-                                               encrypted.size())});
+    const std::vector<std::byte> snapshot{
+        reinterpret_cast<const std::byte*>(encrypted.data()),
+        reinterpret_cast<const std::byte*>(encrypted.data() + encrypted.size())};
+    kasumi::test::write_binary(paths->final_path, snapshot);
     const auto confirmation_path =
         paths->final_path.parent_path() / "confirmed.enc";
     auto confirmation = kasumi::test::read_binary(confirmation_path);
@@ -564,14 +562,19 @@ TEST(JournalPreparationTest,
                                                    profile / "state.db",
                                                .key_path = profile / "key.bin"};
     kasumi::transport::Transport unavailable{};
-    auto recovered =
+    const auto recovered =
         sync::coordinator::recover_if_needed(runtime, unavailable, key);
-    ASSERT_TRUE(recovered) << (recovered ? "" : recovered.error().detail);
-    EXPECT_EQ(*recovered, sync::coordinator::RecoveryResult::RolledBack);
-    EXPECT_EQ(kasumi::test::read_text(local / "download.txt"), dl_old_content);
-    EXPECT_EQ(kasumi::test::read_text(local / "delete.txt"), del_old_content);
-    EXPECT_FALSE(std::filesystem::exists(paths->final_path));
-    EXPECT_FALSE(std::filesystem::exists(workspace->root));
+    ASSERT_FALSE(recovered);
+    EXPECT_EQ(recovered.error().code,
+              sync::coordinator::ErrorCode::JournalFailure);
+    EXPECT_EQ(kasumi::test::read_text(local / "download.txt"), dl_new_content);
+    EXPECT_FALSE(std::filesystem::exists(local / "delete.txt"));
+    EXPECT_EQ(kasumi::test::read_text(workspace->root / "0.backup"),
+              dl_old_content);
+    EXPECT_EQ(kasumi::test::read_text(workspace->root / "1.backup"),
+              del_old_content);
+    EXPECT_EQ(kasumi::test::read_binary(paths->final_path), snapshot);
+    EXPECT_EQ(kasumi::test::read_binary(confirmation_path), confirmation);
 }
 
 } // namespace
