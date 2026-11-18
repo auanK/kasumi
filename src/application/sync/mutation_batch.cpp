@@ -1,6 +1,7 @@
 #include "application/sync/mutation_batch.hpp"
 
 #include "application/concurrency.hpp"
+#include "application/progress.hpp"
 #include "application/sync/mutation_detail.hpp"
 #include "crypto/content.hpp"
 #include "platform/workspace.hpp"
@@ -56,7 +57,7 @@ create_batch_staging_directory(const platform::Workspace& workspace,
 }
 
 std::expected<StagedUploadObject, MutationError>
-stage_upload_to_path(const Operation& operation,
+stage_upload_to_path(const kasumi::Operation& operation,
                      std::size_t operation_index,
                      const std::filesystem::path& local_root,
                      const std::filesystem::path& destination,
@@ -88,7 +89,8 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
                    const transaction::Record& record,
                    const std::filesystem::path& local_root,
                    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                   const platform::Workspace& workspace) {
+                   const platform::Workspace& workspace,
+                   ProgressMeter* meter) {
     if (operation_indices.empty()) {
         return StagedUploadBatch{};
     }
@@ -156,6 +158,8 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
         }
     }
 
+    if (meter)
+        meter->phase(Activity::Staging, plans.size());
     const auto execute_plan =
         [&](const UniqueUploadPlan& plan)
         -> std::expected<StagedUploadObject, MutationError> {
@@ -169,6 +173,9 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
                                            key);
         if (!staged) {
             return std::unexpected(staged.error());
+        }
+        if (meter) {
+            meter->record_staged(destination, staged->plaintext_size);
         }
         for (const auto dup_index : plan.duplicate_indices) {
             const auto& dup_op = record.plan.operations[dup_index];
@@ -276,7 +283,8 @@ MutationResult verify_upload_batch_individually(
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const platform::Workspace& workspace,
-    std::size_t parallelism) {
+    std::size_t parallelism,
+    ProgressMeter* meter) {
     if (batch.objects.empty()) {
         return {};
     }
@@ -298,6 +306,8 @@ MutationResult verify_upload_batch_individually(
                 index);
             if (!result) {
                 errors[index] = std::move(result.error());
+            } else if (meter) {
+                ProgressMeter::add(meter->work);
             }
         });
 
@@ -385,7 +395,8 @@ verify_upload_batch(const StagedUploadBatch& batch,
                     transport::Transport& storage,
                     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                     const platform::Workspace& workspace,
-                    std::size_t parallelism) {
+                    std::size_t parallelism,
+                    ProgressMeter* meter) {
     if (batch.objects.empty()) {
         return {};
     }
@@ -393,7 +404,7 @@ verify_upload_batch(const StagedUploadBatch& batch,
     if (!transport::prefers_physical_hash_batch(storage,
                                                 batch.objects.size())) {
         return verify_upload_batch_individually(
-            batch, storage, key, workspace, parallelism);
+            batch, storage, key, workspace, parallelism, meter);
     }
 
     transport::PhysicalHashBatchRequest request;
@@ -412,6 +423,8 @@ verify_upload_batch(const StagedUploadBatch& batch,
         if (auto failure = bulk_verification_error(batch, *bulk)) {
             return std::unexpected(*failure);
         }
+        if (meter)
+            ProgressMeter::add(meter->work, batch.objects.size());
         return {};
     }
     if (bulk.error().code != transport::ErrorCode::Unsupported) {
@@ -423,7 +436,7 @@ verify_upload_batch(const StagedUploadBatch& batch,
     }
 
     return verify_upload_batch_individually(
-        batch, storage, key, workspace, parallelism);
+        batch, storage, key, workspace, parallelism, meter);
 }
 
 MutationResult cleanup_upload_batch(const StagedUploadBatch& batch) {

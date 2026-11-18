@@ -1,5 +1,6 @@
 #include "application/observation/scanner.hpp"
 #include "application/observation/state.hpp"
+#include "application/progress.hpp"
 #include "application/sync/coordinator.hpp"
 #include "application/sync/coordinator_detail.hpp"
 #include "application/sync/journal.hpp"
@@ -1373,11 +1374,19 @@ TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
     }
     kasumi::test::write_binary(first_local / "large.bin", data);
 
-    const auto synchronize = [&]() -> ::testing::AssertionResult {
+    const auto synchronize = [&](kasumi::application::ProgressMeter* meter =
+                                     nullptr) -> ::testing::AssertionResult {
+        kasumi::application::observation::LocalObservationSession session;
+        session.progress = meter;
         probe.profile = fixture->profile;
         auto observed =
             kasumi::application::observation::collect_reconciliation_input(
-                runtime_data(*fixture), fixture->storage, fixture->key, false);
+                runtime_data(*fixture),
+                fixture->storage,
+                fixture->key,
+                false,
+                {},
+                &session);
         if (!observed) {
             return ::testing::AssertionFailure() << observed.error().detail;
         }
@@ -1385,15 +1394,14 @@ TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
         if (!planned) {
             return ::testing::AssertionFailure() << planned.error().detail;
         }
-        const auto executed = sync::coordinator::execute(
-            runtime_data(*fixture),
-            fixture->storage,
-            fixture->key,
-            *observed,
-            *planned,
-            nullptr,
-            nullptr,
-            true);
+        const auto executed = sync::coordinator::execute(runtime_data(*fixture),
+                                                         fixture->storage,
+                                                         fixture->key,
+                                                         *observed,
+                                                         *planned,
+                                                         &session,
+                                                         nullptr,
+                                                         true);
         if (!executed) {
             return ::testing::AssertionFailure() << executed.error().detail;
         }
@@ -1477,11 +1485,19 @@ TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
                 assembled_checked = true;
             }
         });
-        const auto result = synchronize();
+        const kasumi::application::ProgressCallback no_ui;
+        kasumi::application::ProgressMeter meter(no_ui, fixture->storage);
+        const auto result = synchronize(&meter);
         fault::clear_hook();
         ASSERT_TRUE(result);
         EXPECT_TRUE(chunks_checked && assembled_checked);
         EXPECT_EQ(probe.content_get_count, needed_hashes.size());
+        EXPECT_EQ(meter.wire.download.objects.load(), needed_hashes.size());
+        EXPECT_EQ(meter.wire.download.bytes.load() == 0, reorder_only);
+        EXPECT_GT(meter.bytes_reused.load(), 0U);
+        if (reorder_only) {
+            EXPECT_EQ(meter.bytes_reused.load(), data.size());
+        }
         EXPECT_EQ(kasumi::test::read_binary(second_local / "large.bin"), data);
         local_hashes.clear();
         for (const auto& c : updated->chunks) {

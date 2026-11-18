@@ -4,6 +4,7 @@
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/scanner.hpp"
+#include "application/progress.hpp"
 #include "application/sync/journal.hpp"
 #include "application/sync/metadata.hpp"
 #include "application/sync/mutation.hpp"
@@ -1286,7 +1287,10 @@ std::expected<void, UploadBatchError> transfer_and_verify_upload_batch(
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const platform::Workspace& workspace,
-    std::size_t parallelism) {
+    std::size_t parallelism,
+    ProgressMeter* meter) {
+    if (meter)
+        meter->phase(Activity::Uploading, batch.objects.size());
     auto transferred =
         mutation::transfer_upload_batch(batch, storage, parallelism);
     const bool transfer_unknown =
@@ -1298,8 +1302,10 @@ std::expected<void, UploadBatchError> transfer_and_verify_upload_batch(
             .mutation = std::move(transferred.error()),
         });
     }
+    if (meter)
+        meter->phase(Activity::Verifying, batch.objects.size());
     auto verified = mutation::verify_upload_batch(
-        batch, storage, key, workspace, parallelism);
+        batch, storage, key, workspace, parallelism, meter);
     if (!verified) {
         return std::unexpected(UploadBatchError{
             .transport_after_unknown_transfer =
@@ -1579,7 +1585,8 @@ run_content_window(
     return failure;
 }
 
-bool same_operation(const Operation& left, const Operation& right) noexcept {
+bool same_operation(const kasumi::Operation& left,
+                    const kasumi::Operation& right) noexcept {
     return left.action == right.action && left.path == right.path &&
            left.hash == right.hash && left.alt_path == right.alt_path &&
            left.size == right.size &&
@@ -1599,7 +1606,7 @@ bool same_plan(const SyncPlan& left, const SyncPlan& right) noexcept {
 
 bool is_storage_repair_operation(const reconciliation::Input& input,
                                  const reconciliation::Result& result,
-                                 const Operation& operation) noexcept {
+                                 const kasumi::Operation& operation) noexcept {
     if (!result.requires_storage_repair || operation.action != Action::Upload ||
         !input.storage.history_present) {
         return false;
@@ -1677,7 +1684,7 @@ struct UploadLayoutPlan {
 
 std::filesystem::path
 resolve_pre_mutation_source_path(const std::filesystem::path& local_root,
-                                 const Operation& operation,
+                                 const kasumi::Operation& operation,
                                  const Hash& expected_hash,
                                  const Snapshot& observed_local_tree,
                                  std::size_t op_index) {
@@ -1993,17 +2000,20 @@ build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
     return layout;
 }
 
-std::expected<void, detail::UploadBatchError> execute_packed_upload_batch(
-    std::span<const PlannedPack* const> packs,
-    const transaction::Record& record,
-    const std::filesystem::path& local_root,
-    transport::Transport& storage,
-    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-    const platform::Workspace& workspace,
-    std::size_t parallelism) {
+std::expected<void, detail::UploadBatchError>
+execute_packed_upload_batch(std::span<const PlannedPack* const> packs,
+                            const transaction::Record& record,
+                            const std::filesystem::path& local_root,
+                            transport::Transport& storage,
+                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                            const platform::Workspace& workspace,
+                            std::size_t parallelism,
+                            ProgressMeter* meter) {
     if (packs.empty()) {
         return {};
     }
+    if (meter)
+        meter->phase(Activity::Staging, packs.size());
     const auto first_op = packs.front()->operation_indices.front();
     auto staging = platform::create_workspace("pack-upload-batch");
     if (!staging) {
@@ -2057,6 +2067,9 @@ std::expected<void, detail::UploadBatchError> execute_packed_upload_batch(
                 };
                 return;
             }
+            if (meter) {
+                meter->record_staged(dest, res->pack_plaintext_size);
+            }
             batch.objects[i] = mutation::StagedUploadObject{
                 .identifier = pack.pack_identifier,
                 .plaintext_hash = hash_hex(res->pack_hash),
@@ -2082,7 +2095,7 @@ std::expected<void, detail::UploadBatchError> execute_packed_upload_batch(
     }
 
     auto transferred = detail::transfer_and_verify_upload_batch(
-        batch, storage, key, workspace, parallelism);
+        batch, storage, key, workspace, parallelism, meter);
     if (!transferred) {
         if (!transferred.error().transport_after_unknown_transfer) {
             return transferred;
@@ -2105,7 +2118,8 @@ std::expected<void, detail::UploadBatchError> execute_chunked_upload_batch(
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const platform::Workspace& workspace,
-    std::size_t parallelism) {
+    std::size_t parallelism,
+    ProgressMeter* meter) {
     if (uploads.empty()) {
         return {};
     }
@@ -2215,12 +2229,16 @@ std::expected<void, detail::UploadBatchError> execute_chunked_upload_batch(
     for (auto& chunk : unique_chunks) {
         if (!present_chunk_ids.contains(chunk.chunk_id)) {
             to_upload.push_back(std::move(chunk));
+        } else if (meter) {
+            ProgressMeter::add(meter->bytes_reused, chunk.size);
         }
     }
     if (to_upload.empty()) {
         return {};
     }
 
+    if (meter)
+        meter->phase(Activity::Staging, to_upload.size());
     const auto first_op = to_upload.front().operation_index;
     auto staging = platform::create_workspace("chunk-upload-batch");
     if (!staging) {
@@ -2268,6 +2286,9 @@ std::expected<void, detail::UploadBatchError> execute_chunked_upload_batch(
                 };
                 return;
             }
+            if (meter) {
+                meter->record_staged(dest, chunk.size);
+            }
             batch.objects[i] = mutation::StagedUploadObject{
                 .identifier = chunk.chunk_id,
                 .plaintext_hash = chunk.chunk_hex,
@@ -2293,7 +2314,7 @@ std::expected<void, detail::UploadBatchError> execute_chunked_upload_batch(
     }
 
     auto transferred = detail::transfer_and_verify_upload_batch(
-        batch, storage, key, workspace, parallelism);
+        batch, storage, key, workspace, parallelism, meter);
     if (!transferred) {
         if (!transferred.error().transport_after_unknown_transfer) {
             return transferred;
@@ -2309,15 +2330,15 @@ std::expected<void, detail::UploadBatchError> execute_chunked_upload_batch(
 
 std::expected<std::unordered_map<std::string, std::filesystem::path>,
               mutation::MutationError>
-prefetch_manifest_downloads(
-    const history::StorageManifest& manifest,
-    std::span<const std::size_t> apply_order,
-    const transaction::Record& record,
-    const std::filesystem::path& local_root,
-    transport::Transport& storage,
-    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-    const platform::Workspace& workspace,
-    std::size_t parallelism) {
+prefetch_manifest_downloads(const history::StorageManifest& manifest,
+                            std::span<const std::size_t> apply_order,
+                            const transaction::Record& record,
+                            const std::filesystem::path& local_root,
+                            transport::Transport& storage,
+                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                            const platform::Workspace& workspace,
+                            std::size_t parallelism,
+                            ProgressMeter* meter) {
     std::unordered_map<std::string, std::filesystem::path> ready;
     if (manifest.empty()) {
         return ready;
@@ -2423,7 +2444,12 @@ prefetch_manifest_downloads(
         for (const auto& p : pack_jobs) {
             ids.push_back(p.identifier);
         }
+        if (meter)
+            meter->phase(Activity::Downloading, ids.size());
         const bool batch_ok = batch_fetch(dl_dir, ids);
+        if (meter && batch_ok) {
+            meter->phase(Activity::Installing, pack_jobs.size());
+        }
 
         std::vector<std::optional<mutation::MutationError>> errors(
             pack_jobs.size());
@@ -2462,6 +2488,8 @@ prefetch_manifest_downloads(
                             extracted.error(),
                         record.plan.operations[job.first_op_index].path,
                         job.first_op_index);
+                } else if (meter && batch_ok) {
+                    ProgressMeter::add(meter->work);
                 }
             });
 
@@ -2636,6 +2664,8 @@ prefetch_manifest_downloads(
             for (const auto& c : chunk_jobs) {
                 chunk_ids.push_back(c.identifier);
             }
+            if (meter)
+                meter->phase(Activity::Downloading, chunk_ids.size());
             const bool batch_ok = batch_fetch(chunk_dl_dir, chunk_ids);
 
             std::vector<std::optional<mutation::MutationError>> chunk_errors(
@@ -2690,6 +2720,8 @@ prefetch_manifest_downloads(
             }
         }
 
+        if (meter)
+            meter->phase(Activity::Installing, file_jobs.size());
         mutation_fault_test::hit("fastcdc_chunks_ready", chunk_plain_dir);
         for (const auto& job : file_jobs) {
             const auto out_path = chunk_plain_dir / (job.file_hex + ".plain");
@@ -2709,6 +2741,8 @@ prefetch_manifest_downloads(
                 const bool from_seed = seed_hits.contains(chunk.hash);
                 if (from_seed) {
                     if (read_seed(local_seeds.at(chunk.hash), chunk, &*private_out)) {
+                        if (meter)
+                            ProgressMeter::add(meter->bytes_reused, chunk.size);
                         continue;
                     }
                 } else {
@@ -2752,6 +2786,8 @@ prefetch_manifest_downloads(
             }
             mutation_fault_test::hit("fastcdc_file_ready", out_path);
             ready.emplace(job.file_hex, out_path);
+            if (meter)
+                ProgressMeter::add(meter->work);
         }
     }
 
@@ -2938,6 +2974,7 @@ execute(const runtime::RuntimeData& runtime_data,
         observation::LocalObservationSession* session,
         StagedExecutionHandoff* staged_handoff,
         bool enable_micro_packs) {
+    auto* meter = session ? session->progress : nullptr;
     struct StagedHandoffGuard {
         StagedExecutionHandoff* handoff = nullptr;
         std::span<const std::uint8_t, crypto::KEY_SIZE> key;
@@ -3069,6 +3106,15 @@ execute(const runtime::RuntimeData& runtime_data,
     };
     const auto content_upload_required = required_content_uploads(
         observed_input, reconciliation_result, record->plan);
+    if (meter) {
+        for (std::size_t i = 0; i < record->plan.operations.size(); ++i) {
+            const auto& op = record->plan.operations[i];
+            if (op.action == Action::Upload && !content_upload_required[i]) {
+                ProgressMeter::add(meter->bytes_reused, op.size);
+            }
+        }
+    }
+
     auto saved = save_active_record();
     if (!saved) {
         if (handoff_workspace.has_value()) {
@@ -3137,6 +3183,12 @@ execute(const runtime::RuntimeData& runtime_data,
     if (!saved)
         return std::unexpected(saved.error());
 
+    if (meter &&
+        std::ranges::any_of(record->plan.operations, [](const auto& operation) {
+            return operation.action == Action::Upload;
+        })) {
+        meter->phase(Activity::Staging);
+    }
     auto layout_plan = build_upload_layout_plan(runtime_data,
                                                 storage,
                                                 key,
@@ -3369,23 +3421,36 @@ execute(const runtime::RuntimeData& runtime_data,
                               std::to_string(operation.size)];
         }
     }
-    auto preverified_downloads = prefetch_manifest_downloads(
-        observed_input.storage.storage_manifest,
-        apply_order,
-        *record,
-        runtime_data.local_dir,
-        storage,
-        key,
-        *workspace,
-        parallelism);
+    auto preverified_downloads =
+        prefetch_manifest_downloads(observed_input.storage.storage_manifest,
+                                    apply_order,
+                                    *record,
+                                    runtime_data.local_dir,
+                                    storage,
+                                    key,
+                                    *workspace,
+                                    parallelism,
+                                    meter);
     if (!preverified_downloads) {
         return fail_mutation(preverified_downloads.error().operation_index,
                              preverified_downloads.error());
     }
     std::unordered_set<std::string> populated_downloads;
+    std::optional<Activity> local_activity;
     for (std::size_t position = 0; position < apply_order.size();) {
         const auto first = apply_order[position];
         const auto& first_operation = record->plan.operations[first];
+        if (meter && first_operation.action != Action::Upload) {
+            const bool loose_download =
+                first_operation.action == Action::Download &&
+                !preverified_downloads->contains(first_operation.hash);
+            const auto phase =
+                loose_download ? Activity::Downloading : Activity::Installing;
+            if (local_activity != phase) {
+                local_activity = phase;
+                meter->phase(phase);
+            }
+        }
         if (auto prepared = prepare_destination(first); !prepared)
             return std::unexpected(prepared.error());
         if (first_operation.action == Action::Download &&
@@ -3481,6 +3546,8 @@ execute(const runtime::RuntimeData& runtime_data,
                 for (auto& content_key : populated_in_window) {
                     populated_downloads.insert(std::move(content_key));
                 }
+                if (meter)
+                    ProgressMeter::add(meter->work, end - position);
                 position = end;
                 continue;
             }
@@ -3515,10 +3582,13 @@ execute(const runtime::RuntimeData& runtime_data,
             if (!marked) {
                 return std::unexpected(marked.error());
             }
+            if (meter)
+                ProgressMeter::add(meter->work);
             ++position;
             continue;
         }
 
+        local_activity.reset();
         std::size_t end = position;
         std::vector<std::size_t> pending_uploads;
         while (end < apply_order.size() &&
@@ -3563,13 +3633,15 @@ execute(const runtime::RuntimeData& runtime_data,
         }
 
         if (!planned_packs_pending.empty()) {
-            if (auto pack_ok = execute_packed_upload_batch(planned_packs_pending,
-                                                           *record,
-                                                           runtime_data.local_dir,
-                                                           storage,
-                                                           key,
-                                                           *workspace,
-                                                           parallelism);
+            if (auto pack_ok =
+                    execute_packed_upload_batch(planned_packs_pending,
+                                                *record,
+                                                runtime_data.local_dir,
+                                                storage,
+                                                key,
+                                                *workspace,
+                                                parallelism,
+                                                meter);
                 !pack_ok) {
                 if (pack_ok.error().transport_after_unknown_transfer) {
                     return std::unexpected(
@@ -3590,16 +3662,17 @@ execute(const runtime::RuntimeData& runtime_data,
         }
 
         if (!planned_chunks_pending.empty()) {
-            if (auto chunk_ok = execute_chunked_upload_batch(
-                    planned_chunks_pending,
-                    *record,
-                    observed_input,
-                    reconciliation_result,
-                    runtime_data.local_dir,
-                    storage,
-                    key,
-                    *workspace,
-                    parallelism);
+            if (auto chunk_ok =
+                    execute_chunked_upload_batch(planned_chunks_pending,
+                                                 *record,
+                                                 observed_input,
+                                                 reconciliation_result,
+                                                 runtime_data.local_dir,
+                                                 storage,
+                                                 key,
+                                                 *workspace,
+                                                 parallelism,
+                                                 meter);
                 !chunk_ok) {
                 if (chunk_ok.error().transport_after_unknown_transfer) {
                     return std::unexpected(
@@ -3625,7 +3698,7 @@ execute(const runtime::RuntimeData& runtime_data,
                 loose_pending_uploads, chunk_start, record->plan.operations);
 
             auto staged_batch = mutation::stage_upload_batch(
-                chunk, *record, runtime_data.local_dir, key, *workspace);
+                chunk, *record, runtime_data.local_dir, key, *workspace, meter);
 
             if (!staged_batch) {
                 return fail_mutation(staged_batch.error().operation_index,
@@ -3634,8 +3707,13 @@ execute(const runtime::RuntimeData& runtime_data,
 
             detail::ScopedUploadBatchCleanup batch_cleanup{*staged_batch};
 
-            if (auto batch_ok = detail::transfer_and_verify_upload_batch(
-                    *staged_batch, storage, key, *workspace, parallelism);
+            if (auto batch_ok =
+                    detail::transfer_and_verify_upload_batch(*staged_batch,
+                                                             storage,
+                                                             key,
+                                                             *workspace,
+                                                             parallelism,
+                                                             meter);
                 !batch_ok) {
                 if (batch_ok.error().transport_after_unknown_transfer) {
                     return std::unexpected(

@@ -749,6 +749,8 @@ TEST(IntegrityMaintenanceTest, FsckProgressCountsUniqueReferencedObjects) {
     EXPECT_EQ(audit->total_plaintext_bytes, 90U);
     EXPECT_EQ(events.back().stage, kasumi::application::FsckStage::Finalizing);
     EXPECT_EQ(events.back().completed_objects, 10U);
+    EXPECT_EQ(events.back().physical_objects_downloaded, 10U);
+    EXPECT_GT(events.back().wire_download_bytes, 90U);
     EXPECT_EQ(events.back().completed_plaintext_bytes, 90U);
     EXPECT_EQ(events.front().stage, kasumi::application::FsckStage::Observing);
     EXPECT_FALSE(events.front().total_objects.has_value());

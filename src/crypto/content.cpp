@@ -14,7 +14,9 @@
 
 namespace kasumi::crypto::content {
 
-std::expected<Hash, std::string> hash_file(const std::filesystem::path& path) {
+std::expected<Hash, std::string>
+hash_file(const std::filesystem::path& path,
+          std::atomic<std::uint64_t>* bytes_read) {
     try {
         blake3_hasher state;
         blake3_hasher_init(&state);
@@ -29,6 +31,10 @@ std::expected<Hash, std::string> hash_file(const std::filesystem::path& path) {
             [&](std::span<const std::uint8_t> chunk) {
                 if (!chunk.empty()) {
                     blake3_hasher_update(&state, chunk.data(), chunk.size());
+                    if (bytes_read) {
+                        bytes_read->fetch_add(chunk.size(),
+                                              std::memory_order_relaxed);
+                    }
                 }
             });
         if (!streamed) {

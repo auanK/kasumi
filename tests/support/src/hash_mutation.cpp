@@ -59,13 +59,15 @@ void mutation_blake3_update(blake3_hasher* state,
 #undef read_file_metadata
 
 namespace kasumi::crypto::content {
-std::expected<Hash, std::string> hash_file(const std::filesystem::path& path) {
+std::expected<Hash, std::string>
+hash_file(const std::filesystem::path& path,
+          std::atomic<std::uint64_t>* bytes_read) {
     watching_hash = active_mutation && active_mutation->path == path;
     std::unique_lock lock(mutation_mutex, std::defer_lock);
     if (watching_hash)
         lock.lock();
     first_chunk = false;
-    auto result = instrumented_hash_file(path);
+    auto result = instrumented_hash_file(path, bytes_read);
     if (watching_hash && result)
         active_mutation->hashes.push_back(*result);
     watching_hash = false;

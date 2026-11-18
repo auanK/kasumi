@@ -2,6 +2,7 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "application/inspection/inspect.hpp"
 #include "application/observation/state.hpp"
+#include "application/progress.hpp"
 #include "application/sync/coordinator.hpp"
 #include "application/sync/coordinator_detail.hpp"
 #include "application/sync/journal_fault_test.hpp"
@@ -72,6 +73,7 @@ SyncCompleted compute_sync_summary(const reconciliation::Result& result) {
 } // namespace
 
 std::expected<Response, Error> run_sync(OperationContext& context) {
+    ProgressMeter meter(context.on_progress, context.storage);
     const auto sync_start = std::chrono::steady_clock::now();
 
     auto recovery = sync::coordinator::recover_if_needed(
@@ -87,6 +89,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
     sync::journal_fault_test::hit("recovered");
 
     observation::LocalObservationSession observation_session;
+    observation_session.progress = &meter;
     observation_session.database_path = context.runtime.database_path;
     std::optional<history_storage::maintenance_protocol::RegistrationResult>
         eager_writer;
@@ -97,12 +100,13 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                                       std::nullopt,
                                   std::uint32_t total_items = 0) {
         current_stage = stage;
-        if (context.on_progress) {
-            context.on_progress(SyncProgress{
-                .stage = stage,
-                .summary = std::move(summary_arg),
-                .total_items = total_items,
-            });
+        meter.notify(SyncProgress{
+            .stage = stage,
+            .summary = std::move(summary_arg),
+            .total_items = total_items,
+        });
+        if (stage == SyncStage::Observing) {
+            meter.phase(Activity::Scanning);
         }
     };
     auto outcome = [&]() -> std::expected<Response, Error> {
@@ -132,6 +136,13 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                         context.runtime.database_path,
                         observation_session.cache));
                 }
+                summary.wire_upload_bytes = meter.wire.upload.bytes.load();
+                summary.wire_download_bytes = meter.wire.download.bytes.load();
+                summary.physical_objects_uploaded =
+                    meter.wire.upload.objects.load();
+                summary.physical_objects_downloaded =
+                    meter.wire.download.objects.load();
+                summary.local_delta_reused_bytes = meter.bytes_reused.load();
                 summary.duration =
                     std::chrono::steady_clock::now() - sync_start;
                 return make_response(context, summary);
@@ -382,6 +393,9 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     break;
                 }
                 confirmed_missing.push_back(*missing_hash);
+                meter.phase(Activity::Reobserving,
+                            std::nullopt,
+                            static_cast<unsigned>(attempt + 2));
 
                 if (auto retry = prepare_pass(
                         false,

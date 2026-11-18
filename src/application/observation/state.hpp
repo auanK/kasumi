@@ -17,6 +17,10 @@
 #include <string>
 #include <vector>
 
+namespace kasumi::application {
+class ProgressMeter;
+}
+
 namespace kasumi::application::observation {
 
 // State reused across local observations.
@@ -29,6 +33,7 @@ struct LocalObservationSession {
     bool cache_dirty = false;
     std::string history_namespace;
     history_storage::KnownHistoryFrontier history_reads;
+    ProgressMeter* progress = nullptr;
 };
 
 // Managed snapshot and transient physical facts from the same local scan.

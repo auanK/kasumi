@@ -1,6 +1,7 @@
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/state.hpp"
+#include "application/progress.hpp"
 #include "application/sync/coordinator.hpp"
 #include "application/sync/coordinator_detail.hpp"
 #include "application/sync/reobservation.hpp"
@@ -18,6 +19,9 @@
 namespace kasumi::application::detail {
 
 std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
+    ProgressMeter meter(context.on_progress, context.storage);
+    meter.notify(SyncProgress{.stage = SyncStage::Observing});
+    meter.phase(Activity::Scanning);
     auto recovered = sync::coordinator::recover_if_needed(
         context.runtime, context.storage, context.key);
     if (!recovered) {
@@ -46,6 +50,7 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
     const auto authority = (*state)->pending_materializations;
 
     observation::LocalObservationSession session;
+    session.progress = &meter;
     auto collected = observation::collect_reconciliation_input(
         context.runtime, context.storage, context.key, false, {}, &session);
     if (!collected) {
@@ -55,6 +60,7 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
 
     collected->pending_deletion_authority = authority;
 
+    meter.notify(SyncProgress{.stage = SyncStage::Calculating});
     auto reconciled = reconciliation::reconcile(*collected);
     if (!reconciled) {
         return std::unexpected(
@@ -173,6 +179,7 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
         writer = std::move(*registered);
     }
 
+    meter.notify(SyncProgress{.stage = SyncStage::Applying});
     auto synchronized = sync::coordinator::execute(
         context.runtime,
         context.storage,
@@ -199,6 +206,7 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
                        sync::coordinator::describe(synchronized.error())));
     }
 
+    meter.notify(SyncProgress{.stage = SyncStage::Finalizing});
     return make_response(context,
                          ResolveMissingCompleted{
                              .resolved_count = resolved_paths.size(),

@@ -3,6 +3,7 @@
 #include "application/concurrency.hpp"
 #include "application/observation/cache_contract.hpp"
 #include "application/observation/file_metadata.hpp"
+#include "application/progress.hpp"
 #include "core/ignore.hpp"
 #include "crypto/content.hpp"
 #include "platform/metadata.hpp"
@@ -57,6 +58,7 @@ struct ScanContext {
     std::unordered_map<std::string_view, const state_storage::FileCacheRow*>
         previous;
     std::vector<state_storage::FileCacheRow> cache;
+    ProgressMeter* progress = nullptr;
 };
 
 ScanError scan_error(const std::filesystem::path& path,
@@ -197,6 +199,11 @@ try_reuse_cached_row(const ScanContext& context,
             cache::CacheReuseResult::Reusable) {
         return std::nullopt;
     }
+    if (auto* progress = context.progress) {
+        ProgressMeter::add(progress->files_seen);
+        ProgressMeter::add(progress->files_bytes, current_meta.size);
+        ProgressMeter::add(progress->cache_hits);
+    }
     row.hash = cached_row.hash;
     platform::perf_trace::count("local hash cache hits");
     return cached_row;
@@ -226,12 +233,18 @@ process_file_entry(const std::filesystem::path& file_path,
                              .cache_row = std::move(*cached_hit)};
     }
 
+    if (auto* progress = context.progress) {
+        ProgressMeter::add(progress->files_seen);
+        ProgressMeter::add(progress->files_bytes, current_meta.size);
+    }
     platform::perf_trace::count("local hash cache misses");
     std::expected<Hash, std::string> hash = std::unexpected("unhashed");
     bool stable = false;
     for (int attempt = 0; attempt < 2; ++attempt) {
         const auto before_meta = current_meta;
-        hash = crypto::content::hash_file(file_path);
+        hash = crypto::content::hash_file(
+            file_path,
+            context.progress ? &context.progress->disk_bytes : nullptr);
         platform::perf_trace::count("local hash file calls");
         platform::perf_trace::count("local hash bytes", before_meta.size);
         if (!hash)
@@ -274,6 +287,9 @@ process_file_entry(const std::filesystem::path& file_path,
                                          "compute hash",
                                          "file changed while being read"});
     row.hash = *hash;
+    if (auto* progress = context.progress) {
+        ProgressMeter::add(progress->files_hashed);
+    }
     std::optional<state_storage::FileCacheRow> cache_row;
     if (current_meta.is_valid && current_meta.identity.has_value()) {
         cache_row = state_storage::FileCacheRow{
@@ -742,10 +758,15 @@ std::expected<ScanResult, ScanError>
 scan_result(const std::filesystem::path& local_root,
             std::span<const state_storage::FileCacheRow> previous_cache,
             ScanPolicy policy,
-            MetadataQuery metadata_query) {
+            MetadataQuery metadata_query,
+            ProgressMeter* progress) {
     const auto ignore_list = load_ignore_list(local_root / ".kasumiignore");
-    return scan_result(
-        local_root, previous_cache, policy, metadata_query, ignore_list);
+    return scan_result(local_root,
+                       previous_cache,
+                       policy,
+                       metadata_query,
+                       ignore_list,
+                       progress);
 }
 
 std::expected<ScanResult, ScanError>
@@ -753,7 +774,8 @@ scan_result(const std::filesystem::path& local_root,
             std::span<const state_storage::FileCacheRow> previous_cache,
             ScanPolicy policy,
             MetadataQuery metadata_query,
-            const IgnoreList& ignore_list) {
+            const IgnoreList& ignore_list,
+            ProgressMeter* progress) {
     if (auto valid = validate_ignore_list(local_root, ignore_list); !valid) {
         return std::unexpected(valid.error());
     }
@@ -765,7 +787,8 @@ scan_result(const std::filesystem::path& local_root,
                         .metadata_query = metadata_query,
                         .scan_start_ns = scan_start_ns,
                         .previous = {},
-                        .cache = {}};
+                        .cache = {},
+                        .progress = progress};
     context.cache.reserve(previous_cache.size());
     context.previous.reserve(previous_cache.size());
     for (const auto& row : previous_cache)
@@ -1173,7 +1196,7 @@ hash_disposable_candidates(
     paths.reserve(candidate_paths.size());
     for (const auto& candidate : candidate_paths) {
         if (candidate.empty() ||
-            !kasumi::has_safe_paths(Operation{.path = candidate})) {
+            !kasumi::has_safe_paths(kasumi::Operation{.path = candidate})) {
             return std::unexpected(ScanError{
                 .code = ScanErrorCode::Io,
                 .path = local_root / candidate,

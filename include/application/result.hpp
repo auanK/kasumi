@@ -93,6 +93,11 @@ struct SyncCompleted {
     bool partial = false;
     std::uint32_t trusted_content_reused = 0;
     std::optional<std::chrono::nanoseconds> duration = std::nullopt;
+    std::uint64_t wire_upload_bytes = 0;
+    std::uint64_t wire_download_bytes = 0;
+    std::uint64_t local_delta_reused_bytes = 0;
+    std::uint64_t physical_objects_uploaded = 0;
+    std::uint64_t physical_objects_downloaded = 0;
 };
 
 // Structural inventory summary collected after an explicitly audited Sync.

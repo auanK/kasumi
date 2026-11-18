@@ -15,6 +15,10 @@
 #include <string>
 #include <vector>
 
+namespace kasumi::application {
+class ProgressMeter;
+}
+
 namespace kasumi::application::sync::mutation {
 
 // Represents staged content ready (encrypted) for upload.
@@ -40,7 +44,8 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
                    const transaction::Record& record,
                    const std::filesystem::path& local_root,
                    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                   const platform::Workspace& workspace);
+                   const platform::Workspace& workspace,
+                   ProgressMeter* meter = nullptr);
 
 // Constructs the request and uploads the batch objects.
 MutationResult transfer_upload_batch(const StagedUploadBatch& batch,
@@ -55,7 +60,8 @@ verify_upload_batch(const StagedUploadBatch& batch,
                     transport::Transport& storage,
                     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                     const platform::Workspace& workspace,
-                    std::size_t parallelism);
+                    std::size_t parallelism,
+                    ProgressMeter* meter = nullptr);
 
 // Removes files from upload staging in a fault-tolerant manner,
 // returning errors if encountered.

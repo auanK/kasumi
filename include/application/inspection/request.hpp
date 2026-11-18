@@ -3,6 +3,7 @@
 
 #include "application/credentials.hpp"
 #include "application/environment.hpp"
+#include "application/execute.hpp"
 
 #include <optional>
 #include <string>
@@ -45,6 +46,7 @@ struct InspectionInput {
     InspectionRequest request;
     Credentials credentials;
     ExecutionEnvironment environment;
+    ProgressCallback on_progress{};
 };
 
 } // namespace kasumi::application

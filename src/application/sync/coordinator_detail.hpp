@@ -23,6 +23,10 @@
 #include <string>
 #include <vector>
 
+namespace kasumi::application {
+class ProgressMeter;
+}
+
 namespace kasumi::application::sync::coordinator::detail {
 
 // Sizing and TTL limits for chunked sub-batch uploads
@@ -180,7 +184,8 @@ std::expected<void, UploadBatchError> transfer_and_verify_upload_batch(
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const platform::Workspace& workspace,
-    std::size_t parallelism);
+    std::size_t parallelism,
+    ProgressMeter* meter = nullptr);
 
 // Initializes state.db (if needed) and persists the committed StoredState.
 std::expected<void, Error>

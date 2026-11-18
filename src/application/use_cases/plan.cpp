@@ -1,6 +1,7 @@
 #include "core/reconciliation/plan.hpp"
 
 #include "application/observation/state.hpp"
+#include "application/progress.hpp"
 #include "application/use_cases/context.hpp"
 #include "application/use_cases/plan_support.hpp"
 #include "core/operation.hpp"
@@ -88,16 +89,12 @@ std::string describe_reconciliation_error(const reconciliation::Error& error) {
 }
 
 std::expected<Response, Error> run_plan(OperationContext& context) {
-    const auto notify = [&](SyncStage stage) {
-        if (context.on_progress) {
-            context.on_progress(SyncProgress{.stage = stage});
-        }
-    };
-
-    notify(SyncStage::Observing);
-
+    ProgressMeter meter(context.on_progress, context.storage, false);
+    meter.notify(SyncProgress{.stage = SyncStage::Observing});
+    meter.phase(Activity::Scanning);
     observation::LocalObservationSession observation_session;
     observation_session.database_path = context.runtime.database_path;
+    observation_session.progress = &meter;
 
     auto collected =
         observation::collect_reconciliation_input(context.runtime,
@@ -113,7 +110,7 @@ std::expected<Response, Error> run_plan(OperationContext& context) {
                         SyncStage::Observing);
     }
 
-    notify(SyncStage::Calculating);
+    meter.notify(SyncProgress{.stage = SyncStage::Calculating});
 
     auto reconciled = reconciliation::reconcile(*collected);
     if (!reconciled) {

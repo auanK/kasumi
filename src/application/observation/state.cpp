@@ -5,6 +5,7 @@
 #include "application/observation/file_metadata.hpp"
 #include "application/observation/history.hpp"
 #include "application/observation/scanner.hpp"
+#include "application/progress.hpp"
 #include "core/ignore.hpp"
 #include "core/reconciliation/plan.hpp"
 #include "crypto/content.hpp"
@@ -247,8 +248,12 @@ collect_local_observation(const std::filesystem::path& local_root,
         ensure_file_cache_loaded(*session);
         auto previous = std::move(session->cache);
         const bool cache_was_dirty = session->cache_dirty;
-        auto scanned = scanner::scan_result(
-            local_root, previous, scanner::ScanPolicy::ReuseStrongFingerprint);
+        auto scanned =
+            scanner::scan_result(local_root,
+                                 previous,
+                                 scanner::ScanPolicy::ReuseStrongFingerprint,
+                                 cache::read_file_metadata,
+                                 session->progress);
         if (!scanned) {
             session->cache = std::move(previous);
             return std::unexpected(scanner::describe(scanned.error()));
@@ -394,6 +399,10 @@ collect_reconciliation_input(
             session->history_reads.observed_markers;
         hints.frontier->observed_epoch = session->history_reads.observed_epoch;
     }
+    if (session && session->progress) {
+        session->progress->observing_remote.store(true,
+                                                  std::memory_order_relaxed);
+    }
     auto observed =
         history::observe(storage,
                          key,
@@ -401,6 +410,10 @@ collect_reconciliation_input(
                          audit_storage_objects,
                          hints.frontier ? &*hints.frontier : nullptr,
                          effective_trusted_markers);
+    if (session && session->progress) {
+        session->progress->observing_remote.store(false,
+                                                  std::memory_order_relaxed);
+    }
     local_scan.join();
     if (!local_observation) {
         return std::unexpected(
