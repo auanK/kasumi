@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.14.1]
+
+### Fixed
+
+- Show the `vault`, `file`, and `memory` key storage modes before asking for credentials when creating a profile. Pressing Enter selects the operating system credential vault.
+- Offer New and Quit when there are no profiles. Type `:back` at profile, path, and key storage prompts to return to the menu.
+- Resolve GCC and Clang build warnings in platform code and the GCC LTO warning from Zstandard's assembler flags.
+
+### Upgrade Notes
+
+- Scripts that drive `kasumi config` via standard input must supply a storage mode or an empty line after the remote destination when creating a profile.
+
 ## [0.14.0]
 
 ### Added
