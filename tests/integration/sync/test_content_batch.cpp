@@ -1,6 +1,5 @@
 #include "application/observation/scanner.hpp"
 #include "application/observation/state.hpp"
-#include "application/progress.hpp"
 #include "application/sync/coordinator.hpp"
 #include "application/sync/coordinator_detail.hpp"
 #include "application/sync/journal.hpp"
@@ -8,6 +7,7 @@
 #include "application/sync/mutation_batch.hpp"
 #include "application/sync/mutation_fault_test.hpp"
 #include "application/sync/reobservation.hpp"
+#include "application/use_cases/context.hpp"
 #include "core/hasher.hpp"
 #include "core/history.hpp"
 #include "core/reconciliation/plan.hpp"
@@ -25,6 +25,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <expected>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <memory>
@@ -36,6 +37,10 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+namespace kasumi::application::detail {
+std::expected<Response, Error> run_sync(OperationContext& context);
+}
 
 namespace {
 
@@ -1374,10 +1379,8 @@ TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
     }
     kasumi::test::write_binary(first_local / "large.bin", data);
 
-    const auto synchronize = [&](kasumi::application::ProgressMeter* meter =
-                                     nullptr) -> ::testing::AssertionResult {
+    const auto synchronize = [&]() -> ::testing::AssertionResult {
         kasumi::application::observation::LocalObservationSession session;
-        session.progress = meter;
         probe.profile = fixture->profile;
         auto observed =
             kasumi::application::observation::collect_reconciliation_input(
@@ -1451,9 +1454,16 @@ TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
             kasumi::crypto::pack::chunk_file_fastcdc(first_local / "large.bin");
         ASSERT_TRUE(updated.has_value()) << updated.error();
         kasumi::HashSet needed_hashes{0, kasumi::hash_key};
+        std::uint64_t reused_bytes = 0;
+        std::uint64_t downloaded_bytes = 0;
         for (const auto& c : updated->chunks) {
-            if (!local_hashes.contains(c.hash)) {
-                needed_hashes.insert(c.hash);
+            if (local_hashes.contains(c.hash)) {
+                reused_bytes += c.size;
+            } else if (needed_hashes.insert(c.hash).second) {
+                const auto id =
+                    kasumi::crypto::content_identifier(fixture->key, c.hash);
+                downloaded_bytes +=
+                    std::filesystem::file_size(fixture->storage_path / id);
             }
         }
         if (reorder_only) {
@@ -1485,19 +1495,30 @@ TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
                 assembled_checked = true;
             }
         });
-        const kasumi::application::ProgressCallback no_ui;
-        kasumi::application::ProgressMeter meter(no_ui, fixture->storage);
-        const auto result = synchronize(&meter);
+        namespace application = kasumi::application;
+        application::detail::OperationContext context{
+            .operation = application::Operation::Sync,
+            .runtime = runtime_data(*fixture),
+            .summary = {},
+            .key = fixture->key,
+            .writer_identifier = {},
+            .storage = std::move(fixture->storage),
+            .initial_content_identifiers = {},
+        };
+        probe.profile = fixture->profile;
+        const auto result = application::detail::run_sync(context);
         fault::clear_hook();
-        ASSERT_TRUE(result);
+        fixture->storage = std::move(context.storage);
+        ASSERT_TRUE(result) << result.error().detail;
+        const auto* summary =
+            std::get_if<application::SyncCompleted>(&result->data);
+        ASSERT_NE(summary, nullptr);
         EXPECT_TRUE(chunks_checked && assembled_checked);
         EXPECT_EQ(probe.content_get_count, needed_hashes.size());
-        EXPECT_EQ(meter.wire.download.objects.load(), needed_hashes.size());
-        EXPECT_EQ(meter.wire.download.bytes.load() == 0, reorder_only);
-        EXPECT_GT(meter.bytes_reused.load(), 0U);
-        if (reorder_only) {
-            EXPECT_EQ(meter.bytes_reused.load(), data.size());
-        }
+        EXPECT_EQ(summary->physical_objects_downloaded, needed_hashes.size());
+        EXPECT_EQ(summary->wire_download_bytes, downloaded_bytes);
+        EXPECT_GT(reused_bytes, 0U);
+        EXPECT_EQ(summary->local_delta_reused_bytes, reused_bytes);
         EXPECT_EQ(kasumi::test::read_binary(second_local / "large.bin"), data);
         local_hashes.clear();
         for (const auto& c : updated->chunks) {
