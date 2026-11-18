@@ -1097,6 +1097,42 @@ TEST(ContentReachabilityTest, SharedCommitTreesAvoidPerCommitCapacityGrowth) {
     EXPECT_EQ(result->contents.front().references.size(), commit_count);
 }
 
+TEST(ContentReachabilityTest, RepeatedHistoryReferencesCountAsOnePhysicalObject) {
+    constexpr std::size_t commit_count = 205;
+    constexpr std::size_t chunks_per_file = 5000;
+    static_assert(commit_count * chunks_per_file > 1'000'000);
+    auto storage = make_local_storage();
+    const auto chunk_hash = kasumi::hasher::hash_string("chunk");
+    auto row = file_row("shared.bin", "logical file");
+    row.size = 5U * chunks_per_file;
+    auto commit = make_tree_commit(0, {},
+        {NodeRow{.path = "", .is_directory = true}, row});
+    commit.storage.chunked_files.push_back({
+        .file_hash = row.hash,
+        .file_size = row.size,
+        .chunks = std::vector(chunks_per_file,
+                              kasumi::history::ChunkSlice{chunk_hash, 5}),
+    });
+    ReachabilityInventory history;
+    for (std::size_t index = 0; index < commit_count; ++index) {
+        commit.height = index;
+        history.commits.push_back({.commit_id = commit_id(commit),
+                                   .valid = true,
+                                   .reachable = true,
+                                   .tree = commit});
+    }
+    const std::vector<std::string> identifiers{content_id("chunk")};
+    const auto result =
+        kasumi::application::history_storage::inventory_content_reachability(
+            storage.transport, test_key(), identifiers, history,
+            kasumi::test::workspace_root(storage.workspace));
+    ASSERT_TRUE(result) << result.error().detail;
+    EXPECT_EQ(result->reachable_content_ids, identifiers);
+    ASSERT_EQ(result->contents.size(), 1U);
+    EXPECT_EQ(result->contents.front().references.size(), commit_count);
+    EXPECT_TRUE(result->missing_content_ids.empty());
+}
+
 TEST(ContentReachabilityTest, AllocationBudgetAvoidsNodeBasedContainers) {
     auto storage = make_local_storage();
     std::vector<NodeRow> rows;

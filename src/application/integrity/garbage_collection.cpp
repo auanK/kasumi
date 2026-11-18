@@ -332,7 +332,8 @@ observe(transport::Transport& storage,
     }
 
     auto content = history_storage::inventory_content_reachability(
-        storage, key, *listing, *history, workspace_root, false);
+        storage, key, *listing, *history, workspace_root,
+        /*audit_payloads=*/false, /*include_references=*/false);
     if (!content) {
         return std::unexpected(history_error(content.error()));
     }
