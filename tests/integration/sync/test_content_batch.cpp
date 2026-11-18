@@ -5,6 +5,7 @@
 #include "application/sync/journal.hpp"
 #include "application/sync/mutation.hpp"
 #include "application/sync/mutation_batch.hpp"
+#include "application/sync/mutation_fault_test.hpp"
 #include "application/sync/reobservation.hpp"
 #include "core/hasher.hpp"
 #include "core/history.hpp"
@@ -1457,7 +1458,29 @@ TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
         fixture->profile = second_profile;
         fixture->local = second_local;
         probe.content_get_count = 0;
-        ASSERT_TRUE(synchronize());
+        const auto count_chunk_files = [](const std::filesystem::path& dir) {
+            return std::ranges::count_if(std::filesystem::directory_iterator(dir),
+                                         [](const auto& entry) {
+                                             return entry.path().extension() == ".chunk";
+                                         });
+        };
+        bool chunks_checked = false;
+        bool assembled_checked = false;
+        namespace fault = kasumi::application::sync::mutation_fault_test;
+        fault::set_hook([&](std::string_view point, const auto& path) {
+            if (point == "fastcdc_chunks_ready") {
+                EXPECT_EQ(count_chunk_files(path),
+                          static_cast<std::ptrdiff_t>(needed_hashes.size()));
+                chunks_checked = true;
+            } else if (point == "fastcdc_file_ready") {
+                EXPECT_EQ(count_chunk_files(path.parent_path()), 0);
+                assembled_checked = true;
+            }
+        });
+        const auto result = synchronize();
+        fault::clear_hook();
+        ASSERT_TRUE(result);
+        EXPECT_TRUE(chunks_checked && assembled_checked);
         EXPECT_EQ(probe.content_get_count, needed_hashes.size());
         EXPECT_EQ(kasumi::test::read_binary(second_local / "large.bin"), data);
         local_hashes.clear();

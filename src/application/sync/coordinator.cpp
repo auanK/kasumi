@@ -32,6 +32,7 @@
 
 #include <algorithm>
 #include <array>
+#include <blake3.h>
 #include <charconv>
 #include <condition_variable>
 #include <cstdlib>
@@ -2328,7 +2329,6 @@ prefetch_manifest_downloads(
         std::size_t first_op_index = 0;
     };
     struct ChunkDownloadJob {
-        Hash chunk_hash{};
         std::string chunk_hex;
         std::string identifier;
         std::uint32_t size = 0;
@@ -2346,7 +2346,6 @@ prefetch_manifest_downloads(
     std::vector<ChunkedFileJob> file_jobs;
     HashSet seen_files{0, hash_key};
     std::vector<ChunkDownloadJob> chunk_jobs;
-    HashSet seen_chunks{0, hash_key};
 
     for (const auto op_idx : apply_order) {
         if (record.progress[op_idx].state ==
@@ -2570,59 +2569,60 @@ prefetch_manifest_downloads(
             }
         }
 
-        std::vector<std::string> staged_chunk_hexes;
+        std::vector<std::uint8_t> copy_buf(256U * 1024U);
+        crypto::secure_memory::WipeGuard wipe_buffer{copy_buf};
+        namespace ps = platform::private_storage;
+        const auto read_seed = [&](const LocalChunkSeed& seed,
+                                   const history::ChunkSlice& chunk,
+                                   ps::PrivateOutputFile* out) {
+            const auto source_matches = [&]() {
+                return !ps::is_reparse_or_symlink(seed.source_path) &&
+                       ps::query_file_identity(seed.source_path) == seed.identity;
+            };
+            if (seed.size != chunk.size || !source_matches()) {
+                return false;
+            }
+            blake3_hasher hasher;
+            blake3_hasher_init(&hasher);
+            crypto::secure_memory::WipeGuard wipe_hasher{hasher};
+            const auto streamed = ps::stream_regular_file(
+                seed.source_path, copy_buf,
+                [&](std::span<const std::uint8_t> slab) {
+                    blake3_hasher_update(&hasher, slab.data(), slab.size());
+                    return out == nullptr ||
+                           ps::write_private_file(*out, slab.data(), slab.size())
+                               .has_value();
+                },
+                std::nullopt,
+                ps::FileSlice{seed.offset, seed.size});
+            if (!source_matches() || !streamed) {
+                return false;
+            }
+            Hash digest{};
+            blake3_hasher_finalize(&hasher,
+                                   reinterpret_cast<std::uint8_t*>(digest.data()),
+                                   digest.size());
+            return digest == chunk.hash;
+        };
+
+        HashSet seed_hits{0, hash_key};
+        std::unordered_map<Hash, std::size_t, decltype(&hash_key)>
+            remaining_uses{0, hash_key};
         for (const auto& fjob : file_jobs) {
             for (const auto& c : fjob.entry->chunks) {
-                if (!seen_chunks.insert(c.hash).second) {
+                auto [uses, first_use] = remaining_uses.try_emplace(c.hash, 0);
+                ++uses->second;
+                if (!first_use) {
                     continue;
                 }
-                auto chunk_hex = hash_hex(c.hash);
-                staged_chunk_hexes.push_back(chunk_hex);
                 if (const auto seed = local_seeds.find(c.hash);
-                    seed != local_seeds.end() && seed->second.size == c.size &&
-                    c.size > 0 && c.size <= crypto::pack::FASTCDC_MAX_CHUNK &&
-                    seed->second.offset <=
-                        static_cast<std::uint64_t>(
-                            (std::numeric_limits<std::streamoff>::max)())) {
-                    const auto pre_id =
-                        platform::private_storage::query_file_identity(
-                            seed->second.source_path);
-                    if (pre_id.valid && pre_id == seed->second.identity &&
-                        !platform::private_storage::is_reparse_or_symlink(
-                            seed->second.source_path)) {
-                        std::ifstream source(seed->second.source_path,
-                                             std::ios::binary);
-                        source.seekg(
-                            static_cast<std::streamoff>(seed->second.offset));
-                        std::vector<std::uint8_t> buf(c.size);
-                        crypto::secure_memory::WipeGuard wipe{buf};
-                        const bool read_ok =
-                            source.read(
-                                reinterpret_cast<char*>(buf.data()),
-                                static_cast<std::streamsize>(buf.size())) &&
-                            source.gcount() ==
-                                static_cast<std::streamsize>(buf.size()) &&
-                            !source.bad();
-                        source.close();
-                        const auto post_id =
-                            platform::private_storage::query_file_identity(
-                                seed->second.source_path);
-                        if (read_ok && post_id.valid &&
-                            post_id == seed->second.identity &&
-                            hasher::hash_bytes(buf.data(), buf.size()) ==
-                                c.hash &&
-                            platform::private_storage::write_atomically(
-                                chunk_plain_dir / (chunk_hex + ".chunk"),
-                                std::string_view{
-                                    reinterpret_cast<const char*>(buf.data()),
-                                    buf.size()})) {
-                            continue;
-                        }
-                    }
+                    seed != local_seeds.end() &&
+                    read_seed(seed->second, c, nullptr)) {
+                    seed_hits.insert(c.hash);
+                    continue;
                 }
                 chunk_jobs.push_back(ChunkDownloadJob{
-                    .chunk_hash = c.hash,
-                    .chunk_hex = std::move(chunk_hex),
+                    .chunk_hex = hash_hex(c.hash),
                     .identifier = crypto::content_identifier(key, c.hash),
                     .size = c.size,
                     .first_op_index = fjob.first_op_index,
@@ -2690,8 +2690,7 @@ prefetch_manifest_downloads(
             }
         }
 
-        std::vector<std::uint8_t> copy_buf(256U * 1024U);
-        crypto::secure_memory::WipeGuard copy_buf_guard{copy_buf};
+        mutation_fault_test::hit("fastcdc_chunks_ready", chunk_plain_dir);
         for (const auto& job : file_jobs) {
             const auto out_path = chunk_plain_dir / (job.file_hex + ".plain");
             std::error_code rm_ec;
@@ -2706,33 +2705,41 @@ prefetch_manifest_downloads(
                     out_path,
                     job.first_op_index));
             }
-            bool write_failed = false;
             for (const auto& chunk : job.entry->chunks) {
-                const auto chunk_path =
-                    chunk_plain_dir / (hash_hex(chunk.hash) + ".chunk");
-                auto streamed = platform::private_storage::stream_regular_file(
-                    chunk_path,
-                    copy_buf,
-                    [&](std::span<const std::uint8_t> slab) {
-                        if (!slab.empty() &&
-                            !platform::private_storage::write_private_file(
-                                *private_out, slab.data(), slab.size())) {
-                            write_failed = true;
-                            return false;
+                const bool from_seed = seed_hits.contains(chunk.hash);
+                if (from_seed) {
+                    if (read_seed(local_seeds.at(chunk.hash), chunk, &*private_out)) {
+                        continue;
+                    }
+                } else {
+                    const auto chunk_path =
+                        chunk_plain_dir / (hash_hex(chunk.hash) + ".chunk");
+                    const auto streamed = ps::stream_regular_file(
+                        chunk_path,
+                        copy_buf,
+                        [&](std::span<const std::uint8_t> slab) {
+                            return ps::write_private_file(
+                                       *private_out, slab.data(), slab.size())
+                                .has_value();
+                        },
+                        chunk.size);
+                    if (streamed) {
+                        if (--remaining_uses.at(chunk.hash) == 0) {
+                            std::error_code ignored;
+                            std::filesystem::remove(chunk_path, ignored);
                         }
-                        return true;
-                    },
-                    chunk.size);
-                if (!streamed || write_failed) {
-                    static_cast<void>(platform::private_storage::
-                                          remove_private_file_if_owned(
-                                              *private_out));
-                    return std::unexpected(mutation::detail::make_error(
-                        mutation::MutationErrorCode::LocalIo,
-                        "failed to concatenate FastCDC chunk",
-                        out_path,
-                        job.first_op_index));
+                        continue;
+                    }
                 }
+                static_cast<void>(platform::private_storage::
+                                      remove_private_file_if_owned(*private_out));
+                return std::unexpected(mutation::detail::make_error(
+                    from_seed ? mutation::MutationErrorCode::IntegrityMismatch
+                              : mutation::MutationErrorCode::LocalIo,
+                    from_seed ? "local FastCDC seed changed or could not be staged"
+                              : "failed to concatenate FastCDC chunk",
+                    out_path,
+                    job.first_op_index));
             }
             platform::private_storage::close_private_file(*private_out);
             if (!crypto::content::verify_file(
@@ -2743,12 +2750,8 @@ prefetch_manifest_downloads(
                     out_path,
                     job.first_op_index));
             }
+            mutation_fault_test::hit("fastcdc_file_ready", out_path);
             ready.emplace(job.file_hex, out_path);
-        }
-        for (const auto& chunk_hex : staged_chunk_hexes) {
-            std::error_code ignored;
-            std::filesystem::remove(chunk_plain_dir / (chunk_hex + ".chunk"),
-                                    ignored);
         }
     }
 

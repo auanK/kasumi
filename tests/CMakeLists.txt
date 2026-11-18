@@ -84,6 +84,7 @@ target_compile_definitions(kasumi_application_fault_test_objects PRIVATE
 )
 target_link_libraries(kasumi_application_fault_test_objects PRIVATE
     kasumi_application
+    blake3
     monocypher
     kasumi_warnings
     kasumi_release_optimizations
