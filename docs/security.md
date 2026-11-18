@@ -123,7 +123,7 @@ Before accepting any commit into the local history DAG, Kasumi verifies:
 * AEAD authentication tag validity and `FilePurpose::History` binding;
 * Keyed commit ID integrity;
 * Snapshot canonical structure, ordering, hierarchy, and path constraints;
-* `StorageManifest` canonical ordering, uniqueness, size bounds (`packed_blobs` entries `<= 16 MiB`; `chunked_files` slices `<= 4 MiB` each and summing exactly to `file_size`), disjointness between packed and chunked logical hashes, and consistency with the commit's live Snapshot file rows;
+* `StorageManifest` canonical ordering, uniqueness, size bounds (`packed_blobs` entries `<= 16 MiB`; `chunked_files` slices `<= 32 MiB` each and summing exactly to `file_size`), disjointness between packed and chunked logical hashes, and consistency with the commit's live Snapshot file rows;
 * Parent existence, height consistency (`height = max(parent height) + 1`), and absence of cycles;
 * Timestamp non-regression along parent edges.
 
