@@ -2237,94 +2237,113 @@ std::expected<void, detail::UploadBatchError> execute_chunked_upload_batch(
         return {};
     }
 
-    if (meter)
-        meter->phase(Activity::Staging, to_upload.size());
-    const auto first_op = to_upload.front().operation_index;
-    auto staging = platform::create_workspace("chunk-upload-batch");
-    if (!staging) {
-        return std::unexpected(detail::UploadBatchError{
-            .transport_after_unknown_transfer = false,
-            .mutation = mutation::MutationError{
-                .code = mutation::MutationErrorCode::LocalIo,
-                .detail = staging.error(),
-                .path = local_root,
-                .operation_index = first_op,
-            }});
-    }
-
-    mutation::StagedUploadBatch batch;
-    batch.root = staging->root;
-    batch.objects.resize(to_upload.size());
-    detail::ScopedUploadBatchCleanup cleanup{batch};
-
-    std::vector<std::optional<mutation::MutationError>> stage_errors(
-        to_upload.size());
-    application::parallel_for_indexed(
-        to_upload.size(),
-        std::min<std::size_t>(parallelism, to_upload.size()),
-        [&](std::size_t i) {
-            const auto& chunk = to_upload[i];
-            std::string detail_err;
-            const auto dest = batch.root / chunk.chunk_id;
-            auto enc = crypto::pack::encrypt_file_slice_with_hashes(
-                chunk.source_path,
-                chunk.offset,
-                chunk.size,
-                chunk.chunk_hash,
-                dest,
-                key,
-                &detail_err);
-            if (!enc) {
-                stage_errors[i] = mutation::MutationError{
-                    .code = mutation::MutationErrorCode::IntegrityMismatch,
-                    .detail =
-                        detail_err.empty()
-                            ? "failed to encrypt FastCDC chunk slice"
-                            : std::move(detail_err),
-                    .path = chunk.source_path,
-                    .operation_index = chunk.operation_index,
-                };
-                return;
+    constexpr std::size_t max_chunk_window_items = 64;
+    for (std::size_t window_start = 0; window_start < to_upload.size();) {
+        std::size_t window_end = window_start;
+        std::uint64_t window_bytes = 0;
+        while (window_end < to_upload.size()) {
+            const auto next_size = to_upload[window_end].size;
+            if (window_end > window_start &&
+                (window_end - window_start >= max_chunk_window_items ||
+                 window_bytes + next_size > detail::upload_batch_max_bytes)) {
+                break;
             }
-            if (meter) {
-                meter->record_staged(dest, chunk.size);
-            }
-            batch.objects[i] = mutation::StagedUploadObject{
-                .identifier = chunk.chunk_id,
-                .plaintext_hash = chunk.chunk_hex,
-                .plaintext_size = chunk.size,
-                .ciphertext_sha256 = std::move(enc->ciphertext_sha256),
-                .operation_indices = {chunk.operation_index},
-                .is_pack = false,
-            };
-        });
-
-    std::optional<mutation::MutationError> lowest_err;
-    for (const auto& err : stage_errors) {
-        if (err &&
-            (!lowest_err || err->operation_index < lowest_err->operation_index)) {
-            lowest_err = *err;
+            window_bytes += next_size;
+            ++window_end;
         }
-    }
-    if (lowest_err) {
-        return std::unexpected(detail::UploadBatchError{
-            .transport_after_unknown_transfer = false,
-            .mutation = std::move(*lowest_err),
-        });
-    }
+        const auto window = std::span{to_upload}.subspan(
+            window_start, window_end - window_start);
+        if (meter)
+            meter->phase(Activity::Staging, window.size());
+        const auto first_op = window.front().operation_index;
+        auto staging = platform::create_workspace("chunk-upload-batch");
+        if (!staging) {
+            return std::unexpected(detail::UploadBatchError{
+                .transport_after_unknown_transfer = false,
+                .mutation = mutation::MutationError{
+                    .code = mutation::MutationErrorCode::LocalIo,
+                    .detail = staging.error(),
+                    .path = local_root,
+                    .operation_index = first_op,
+                }});
+        }
 
-    auto transferred = detail::transfer_and_verify_upload_batch(
-        batch, storage, key, workspace, parallelism, meter);
-    if (!transferred) {
-        if (!transferred.error().transport_after_unknown_transfer) {
+        mutation::StagedUploadBatch batch;
+        batch.root = staging->root;
+        batch.objects.resize(window.size());
+        detail::ScopedUploadBatchCleanup cleanup{batch};
+
+        std::vector<std::optional<mutation::MutationError>> stage_errors(
+            window.size());
+        application::parallel_for_indexed(
+            window.size(),
+            std::min<std::size_t>(parallelism, window.size()),
+            [&](std::size_t i) {
+                const auto& chunk = window[i];
+                std::string detail_err;
+                const auto dest = batch.root / chunk.chunk_id;
+                auto enc = crypto::pack::encrypt_file_slice_with_hashes(
+                    chunk.source_path,
+                    chunk.offset,
+                    chunk.size,
+                    chunk.chunk_hash,
+                    dest,
+                    key,
+                    &detail_err);
+                if (!enc) {
+                    stage_errors[i] = mutation::MutationError{
+                        .code = mutation::MutationErrorCode::IntegrityMismatch,
+                        .detail =
+                            detail_err.empty()
+                                ? "failed to encrypt FastCDC chunk slice"
+                                : std::move(detail_err),
+                        .path = chunk.source_path,
+                        .operation_index = chunk.operation_index,
+                    };
+                    return;
+                }
+                if (meter) {
+                    meter->record_staged(dest, chunk.size);
+                }
+                batch.objects[i] = mutation::StagedUploadObject{
+                    .identifier = chunk.chunk_id,
+                    .plaintext_hash = chunk.chunk_hex,
+                    .plaintext_size = chunk.size,
+                    .ciphertext_sha256 = std::move(enc->ciphertext_sha256),
+                    .operation_indices = {chunk.operation_index},
+                    .is_pack = false,
+                };
+            });
+
+        std::optional<mutation::MutationError> lowest_err;
+        for (const auto& err : stage_errors) {
+            if (err &&
+                (!lowest_err ||
+                 err->operation_index < lowest_err->operation_index)) {
+                lowest_err = *err;
+            }
+        }
+        if (lowest_err) {
+            return std::unexpected(detail::UploadBatchError{
+                .transport_after_unknown_transfer = false,
+                .mutation = std::move(*lowest_err),
+            });
+        }
+
+        auto transferred = detail::transfer_and_verify_upload_batch(
+            batch, storage, key, workspace, parallelism, meter);
+        if (!transferred) {
+            if (!transferred.error().transport_after_unknown_transfer) {
+                return transferred;
+            }
+            cleanup.dismissed = true;
+            static_cast<void>(mutation::cleanup_upload_batch(batch));
             return transferred;
         }
         cleanup.dismissed = true;
         static_cast<void>(mutation::cleanup_upload_batch(batch));
-        return transferred;
+        window_start = window_end;
     }
-    cleanup.dismissed = true;
-    static_cast<void>(mutation::cleanup_upload_batch(batch));
     return {};
 }
 
@@ -2577,7 +2596,10 @@ prefetch_manifest_downloads(const history::StorageManifest& manifest,
                 if (!id.valid) {
                     continue;
                 }
-                if (auto cdc = crypto::pack::chunk_file_fastcdc(cand)) {
+                if (auto cdc = crypto::pack::chunk_file_fastcdc(
+                        cand,
+                        crypto::pack::fastcdc_profile_for_size(
+                            fjob.file_size))) {
                     const auto post_id =
                         platform::private_storage::query_file_identity(cand);
                     if (!post_id.valid || !(post_id == id)) {
