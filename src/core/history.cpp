@@ -753,9 +753,10 @@ read_storage_manifest(wire::Reader& reader) {
         auto blob_hash = wire::read_array<HASH_SIZE>(reader);
         auto size = wire::read<std::uint64_t>(reader);
         auto pack_hash = wire::read_array<HASH_SIZE>(reader);
-        if (!blob_hash || !size || !pack_hash) {
+        if (!blob_hash || !size || !pack_hash ||
+            *size > maximum_packed_blob_size) {
             return fail(ErrorCode::InvalidEncoding,
-                        "truncated packed blob entry");
+                        "truncated or oversized packed blob entry");
         }
         if (i > 0 && !(manifest.packed_blobs.back().blob_hash < *blob_hash)) {
             return fail(ErrorCode::InvalidEncoding,
@@ -811,7 +812,7 @@ read_storage_manifest(wire::Reader& reader) {
                 return fail(ErrorCode::InvalidEncoding,
                             "truncated chunk entry");
             }
-            if (*chunk_size == 0 ||
+            if (*chunk_size == 0 || *chunk_size > maximum_chunk_slice_size ||
                 *chunk_size > *file_size - total_chunk_bytes) {
                 return fail(ErrorCode::InvalidEncoding,
                             "invalid chunk size sum");
@@ -862,6 +863,9 @@ bool valid_storage_manifest(const StorageManifest& manifest,
                 !(manifest.packed_blobs[i - 1].blob_hash < entry.blob_hash)) {
                 return false;
             }
+            if (entry.size > maximum_packed_blob_size) {
+                return false;
+            }
             if (!std::ranges::binary_search(
                     live_files, std::pair{entry.blob_hash, entry.size})) {
                 return false;
@@ -883,7 +887,7 @@ bool valid_storage_manifest(const StorageManifest& manifest,
             }
             std::uint64_t sum = 0;
             for (const auto& chunk : entry.chunks) {
-                if (chunk.size == 0 ||
+                if (chunk.size == 0 || chunk.size > maximum_chunk_slice_size ||
                     chunk.size > entry.file_size - sum) {
                     return false;
                 }
@@ -1165,7 +1169,7 @@ BytesResult serialize(const Commit& commit) {
                                          "tree size exceeds maximum size"});
         }
 
-        const std::uint8_t format_version = commit.storage.empty() ? 2U : 3U;
+        constexpr std::uint8_t format_version = 3U;
         wire::Writer writer;
         wire::write_array(writer,
                           std::array<std::byte, 4>{std::byte{'K'},
@@ -1186,9 +1190,7 @@ BytesResult serialize(const Commit& commit) {
         }
         wire::write(writer, static_cast<uint64_t>(tree_bytes.size()));
         wire::write_bytes(writer, tree_bytes);
-        if (!commit.storage.empty()) {
-            write_storage_manifest(writer, commit.storage);
-        }
+        write_storage_manifest(writer, commit.storage);
         if (writer.buffer.size() > maximum_commit_plaintext_size) {
             return std::unexpected(
                 Error{ErrorCode::LimitExceeded, "commit exceeds maximum size"});
@@ -1225,7 +1227,7 @@ CommitResult deserialize(std::span<const std::uint8_t> bytes) {
                         magic ? "invalid magic" : "truncated magic");
         }
         auto version = wire::read<uint8_t>(reader);
-        if (!version || (*version != 2 && *version != 3)) {
+        if (!version || *version != 3) {
             return fail(version ? ErrorCode::UnsupportedVersion
                                 : ErrorCode::InvalidEncoding,
                         version ? "unsupported version" : "truncated version");
@@ -1268,18 +1270,11 @@ CommitResult deserialize(std::span<const std::uint8_t> bytes) {
             return fail(ErrorCode::InvalidEncoding, "truncated tree");
         }
 
-        StorageManifest storage;
-        if (*version == 3) {
-            auto parsed_manifest = read_storage_manifest(reader);
-            if (!parsed_manifest) {
-                return std::unexpected(parsed_manifest.error());
-            }
-            if (parsed_manifest->empty()) {
-                return fail(ErrorCode::InvalidEncoding,
-                            "v3 commit cannot have empty storage manifest");
-            }
-            storage = std::move(*parsed_manifest);
+        auto parsed_manifest = read_storage_manifest(reader);
+        if (!parsed_manifest) {
+            return std::unexpected(parsed_manifest.error());
         }
+        StorageManifest storage = std::move(*parsed_manifest);
         if (!reader.data.empty()) {
             return fail(ErrorCode::InvalidEncoding, "trailing bytes");
         }

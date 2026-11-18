@@ -43,7 +43,8 @@ void write_profile(const TempWorkspace& workspace,
             kasumi::platform::path::to_utf8(
                 kasumi::test::workspace_path(workspace, "local")) +
             "'\nremote_dir = '" + kasumi::platform::path::to_utf8(remote) +
-            "'\nmin_history_depth = 5\nmin_history_age_hours = 6\n");
+            "'\nmin_history_depth = 5\nmin_history_age_hours = 6\n"
+            "key_storage = 'file'\n");
 }
 
 auto inspect_request(const TempWorkspace& workspace,

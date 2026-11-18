@@ -96,6 +96,10 @@ struct StorageManifest {
 inline constexpr std::size_t maximum_packed_blob_entries = 262144;
 inline constexpr std::size_t maximum_chunked_file_entries = 65536;
 inline constexpr std::size_t maximum_chunks_per_file = 65536;
+inline constexpr std::uint64_t maximum_packed_blob_size =
+    16ULL * 1024ULL * 1024ULL;
+inline constexpr std::uint32_t maximum_chunk_slice_size =
+    4U * 1024U * 1024U;
 
 // Versioned state with its position in the history DAG.
 struct Commit {

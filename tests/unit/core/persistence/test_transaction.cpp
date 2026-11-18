@@ -87,7 +87,7 @@ std::vector<std::byte> minimal_record(std::uint8_t phase,
                                       std::uint8_t state,
                                       std::uint32_t backup_slot) {
     wire::Writer writer;
-    wire::write<std::uint8_t>(writer, 9);
+    wire::write<std::uint8_t>(writer, 10);
     wire::write_string(writer, "id");
     wire::write<std::uint8_t>(writer, phase);
     wire::write<std::uint8_t>(writer, 1);
@@ -138,9 +138,10 @@ struct WireOperationSpec {
 };
 
 std::vector<std::byte>
-build_wire_record_with_operations(std::span<const WireOperationSpec> ops) {
+build_wire_record_with_operations(std::span<const WireOperationSpec> ops,
+                                  std::uint8_t version = 10) {
     wire::Writer writer;
-    wire::write<std::uint8_t>(writer, 9);
+    wire::write<std::uint8_t>(writer, version);
     wire::write_string(writer, std::string(32, '0'));
     wire::write<std::uint8_t>(writer,
                               static_cast<std::uint8_t>(Phase::Started));
@@ -1004,32 +1005,16 @@ TEST(TransactionCodecTest,
                      .has_value());
 }
 
-// Teste F — Compatibilidade de bytes antigos (decode v0.9.1 -> encode novo)
-TEST(TransactionCodecTest,
-     DecodesV9BytesAndWritesCurrentV10Format) {
-    const auto v091_bytes = make_v091_all_legacy_actions_fixture();
-    ASSERT_FALSE(v091_bytes.empty());
-    EXPECT_EQ(std::to_integer<std::uint8_t>(v091_bytes.front()), 9U);
-    const auto decoded = kasumi::transaction::codec::decode(v091_bytes);
+TEST(TransactionCodecTest, RejectsLegacyV9BytesAndDecodesCurrentV10Format) {
+    const auto v10_bytes = make_v091_all_legacy_actions_fixture();
+    ASSERT_FALSE(v10_bytes.empty());
+    EXPECT_EQ(std::to_integer<std::uint8_t>(v10_bytes.front()), 10U);
+    const auto decoded = kasumi::transaction::codec::decode(v10_bytes);
     ASSERT_TRUE(decoded.has_value()) << decoded.error();
 
-    const auto reencoded = kasumi::transaction::codec::encode(*decoded);
-    ASSERT_TRUE(reencoded.has_value()) << reencoded.error();
-    EXPECT_EQ(std::to_integer<std::uint8_t>(reencoded->front()), 10U);
-    const auto migrated = kasumi::transaction::codec::decode(*reencoded);
-    ASSERT_TRUE(migrated.has_value()) << migrated.error();
-    ASSERT_EQ(migrated->plan.operations.size(),
-              decoded->plan.operations.size());
-    for (std::size_t index = 0; index < decoded->plan.operations.size();
-         ++index) {
-        EXPECT_EQ(migrated->plan.operations[index].action,
-                  decoded->plan.operations[index].action);
-        EXPECT_EQ(migrated->plan.operations[index].path,
-                  decoded->plan.operations[index].path);
-        EXPECT_EQ(migrated->plan.operations[index].hash,
-                  decoded->plan.operations[index].hash);
-    }
-    EXPECT_EQ(migrated->progress.size(), decoded->progress.size());
+    auto v9_bytes = v10_bytes;
+    v9_bytes.front() = std::byte{9};
+    EXPECT_FALSE(kasumi::transaction::codec::decode(v9_bytes).has_value());
 }
 
 
@@ -1115,7 +1100,7 @@ TEST(TransactionCodecTest, V9RecordRejectsDisposableAction11) {
          .state = static_cast<std::uint8_t>(OperationState::Prepared),
          .had_original = true},
     }};
-    const auto v9_bytes = build_wire_record_with_operations(disposable_spec);
+    const auto v9_bytes = build_wire_record_with_operations(disposable_spec, 9);
     EXPECT_EQ(std::to_integer<std::uint8_t>(v9_bytes.front()), 9U);
     EXPECT_FALSE(kasumi::transaction::codec::decode(v9_bytes).has_value());
 }

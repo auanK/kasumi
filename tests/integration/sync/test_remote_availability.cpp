@@ -1848,6 +1848,56 @@ kasumi::reconciliation::Result uploads_for(const kasumi::Snapshot& local) {
 
 } // namespace
 
+TEST(SyncRemoteAvailabilityTest,
+     FastCdcListThresholdAndFallbackPreserveMissingChunks) {
+    const auto key = test_key();
+    const auto hash = kasumi::hasher::hash_string("chunked file");
+    for (const auto chunk_count : {7U, 8U}) {
+        const auto remote =
+            remote_tree_with(hash, chunk_count * 2U * 1024U * 1024U);
+        const auto planned = downloads_for(remote);
+        for (const bool list_failure : {false, true}) {
+            for (const bool missing_chunk : {false, true}) {
+                SCOPED_TRACE(::testing::Message()
+                             << chunk_count << ", " << list_failure << ", "
+                             << missing_chunk);
+                auto input = availability_input(remote, false);
+                kasumi::history::ChunkedFileEntry entry{
+                    .file_hash = hash,
+                    .file_size = remote.rows.back().size,
+                    .chunks = {}};
+                FakeState* state = nullptr;
+                auto storage = make_fake_transport(state);
+                state->control_read_batch_supported = true;
+                if (list_failure) {
+                    state->fail_list = kasumi::transport::ErrorCode::Timeout;
+                }
+                for (std::size_t i = 0; i < chunk_count; ++i) {
+                    const auto ch = kasumi::hasher::hash_string(
+                        "chunk-" + std::to_string(i));
+                    entry.chunks.push_back(
+                        {.hash = ch, .size = 2U * 1024U * 1024U});
+                    if (!missing_chunk || i != 0U) {
+                        state->objects[kasumi::crypto::content_identifier(
+                            key, ch)] = {};
+                    }
+                }
+                input.storage.storage_manifest.chunked_files.push_back(
+                    std::move(entry));
+                const auto refreshed = kasumi::application::sync::coordinator::
+                    reobservation::refresh_content_availability(
+                        input, planned, storage, key);
+                ASSERT_TRUE(refreshed.has_value()) << refreshed.error().detail;
+                EXPECT_EQ(state->full_list_count, chunk_count >= 8U ? 1U : 0U);
+                EXPECT_EQ(state->control_read_batch_count,
+                          chunk_count < 8U || list_failure ? 1U : 0U);
+                EXPECT_EQ(input.known_missing_content_objects.contains(hash),
+                          missing_chunk);
+            }
+        }
+    }
+}
+
 TEST(SyncRemoteAvailabilityTest, LocalCopyStillProbesRequiredContent) {
     const auto key = test_key();
     const auto hash = kasumi::hasher::hash_string("shared bytes");

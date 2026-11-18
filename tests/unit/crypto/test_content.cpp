@@ -526,8 +526,7 @@ TEST(CryptoFileTest, OpenFailuresLeaveNoPartialOutputOrModifiedInput) {
     EXPECT_FALSE(std::filesystem::exists(restored));
 }
 
-TEST(CryptoFileTest, DecryptsLegacyCiphertextFixture) {
-    // Produced by the implementation before payload-sized decryption buffers.
+TEST(CryptoFileTest, RejectsLegacyV2CiphertextFixture) {
     constexpr std::array<std::uint8_t, 98> legacy_ciphertext{
         0x4b, 0x41, 0x53, 0x55, 0x4d, 0x49, 0x02, 0x00, 0x67, 0x01, 0x3a,
         0x08, 0x97, 0x8d, 0x43, 0xb9, 0x26, 0x2a, 0x34, 0x67, 0x59, 0x91,
@@ -549,8 +548,9 @@ TEST(CryptoFileTest, DecryptsLegacyCiphertextFixture) {
     }
     kasumi::test::write_binary(cipher, fixture);
 
-    ASSERT_TRUE(kasumi::crypto::decrypt_file(cipher, restored, key));
-    EXPECT_EQ(kasumi::test::read_text(restored), "legacy ciphertext fixture\n");
+    EXPECT_FALSE(kasumi::crypto::decrypt_file(cipher, restored, key));
+    EXPECT_FALSE(std::filesystem::exists(restored));
+    EXPECT_FALSE(kasumi::crypto::decrypt_bytes(legacy_ciphertext, key).has_value());
     EXPECT_EQ(kasumi::test::read_binary(cipher), fixture);
 }
 

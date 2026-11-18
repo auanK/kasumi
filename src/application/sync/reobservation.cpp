@@ -274,6 +274,7 @@ std::expected<void, Error> observe_content_availability(
     logical_probes.reserve(hashes.size());
     std::vector<std::string> requested_physical;
     requested_physical.reserve(hashes.size());
+    bool has_chunked_probe = false;
     for (const auto& hash : hashes) {
         LogicalProbe probe{.hash = hash, .physical_ids = {}};
         if (const auto* packed = history::find_packed_blob(
@@ -282,6 +283,7 @@ std::expected<void, Error> observe_content_availability(
                 crypto::pack_identifier(key, packed->pack_hash));
         } else if (const auto* chunked = history::find_chunked_file(
                        input.storage.storage_manifest, hash)) {
+            has_chunked_probe = true;
             probe.physical_ids.reserve(chunked->chunks.size());
             for (const auto& chunk : chunked->chunks) {
                 probe.physical_ids.push_back(
@@ -301,7 +303,21 @@ std::expected<void, Error> observe_content_availability(
 
     std::vector<transport::Presence> presences;
     bool probed = false;
-    if (storage.storage.control_read_batch != nullptr) {
+    if (has_chunked_probe && requested_physical.size() >= 8U &&
+        storage.storage.list != nullptr) {
+        if (auto listed = transport::list(storage)) {
+            const std::unordered_set<std::string> remote_set(listed->begin(),
+                                                             listed->end());
+            presences.reserve(requested_physical.size());
+            for (const auto& id : requested_physical) {
+                presences.push_back(remote_set.contains(id)
+                                        ? transport::Presence::Present
+                                        : transport::Presence::Absent);
+            }
+            probed = true;
+        }
+    }
+    if (!probed && storage.storage.control_read_batch != nullptr) {
         transport::ControlReadBatchRequest request;
         request.presence_identifiers = requested_physical;
         auto batch = transport::control_read_batch(storage, request);

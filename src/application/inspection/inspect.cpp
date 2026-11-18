@@ -599,17 +599,24 @@ download_remote_file(const InspectionRequest& request,
         content_id = crypto::content_identifier(context.key, row->hash);
         const auto enc = context.workspace->root / "remote-chunk.enc";
         const auto chunk_plain = context.workspace->root / "remote-chunk.plain";
-        std::ofstream out(plaintext, std::ios::binary | std::ios::trunc);
-        if (!out) {
+        std::error_code rm_ec;
+        std::filesystem::remove(plaintext, rm_ec);
+        auto private_out =
+            platform::private_storage::create_private_file(plaintext);
+        if (!private_out) {
             return dest_fail(operation, "failed to open temporary download file");
         }
         std::vector<std::uint8_t> copy_buf(256U * 1024U);
+        crypto::secure_memory::WipeGuard copy_buf_guard{copy_buf};
         for (const auto& chunk : chunked->chunks) {
             const auto cid =
                 crypto::content_identifier(context.key, chunk.hash);
             const auto chex = hash_hex(chunk.hash);
             auto downloaded = transport::get(context.storage, cid, enc);
             if (!downloaded) {
+                static_cast<void>(
+                    platform::private_storage::remove_private_file_if_owned(
+                        *private_out));
                 const bool not_found = downloaded.error().code ==
                                        transport::ErrorCode::ObjectNotFound;
                 return fail(operation,
@@ -621,25 +628,36 @@ download_remote_file(const InspectionRequest& request,
             }
             if (!crypto::decrypt_file(enc, chunk_plain, context.key) ||
                 !crypto::content::verify_file(chunk_plain, chex, chunk.size)) {
+                static_cast<void>(
+                    platform::private_storage::remove_private_file_if_owned(
+                        *private_out));
                 return fail(operation,
                             InspectionErrorCode::RemoteContentInvalid,
                             "remote chunk failed cryptographic authentication");
             }
+            bool write_failed = false;
             auto streamed = platform::private_storage::stream_regular_file(
                 chunk_plain,
                 copy_buf,
                 [&](std::span<const std::uint8_t> slab) {
-                    out.write(reinterpret_cast<const char*>(slab.data()),
-                              static_cast<std::streamsize>(slab.size()));
+                    if (!slab.empty() &&
+                        !platform::private_storage::write_private_file(
+                            *private_out, slab.data(), slab.size())) {
+                        write_failed = true;
+                        return false;
+                    }
+                    return true;
                 },
                 chunk.size);
-            if (!streamed || out.bad()) {
+            if (!streamed || write_failed) {
+                static_cast<void>(
+                    platform::private_storage::remove_private_file_if_owned(
+                        *private_out));
                 return dest_fail(operation, "failed to assemble remote chunks");
             }
         }
-        out.close();
-        if (out.fail() ||
-            !crypto::content::verify_file(plaintext, logical_hash, row->size)) {
+        platform::private_storage::close_private_file(*private_out);
+        if (!crypto::content::verify_file(plaintext, logical_hash, row->size)) {
             return fail(operation,
                         InspectionErrorCode::RemoteContentInvalid,
                         "assembled remote content failed verification");

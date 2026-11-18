@@ -15,7 +15,6 @@ namespace kasumi::transaction::codec {
 namespace {
 
 inline constexpr std::uint8_t format_version = 10;
-inline constexpr std::uint8_t oldest_supported_format_version = 9;
 inline constexpr std::size_t maximum_string_size = 4096;
 inline constexpr std::uint32_t maximum_operation_count = 1'000'000;
 inline constexpr std::uint32_t maximum_pending_path_count = 1'000'000;
@@ -176,8 +175,7 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
         wire::Reader reader{data};
 
         auto version = wire::read<std::uint8_t>(reader);
-        if (!version || *version < oldest_supported_format_version ||
-            *version > format_version) {
+        if (!version || *version != format_version) {
             return std::unexpected("unsupported journal format version");
         }
 
@@ -273,7 +271,7 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
             auto size = wire::read<std::uint64_t>(reader);
             auto exclusive = wire::read<std::uint8_t>(reader);
             kasumi::PhysicalFileIdentity source_identity{};
-            if (*version >= 10 && action_raw && *action_raw == 11) {
+            if (action_raw && *action_raw == 11) {
                 auto volume = wire::read<std::uint64_t>(reader);
                 auto low = wire::read<std::uint64_t>(reader);
                 auto high = wire::read<std::uint64_t>(reader);
@@ -300,7 +298,7 @@ std::expected<Record, std::string> decode(std::span<const std::byte> data) {
                 return std::unexpected("truncated operation");
             }
             const auto action = action_from_persisted_id(*action_raw);
-            if (!action || (*version == 9 && *action_raw == 11)) {
+            if (!action) {
                 return std::unexpected("invalid action");
             }
             if (*exclusive > 1 || *had_original > 1) {

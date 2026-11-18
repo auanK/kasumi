@@ -164,7 +164,7 @@ TEST(RuntimeProfileTest, RetentionFieldsAreRequiredAndRejectInvalidValues) {
     const auto prefix = "[profiles.demo]\nlocal_dir = '" +
                         kasumi::platform::path::to_utf8(
                             kasumi::test::workspace_path(workspace, "local")) +
-                        "'\nremote_dir = 'remote:root'\n";
+                        "'\nremote_dir = 'remote:root'\nkey_storage = 'file'\n";
 
     kasumi::test::write_text(config, prefix);
     const auto missing = kasumi::runtime::load_profile(config, "demo");
@@ -240,6 +240,17 @@ TEST(RuntimeProfileTest, KeyStorageRoundTripsAndRejectsInvalidValues) {
     const auto rejected = kasumi::runtime::load_profiles(config);
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(rejected.error().code,
+              kasumi::runtime::ErrorCode::ProfileInvalid);
+
+    kasumi::test::write_text(
+        config,
+        "[profiles.missing_storage]\nlocal_dir = '" +
+            kasumi::platform::path::to_utf8(local) +
+            "'\nremote_dir = 'remote:'\nmin_history_depth = 5\n"
+            "min_history_age_hours = 6\n");
+    const auto missing_storage = kasumi::runtime::load_profiles(config);
+    ASSERT_FALSE(missing_storage.has_value());
+    EXPECT_EQ(missing_storage.error().code,
               kasumi::runtime::ErrorCode::ProfileInvalid);
 }
 

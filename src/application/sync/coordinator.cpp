@@ -19,6 +19,7 @@
 #include "crypto/content.hpp"
 #include "crypto/key_derivation.hpp"
 #include "crypto/pack.hpp"
+#include "crypto/secure_memory.hpp"
 #include "journal_fault_test.hpp"
 #include "platform/clock.hpp"
 #include "platform/durability.hpp"
@@ -2131,11 +2132,25 @@ std::expected<void, detail::UploadBatchError> execute_chunked_upload_batch(
             std::ranges::unique(candidate_present_ids).begin(),
             candidate_present_ids.end());
         bool probed = false;
-        if (storage.storage.control_read_batch != nullptr) {
+        if (candidate_present_ids.size() >= 8U &&
+            storage.storage.list != nullptr) {
+            if (auto listed = transport::list(storage)) {
+                const std::unordered_set<std::string> remote_set(
+                    listed->begin(), listed->end());
+                for (const auto& id : candidate_present_ids) {
+                    if (remote_set.contains(id)) {
+                        present_chunk_ids.insert(id);
+                    }
+                }
+                probed = true;
+            }
+        }
+        if (!probed && storage.storage.control_read_batch != nullptr) {
             transport::ControlReadBatchRequest req;
             req.presence_identifiers = candidate_present_ids;
             auto batch = transport::control_read_batch(storage, req);
-            if (batch && batch->presences.size() == candidate_present_ids.size()) {
+            if (batch &&
+                batch->presences.size() == candidate_present_ids.size()) {
                 for (std::size_t i = 0; i < candidate_present_ids.size(); ++i) {
                     if (batch->presences[i] == transport::Presence::Present) {
                         present_chunk_ids.insert(candidate_present_ids[i]);
@@ -2257,6 +2272,7 @@ prefetch_manifest_downloads(
     const history::StorageManifest& manifest,
     std::span<const std::size_t> apply_order,
     const transaction::Record& record,
+    const std::filesystem::path& local_root,
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const platform::Workspace& workspace,
@@ -2322,17 +2338,6 @@ prefetch_manifest_downloads(
                     .entry = chunked,
                     .first_op_index = op_idx,
                 });
-                for (const auto& c : chunked->chunks) {
-                    if (seen_chunks.insert(c.hash).second) {
-                        chunk_jobs.push_back(ChunkDownloadJob{
-                            .chunk_hash = c.hash,
-                            .chunk_hex = hash_hex(c.hash),
-                            .identifier = crypto::content_identifier(key, c.hash),
-                            .size = c.size,
-                            .first_op_index = op_idx,
-                        });
-                    }
-                }
             }
         }
     }
@@ -2453,7 +2458,7 @@ prefetch_manifest_downloads(
                 mutation::MutationErrorCode::LocalIo,
                 ok.error(),
                 chunk_dl_dir,
-                chunk_jobs.front().first_op_index));
+                file_jobs.front().first_op_index));
         }
         if (auto ok =
                 platform::private_storage::ensure_directory(chunk_plain_dir);
@@ -2462,77 +2467,206 @@ prefetch_manifest_downloads(
                 mutation::MutationErrorCode::LocalIo,
                 ok.error(),
                 chunk_plain_dir,
-                chunk_jobs.front().first_op_index));
+                file_jobs.front().first_op_index));
         }
 
-        std::vector<std::string> chunk_ids;
-        chunk_ids.reserve(chunk_jobs.size());
-        for (const auto& c : chunk_jobs) {
-            chunk_ids.push_back(c.identifier);
-        }
-        const bool batch_ok = batch_fetch(chunk_dl_dir, chunk_ids);
-
-        std::vector<std::optional<mutation::MutationError>> chunk_errors(
-            chunk_jobs.size());
-        application::parallel_for_indexed(
-            chunk_jobs.size(),
-            std::min<std::size_t>(parallelism, chunk_jobs.size()),
-            [&](std::size_t i) {
-                const auto& job = chunk_jobs[i];
-                const auto enc = chunk_dl_dir / job.identifier;
-                const auto plain = chunk_plain_dir / (job.chunk_hex + ".chunk");
-                if (!batch_ok && !std::filesystem::is_regular_file(enc)) {
-                    auto fetched =
-                        transport::get(storage, job.identifier, enc);
-                    if (!fetched) {
-                        chunk_errors[i] = mutation::detail::make_error(
-                            fetched.error().code ==
-                                    transport::ErrorCode::ObjectNotFound
-                                ? mutation::MutationErrorCode::
-                                      RemoteContentMissing
-                                : mutation::MutationErrorCode::
-                                      TransportFailure,
-                            transport::describe(fetched.error()),
-                            record.plan.operations[job.first_op_index].path,
-                            job.first_op_index);
-                        return;
+        struct LocalChunkSeed {
+            std::filesystem::path source_path;
+            platform::private_storage::FileIdentity identity{};
+            std::uint64_t offset = 0;
+            std::uint32_t size = 0;
+        };
+        std::unordered_map<Hash, LocalChunkSeed, decltype(&hash_key)>
+            local_seeds{0, hash_key};
+        for (const auto& fjob : file_jobs) {
+            const auto& op = record.plan.operations[fjob.first_op_index];
+            std::vector<std::filesystem::path> candidates;
+            if (auto resolved = mutation::detail::resolve_local_path(
+                    local_root, op.path, fjob.first_op_index)) {
+                candidates.push_back(std::move(*resolved));
+            }
+            const auto slot = record.progress[fjob.first_op_index].backup_slot;
+            if (slot != std::numeric_limits<std::uint32_t>::max()) {
+                auto bpath =
+                    platform::workspace_file(workspace, slot, ".backup");
+                if (!bpath.empty()) {
+                    candidates.push_back(std::move(bpath));
+                }
+            }
+            for (const auto& cand : candidates) {
+                std::error_code ec;
+                const auto st = std::filesystem::symlink_status(cand, ec);
+                if (ec || std::filesystem::is_symlink(st) ||
+                    !std::filesystem::is_regular_file(st) ||
+                    platform::private_storage::is_reparse_or_symlink(cand)) {
+                    continue;
+                }
+                const auto fsize = std::filesystem::file_size(cand, ec);
+                if (ec || fsize < crypto::pack::FASTCDC_MIN_CHUNK) {
+                    continue;
+                }
+                const auto id =
+                    platform::private_storage::query_file_identity(cand);
+                if (!id.valid) {
+                    continue;
+                }
+                if (auto cdc = crypto::pack::chunk_file_fastcdc(cand)) {
+                    const auto post_id =
+                        platform::private_storage::query_file_identity(cand);
+                    if (!post_id.valid || !(post_id == id)) {
+                        continue;
                     }
+                    for (const auto& sc : cdc->chunks) {
+                        local_seeds.try_emplace(sc.hash,
+                                                LocalChunkSeed{
+                                                    .source_path = cand,
+                                                    .identity = id,
+                                                    .offset = sc.offset,
+                                                    .size = sc.size,
+                                                });
+                    }
+                    break;
                 }
-                if (!crypto::decrypt_file(enc, plain, key) ||
-                    !crypto::content::verify_file(
-                        plain, job.chunk_hex, job.size)) {
-                    chunk_errors[i] = mutation::detail::make_error(
-                        mutation::MutationErrorCode::CryptoFailure,
-                        "FastCDC chunk failed authentication",
-                        record.plan.operations[job.first_op_index].path,
-                        job.first_op_index);
-                }
-                std::error_code ignored;
-                std::filesystem::remove(enc, ignored);
-            });
-
-        std::optional<mutation::MutationError> first_err;
-        for (const auto& e : chunk_errors) {
-            if (e &&
-                (!first_err || e->operation_index < first_err->operation_index)) {
-                first_err = *e;
             }
         }
-        if (first_err) {
-            return std::unexpected(*first_err);
+
+        std::vector<std::string> staged_chunk_hexes;
+        for (const auto& fjob : file_jobs) {
+            for (const auto& c : fjob.entry->chunks) {
+                if (!seen_chunks.insert(c.hash).second) {
+                    continue;
+                }
+                auto chunk_hex = hash_hex(c.hash);
+                staged_chunk_hexes.push_back(chunk_hex);
+                if (const auto seed = local_seeds.find(c.hash);
+                    seed != local_seeds.end() && seed->second.size == c.size &&
+                    c.size > 0 && c.size <= crypto::pack::FASTCDC_MAX_CHUNK &&
+                    seed->second.offset <=
+                        static_cast<std::uint64_t>(
+                            (std::numeric_limits<std::streamoff>::max)())) {
+                    const auto pre_id =
+                        platform::private_storage::query_file_identity(
+                            seed->second.source_path);
+                    if (pre_id.valid && pre_id == seed->second.identity &&
+                        !platform::private_storage::is_reparse_or_symlink(
+                            seed->second.source_path)) {
+                        std::ifstream source(seed->second.source_path,
+                                             std::ios::binary);
+                        source.seekg(
+                            static_cast<std::streamoff>(seed->second.offset));
+                        std::vector<std::uint8_t> buf(c.size);
+                        crypto::secure_memory::WipeGuard wipe{buf};
+                        const bool read_ok =
+                            source.read(
+                                reinterpret_cast<char*>(buf.data()),
+                                static_cast<std::streamsize>(buf.size())) &&
+                            source.gcount() ==
+                                static_cast<std::streamsize>(buf.size()) &&
+                            !source.bad();
+                        source.close();
+                        const auto post_id =
+                            platform::private_storage::query_file_identity(
+                                seed->second.source_path);
+                        if (read_ok && post_id.valid &&
+                            post_id == seed->second.identity &&
+                            hasher::hash_bytes(buf.data(), buf.size()) ==
+                                c.hash &&
+                            platform::private_storage::write_atomically(
+                                chunk_plain_dir / (chunk_hex + ".chunk"),
+                                std::string_view{
+                                    reinterpret_cast<const char*>(buf.data()),
+                                    buf.size()})) {
+                            continue;
+                        }
+                    }
+                }
+                chunk_jobs.push_back(ChunkDownloadJob{
+                    .chunk_hash = c.hash,
+                    .chunk_hex = std::move(chunk_hex),
+                    .identifier = crypto::content_identifier(key, c.hash),
+                    .size = c.size,
+                    .first_op_index = fjob.first_op_index,
+                });
+            }
+        }
+
+        if (!chunk_jobs.empty()) {
+            std::vector<std::string> chunk_ids;
+            chunk_ids.reserve(chunk_jobs.size());
+            for (const auto& c : chunk_jobs) {
+                chunk_ids.push_back(c.identifier);
+            }
+            const bool batch_ok = batch_fetch(chunk_dl_dir, chunk_ids);
+
+            std::vector<std::optional<mutation::MutationError>> chunk_errors(
+                chunk_jobs.size());
+            application::parallel_for_indexed(
+                chunk_jobs.size(),
+                std::min<std::size_t>(parallelism, chunk_jobs.size()),
+                [&](std::size_t i) {
+                    const auto& job = chunk_jobs[i];
+                    const auto enc = chunk_dl_dir / job.identifier;
+                    const auto plain =
+                        chunk_plain_dir / (job.chunk_hex + ".chunk");
+                    if (!batch_ok && !std::filesystem::is_regular_file(enc)) {
+                        auto fetched =
+                            transport::get(storage, job.identifier, enc);
+                        if (!fetched) {
+                            chunk_errors[i] = mutation::detail::make_error(
+                                fetched.error().code ==
+                                        transport::ErrorCode::ObjectNotFound
+                                    ? mutation::MutationErrorCode::
+                                          RemoteContentMissing
+                                    : mutation::MutationErrorCode::
+                                          TransportFailure,
+                                transport::describe(fetched.error()),
+                                record.plan.operations[job.first_op_index].path,
+                                job.first_op_index);
+                            return;
+                        }
+                    }
+                    if (!crypto::decrypt_file(enc, plain, key) ||
+                        !crypto::content::verify_file(
+                            plain, job.chunk_hex, job.size)) {
+                        chunk_errors[i] = mutation::detail::make_error(
+                            mutation::MutationErrorCode::CryptoFailure,
+                            "FastCDC chunk failed authentication",
+                            record.plan.operations[job.first_op_index].path,
+                            job.first_op_index);
+                    }
+                    std::error_code ignored;
+                    std::filesystem::remove(enc, ignored);
+                });
+
+            std::optional<mutation::MutationError> first_err;
+            for (const auto& e : chunk_errors) {
+                if (e && (!first_err ||
+                          e->operation_index < first_err->operation_index)) {
+                    first_err = *e;
+                }
+            }
+            if (first_err) {
+                return std::unexpected(*first_err);
+            }
         }
 
         std::vector<std::uint8_t> copy_buf(256U * 1024U);
+        crypto::secure_memory::WipeGuard copy_buf_guard{copy_buf};
         for (const auto& job : file_jobs) {
             const auto out_path = chunk_plain_dir / (job.file_hex + ".plain");
-            std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
-            if (!out) {
+            std::error_code rm_ec;
+            std::filesystem::remove(out_path, rm_ec);
+            auto private_out =
+                platform::private_storage::create_private_file(out_path);
+            if (!private_out) {
                 return std::unexpected(mutation::detail::make_error(
                     mutation::MutationErrorCode::LocalIo,
-                    "failed to open reassembled download file",
+                    "failed to create reassembled download file: " +
+                        private_out.error().message,
                     out_path,
                     job.first_op_index));
             }
+            bool write_failed = false;
             for (const auto& chunk : job.entry->chunks) {
                 const auto chunk_path =
                     chunk_plain_dir / (hash_hex(chunk.hash) + ".chunk");
@@ -2540,11 +2674,19 @@ prefetch_manifest_downloads(
                     chunk_path,
                     copy_buf,
                     [&](std::span<const std::uint8_t> slab) {
-                        out.write(reinterpret_cast<const char*>(slab.data()),
-                                  static_cast<std::streamsize>(slab.size()));
+                        if (!slab.empty() &&
+                            !platform::private_storage::write_private_file(
+                                *private_out, slab.data(), slab.size())) {
+                            write_failed = true;
+                            return false;
+                        }
+                        return true;
                     },
                     chunk.size);
-                if (!streamed || out.bad()) {
+                if (!streamed || write_failed) {
+                    static_cast<void>(platform::private_storage::
+                                          remove_private_file_if_owned(
+                                              *private_out));
                     return std::unexpected(mutation::detail::make_error(
                         mutation::MutationErrorCode::LocalIo,
                         "failed to concatenate FastCDC chunk",
@@ -2552,9 +2694,8 @@ prefetch_manifest_downloads(
                         job.first_op_index));
                 }
             }
-            out.close();
-            if (out.fail() ||
-                !crypto::content::verify_file(
+            platform::private_storage::close_private_file(*private_out);
+            if (!crypto::content::verify_file(
                     out_path, job.file_hex, job.file_size)) {
                 return std::unexpected(mutation::detail::make_error(
                     mutation::MutationErrorCode::IntegrityMismatch,
@@ -2564,9 +2705,9 @@ prefetch_manifest_downloads(
             }
             ready.emplace(job.file_hex, out_path);
         }
-        for (const auto& c : chunk_jobs) {
+        for (const auto& chunk_hex : staged_chunk_hexes) {
             std::error_code ignored;
-            std::filesystem::remove(chunk_plain_dir / (c.chunk_hex + ".chunk"),
+            std::filesystem::remove(chunk_plain_dir / (chunk_hex + ".chunk"),
                                     ignored);
         }
     }
@@ -3189,6 +3330,7 @@ execute(const runtime::RuntimeData& runtime_data,
         observed_input.storage.storage_manifest,
         apply_order,
         *record,
+        runtime_data.local_dir,
         storage,
         key,
         *workspace,

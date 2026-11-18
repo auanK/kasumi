@@ -26,7 +26,8 @@ void write_profile(const kasumi::application::ExecutionEnvironment& environment,
                              "[profiles.demo]\nlocal_dir = '" + local.string() +
                                  "'\nremote_dir = '" + remote.string() +
                                  "'\nmin_history_depth = 5\n"
-                                 "min_history_age_hours = 6\n");
+                                 "min_history_age_hours = 6\n"
+                                 "key_storage = 'file'\n");
 }
 
 struct RemoteHeadsCliEnv {

@@ -42,7 +42,8 @@ void setup_test_profile(const TempWorkspace& workspace, int file_count = 5) {
         app / "config.toml",
         "[profiles.demo]\nlocal_dir = '" + local.string() + "'\n"
         "remote_dir = '" + remote.string() + "'\n"
-        "min_history_depth = 5\nmin_history_age_hours = 6\n");
+        "min_history_depth = 5\nmin_history_age_hours = 6\n"
+        "key_storage = 'file'\n");
     std::filesystem::create_directories(app / "profiles" / "demo");
     ASSERT_TRUE(kasumi::state_storage::initialize(
         app / "profiles" / "demo" / "db.sqlite"));

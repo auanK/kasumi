@@ -231,8 +231,7 @@ fetch_decrypt_and_verify(transport::Transport& storage,
         std::error_code size_error;
         const auto actual_size =
             std::filesystem::file_size(encrypted, size_error);
-        const std::uint64_t minimum_size = std::min<std::uint64_t>(
-            crypto::LEGACY_FILE_HEADER_SIZE, crypto::FILE_HEADER_SIZE);
+        const std::uint64_t minimum_size = crypto::FILE_HEADER_SIZE;
         if (size_error || actual_size < minimum_size ||
             actual_size > *expected_ciphertext_size) {
             return std::unexpected(

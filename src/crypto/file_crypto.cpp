@@ -22,14 +22,8 @@
 namespace kasumi::crypto {
 namespace {
 
-inline constexpr std::array<std::uint8_t, FILE_MAGIC_SIZE> format_magic_v2{
-    'K', 'A', 'S', 'U', 'M', 'I', 2, 0};
 inline constexpr std::array<std::uint8_t, FILE_MAGIC_SIZE> format_magic_v3{
     'K', 'A', 'S', 'U', 'M', 'I', 3, 0};
-inline constexpr std::size_t header_ad_size_v2 =
-    FILE_MAGIC_SIZE + NONCE_SIZE + sizeof(std::uint64_t);
-inline constexpr std::size_t chunk_ad_size_v2 =
-    header_ad_size_v2 + 2 * sizeof(std::uint64_t);
 inline constexpr std::size_t header_ad_size_v3 =
     FILE_MAGIC_SIZE + 1 + NONCE_SIZE + sizeof(std::uint64_t);
 inline constexpr std::size_t chunk_ad_size_v3 =
@@ -47,21 +41,6 @@ KeyPurpose key_purpose_for(FilePurpose purpose) noexcept {
     return KeyPurpose::Content;
 }
 
-std::optional<std::uint64_t>
-encoded_file_size_v2(std::uint64_t plaintext_size) noexcept {
-    constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();
-    const auto chunks = plaintext_size / LEGACY_CHUNK_SIZE +
-                        (plaintext_size % LEGACY_CHUNK_SIZE != 0 ? 1 : 0);
-    if (plaintext_size > maximum - LEGACY_FILE_HEADER_SIZE) {
-        return std::nullopt;
-    }
-    const auto base = LEGACY_FILE_HEADER_SIZE + plaintext_size;
-    if (chunks > (maximum - base) / MAC_SIZE) {
-        return std::nullopt;
-    }
-    return base + chunks * MAC_SIZE;
-}
-
 std::array<std::uint8_t, header_ad_size_v3>
 make_header_ad_v3(FilePurpose purpose,
                   const std::uint8_t* base_nonce,
@@ -75,18 +54,6 @@ make_header_ad_v3(FilePurpose purpose,
                     static_cast<std::ptrdiff_t>(FILE_MAGIC_SIZE + 1));
     wire::encode_le<std::uint64_t>(
         plaintext_size, result.data() + FILE_MAGIC_SIZE + 1 + NONCE_SIZE);
-    return result;
-}
-
-std::array<std::uint8_t, chunk_ad_size_v2>
-make_chunk_ad_v2(std::span<const std::uint8_t, header_ad_size_v2> header,
-                 std::uint64_t chunk_index,
-                 std::uint64_t chunk_size) noexcept {
-    std::array<std::uint8_t, chunk_ad_size_v2> result{};
-    std::copy(header.begin(), header.end(), result.begin());
-    wire::encode_le<std::uint64_t>(chunk_index, result.data() + header.size());
-    wire::encode_le<std::uint64_t>(
-        chunk_size, result.data() + header.size() + sizeof(chunk_index));
     return result;
 }
 
@@ -422,74 +389,6 @@ bool encrypt_v3_chunk(CryptoSession& session,
 }
 
 template <typename ReadFn, typename WriteFn, typename AtEofFn>
-bool decode_v2_stream(CryptoSession& session,
-                      const Key& key,
-                      std::uint64_t input_size,
-                      ReadFn&& read_exact,
-                      WriteFn&& write_exact,
-                      AtEofFn&& at_eof) {
-    std::array<std::uint8_t, header_ad_size_v2> header{};
-    std::copy(format_magic_v2.begin(), format_magic_v2.end(), header.begin());
-    if (!read_exact(header.data() + FILE_MAGIC_SIZE,
-                    header_ad_size_v2 - FILE_MAGIC_SIZE)) {
-        return false;
-    }
-
-    std::copy_n(
-        header.data() + FILE_MAGIC_SIZE, NONCE_SIZE, session.base_nonce.data());
-    const auto expected_size =
-        wire::decode_le<std::uint64_t>(header.data() + FILE_MAGIC_SIZE + NONCE_SIZE);
-
-    if (!read_exact(session.header_mac.data(), session.header_mac.size())) {
-        return false;
-    }
-    if (encoded_file_size_v2(expected_size) != input_size ||
-        !header_mac_op(session.header_mac.data(),
-                       session.base_nonce.data(),
-                       header,
-                       key.data(),
-                       false)) {
-        return false;
-    }
-
-    const auto buf_size = static_cast<std::size_t>(
-        std::min<std::uint64_t>(LEGACY_CHUNK_SIZE, expected_size));
-    session.buffer_a.resize(buf_size);
-    session.buffer_b.resize(buf_size);
-
-    std::uint64_t chunk_index = 0;
-    std::uint64_t total_decrypted = 0;
-    while (total_decrypted < expected_size) {
-        const auto chunk_size = static_cast<std::size_t>(
-            std::min<std::uint64_t>(LEGACY_CHUNK_SIZE,
-                                    expected_size - total_decrypted));
-        if (!read_exact(session.mac.data(), session.mac.size()) ||
-            !read_exact(session.buffer_a.data(), chunk_size)) {
-            return false;
-        }
-        derive_chunk_nonce(
-            session.base_nonce.data(), chunk_index, session.chunk_nonce.data());
-        const auto chunk_ad = make_chunk_ad_v2(header, chunk_index, chunk_size);
-        if (crypto_aead_unlock(session.buffer_b.data(),
-                               session.mac.data(),
-                               key.data(),
-                               session.chunk_nonce.data(),
-                               chunk_ad.data(),
-                               chunk_ad.size(),
-                               session.buffer_a.data(),
-                               chunk_size) != 0) {
-            return false;
-        }
-        if (!write_exact(session.buffer_b.data(), chunk_size)) {
-            return false;
-        }
-        total_decrypted += chunk_size;
-        ++chunk_index;
-    }
-    return at_eof();
-}
-
-template <typename ReadFn, typename WriteFn, typename AtEofFn>
 bool decode_v3_stream(CryptoSession& session,
                       const Key& key,
                       FilePurpose purpose,
@@ -731,23 +630,14 @@ decrypt_bytes(std::span<const std::uint8_t> ciphertext,
             };
             const auto at_eof = [&]() { return cursor == ciphertext.size(); };
 
-            bool ok = false;
-            if (magic == format_magic_v3) {
-                ok = decode_v3_stream(session,
-                                      key,
-                                      purpose,
-                                      ciphertext.size(),
-                                      read_exact,
-                                      write_exact,
-                                      at_eof);
-            } else if (magic == format_magic_v2 && purpose != FilePurpose::Pack) {
-                ok = decode_v2_stream(session,
-                                      key,
-                                      ciphertext.size(),
-                                      read_exact,
-                                      write_exact,
-                                      at_eof);
-            }
+            const bool ok = magic == format_magic_v3 &&
+                            decode_v3_stream(session,
+                                             key,
+                                             purpose,
+                                             ciphertext.size(),
+                                             read_exact,
+                                             write_exact,
+                                             at_eof);
             if (!ok) {
                 if (!plaintext.empty()) {
                     crypto_wipe(plaintext.data(), plaintext.size());
@@ -971,23 +861,14 @@ bool decrypt_file(const std::filesystem::path& input_path,
                 return input.gcount() == 0 && !input.bad();
             };
 
-            bool ok = false;
-            if (magic == format_magic_v3) {
-                ok = decode_v3_stream(session,
-                                      key,
-                                      purpose,
-                                      input_size,
-                                      read_exact,
-                                      write_exact,
-                                      at_eof);
-            } else if (magic == format_magic_v2 && purpose != FilePurpose::Pack) {
-                ok = decode_v2_stream(session,
-                                      key,
-                                      input_size,
-                                      read_exact,
-                                      write_exact,
-                                      at_eof);
-            }
+            const bool ok = magic == format_magic_v3 &&
+                            decode_v3_stream(session,
+                                             key,
+                                             purpose,
+                                             input_size,
+                                             read_exact,
+                                             write_exact,
+                                             at_eof);
             if (!ok) {
                 return false;
             }

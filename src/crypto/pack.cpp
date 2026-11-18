@@ -604,6 +604,12 @@ encrypt_file_slice_with_hashes(const std::filesystem::path& input_path,
         return fail("slice range is outside file bounds");
     }
 
+    const auto pre_identity =
+        platform::private_storage::query_file_identity(input_path);
+    if (!pre_identity.valid) {
+        return fail("failed to query slice input file identity");
+    }
+
     std::vector<std::uint8_t> buffer(length);
     secure_memory::WipeGuard buffer_guard{buffer};
 
@@ -619,6 +625,14 @@ encrypt_file_slice_with_hashes(const std::filesystem::path& input_path,
                static_cast<std::streamsize>(length));
     if (input.gcount() != static_cast<std::streamsize>(length) || input.bad()) {
         return fail("failed to read complete slice from input file");
+    }
+    input.close();
+
+    const auto post_identity =
+        platform::private_storage::query_file_identity(input_path);
+    if (!post_identity.valid || !(post_identity == pre_identity) ||
+        platform::private_storage::is_reparse_or_symlink(input_path)) {
+        return fail("slice input file identity changed during read");
     }
 
     if (hash_span(buffer) != expected_slice_hash) {

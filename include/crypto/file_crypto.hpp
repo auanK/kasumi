@@ -16,15 +16,12 @@ namespace kasumi::crypto {
 
 // Maximum plaintext size of each authenticated chunk in Protocol v3 (1 MiB).
 inline constexpr std::size_t CHUNK_SIZE = 1U * 1024U * 1024U;
-inline constexpr std::size_t LEGACY_CHUNK_SIZE = 4U * 1024U * 1024U;
 
 // Fixed key, nonce, prefix, and MAC sizes for the encrypted format.
 inline constexpr std::size_t NONCE_SIZE = 24;
 inline constexpr std::size_t MAC_SIZE = 16;
 inline constexpr std::size_t CHUNK_PREFIX_SIZE = 5;
 inline constexpr std::size_t FILE_MAGIC_SIZE = 8;
-inline constexpr std::size_t LEGACY_FILE_HEADER_SIZE =
-    FILE_MAGIC_SIZE + NONCE_SIZE + sizeof(std::uint64_t) + MAC_SIZE;
 inline constexpr std::size_t FILE_HEADER_SIZE =
     FILE_MAGIC_SIZE + 1 + NONCE_SIZE + sizeof(std::uint64_t) + MAC_SIZE;
 

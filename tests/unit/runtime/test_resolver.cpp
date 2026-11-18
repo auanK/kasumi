@@ -16,7 +16,8 @@ void write_config(const TempWorkspace& workspace, std::string_view remote) {
         "[profiles.demo]\nlocal_dir = '" +
             kasumi::test::workspace_path(workspace, "local data").string() +
             "'\nremote_dir = '" + std::string(remote) +
-            "'\nmin_history_depth = 5\nmin_history_age_hours = 6\n");
+            "'\nmin_history_depth = 5\nmin_history_age_hours = 6\n"
+            "key_storage = 'file'\n");
 }
 
 TEST(RuntimeResolverTest, ReadOnlyDoesNotCreateAnyProfileInfrastructure) {
@@ -117,7 +118,8 @@ TEST(RuntimeResolverTest, RejectsStoredRelativeLocalPath) {
     kasumi::test::write_text(
         app / "config.toml",
         "[profiles.demo]\nlocal_dir = 'relative'\nremote_dir = 'remote:root'\n"
-        "min_history_depth = 5\nmin_history_age_hours = 6\n");
+        "min_history_depth = 5\nmin_history_age_hours = 6\n"
+        "key_storage = 'file'\n");
 
     const auto result = kasumi::runtime::resolve(
         app, "demo", kasumi::runtime::AccessMode::ReadWrite);
