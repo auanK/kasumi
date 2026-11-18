@@ -1715,6 +1715,23 @@ build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
                          bool enable_micro_packs) {
     UploadLayoutPlan layout;
 
+    const auto& observed_manifest = observed_input.storage.storage_manifest;
+    const auto& missing = reconciliation_result.missing_objects;
+    std::unordered_map<Hash, std::vector<std::size_t>, decltype(&hash_key)>
+        repair_ops_by_hash{0, hash_key};
+    if (!observed_manifest.empty() && !missing.empty()) {
+        for (std::size_t index = 0; index < record.plan.operations.size();
+             ++index) {
+            const auto& op = record.plan.operations[index];
+            if (op.action == Action::Upload && content_upload_required[index]) {
+                if (const auto h = hash_from_hex(op.hash);
+                    h && missing.contains(*h)) {
+                    repair_ops_by_hash[*h].push_back(index);
+                }
+            }
+        }
+    }
+
     const auto& ref_tree = record.publication_required
                                ? reconciliation_result.candidate_shared_tree
                                : observed_input.storage.tree;
@@ -1722,8 +1739,19 @@ build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
         0, hash_key};
     live_files.reserve(ref_tree.rows.size());
     for (const auto& row : ref_tree.rows) {
-        if (!row.is_directory && row.path != ".kasumiignore" &&
-            !reconciliation_result.missing_objects.contains(row.hash)) {
+        if (row.is_directory) {
+            continue;
+        }
+        if (missing.contains(row.hash)) {
+            if (record.publication_required &&
+                history::find_packed_blob(observed_manifest, row.hash) &&
+                !repair_ops_by_hash.contains(row.hash)) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::MutationFailure,
+                    "cannot replace an absent pack without a local source for " +
+                        row.path));
+            }
+        } else if (row.path != ".kasumiignore") {
             live_files.emplace(row.hash, row.size);
         }
     }
@@ -1863,18 +1891,8 @@ build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
     } else if (!record.publication_required &&
                reconciliation_result.requires_storage_repair &&
                !observed_input.storage.storage_manifest.empty()) {
-        std::unordered_map<Hash, std::vector<std::size_t>, decltype(&hash_key)>
-            repair_ops_by_hash{0, hash_key};
-        for (std::size_t index = 0; index < record.plan.operations.size();
-             ++index) {
-            const auto& op = record.plan.operations[index];
-            if (op.action == Action::Upload && content_upload_required[index]) {
-                if (const auto h = hash_from_hex(op.hash)) {
-                    repair_ops_by_hash[*h].push_back(index);
-                }
-            }
-        }
         HashSet handled_packs{0, hash_key};
+        std::optional<std::size_t> incomplete_pack;
         for (const auto& [op_hash, indices] : repair_ops_by_hash) {
             if (const auto* chunked = history::find_chunked_file(
                     observed_input.storage.storage_manifest, op_hash)) {
@@ -1906,7 +1924,9 @@ build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
                                      key, packed->pack_hash),
                                  .blobs = {},
                                  .operation_indices = {}};
+                std::vector<crypto::pack::PackMemberDescriptor> descriptors;
                 bool complete = true;
+                auto first_pack_operation = indices.front();
                 for (const auto& entry :
                      observed_input.storage.storage_manifest.packed_blobs) {
                     if (entry.pack_hash != packed->pack_hash) {
@@ -1915,20 +1935,40 @@ build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
                     const auto found = repair_ops_by_hash.find(entry.blob_hash);
                     if (found == repair_ops_by_hash.end()) {
                         complete = false;
-                        break;
+                        continue;
                     }
+                    const auto op_index = found->second.front();
+                    first_pack_operation =
+                        std::min(first_pack_operation, op_index);
+                    if (record.plan.operations[op_index].size != entry.size) {
+                        complete = false;
+                        continue;
+                    }
+                    descriptors.push_back({entry.blob_hash,
+                                           static_cast<std::uint32_t>(entry.size)});
                     pack.blobs.push_back(PlannedSmallUpload{
                         .hash = entry.blob_hash,
                         .size = static_cast<std::uint32_t>(entry.size),
-                        .op_index = found->second.front(),
+                        .op_index = op_index,
                     });
-                    pack.operation_indices.push_back(found->second.front());
+                    pack.operation_indices.push_back(op_index);
                 }
-                if (complete && pack.blobs.size() >= 2) {
+                if (complete && crypto::pack::compute_pack_hash(descriptors) ==
+                                    packed->pack_hash) {
                     std::ranges::sort(pack.operation_indices);
                     layout.packs.push_back(std::move(pack));
+                } else {
+                    incomplete_pack = std::min(
+                        incomplete_pack.value_or(first_pack_operation),
+                        first_pack_operation);
                 }
             }
+        }
+        if (incomplete_pack) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::MutationFailure,
+                "cannot reconstruct the original absent pack from local sources",
+                incomplete_pack));
         }
     }
 
@@ -2007,10 +2047,10 @@ std::expected<void, detail::UploadBatchError> execute_packed_upload_batch(
             const auto dest = batch.root / pack.pack_identifier;
             auto res =
                 crypto::pack::write_encrypted_pack(sources, dest, key);
-            if (!res) {
+            if (!res || res->pack_hash != pack.pack_hash) {
                 stage_errors[i] = mutation::MutationError{
                     .code = mutation::MutationErrorCode::IntegrityMismatch,
-                    .detail = res.error(),
+                    .detail = res ? "staged pack identifier mismatch" : res.error(),
                     .path = local_root,
                     .operation_index = pack.operation_indices.front(),
                 };
