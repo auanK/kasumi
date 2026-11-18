@@ -12,13 +12,16 @@
 #include "crypto/content.hpp"
 #include "crypto/key_derivation.hpp"
 #include "crypto/pack.hpp"
+#include "crypto/secure_memory.hpp"
 #include "platform/cancellation.hpp"
 #include "platform/clock.hpp"
 #include "platform/path.hpp"
+#include "platform/private_storage.hpp"
 #include "platform/workspace.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <blake3.h>
 #include <condition_variable>
 #include <deque>
 #include <exception>
@@ -111,6 +114,8 @@ struct PhysicalAuditUnit {
     std::string plaintext_hash_hex;
     std::optional<std::uint64_t> expected_size;
     bool is_pack = false;
+    std::filesystem::path retained_chunk;
+    std::atomic<std::size_t> remaining_uses{0};
     std::once_flag once;
     std::expected<AuditState, Error> outcome{AuditState::Healthy};
 };
@@ -130,7 +135,8 @@ audit_physical_unit(transport::Transport& storage,
         unit.expected_size,
         workspace.root,
         sequence,
-        unit.is_pack);
+        unit.is_pack,
+        unit.retained_chunk.empty() ? nullptr : &unit.retained_chunk);
     if (!audited) {
         const auto code =
             audited.error().code == history_storage::ErrorCode::TransportFailure
@@ -158,8 +164,34 @@ audit_object(transport::Transport& storage,
              const kasumi::maintenance::ObjectReference& reference,
              std::span<PhysicalAuditUnit* const> units,
              std::span<const std::size_t> unit_sequences,
+             const history::ChunkedFileEntry* chunked,
              const platform::Workspace& workspace) {
+    struct ReleaseChunks {
+        std::span<PhysicalAuditUnit* const> pending;
+        void release_one() {
+            auto* unit = pending.front();
+            pending = pending.subspan(1);
+            if (!unit->retained_chunk.empty() &&
+                unit->remaining_uses.fetch_sub(1) == 1) {
+                std::error_code ignored;
+                std::filesystem::remove(unit->retained_chunk, ignored);
+            }
+        }
+        ~ReleaseChunks() {
+            while (!pending.empty()) {
+                release_one();
+            }
+        }
+    } release{units};
+
+    std::vector<std::uint8_t> buffer(chunked != nullptr ? 256U * 1024U : 0U);
+    crypto::secure_memory::WipeGuard wipe_buffer{buffer};
+    blake3_hasher hasher{};
+    blake3_hasher_init(&hasher);
+    crypto::secure_memory::WipeGuard wipe_hasher{hasher};
+
     AuditState combined = AuditState::Healthy;
+    std::uint64_t size = 0;
     for (std::size_t i = 0; i < units.size(); ++i) {
         PhysicalAuditUnit* unit = units[i];
         const std::size_t seq = unit_sequences[i];
@@ -175,6 +207,37 @@ audit_object(transport::Transport& storage,
         }
         if (*unit->outcome == AuditState::Missing) {
             combined = AuditState::Missing;
+        }
+        if (combined == AuditState::Healthy && chunked != nullptr) {
+            const auto streamed = platform::private_storage::stream_regular_file(
+                unit->retained_chunk,
+                buffer,
+                [&](std::span<const std::uint8_t> slab) {
+                    blake3_hasher_update(&hasher, slab.data(), slab.size());
+                },
+                chunked->chunks[i].size);
+            if (!streamed) {
+                if (streamed.error().kind ==
+                    platform::private_storage::StreamErrorKind::SizeMismatch) {
+                    return AuditState::Corrupt;
+                }
+                return std::unexpected(make_error(ErrorCode::WorkspaceFailure,
+                                                  streamed.error().detail));
+            }
+            if (*streamed > reference.size - size) {
+                return AuditState::Corrupt;
+            }
+            size += *streamed;
+        }
+        release.release_one();
+    }
+    if (combined == AuditState::Healthy && chunked != nullptr) {
+        Hash digest{};
+        blake3_hasher_finalize(&hasher,
+                               reinterpret_cast<std::uint8_t*>(digest.data()),
+                               digest.size());
+        if (size != reference.size || hash_hex(digest) != reference.identifier) {
+            return AuditState::Corrupt;
         }
     }
     return combined;
@@ -331,6 +394,7 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
             std::deque<PhysicalAuditUnit> physical_units;
             std::unordered_map<std::string, std::size_t> unit_index_by_id;
             std::vector<std::vector<std::size_t>> ref_unit_indices(total_objects);
+            std::vector<const history::ChunkedFileEntry*> ref_chunks(total_objects);
 
             for (std::size_t i = 0; i < total_objects; ++i) {
                 const auto& ref = inventory->referenced_objects[i];
@@ -343,7 +407,8 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                 const auto add_unit = [&](std::string remote_id,
                                           std::string plaintext_hex,
                                           std::optional<std::uint64_t> exp_size,
-                                          bool is_pack) {
+                                          bool is_pack,
+                                          bool retain_chunk = false) {
                     auto [it, inserted] = unit_index_by_id.try_emplace(
                         remote_id, physical_units.size());
                     if (inserted) {
@@ -352,6 +417,12 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                         added.plaintext_hash_hex = std::move(plaintext_hex);
                         added.expected_size = exp_size;
                         added.is_pack = is_pack;
+                    }
+                    auto& unit = physical_units[it->second];
+                    ++unit.remaining_uses;
+                    if (retain_chunk && unit.retained_chunk.empty()) {
+                        unit.retained_chunk = workspace->root /
+                            ("fsck-chunk-" + std::to_string(it->second) + ".plain");
                     }
                     ref_unit_indices[i].push_back(it->second);
                 };
@@ -364,11 +435,13 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                 } else if (const auto* chunked = history::find_chunked_file(
                                storage_state.storage_manifest,
                                *logical_hash)) {
+                    ref_chunks[i] = chunked;
                     for (const auto& chunk : chunked->chunks) {
                         add_unit(crypto::content_identifier(key, chunk.hash),
                                  hash_hex(chunk.hash),
                                  chunk.size,
-                                 false);
+                                 false,
+                                 true);
                     }
                 } else {
                     add_unit(crypto::content_identifier(key, *logical_hash),
@@ -450,6 +523,7 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                                 inventory->referenced_objects[index],
                                 unit_ptrs,
                                 unit_idxs,
+                                ref_chunks[index],
                                 *workspace);
                             if (!audited) {
                                 record_hard_failure(index,

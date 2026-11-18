@@ -363,6 +363,7 @@ std::expected<void, Error> observe_content_availability(
 
     const bool inventory_available = input.audit_storage_objects;
     std::vector<Hash> missing;
+    HashSet absent_packs{0, hash_key};
     missing.reserve(logical_probes.size());
     for (std::size_t index = 0; index < logical_probes.size(); ++index) {
         const auto& [hash, phys_ids] = logical_probes[index];
@@ -416,8 +417,21 @@ std::expected<void, Error> observe_content_availability(
                 continue;
             }
         }
+        if (!present) {
+            if (const auto* packed = history::find_packed_blob(
+                    input.storage.storage_manifest, hash)) {
+                absent_packs.insert(packed->pack_hash);
+            }
+        }
         if (!present || upload_it != upload_sizes.end()) {
             missing.push_back(hash);
+        }
+    }
+    if (!absent_packs.empty()) {
+        for (const auto& member : input.storage.storage_manifest.packed_blobs) {
+            if (absent_packs.contains(member.pack_hash)) {
+                missing.push_back(member.blob_hash);
+            }
         }
     }
     // Replace the set only after every requested identifier has been

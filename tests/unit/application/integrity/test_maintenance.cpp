@@ -676,6 +676,49 @@ std::vector<std::string> setup_multi_file_dataset(
     return identifiers;
 }
 
+TEST(IntegrityMaintenanceTest, FsckDetectsChunkedFileWithSwappedChunkOrderInManifest) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+    const std::string first(3U * 1024U * 1024U, 'a');
+    const std::string second(first.size(), 'b');
+    const std::string last(first.size(), 'c');
+    const auto size = static_cast<std::uint32_t>(first.size());
+    (void)put_content(storage.transport, storage.workspace, first, "first");
+    (void)put_content(storage.transport, storage.workspace, second, "second");
+    (void)put_content(storage.transport, storage.workspace, last, "last");
+
+    const auto file_hash = kasumi::hasher::hash_string(first + second + last);
+    const auto healthy_hash = kasumi::hasher::hash_string(second + first + last);
+    kasumi::Snapshot tree;
+    tree.rows = {{.path = "", .is_directory = true},
+                 {.path = "chunked.bin", .hash = file_hash, .size = 3ULL * size},
+                 {.path = "healthy.bin", .hash = healthy_hash, .size = 3ULL * size}};
+    kasumi::finalize_snapshot(tree);
+    kasumi::history::StorageManifest manifest;
+    manifest.chunked_files.push_back({
+        .file_hash = file_hash,
+        .file_size = 3ULL * size,
+        .chunks = {{kasumi::hasher::hash_string(second), size},
+                   {kasumi::hasher::hash_string(first), size},
+                   {kasumi::hasher::hash_string(last), size}},
+    });
+    auto healthy_manifest = manifest.chunked_files.front();
+    healthy_manifest.file_hash = healthy_hash;
+    manifest.chunked_files.push_back(std::move(healthy_manifest));
+    std::ranges::sort(manifest.chunked_files, {},
+                      &kasumi::history::ChunkedFileEntry::file_hash);
+    const auto commit = kasumi::history::make_commit(0, {}, tree, 0, manifest);
+    ASSERT_TRUE(commit);
+    publish_remote(storage.transport, storage.workspace, *commit);
+
+    const auto audited = kasumi::application::integrity::fsck(
+        runtime, storage.transport, test_key());
+    ASSERT_FALSE(audited);
+    EXPECT_EQ(audited.error().code, IntegrityErrorCode::Unrecoverable);
+    EXPECT_NE(audited.error().detail.find("chunked.bin"), std::string::npos);
+    EXPECT_EQ(audited.error().detail.find("healthy.bin"), std::string::npos);
+}
+
 TEST(IntegrityMaintenanceTest, FsckProgressCountsUniqueReferencedObjects) {
     auto storage = make_local_storage();
     auto runtime = runtime_data(storage.workspace);

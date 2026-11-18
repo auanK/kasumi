@@ -773,6 +773,7 @@ inspect_contents(const observation::history::StorageView& observed,
                  InspectionOperation operation,
                  bool audit) {
     std::map<std::string, RemoteContentInfo> inventory;
+    std::map<std::string, std::set<std::string, std::less<>>> paths;
     std::unordered_set<std::string> pack_ids;
     const auto add_rows = [&](const Snapshot& tree,
                               const history::StorageManifest& manifest,
@@ -800,8 +801,12 @@ inspect_contents(const observation::history::StorageView& observed,
                 return false;
             }
             content.current_tree = content.current_tree || current;
-            content.paths.push_back(logical_path.empty() ? "/"
-                                                         : std::string{logical_path});
+            auto& unique_paths = paths[content_id];
+            const auto path = logical_path.empty() ? "/" : logical_path;
+            const auto position = unique_paths.lower_bound(path);
+            if (position == unique_paths.end() || *position != path) {
+                unique_paths.emplace_hint(position, path);
+            }
             return true;
         };
 
@@ -861,9 +866,10 @@ inspect_contents(const observation::history::StorageView& observed,
 
     std::size_t audit_index = 0;
     for (auto& [unused, content] : inventory) {
-        std::ranges::sort(content.paths);
-        const auto unique = std::ranges::unique(content.paths);
-        content.paths.erase(unique.begin(), unique.end());
+        if (const auto found = paths.find(content.content_id); found != paths.end()) {
+            content.paths.assign(found->second.begin(), found->second.end());
+            paths.erase(found);
+        }
         content.state = !content.physically_present
                             ? RemoteContentState::Missing
                         : content.referenced ? RemoteContentState::Present
@@ -1064,7 +1070,8 @@ load_physical_inventories(transport::Transport& storage,
             "remote history is incomplete; inventory is inconclusive");
     }
     auto content_inventory = history_storage::inventory_content_reachability(
-        storage, key, identifiers, *history_inventory, workspace_root);
+        storage, key, identifiers, *history_inventory, workspace_root,
+        /*audit_payloads=*/false, /*include_references=*/false);
     if (!content_inventory) {
         return std::unexpected(content_error);
     }

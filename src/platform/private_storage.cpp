@@ -5,6 +5,7 @@
 #include "platform/path.hpp"
 #include "platform/random.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstddef>
@@ -1258,7 +1259,8 @@ stream_regular_file_raw(const std::filesystem::path& path,
                         std::span<std::uint8_t> scratch,
                         bool (*on_chunk)(void*, std::span<const std::uint8_t>),
                         void* context,
-                        std::optional<std::uint64_t> expected_size) {
+                        std::optional<std::uint64_t> expected_size,
+                        std::optional<FileSlice> slice) {
     if (scratch.empty() || on_chunk == nullptr) {
         return make_stream_error(StreamErrorKind::ReadFailed,
                                  "invalid stream buffer or callback");
@@ -1303,14 +1305,10 @@ stream_regular_file_raw(const std::filesystem::path& path,
         return make_stream_error(StreamErrorKind::ReadFailed,
                                  "could not read file size");
     }
-    if (expected_size &&
-        static_cast<std::uint64_t>(actual_size.QuadPart) != *expected_size) {
-        return make_stream_error(StreamErrorKind::SizeMismatch,
-                                 "file size does not match expected size");
-    }
-
+    const auto file_size = static_cast<std::uint64_t>(actual_size.QuadPart);
 #else
-    const int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    const int flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | (slice ? O_NONBLOCK : 0);
+    const int fd = ::open(path.c_str(), flags);
     if (fd < 0) {
         const std::error_code sys_err{errno, std::generic_category()};
         const auto kind = errno == ELOOP ? StreamErrorKind::Symlink
@@ -1330,19 +1328,40 @@ stream_regular_file_raw(const std::filesystem::path& path,
         return make_stream_error(StreamErrorKind::NotRegular,
                                  "path is not a regular file");
     }
-    if (expected_size &&
-        static_cast<std::uint64_t>(st.st_size) != *expected_size) {
+    const auto file_size = static_cast<std::uint64_t>(st.st_size);
+#endif
+    if (expected_size && file_size != *expected_size) {
         return make_stream_error(StreamErrorKind::SizeMismatch,
                                  "file size does not match expected size");
     }
+    if (slice) {
+        if (slice->offset > file_size || slice->size > file_size - slice->offset) {
+            return make_stream_error(StreamErrorKind::SizeMismatch,
+                                     "slice exceeds file size");
+        }
+#if defined(_WIN32)
+        LARGE_INTEGER offset{};
+        offset.QuadPart = static_cast<LONGLONG>(slice->offset);
+        const bool seek_ok = SetFilePointerEx(handle, offset, nullptr, FILE_BEGIN) != 0;
+#else
+        const bool seek_ok = ::lseek(fd, static_cast<off_t>(slice->offset), SEEK_SET) >= 0;
 #endif
+        if (!seek_ok) {
+            return make_stream_error(StreamErrorKind::ReadFailed,
+                                     "could not seek to file slice");
+        }
+    }
     std::uint64_t total_read = 0;
-    for (;;) {
+    while (!slice || total_read < slice->size) {
+        const auto requested = slice
+            ? static_cast<std::size_t>(std::min<std::uint64_t>(
+                  scratch.size(), slice->size - total_read))
+            : scratch.size();
 #if defined(_WIN32)
         DWORD count = 0;
         if (!ReadFile(handle,
                       scratch.data(),
-                      static_cast<DWORD>(scratch.size()),
+                      static_cast<DWORD>(requested),
                       &count,
                       nullptr)) {
             const DWORD code = GetLastError();
@@ -1352,7 +1371,7 @@ stream_regular_file_raw(const std::filesystem::path& path,
                 {static_cast<int>(code), std::system_category()});
         }
 #else
-        const auto count = ::read(fd, scratch.data(), scratch.size());
+        const auto count = ::read(fd, scratch.data(), requested);
         if (count < 0) {
             if (errno == EINTR) {
                 continue;
@@ -1371,6 +1390,10 @@ stream_regular_file_raw(const std::filesystem::path& path,
             return make_stream_error(StreamErrorKind::Aborted,
                                      "stream aborted by consumer");
         }
+    }
+    if (slice && total_read != slice->size) {
+        return make_stream_error(StreamErrorKind::SizeMismatch,
+                                 "file ended before the end of the slice");
     }
     return total_read;
 }

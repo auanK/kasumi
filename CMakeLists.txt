@@ -582,6 +582,7 @@ target_link_libraries(kasumi_application
     kasumi_platform
     kasumi_crypto
     kasumi_state_storage
+    blake3
     monocypher
     kasumi_warnings
     kasumi_release_optimizations

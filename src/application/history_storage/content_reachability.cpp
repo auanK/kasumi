@@ -21,6 +21,7 @@ struct ReferencedContent {
     std::string remote_id;
     std::string plaintext_hash;
     bool is_pack = false;
+    std::uint64_t size = 0;
     std::vector<ContentReference> references;
 };
 
@@ -78,11 +79,13 @@ audit_content_object(transport::Transport& storage,
                      std::optional<std::uint64_t> expected_size,
                      const std::filesystem::path& workspace,
                      std::size_t sequence,
-                     bool expect_pack) {
+                     bool expect_pack,
+                     const std::filesystem::path* retain_plaintext_at) {
     const auto encrypted =
         workspace / ("content-" + std::to_string(sequence) + ".enc");
-    const auto plaintext =
-        workspace / ("content-" + std::to_string(sequence) + ".plain");
+    const auto plaintext = retain_plaintext_at != nullptr
+                               ? *retain_plaintext_at
+                               : workspace / ("content-" + std::to_string(sequence) + ".plain");
     for (const auto& path : {encrypted, plaintext}) {
         if (auto ok =
                 check_temp_file(path, true, "temporary file has invalid type");
@@ -161,7 +164,11 @@ audit_content_object(transport::Transport& storage,
             }
         }
     }
-    if (auto cleaned = remove_temp_pair(encrypted, plaintext); !cleaned) {
+    const auto cleaned = retain_plaintext_at != nullptr && !expect_pack &&
+                                 result.state == ContentObjectState::Present
+                             ? check_temp_file(encrypted, true, "invalid temporary download")
+                             : remove_temp_pair(encrypted, plaintext);
+    if (!cleaned) {
         return std::unexpected(cleaned.error());
     }
     return result;
@@ -175,7 +182,8 @@ inventory_impl(transport::Transport& storage,
                std::optional<std::span<const std::string>> identifiers,
                const ReachabilityInventory& history_inventory,
                const std::filesystem::path& workspace_root,
-               bool audit_payloads) {
+               bool audit_payloads,
+               bool include_references) {
     return detail::guard_alloc([&]() -> ContentReachabilityResult {
         if (!transport::valid(storage)) {
             return std::unexpected(
@@ -191,7 +199,6 @@ inventory_impl(transport::Transport& storage,
         }
 
         std::map<std::string, ReferencedContent> by_remote_id;
-        std::size_t reference_count = 0;
         for (const auto& commit : history_inventory.commits) {
             if (!commit.valid || !commit.reachable) {
                 continue;
@@ -208,31 +215,34 @@ inventory_impl(transport::Transport& storage,
                     bool is_pack,
                     std::string_view logical_path,
                     std::uint64_t ref_size) -> std::expected<void, Error> {
-                if (++reference_count > maximum_content_object_count) {
-                    return std::unexpected(
-                        detail::error(ErrorCode::LimitExceeded,
-                                      "too many content references"));
-                }
-                auto [it, inserted] = by_remote_id.try_emplace(
-                    remote_id,
-                    ReferencedContent{.remote_id = remote_id,
-                                      .plaintext_hash = hash_hex(obj_hash),
-                                      .is_pack = is_pack,
-                                      .references = {}});
-                if (!inserted) {
-                    if (it->second.is_pack != is_pack ||
-                        (!is_pack && !it->second.references.empty() &&
-                         it->second.references.front().size != ref_size)) {
+                auto [it, inserted] = by_remote_id.try_emplace(remote_id);
+                auto& content = it->second;
+                if (inserted) {
+                    if (by_remote_id.size() > maximum_content_object_count) {
                         return std::unexpected(
-                            detail::error(ErrorCode::VerificationFailure,
-                                          "content reference sizes conflict"));
+                            detail::error(ErrorCode::LimitExceeded,
+                                          "too many unique content objects"));
                     }
+                    content.remote_id = remote_id;
+                    content.plaintext_hash = hash_hex(obj_hash);
+                    content.is_pack = is_pack;
+                    content.size = ref_size;
+                } else if (content.is_pack != is_pack ||
+                           (!is_pack && content.size != ref_size)) {
+                    return std::unexpected(
+                        detail::error(ErrorCode::VerificationFailure,
+                                      "content reference sizes conflict"));
                 }
-                it->second.references.push_back(ContentReference{
-                    .commit_id = commit.commit_id,
-                    .path = std::string{logical_path},
-                    .size = ref_size,
-                });
+                auto& refs = content.references;
+                if (include_references &&
+                    (refs.empty() || refs.back().commit_id != commit.commit_id ||
+                     refs.back().path != logical_path || refs.back().size != ref_size)) {
+                    refs.push_back(ContentReference{
+                        .commit_id = commit.commit_id,
+                        .path = std::string{logical_path},
+                        .size = ref_size,
+                    });
+                }
                 return {};
             };
             for (const auto& row : commit.tree->tree.rows) {
@@ -354,7 +364,9 @@ inventory_impl(transport::Transport& storage,
         };
 
         for (auto& content : references) {
-            std::ranges::sort(content.references);
+            auto& refs = content.references;
+            std::ranges::sort(refs);
+            refs.erase(std::ranges::unique(refs).begin(), refs.end());
             auto state = ContentObjectState::Missing;
             if (std::ranges::binary_search(physical, content.remote_id)) {
                 auto audited = audit(
@@ -362,8 +374,7 @@ inventory_impl(transport::Transport& storage,
                     content.plaintext_hash,
                     content.is_pack
                         ? std::nullopt
-                        : std::optional<std::uint64_t>{
-                              content.references.front().size},
+                        : std::optional<std::uint64_t>{content.size},
                     content.is_pack);
                 if (!audited) {
                     return std::unexpected(audited.error());
@@ -417,13 +428,15 @@ ContentReachabilityResult inventory_content_reachability(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const ReachabilityInventory& history_inventory,
     const std::filesystem::path& workspace_root,
-    bool audit_payloads) {
+    bool audit_payloads,
+    bool include_references) {
     return inventory_impl(storage,
                           key,
                           std::nullopt,
                           history_inventory,
                           workspace_root,
-                          audit_payloads);
+                          audit_payloads,
+                          include_references);
 }
 
 ContentReachabilityResult inventory_content_reachability(
@@ -432,13 +445,15 @@ ContentReachabilityResult inventory_content_reachability(
     std::span<const std::string> identifiers,
     const ReachabilityInventory& history_inventory,
     const std::filesystem::path& workspace_root,
-    bool audit_payloads) {
+    bool audit_payloads,
+    bool include_references) {
     return inventory_impl(storage,
                           key,
                           identifiers,
                           history_inventory,
                           workspace_root,
-                          audit_payloads);
+                          audit_payloads,
+                          include_references);
 }
 
 } // namespace kasumi::application::history_storage

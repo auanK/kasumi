@@ -63,7 +63,8 @@ struct ContentAuditResult {
     std::uint64_t size = 0;
 };
 
-// Downloads, decrypts, and cryptographically verifies a remote content object.
+// Downloads and verifies a remote object. A caller may retain verified loose
+// plaintext at a private workspace path for ordered file reconstruction.
 std::expected<ContentAuditResult, Error>
 audit_content_object(transport::Transport& storage,
                      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
@@ -72,7 +73,8 @@ audit_content_object(transport::Transport& storage,
                      std::optional<std::uint64_t> expected_size,
                      const std::filesystem::path& workspace,
                      std::size_t sequence,
-                     bool expect_pack = false);
+                     bool expect_pack = false,
+                     const std::filesystem::path* retain_plaintext_at = nullptr);
 
 // Audits referenced and orphan objects without removing them.
 ContentReachabilityResult inventory_content_reachability(
@@ -80,7 +82,8 @@ ContentReachabilityResult inventory_content_reachability(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const ReachabilityInventory& history_inventory,
     const std::filesystem::path& workspace_root,
-    bool audit_payloads = false);
+    bool audit_payloads = false,
+    bool include_references = true);
 
 // Variant reusing an already captured physical listing.
 ContentReachabilityResult inventory_content_reachability(
@@ -89,7 +92,8 @@ ContentReachabilityResult inventory_content_reachability(
     std::span<const std::string> identifiers,
     const ReachabilityInventory& history_inventory,
     const std::filesystem::path& workspace_root,
-    bool audit_payloads = false);
+    bool audit_payloads = false,
+    bool include_references = true);
 
 } // namespace kasumi::application::history_storage
 

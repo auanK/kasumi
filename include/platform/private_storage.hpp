@@ -160,19 +160,27 @@ struct StreamError {
     std::error_code system_error{};
 };
 
+struct FileSlice {
+    std::uint64_t offset;
+    std::uint64_t size;
+};
+
+// Streams a whole regular file, or exactly the requested slice if provided.
 std::expected<std::uint64_t, StreamError> stream_regular_file_raw(
     const std::filesystem::path& path,
     std::span<std::uint8_t> scratch,
     bool (*on_chunk)(void*, std::span<const std::uint8_t>),
     void* context,
-    std::optional<std::uint64_t> expected_size = std::nullopt);
+    std::optional<std::uint64_t> expected_size = std::nullopt,
+    std::optional<FileSlice> slice = std::nullopt);
 
 template <typename Callback>
 std::expected<std::uint64_t, StreamError>
 stream_regular_file(const std::filesystem::path& path,
                     std::span<std::uint8_t> scratch,
                     Callback&& on_chunk,
-                    std::optional<std::uint64_t> expected_size = std::nullopt) {
+                    std::optional<std::uint64_t> expected_size = std::nullopt,
+                    std::optional<FileSlice> slice = std::nullopt) {
     struct Adapter {
         static bool invoke(void* ctx, std::span<const std::uint8_t> chunk) {
             auto& fn = *static_cast<std::remove_reference_t<Callback>*>(ctx);
@@ -185,7 +193,7 @@ stream_regular_file(const std::filesystem::path& path,
         }
     };
     return stream_regular_file_raw(
-        path, scratch, &Adapter::invoke, &on_chunk, expected_size);
+        path, scratch, &Adapter::invoke, &on_chunk, expected_size, slice);
 }
 
 // Returns true when path exists as a symlink, NTFS junction, or reparse point.

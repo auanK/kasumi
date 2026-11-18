@@ -12,6 +12,7 @@
 #include "core/node.hpp"
 #include "core/reconciliation/plan.hpp"
 #include "crypto/content.hpp"
+#include "crypto/key_derivation.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/history_storage.hpp"
 #include "kasumi/test/temp_workspace.hpp"
@@ -1232,6 +1233,90 @@ TEST(SyncRemoteAvailabilityTest, LocalCopyRepairsMissingContentWithoutPublicatio
         const auto healthy = receiver.fsck();
         ASSERT_TRUE(healthy.has_value()) << healthy.error().detail;
     }
+}
+
+TEST(SyncRemoteAvailabilityTest, MissingMicroPackIsRepairedAndPassesFsck) {
+    SyncHarness publisher("pack-repair-publisher");
+    SyncHarness receiver("pack-repair-receiver", publisher.storage_root());
+    ASSERT_TRUE(publisher.valid() && receiver.valid());
+    for (int index = 0; index < 17; ++index) {
+        const auto name = "member-" + std::to_string(index);
+        const auto contents = "packed member " + std::to_string(index);
+        publisher.write(name, contents);
+        receiver.write(name, contents);
+    }
+    publisher.write("copy.txt", "packed member 0");
+    ASSERT_TRUE(publisher.sync().has_value());
+    const auto before = kasumi::state_storage::load_state(publisher.database());
+    ASSERT_TRUE(before && *before);
+    const auto& members = (*before)->storage_manifest.packed_blobs;
+    ASSERT_EQ(members.size(), 17U);
+    const auto pack_hash = members.front().pack_hash;
+    const auto pack_id = kasumi::crypto::pack_identifier(publisher.key(), pack_hash);
+    ASSERT_TRUE(std::filesystem::remove(publisher.remote_path(pack_id)));
+
+    const auto result = receiver.sync();
+    ASSERT_TRUE(result) << result.error().detail;
+    const auto* completed =
+        std::get_if<kasumi::application::SyncCompleted>(&result->data);
+    ASSERT_NE(completed, nullptr);
+    EXPECT_FALSE(completed->published);
+    EXPECT_FALSE(completed->partial);
+    EXPECT_EQ(receiver.content_puts(), 1U);
+    EXPECT_EQ(receiver.read("copy.txt"), "packed member 0");
+    EXPECT_TRUE(std::filesystem::is_regular_file(publisher.remote_path(pack_id)));
+    for (const auto& member : members) {
+        EXPECT_FALSE(std::filesystem::exists(publisher.content_path(member.blob_hash)));
+    }
+    const auto after = kasumi::state_storage::load_state(receiver.database());
+    ASSERT_TRUE(after && *after);
+    EXPECT_EQ((*after)->commit_id, (*before)->commit_id);
+    EXPECT_EQ((*after)->ciphertext_id, (*before)->ciphertext_id);
+    const auto audited = receiver.fsck();
+    ASSERT_TRUE(audited) << audited.error().detail;
+}
+
+TEST(SyncRemoteAvailabilityTest, IncompleteMicroPackRepairRequiresPublication) {
+    SyncHarness publisher("incomplete-pack-publisher");
+    SyncHarness receiver("incomplete-pack-receiver", publisher.storage_root());
+    ASSERT_TRUE(publisher.valid() && receiver.valid());
+    for (int index = 0; index < 17; ++index) {
+        const auto name = "member-" + std::to_string(index);
+        const auto contents = "packed member " + std::to_string(index);
+        publisher.write(name, contents);
+        receiver.write(name, contents);
+    }
+    publisher.write("copy.txt", "packed member 0");
+    ASSERT_TRUE(publisher.sync());
+    publisher.write("member-16", "replacement");
+    receiver.write("member-16", "replacement");
+    ASSERT_TRUE(publisher.sync());
+    const auto before = kasumi::state_storage::load_state(publisher.database());
+    ASSERT_TRUE(before && *before);
+    const auto& members = (*before)->storage_manifest.packed_blobs;
+    ASSERT_EQ(members.size(), 16U);
+    const auto pack_id = kasumi::crypto::pack_identifier(
+        publisher.key(), members.front().pack_hash);
+    ASSERT_TRUE(std::filesystem::remove(publisher.remote_path(pack_id)));
+
+    const auto rejected = receiver.sync();
+    ASSERT_FALSE(rejected);
+    EXPECT_NE(rejected.error().detail.find("cannot reconstruct the original absent pack"),
+              std::string::npos);
+    EXPECT_EQ(receiver.content_puts(), 0U);
+
+    receiver.write("new.txt", "new upload");
+    const auto result = receiver.sync();
+    ASSERT_TRUE(result) << result.error().detail;
+    const auto* completed =
+        std::get_if<kasumi::application::SyncCompleted>(&result->data);
+    ASSERT_NE(completed, nullptr);
+    EXPECT_TRUE(completed->published);
+    EXPECT_FALSE(completed->partial);
+    EXPECT_EQ(receiver.read("copy.txt"), "packed member 0");
+    EXPECT_FALSE(std::filesystem::exists(publisher.remote_path(pack_id)));
+    const auto audited = receiver.fsck();
+    ASSERT_TRUE(audited) << audited.error().detail;
 }
 
 TEST(SyncRemoteAvailabilityTest,
