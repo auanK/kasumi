@@ -292,11 +292,28 @@ class CliProcessTest(unittest.TestCase):
         self.assertIn(f'Synchronizing "{profile}"'.encode(), output)
 
     def test_empty_wizard_quits_without_creating_profile_data(self):
-        output = self.invoke("config", input=b"q\n")
+        output = self.invoke("config", input=b"e\nc\nk\ns\nd\nr\nq\n")
         self.assertIn(b"No profiles registered.", output)
-        for choice in (b"Edit", b"New", b"Clone", b"Delete", b"Rename", b"Quit"):
-            self.assertIn(choice, output)
+        self.assertIn(b"[n] New  [q] Quit", output)
         self.assertFalse((self.root / "kasumi").exists())
+
+    def test_wizard_can_return_to_menu_without_changing_profiles(self):
+        local = self.root / "local"
+        local.mkdir()
+        remote = self.root / "remote"
+        self.invoke("config", input=f"n\ndemo\n{local}\n{remote}\nfile\nq\n".encode())
+        config = self.root / "kasumi" / "config.toml"
+        original = config.read_bytes()
+
+        output = self.invoke(
+            "config",
+            input=(b"e\nmissing\n:back\nc\n:back\nk\n:back\ns\n:back\n"
+                   b"d\n:back\nr\n:back\nn\n:back\n"
+                   b"c\ndemo\n:back\ne\ndemo\n:back\ns\ndemo\n:back\nq\n"),
+        )
+        self.assertIn(b"Profile not found.", output)
+        self.assertIn(b"Type :back to return to the menu.", output)
+        self.assertEqual(config.read_bytes(), original)
 
     def test_profile_lifecycle_persists_across_processes(self):
         local = self.root / "local"

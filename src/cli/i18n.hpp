@@ -395,6 +395,8 @@ enum class Key {
     WizardProblemSnapshot,
     WizardProblemCleanup,
     WizardMenu,
+    WizardMenuEmpty,
+    WizardPromptWithBack,
     WizardPromptProfileName,
     WizardProfileAlreadyExists,
     WizardPromptLocalPath,

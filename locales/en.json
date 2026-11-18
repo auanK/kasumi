@@ -315,6 +315,8 @@
     "no_profiles": "No profiles registered.",
     "profile_list_entry": "{:<24} {}",
     "menu": "\n[e] Edit  [n] New  [c] Clone  [k] Key  [s] Storage  [d] Delete  [r] Rename  [q] Quit\n\n> ",
+    "menu_empty": "\n[n] New  [q] Quit\n\n> ",
+    "prompt_with_back": "Type :back to return to the menu.\n{}",
     "prompt_profile_name": "Profile name: ",
     "profile_already_exists": "The profile '{}' already exists.",
     "prompt_local_path": "Synchronized local path (e.g. C:/MyData or /home/user/MyData): ",

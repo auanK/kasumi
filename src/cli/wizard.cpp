@@ -128,6 +128,11 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         }
         return !platform::cancellation::requested();
     };
+    const auto prompt_form_line = [&](std::string_view label, std::string& value) {
+        return prompt_line(i18n::format(i18n::Key::WizardPromptWithBack, label),
+                           value) &&
+               value != ":back";
+    };
     const auto confirm_change = [&](std::string_view message) {
         std::string confirmation;
         if (!prompt_line(message, confirmation)) {
@@ -146,7 +151,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             i18n::format(i18n::Key::WizardPromptKeyStorage,
                          application::to_string(default_mode));
         std::string mode;
-        while (prompt_line(prompt, mode)) {
+        while (prompt_form_line(prompt, mode)) {
             const auto first = mode.find_first_not_of(" \t\r\n");
             if (first == std::string::npos) {
                 return default_mode;
@@ -202,7 +207,9 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         }
 
         std::string choice;
-        if (!prompt_line(i18n::tr(i18n::Key::WizardMenu), choice)) {
+        const auto menu = profiles.empty() ? i18n::Key::WizardMenuEmpty
+                                           : i18n::Key::WizardMenu;
+        if (!prompt_line(i18n::tr(menu), choice)) {
             break;
         }
         std::println();
@@ -215,7 +222,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                                       application::ProfileField field,
                                       std::string& value,
                                       std::string_view fallback = {}) {
-            while (prompt_line(label, value)) {
+            while (prompt_form_line(label, value)) {
                 if (value.empty() && !fallback.empty()) {
                     value = fallback;
                 }
@@ -245,7 +252,10 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         };
 
         const auto prompt_existing = [&](i18n::Key key, std::string& name) {
-            while (prompt_line(i18n::tr(key), name)) {
+            if (profiles.empty()) {
+                return false;
+            }
+            while (prompt_form_line(i18n::tr(key), name)) {
                 if (std::ranges::find(
                         profiles, name, &application::Profile::name) !=
                     profiles.end()) {
@@ -272,7 +282,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             if (!prompt_field(i18n::tr(i18n::Key::WizardPromptProfileName),
                               application::ProfileField::Name,
                               new_profile)) {
-                break;
+                continue;
             }
             std::println();
             if (!prompt_field(i18n::tr(i18n::Key::WizardPromptLocalPath),
@@ -281,12 +291,12 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 !prompt_field(i18n::tr(i18n::Key::WizardPromptRemotePath),
                               application::ProfileField::RemotePath,
                               new_remote)) {
-                break;
+                continue;
             }
             const auto key_storage =
                 prompt_key_storage(application::KeyStorage::Vault);
             if (!key_storage) {
-                break;
+                continue;
             }
             std::println();
             application::ProfileCredentials creds =
@@ -309,7 +319,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             std::string source, new_name;
             if (!prompt_pair(
                     i18n::Key::WizardPromptSourceProfile, source, new_name)) {
-                break;
+                continue;
             }
             report_result(
                 application::clone_profile(environment, source, new_name),
@@ -319,7 +329,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             std::string target;
             if (!prompt_existing(i18n::Key::WizardPromptProfileToDelete,
                                  target)) {
-                break;
+                continue;
             }
             const auto selected = std::ranges::find(
                 profiles, target, &application::Profile::name);
@@ -342,7 +352,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             std::string target;
             if (!prompt_existing(i18n::Key::WizardPromptProfileToEdit,
                                  target)) {
-                break;
+                continue;
             }
 
             auto it =
@@ -368,7 +378,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                     !prompt_default(i18n::Key::WizardPromptNewRemotePath,
                                     it->remote_dir,
                                     edit_remote)) {
-                    break;
+                    continue;
                 }
 
                 application::Profile updated{
@@ -401,7 +411,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         } else if (choice == "k") {
             std::string target;
             if (!prompt_existing(i18n::Key::WizardPromptProfileToKey, target)) {
-                break;
+                continue;
             }
             const auto selected = std::ranges::find(
                 profiles, target, &application::Profile::name);
@@ -430,7 +440,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             std::string target;
             if (!prompt_existing(i18n::Key::WizardPromptProfileToStorage,
                                  target)) {
-                break;
+                continue;
             }
             const auto selected = std::ranges::find(
                 profiles, target, &application::Profile::name);
@@ -440,7 +450,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             }
             const auto chosen = prompt_key_storage(selected->key_storage);
             if (!chosen) {
-                break;
+                continue;
             }
             if (*chosen == selected->key_storage) {
                 continue;
@@ -466,7 +476,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             std::string target, new_name;
             if (!prompt_pair(
                     i18n::Key::WizardPromptProfileToRename, target, new_name)) {
-                break;
+                continue;
             }
             report_result(
                 application::rename_profile(environment, target, new_name),

@@ -315,6 +315,8 @@
     "no_profiles": "Nenhum perfil cadastrado.",
     "profile_list_entry": "{:<24} {}",
     "menu": "\n[e] Editar  [n] Novo  [c] Clonar  [k] Chave  [s] Armazenamento  [d] Deletar  [r] Renomear  [q] Sair\n\n> ",
+    "menu_empty": "\n[n] Novo  [q] Sair\n\n> ",
+    "prompt_with_back": "Digite :back para voltar ao menu.\n{}",
     "prompt_profile_name": "Nome do Perfil: ",
     "profile_already_exists": "O perfil '{}' ja existe.",
     "prompt_local_path": "Caminho local sincronizado (ex: C:/MeusDados ou /home/user/MeusDados): ",
