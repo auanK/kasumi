@@ -53,21 +53,24 @@ jobs:
           ./build/kasumi --help
           tmp="$(mktemp -d)"
           trap 'rm -rf "$tmp"' EXIT
-          mkdir -p "$tmp/local" "$tmp/storage"
+          mkdir -p "$tmp/local" "$tmp/storage" "$tmp/cfg"
           printf 'x' > "$tmp/local/item.txt"
           vault_err="$(printf "n\nsmoke\n%s\n%s\nq\n" "$tmp/local" "$tmp/storage" | \
             env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR="$tmp/no-bus" XDG_CONFIG_HOME="$tmp/cfg" \
-            KASUMI_LANG=en KASUMI_PASSWORD="smoke-password-123" KASUMI_PASSWORD2="smoke-salt-456" \
+            KASUMI_LANG=en KASUMI_PASSWORD="smoke-password-123" KASUMI_PASSWORD2="smoke-salt-value-16" \
             ./build/kasumi config 2>&1)"
-          printf '%s' "$vault_err" | grep -qi "no active D-Bus session bus"
+          if ! printf '%s' "$vault_err" | grep -qi "no active D-Bus session bus"; then
+            printf '%s\n' "$vault_err" >&2
+            exit 1
+          fi
           test ! -e "$tmp/cfg/kasumi/config.toml"
           printf "n\nsmoke\n%s\n%s\nq\n" "$tmp/local" "$tmp/storage" | \
             python3 scripts/run_with_linux_vault.py --backend gnome -- \
-            env XDG_CONFIG_HOME="$tmp/cfg" KASUMI_LANG=en KASUMI_PASSWORD="smoke-password-123" KASUMI_PASSWORD2="smoke-salt-456" \
+            env XDG_CONFIG_HOME="$tmp/cfg" KASUMI_LANG=en KASUMI_PASSWORD="smoke-password-123" KASUMI_PASSWORD2="smoke-salt-value-16" \
             ./build/kasumi config >/dev/null
           sed -i -E "s/(key_storage[[:space:]]*=[[:space:]]*)['\"]vault['\"]/\1'file'/" "$tmp/cfg/kasumi/config.toml"
           env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR="$tmp/no-bus" XDG_CONFIG_HOME="$tmp/cfg" \
-            KASUMI_LANG=en KASUMI_PASSWORD="smoke-password-123" KASUMI_PASSWORD2="smoke-salt-456" \
+            KASUMI_LANG=en KASUMI_PASSWORD="smoke-password-123" KASUMI_PASSWORD2="smoke-salt-value-16" \
             ./build/kasumi key smoke >/dev/null
           env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR="$tmp/no-bus" XDG_CONFIG_HOME="$tmp/cfg" \
             KASUMI_LANG=en ./build/kasumi sync smoke >/dev/null

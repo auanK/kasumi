@@ -88,11 +88,11 @@ ProfileError map_runtime_error(const runtime::Error& err) {
 }
 class ScopedConfigLock {
 public:
-    // Six-clone contention exceeded 500 ms under load; keep waits bounded at 2
-    // s.
+    // Six-clone contention with OS vault RPCs can exceed 2 s under CI load;
+    // keep waits bounded at 10 s.
     static std::expected<ScopedConfigLock, ProfileError>
     acquire(const std::filesystem::path& app_data_dir,
-            std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
+            std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
         namespace storage = platform::private_storage;
         std::error_code status_error;
         auto status =
