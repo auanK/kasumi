@@ -78,11 +78,13 @@ audit_content_object(transport::Transport& storage,
                      std::optional<std::uint64_t> expected_size,
                      const std::filesystem::path& workspace,
                      std::size_t sequence,
-                     bool expect_pack) {
+                     bool expect_pack,
+                     const std::filesystem::path* retain_plaintext_at) {
     const auto encrypted =
         workspace / ("content-" + std::to_string(sequence) + ".enc");
-    const auto plaintext =
-        workspace / ("content-" + std::to_string(sequence) + ".plain");
+    const auto plaintext = retain_plaintext_at != nullptr
+                               ? *retain_plaintext_at
+                               : workspace / ("content-" + std::to_string(sequence) + ".plain");
     for (const auto& path : {encrypted, plaintext}) {
         if (auto ok =
                 check_temp_file(path, true, "temporary file has invalid type");
@@ -161,7 +163,11 @@ audit_content_object(transport::Transport& storage,
             }
         }
     }
-    if (auto cleaned = remove_temp_pair(encrypted, plaintext); !cleaned) {
+    const auto cleaned = retain_plaintext_at != nullptr && !expect_pack &&
+                                 result.state == ContentObjectState::Present
+                             ? check_temp_file(encrypted, true, "invalid temporary download")
+                             : remove_temp_pair(encrypted, plaintext);
+    if (!cleaned) {
         return std::unexpected(cleaned.error());
     }
     return result;
