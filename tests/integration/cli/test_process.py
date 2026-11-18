@@ -297,6 +297,16 @@ class CliProcessTest(unittest.TestCase):
         self.assertIn(b"[n] New  [q] Quit", output)
         self.assertFalse((self.root / "kasumi").exists())
 
+    def test_wizard_invalid_option_does_not_reprint_menu(self):
+        local = self.root / "local"
+        local.mkdir()
+        remote = self.root / "remote"
+        self.invoke("config", input=f"n\ndemo\n{local}\n{remote}\nfile\nq\n".encode())
+        output = self.invoke("config", input=b"das\nfoo\nq\n")
+        self.assertEqual(output.count(b"=== Kasumi Profiles ==="), 1)
+        self.assertEqual(output.count(b"[e] Edit"), 1)
+        self.assertEqual(output.count(b"[ERROR] Invalid option."), 2)
+
     def test_wizard_can_return_to_menu_without_changing_profiles(self):
         local = self.root / "local"
         local.mkdir()

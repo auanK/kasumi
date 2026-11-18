@@ -255,10 +255,10 @@ void render_plan_report(const application::PlanReport& report,
     auto print_item = [&](const application::PlanItem& item) {
         auto idx = static_cast<std::size_t>(item.action);
         if (idx < action_keys.size()) {
-            std::print("  - [{}] {}",
-                       i18n::tr(action_keys[idx]),
-                       sanitize_terminal_text(
-                           platform::path::to_utf8(item.path)));
+            std::print(
+                "  - [{}] {}",
+                i18n::tr(action_keys[idx]),
+                sanitize_terminal_text(platform::path::to_utf8(item.path)));
             if (item.action == application::PlanAction::RenameLocal ||
                 item.action == application::PlanAction::MoveLocal ||
                 item.action == application::PlanAction::CopyLocal) {
@@ -964,32 +964,147 @@ std::string format_eta(std::uint64_t seconds) {
     return i18n::format(K::ProgressSeconds, seconds);
 }
 
+namespace {
+
+bool is_byte_transfer(application::Activity activity) noexcept {
+    using A = application::Activity;
+    return activity == A::Uploading || activity == A::Downloading ||
+           activity == A::Auditing || activity == A::Updating;
+}
+
+std::string format_bytes_rate(double bytes_per_second) {
+    return i18n::format(i18n::Key::ProgressBytesRate,
+                        format_size(static_cast<std::uint64_t>(
+                            std::llround(bytes_per_second))));
+}
+
+} // namespace
+
 ProgressDisplay::~ProgressDisplay() {
     finish();
 }
 
+void ProgressDisplay::clear_line() noexcept {
+    if (rendered_width_ == 0) {
+        return;
+    }
+    if (terminal_.ansi) {
+        std::fputs("\r\x1b[2K", stdout);
+    } else {
+        std::fputc('\r', stdout);
+        const auto width =
+            std::min(rendered_width_, platform::terminal_width(terminal_) - 1);
+        for (std::size_t i = 0; i < width; ++i) {
+            std::fputc(' ', stdout);
+        }
+        std::fputc('\r', stdout);
+    }
+    rendered_width_ = 0;
+}
+
+void ProgressDisplay::flush_transfer(TransferMetricsState& state) noexcept {
+    if (!terminal_.interactive || !state.active || state.completed_reported ||
+        !state.last_event ||
+        (state.last_event->bytes == 0 && state.last_event->objects == 0)) {
+        state = {};
+        return;
+    }
+    render_event(*state.last_event, state.last_extra, true);
+    if (rendered_width_ != 0) {
+        std::fputc('\n', stdout);
+        rendered_width_ = 0;
+    }
+    const auto elapsed = std::chrono::duration<double>(
+                             std::chrono::steady_clock::now() - state.started)
+                             .count();
+    const auto total_bytes = state.last_event->bytes;
+    if (total_bytes > 0 && elapsed > 0.0) {
+        const double avg = static_cast<double>(total_bytes) / elapsed;
+        if (avg > 0.0 && avg < 1e18) {
+            const double min_rate =
+                state.min_rate ? std::min(*state.min_rate, avg) : avg;
+            const double max_rate =
+                state.max_rate ? std::max(*state.max_rate, avg) : avg;
+            std::println("{}{}",
+                         indented_ ? "      " : "",
+                         i18n::format(i18n::Key::ProgressSpeedSummary,
+                                      format_bytes_rate(avg),
+                                      format_bytes_rate(min_rate),
+                                      format_bytes_rate(max_rate)));
+        }
+    }
+    std::fflush(stdout);
+    state.completed_reported = true;
+}
+
 void ProgressDisplay::finish(bool keep) noexcept {
+    if (!keep) {
+        upload_state_ = {};
+        download_state_ = {};
+        last_event_.reset();
+        last_extra_.clear();
+        rendered_last_ = true;
+    } else if (terminal_.interactive) {
+        if (in_applying_ && !full_) {
+            const bool had_upload = upload_state_.active &&
+                                    !upload_state_.completed_reported &&
+                                    (upload_state_.last_bytes > 0 ||
+                                     upload_state_.last_objects > 0);
+            const bool had_download = download_state_.active &&
+                                      !download_state_.completed_reported &&
+                                      (download_state_.last_bytes > 0 ||
+                                       download_state_.last_objects > 0);
+            if (had_upload) {
+                flush_transfer(upload_state_);
+            }
+            if (had_download) {
+                flush_transfer(download_state_);
+            }
+            if (had_upload || had_download) {
+                activity_.reset();
+                stage_id_ = 0;
+                last_event_.reset();
+                last_extra_.clear();
+                rendered_last_ = true;
+                return;
+            }
+            keep = false;
+        } else if (last_event_ && is_byte_transfer(last_event_->activity)) {
+            auto& state =
+                last_event_->activity == application::Activity::Uploading
+                    ? upload_state_
+                    : download_state_;
+            if (state.active && !state.completed_reported && state.last_event &&
+                state.last_event->bytes > 0) {
+                flush_transfer(state);
+                activity_.reset();
+                stage_id_ = 0;
+                last_event_.reset();
+                last_extra_.clear();
+                rendered_last_ = true;
+                return;
+            }
+        } else if (!rendered_last_ && last_event_) {
+            render_event(*last_event_, last_extra_, true);
+        }
+    }
     if (rendered_width_ != 0) {
         if (keep) {
             std::fputc('\n', stdout);
-        } else if (terminal_.ansi) {
-            std::fputs("\r\x1b[2K", stdout);
+            rendered_width_ = 0;
         } else {
-            std::fputc('\r', stdout);
-            const auto width = std::min(
-                rendered_width_, platform::terminal_width(terminal_) - 1);
-            for (std::size_t i = 0; i < width; ++i) {
-                std::fputc(' ', stdout);
-            }
-            std::fputc('\r', stdout);
+            clear_line();
         }
-        rendered_width_ = 0;
     }
+    last_event_.reset();
+    last_extra_.clear();
+    rendered_last_ = true;
     std::fflush(stdout);
 }
 
-void ProgressDisplay::show(const application::ActivityProgress& event,
-                           std::string_view extra) {
+void ProgressDisplay::render_event(const application::ActivityProgress& event,
+                                   std::string_view extra,
+                                   bool force_complete) {
     using A = application::Activity;
     using K = i18n::Key;
     static constexpr std::array labels{
@@ -1006,39 +1121,12 @@ void ProgressDisplay::show(const application::ActivityProgress& event,
         K::ProgressUpdating,
         K::ProgressRemoving,
     };
-    const bool transition =
-        activity_ != event.activity || stage_id_ != event.stage_id;
-    const auto now = std::chrono::steady_clock::now();
-    const bool object_rate = event.activity == A::Removing;
-    const auto value = object_rate ? event.objects : event.bytes;
-    const auto total = object_rate ? event.total_objects : event.total_bytes;
-    const bool complete = total && *total > 0 && value >= *total;
-    if (transition) {
-        finish(true);
-        activity_ = event.activity;
-        stage_id_ = event.stage_id;
-        started_ = now;
-        last_render_ = now;
-        last_value_ = value;
-        rate_ = 0.0;
-        was_complete_ = false;
-    } else if (!terminal_.interactive ||
-               (now - last_render_ < std::chrono::milliseconds(200) &&
-                (!complete || was_complete_))) {
-        return;
-    }
 
     const auto label = labels[static_cast<std::size_t>(event.activity)];
-    std::string line = event.activity == A::Reobserving
-                           ? i18n::format(label, event.attempt)
-                           : std::string{i18n::tr(label)};
-    if (!terminal_.interactive) {
-        if (event.activity != A::Scanning && event.activity != A::Removing) {
-            std::println("{}", line);
-            std::fflush(stdout);
-        }
-        return;
-    }
+    std::string line = indented_ ? "      " : "";
+    line += event.activity == A::Reobserving
+                ? i18n::format(label, event.attempt)
+                : std::string{i18n::tr(label)};
 
     const auto add = [&](std::string_view text) {
         line += " | ";
@@ -1057,47 +1145,58 @@ void ProgressDisplay::show(const application::ActivityProgress& event,
             add(i18n::tr(K::ProgressRemotePending));
         }
     } else if (event.objects != 0 || event.total_objects) {
-        add(event.total_objects
-                ? i18n::format(
-                      K::ProgressFraction, event.objects, *event.total_objects)
-                : format_plural(
-                      event.objects, K::ProgressObject, K::ProgressObjects));
+        add(event.total_objects ? i18n::format(*event.total_objects == 1
+                                                   ? K::ProgressFractionObject
+                                                   : K::ProgressFractionObjects,
+                                               event.objects,
+                                               *event.total_objects)
+                                : format_plural(event.objects,
+                                                K::ProgressObject,
+                                                K::ProgressObjects));
     }
     if (event.staged_bytes) {
-        add(i18n::format(K::ProgressStaged,
-                         format_size(event.bytes),
-                         format_size(*event.staged_bytes)));
+        if (event.bytes != 0 || *event.staged_bytes != 0) {
+            add(i18n::format(K::ProgressStaged,
+                             format_size(event.bytes),
+                             format_size(*event.staged_bytes)));
+        }
     } else if (!scanning && (event.bytes != 0 || event.total_bytes)) {
         add(event.total_bytes ? i18n::format(K::ProgressFraction,
                                              format_size(event.bytes),
                                              format_size(*event.total_bytes))
                               : format_size(event.bytes));
     }
+    const bool object_rate = event.activity == A::Removing;
+    const auto value = object_rate ? event.objects : event.bytes;
+    const auto total = object_rate ? event.total_objects : event.total_bytes;
     if (total && *total > 0 && !scanning) {
         const auto percent = std::min(100.0,
                                       100.0 * static_cast<double>(value) /
                                           static_cast<double>(*total));
         add(i18n::format(K::ProgressPercent, static_cast<unsigned>(percent)));
     }
-    if (event.bytes_reused != 0) {
+    if (full_ && event.bytes_reused != 0) {
         add(i18n::format(K::ProgressReused, format_size(event.bytes_reused)));
     }
-    const auto dt = std::chrono::duration<double>(now - last_render_).count();
-    if (dt > 0 && value >= last_value_) {
-        const auto instantaneous =
-            static_cast<double>(value - last_value_) / dt;
-        rate_ += (instantaneous - rate_) * (1.0 - std::exp(-dt / 2.5));
+    const auto now = std::chrono::steady_clock::now();
+    double display_rate = rate_;
+    if (force_complete && is_byte_transfer(event.activity) && event.bytes > 0) {
+        const auto& state =
+            event.activity == A::Uploading ? upload_state_ : download_state_;
+        const auto elapsed =
+            std::chrono::duration<double>(now - state.started).count();
+        if (elapsed > 0.0) {
+            display_rate = static_cast<double>(event.bytes) / elapsed;
+        }
     }
-    if (rate_ > 0 && rate_ < 1e18 &&
-        now - started_ >= std::chrono::milliseconds(500)) {
-        add(object_rate
-                ? i18n::format(K::ProgressObjectsRate,
-                               std::format("{:.1f}", rate_))
-                : i18n::format(K::ProgressBytesRate,
-                               format_size(static_cast<std::uint64_t>(rate_))));
-        if (total && *total > value && !scanning) {
+    if (display_rate > 0 && display_rate < 1e18 &&
+        (force_complete || now - started_ >= std::chrono::milliseconds(500))) {
+        add(object_rate ? i18n::format(K::ProgressObjectsRate,
+                                       std::format("{:.1f}", display_rate))
+                        : format_bytes_rate(display_rate));
+        if (!force_complete && total && *total > value && !scanning) {
             const auto eta =
-                std::ceil(static_cast<double>(*total - value) / rate_);
+                std::ceil(static_cast<double>(*total - value) / display_rate);
             if (eta <= 86400.0 * 365.0) {
                 add(i18n::format(K::ProgressEta,
                                  format_eta(static_cast<std::uint64_t>(eta))));
@@ -1109,12 +1208,214 @@ void ProgressDisplay::show(const application::ActivityProgress& event,
     }
 
     const auto width = platform::terminal_width(terminal_) - 1U;
-    finish();
+    clear_line();
     std::print("{}", platform::fit_terminal_text(line, width));
     rendered_width_ = width;
+    rendered_last_ = true;
     std::fflush(stdout);
+}
+
+void ProgressDisplay::show(const application::ActivityProgress& raw_event,
+                           std::string_view extra) {
+    using A = application::Activity;
+    using K = i18n::Key;
+    static constexpr std::array labels{
+        K::ProgressScanning,
+        K::ProgressStaging,
+        K::ProgressUploading,
+        K::ProgressDownloading,
+        K::ProgressVerifying,
+        K::ProgressInstalling,
+        K::ProgressReobserving,
+        K::ProgressListing,
+        K::ProgressAuthenticating,
+        K::ProgressAuditing,
+        K::ProgressUpdating,
+        K::ProgressRemoving,
+    };
+
+    if (!terminal_.interactive) {
+        const bool transition =
+            activity_ != raw_event.activity || stage_id_ != raw_event.stage_id;
+        if (!transition) {
+            return;
+        }
+        activity_ = raw_event.activity;
+        stage_id_ = raw_event.stage_id;
+        if (raw_event.activity != A::Scanning &&
+            raw_event.activity != A::Removing) {
+            const auto label =
+                labels[static_cast<std::size_t>(raw_event.activity)];
+            const std::string line =
+                raw_event.activity == A::Reobserving
+                    ? i18n::format(label, raw_event.attempt)
+                    : std::string{i18n::tr(label)};
+            std::println("{}", line);
+            std::fflush(stdout);
+        }
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    application::ActivityProgress event = raw_event;
+
+    if (is_byte_transfer(raw_event.activity)) {
+        auto& state = raw_event.activity == A::Uploading ? upload_state_
+                                                         : download_state_;
+        if (in_applying_ && !full_) {
+            auto& other = raw_event.activity == A::Uploading ? download_state_
+                                                             : upload_state_;
+            if (other.active && !other.completed_reported &&
+                (other.last_bytes > 0 || other.last_objects > 0)) {
+                flush_transfer(other);
+            }
+            if (!state.active || state.completed_reported) {
+                state = {};
+                state.active = true;
+                state.last_stage_id = raw_event.stage_id;
+                state.started = now;
+                state.last_sample = now;
+            } else if (state.last_stage_id != raw_event.stage_id) {
+                state.base_objects += state.last_objects;
+                state.base_total_objects += state.last_total_objects;
+                state.base_bytes += state.last_bytes;
+                state.base_total_bytes += state.last_total_bytes;
+                state.last_objects = 0;
+                state.last_total_objects = 0;
+                state.last_bytes = 0;
+                state.last_total_bytes = 0;
+                state.last_stage_id = raw_event.stage_id;
+                state.last_sample_bytes = state.base_bytes;
+                state.last_sample = now;
+            }
+            state.last_objects = raw_event.objects;
+            state.last_total_objects =
+                raw_event.total_objects.value_or(raw_event.objects);
+            state.last_bytes = raw_event.bytes;
+            state.last_total_bytes =
+                raw_event.total_bytes.value_or(raw_event.bytes);
+
+            event.objects = state.base_objects + raw_event.objects;
+            if (raw_event.total_objects) {
+                event.total_objects =
+                    state.base_total_objects + *raw_event.total_objects;
+            } else if (state.base_total_objects > 0) {
+                event.total_objects =
+                    state.base_total_objects + raw_event.objects;
+            }
+            event.bytes = state.base_bytes + raw_event.bytes;
+            if (raw_event.total_bytes) {
+                event.total_bytes =
+                    state.base_total_bytes + *raw_event.total_bytes;
+            } else if (state.base_total_bytes > 0) {
+                event.total_bytes = state.base_total_bytes + raw_event.bytes;
+            }
+        } else {
+            if (!state.active || state.last_stage_id != raw_event.stage_id) {
+                state = {};
+                state.active = true;
+                state.last_stage_id = raw_event.stage_id;
+                state.started = now;
+                state.last_sample = now;
+            }
+            state.last_objects = raw_event.objects;
+            state.last_total_objects =
+                raw_event.total_objects.value_or(raw_event.objects);
+            state.last_bytes = raw_event.bytes;
+            state.last_total_bytes =
+                raw_event.total_bytes.value_or(raw_event.bytes);
+        }
+
+        const auto dt_sample =
+            std::chrono::duration<double>(now - state.last_sample).count();
+        if (dt_sample >= 0.20 && event.bytes > state.last_sample_bytes) {
+            const double inst =
+                static_cast<double>(event.bytes - state.last_sample_bytes) /
+                dt_sample;
+            state.rate =
+                state.rate <= 0.0
+                    ? inst
+                    : state.rate + (inst - state.rate) *
+                                       (1.0 - std::exp(-dt_sample / 2.5));
+            state.last_sample = now;
+            state.last_sample_bytes = event.bytes;
+            if (state.rate > 0.0 && state.rate < 1e18 &&
+                now - state.started >= std::chrono::milliseconds(400)) {
+                state.min_rate = state.min_rate
+                                     ? std::min(*state.min_rate, state.rate)
+                                     : state.rate;
+                state.max_rate = state.max_rate
+                                     ? std::max(*state.max_rate, state.rate)
+                                     : state.rate;
+            }
+        }
+        state.last_event = event;
+        state.last_extra = std::string{extra};
+    } else if (!in_applying_ && download_state_.active &&
+               !download_state_.completed_reported &&
+               download_state_.last_bytes > 0) {
+        flush_transfer(download_state_);
+    }
+
+    const bool transition =
+        activity_ != event.activity || stage_id_ != event.stage_id;
+    const bool object_rate = event.activity == A::Removing;
+    const auto value = object_rate ? event.objects : event.bytes;
+    const auto total = object_rate ? event.total_objects : event.total_bytes;
+    const bool complete = total && *total > 0 && value >= *total &&
+                          (!event.total_objects || *event.total_objects == 0 ||
+                           event.objects >= *event.total_objects);
+
+    if (transition) {
+        if (full_ && activity_) {
+            finish(true);
+        } else {
+            clear_line();
+        }
+        activity_ = event.activity;
+        stage_id_ = event.stage_id;
+        started_ = now;
+        last_render_ = now;
+        last_value_ = value;
+        last_objects_ = event.objects;
+        rate_ = is_byte_transfer(event.activity)
+                    ? (event.activity == A::Uploading ? upload_state_.rate
+                                                      : download_state_.rate)
+                    : 0.0;
+        was_complete_ = false;
+        last_event_ = event;
+        last_extra_ = std::string{extra};
+        rendered_last_ = false;
+        render_event(event, extra);
+        return;
+    }
+
+    const auto dt = std::chrono::duration<double>(now - last_render_).count();
+    if (is_byte_transfer(event.activity)) {
+        rate_ = event.activity == A::Uploading ? upload_state_.rate
+                                               : download_state_.rate;
+    } else if (dt > 0 && value >= last_value_) {
+        const auto instantaneous =
+            static_cast<double>(value - last_value_) / dt;
+        rate_ = rate_ <= 0.0 ? instantaneous
+                             : rate_ + (instantaneous - rate_) *
+                                           (1.0 - std::exp(-dt / 2.5));
+    }
+
+    const bool objects_advanced = event.objects != last_objects_;
+    last_event_ = event;
+    last_extra_ = std::string{extra};
+    rendered_last_ = false;
+
+    if (now - last_render_ < std::chrono::milliseconds(200) &&
+        !(complete && (!was_complete_ || objects_advanced))) {
+        return;
+    }
+
+    render_event(event, extra);
     last_render_ = now;
     last_value_ = value;
+    last_objects_ = event.objects;
     was_complete_ = complete;
 }
 
@@ -1127,13 +1428,31 @@ void ProgressDisplay::update(const application::ExecutionProgress& progress,
             if constexpr (std::is_same_v<T, application::ActivityProgress>) {
                 show(event);
             } else if constexpr (std::is_same_v<T, application::SyncProgress>) {
-                finish(true);
+                const bool was_applying = in_applying_;
+                const bool keep_stage =
+                    full_ || (was_applying &&
+                              event.stage != application::SyncStage::Applying);
+                finish(keep_stage);
+                if (was_applying &&
+                    event.stage != application::SyncStage::Applying) {
+                    upload_state_ = {};
+                    download_state_ = {};
+                }
+                in_applying_ = event.stage == application::SyncStage::Applying;
+                indented_ = true;
                 activity_.reset();
+                stage_id_ = 0;
                 present(event, operation);
             } else if constexpr (std::is_same_v<T, application::FsckProgress>) {
                 if (fsck_.last_stage != event.stage) {
-                    finish(true);
+                    const bool keep_fsck =
+                        fsck_.last_stage ==
+                            application::FsckStage::AuditingContent ||
+                        full_;
+                    finish(keep_fsck);
+                    indented_ = false;
                     activity_.reset();
+                    stage_id_ = 0;
                     if (terminal_.interactive) {
                         auto stage = event;
                         stage.total_objects.reset();
@@ -1156,8 +1475,12 @@ void ProgressDisplay::update(const application::ExecutionProgress& progress,
                 }
             } else {
                 if (gc_.last_stage != event.stage) {
-                    finish(true);
+                    finish(full_ &&
+                           gc_.last_stage ==
+                               application::GarbageCollectStage::Applying);
+                    indented_ = false;
                     activity_.reset();
+                    stage_id_ = 0;
                 }
                 present(event, gc_);
                 if (terminal_.interactive &&
@@ -1190,9 +1513,9 @@ int present(const application::Response& response, bool full) {
                 } else {
                     print_ok_line(i18n::tr(i18n::Key::SyncCompleted));
                 }
-                if (data.physical_objects_uploaded ||
-                    data.physical_objects_downloaded ||
-                    data.local_delta_reused_bytes) {
+                if (full && (data.physical_objects_uploaded ||
+                             data.physical_objects_downloaded ||
+                             data.local_delta_reused_bytes)) {
                     i18n::println(
                         i18n::Key::ProgressWireSummary,
                         format_size(data.wire_upload_bytes),

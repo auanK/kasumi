@@ -177,7 +177,8 @@ int run(int argc, char* argv[]) {
                     display.update(progress);
                 },
         });
-        display.finish();
+        display.finish(result.has_value() &&
+                       !platform::cancellation::requested());
         application::wipe_credentials(creds);
 
         if (platform::cancellation::requested()) {
@@ -203,7 +204,7 @@ int run(int argc, char* argv[]) {
     }
 
     application::ProgressCallback on_progress{};
-    ProgressDisplay display;
+    ProgressDisplay display(platform::stdout_terminal(), full);
     constexpr std::array<std::pair<application::Operation, i18n::Key>, 6>
         starting_keys{{
             {application::Operation::Sync, i18n::Key::SyncStarting},
@@ -235,7 +236,7 @@ int run(int argc, char* argv[]) {
                                         .credentials = std::move(creds),
                                         .environment = environment,
                                         .on_progress = std::move(on_progress)});
-    display.finish();
+    display.finish(result.has_value() && !platform::cancellation::requested());
     application::wipe_credentials(creds);
 
     if (platform::cancellation::requested()) {

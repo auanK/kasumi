@@ -46,9 +46,12 @@
     "object": "1 objeto",
     "objects": "{} objetos",
     "fraction": "{}/{}",
+    "fraction_object": "{}/{} objeto",
+    "fraction_objects": "{}/{} objetos",
     "percent": "{}%",
     "bytes_rate": "{}/s",
     "objects_rate": "{} objetos/s",
+    "speed_summary": "Velocidade: média {} | mínima {} | máxima {}",
     "eta": "Tempo restante {}",
     "seconds": "{}s",
     "minutes": "{}m {:02}s",
@@ -414,8 +417,8 @@
     "mutation_uncertain": "Incerta"
   },
   "command_help": {
-    "sync": "Uso: kasumi sync <perfil> [--dry-run | --initial [--trust-existing-content] | --audit-inventory] [--full]\n\nSincroniza com o remoto. --dry-run simula sem alterar dados.\n--initial inicializa banco local ausente; --trust-existing-content exige --initial.\n--audit-inventory executa Sync e auditoria estrutural; não pode combinar com os outros modos.\n--full exibe todos os itens do plano e pendências.\nExemplo: kasumi sync Programming --dry-run\n",
-    "status": "Uso: kasumi status <perfil> [--full]\n\nMostra mudanças locais pendentes. --full exibe todos os itens e pendências.\nExemplo: kasumi status Programming --full\n",
+    "sync": "Uso: kasumi sync <perfil> [--dry-run | --initial [--trust-existing-content] | --audit-inventory] [--full]\n\nSincroniza com o remoto. --dry-run simula sem alterar dados.\n--initial inicializa banco local ausente; --trust-existing-content exige --initial.\n--audit-inventory executa Sync e auditoria estrutural; não pode combinar com os outros modos.\n--full exibe estatísticas detalhadas de todas as etapas, resumo de transferência e todos os itens.\nExemplo: kasumi sync Programming --dry-run\n",
+    "status": "Uso: kasumi status <perfil> [--full]\n\nMostra mudanças locais pendentes. --full exibe estatísticas detalhadas e todos os itens e pendências.\nExemplo: kasumi status Programming --full\n",
     "fsck": "Uso: kasumi fsck <perfil>\n\nAudita integridade remota e conteúdo autenticado.\nExemplo: kasumi fsck Programming\n",
     "gc": "Uso: kasumi gc <perfil>\n\nAnalisa candidatos à coleta de lixo e remove objetos seguros.\nPare o Sync em todos os clientes e serialize a manutenção antes do GC.\nSubcomandos: remove-writer, remove-barrier (use --help em cada subcomando).\nExemplo: kasumi gc Programming\n",
     "gc_remove-writer": "Uso: kasumi gc remove-writer <perfil> <writer-id>\n\nRemove um marker exato listado por remote writers.\nVerifique se o processo está inativo e se nenhum Sync ou manutenção está em execução.\nNão executa Sync nem GC.\nExemplo: kasumi remote writers Programming\n",

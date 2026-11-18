@@ -3440,7 +3440,10 @@ execute(const runtime::RuntimeData& runtime_data,
     for (std::size_t position = 0; position < apply_order.size();) {
         const auto first = apply_order[position];
         const auto& first_operation = record->plan.operations[first];
-        if (meter && first_operation.action != Action::Upload) {
+        const bool is_content_install =
+            first_operation.action == Action::Download ||
+            first_operation.action == Action::CopyLocal;
+        if (meter && is_content_install) {
             const bool loose_download =
                 first_operation.action == Action::Download &&
                 !preverified_downloads->contains(first_operation.hash);
@@ -3582,7 +3585,7 @@ execute(const runtime::RuntimeData& runtime_data,
             if (!marked) {
                 return std::unexpected(marked.error());
             }
-            if (meter)
+            if (meter && is_content_install)
                 ProgressMeter::add(meter->work);
             ++position;
             continue;
