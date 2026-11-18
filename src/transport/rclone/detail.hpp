@@ -35,6 +35,9 @@ struct State {
     bool process_started = false;
     bool ready = false;
     std::atomic_bool sha256_unsupported = false;
+#if defined(_WIN32)
+    void* job_handle = nullptr;
+#endif
 };
 
 using ChildEnvironment = std::vector<std::pair<std::string, std::string>>;

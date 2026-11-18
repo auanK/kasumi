@@ -49,8 +49,27 @@ add_nanoseconds_to_unix_epoch(std::int64_t unix_ns) noexcept {
     const auto origin =
         file_clock_from_sys(std::chrono::system_clock::time_point{})
             .time_since_epoch();
-    const auto delta =
-        std::chrono::duration_cast<Duration>(std::chrono::nanoseconds{unix_ns});
+    using Factor = std::ratio_divide<typename Duration::period, std::nano>;
+    static_assert(Factor::num > 0 && Factor::den > 0);
+    Rep delta_count = 0;
+    if constexpr (Factor::den == 1) {
+        const auto q = unix_ns / static_cast<std::int64_t>(Factor::num);
+        const auto r = unix_ns % static_cast<std::int64_t>(Factor::num);
+        if (r < 0 && q == std::numeric_limits<std::int64_t>::lowest()) {
+            return std::nullopt;
+        }
+        const std::int64_t floored = r < 0 ? (q - 1) : q;
+        if (floored > static_cast<std::int64_t>(std::numeric_limits<Rep>::max()) ||
+            floored < static_cast<std::int64_t>(std::numeric_limits<Rep>::lowest())) {
+            return std::nullopt;
+        }
+        delta_count = static_cast<Rep>(floored);
+    } else {
+        delta_count =
+            std::chrono::floor<Duration>(std::chrono::nanoseconds{unix_ns})
+                .count();
+    }
+    const Duration delta{delta_count};
     if ((delta.count() > 0 &&
          origin.count() > std::numeric_limits<Rep>::max() - delta.count()) ||
         (delta.count() < 0 &&
@@ -110,7 +129,7 @@ to_windows_ticks(std::filesystem::file_time_type value) noexcept {
             .count();
 #else
     constexpr std::int64_t unix_to_windows_epoch_ticks = 116444736000000000LL;
-    const auto sys_ticks = std::chrono::duration_cast<file_ticks>(
+    const auto sys_ticks = std::chrono::floor<file_ticks>(
                                file_clock_to_sys(value).time_since_epoch())
                                .count();
     if (sys_ticks > std::numeric_limits<std::int64_t>::max() -

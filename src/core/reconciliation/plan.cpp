@@ -1448,6 +1448,11 @@ ReconcileResult reconcile(const Input& input) {
     if (!candidate) {
         return std::unexpected(std::move(candidate.error()));
     }
+    if (!valid_snapshot(candidate->tree, false)) {
+        return std::unexpected(
+            fail_error(ErrorCode::UnsafePlan,
+                       "candidate shared tree violates snapshot invariants"));
+    }
     auto disposable =
         select_disposable_operations(input, candidate->tree, plan);
     if (!disposable) {

@@ -644,6 +644,10 @@ TEST(PortableCaseKeyTest, EquivalenceAndDistinct) {
               kasumi::portable_case_key("ä/ω.txt"));
     EXPECT_NE(kasumi::portable_case_key("Ä/Ω.txt"),
               kasumi::portable_case_key("Ä_Ω.txt"));
+
+    // NFC normalization and full Unicode casefold per segment
+    EXPECT_EQ(kasumi::portable_case_key("cafe\xCC\x81/Stra\xC3\x9F" "e.txt"),
+              kasumi::portable_case_key("CAF\xC3\x89/STRASSE.TXT"));
 }
 
 TEST(ConflictPathTest, HandlesBoundedTruncationAndDeviceNames) {
@@ -696,6 +700,21 @@ TEST(ConflictPathTest, HandlesBoundedTruncationAndDeviceNames) {
         kasumi::make_conflict_path("aux", ".kasumiconflict_local");
     EXPECT_EQ(dos_bare_conflict, "_aux.kasumiconflict_local");
     EXPECT_TRUE(kasumi::valid_logical_path_component(dos_bare_conflict));
+
+    // Oversized suffix with DOS device prefix remains bounded to <= 255 bytes
+    const std::string max_suffix_with_con = "." + std::string(250, 's');
+    const auto clamped_dos_full =
+        kasumi::make_conflict_path("CON", max_suffix_with_con);
+    EXPECT_LE(clamped_dos_full.size(), 255U);
+    EXPECT_EQ(clamped_dos_full, "_CON." + std::string(250, 's'));
+    EXPECT_TRUE(kasumi::valid_logical_path_component(clamped_dos_full));
+
+    const std::string tighter_suffix = "." + std::string(251, 's');
+    const auto clamped_dos_trimmed =
+        kasumi::make_conflict_path("CON", tighter_suffix);
+    EXPECT_LE(clamped_dos_trimmed.size(), 255U);
+    EXPECT_EQ(clamped_dos_trimmed, "_CO." + std::string(251, 's'));
+    EXPECT_TRUE(kasumi::valid_logical_path_component(clamped_dos_trimmed));
 }
 
 } // namespace

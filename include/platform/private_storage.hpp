@@ -188,6 +188,9 @@ stream_regular_file(const std::filesystem::path& path,
         path, scratch, &Adapter::invoke, &on_chunk, expected_size);
 }
 
+// Returns true when path exists as a symlink, NTFS junction, or reparse point.
+bool is_reparse_or_symlink(const std::filesystem::path& path) noexcept;
+
 } // namespace kasumi::platform::private_storage
 
 #endif

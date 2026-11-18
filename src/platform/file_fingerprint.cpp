@@ -76,8 +76,16 @@ regular_file_fingerprint(const std::filesystem::path& path) {
         return std::unexpected(std::system_category().message(errno));
     if (!S_ISREG(status.st_mode))
         return std::optional<FileFingerprint>{};
-    // Inode and ctime can be reused within the same recorded timestamp.
-    return std::optional<FileFingerprint>{};
+    const auto ctime_ns =
+        static_cast<std::uint64_t>(status.st_ctim.tv_sec) * 1000000000ULL +
+        static_cast<std::uint64_t>(status.st_ctim.tv_nsec);
+    return FileFingerprint{
+        .kind = FileFingerprintKind::PosixFileIdentity,
+        .value = {static_cast<std::uint64_t>(status.st_dev),
+                  static_cast<std::uint64_t>(status.st_ino),
+                  ctime_ns,
+                  static_cast<std::uint64_t>(status.st_size)},
+    };
 #endif
 }
 

@@ -108,6 +108,10 @@ std::expected<std::string, std::string>
 verify_package_checksum(const std::filesystem::path& archive,
                         const std::filesystem::path& checksum_file,
                         std::string_view archive_name);
+bool verify_release_signature(
+    std::span<const std::byte> message,
+    std::span<const std::uint8_t, 64> signature,
+    std::span<const std::uint8_t, 32> public_key) noexcept;
 InstallResult install_prepared_executable(const std::filesystem::path& prepared,
                                           const std::filesystem::path& target,
                                           std::string_view expected_sha256,

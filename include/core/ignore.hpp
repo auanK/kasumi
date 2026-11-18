@@ -11,7 +11,7 @@
 
 namespace kasumi::ignore {
 
-inline constexpr std::size_t max_ignore_pattern_size = 255;
+inline constexpr std::size_t max_ignore_pattern_size = 4096;
 
 enum class IgnoreDisposition : std::uint8_t {
     Managed,

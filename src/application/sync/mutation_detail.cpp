@@ -6,6 +6,7 @@
 #include "mutation_fault_test.hpp"
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
+#include "platform/private_storage.hpp"
 
 #include <algorithm>
 #include <array>
@@ -270,7 +271,8 @@ resolve_local_path(const std::filesystem::path& local_root,
     if (!root_status) {
         return std::unexpected(root_status.error());
     }
-    if (std::filesystem::is_symlink(*root_status)) {
+    if (std::filesystem::is_symlink(*root_status) ||
+        platform::private_storage::is_reparse_or_symlink(local_root)) {
         return std::unexpected(make_error(MutationErrorCode::UnsafePath,
                                           "local root is a symlink",
                                           local_root,
@@ -346,7 +348,8 @@ resolve_local_path(const std::filesystem::path& local_root,
         if (missing(*status)) {
             break;
         }
-        if (std::filesystem::is_symlink(*status)) {
+        if (std::filesystem::is_symlink(*status) ||
+            platform::private_storage::is_reparse_or_symlink(current)) {
             return std::unexpected(make_error(MutationErrorCode::UnsafePath,
                                               "path contains a symlink",
                                               current,

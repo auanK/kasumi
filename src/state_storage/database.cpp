@@ -82,6 +82,13 @@ template <typename T> auto sql_arg(const T& value) {
     if constexpr (std::is_same_v<T, bool>) {
         return std::int64_t{value ? 1 : 0};
     } else if constexpr (std::is_integral_v<T>) {
+        if constexpr (std::is_unsigned_v<T>) {
+            if (value > static_cast<std::uint64_t>(
+                            std::numeric_limits<std::int64_t>::max())) {
+                throw std::runtime_error(
+                    "integer exceeds signed 64-bit SQLite limit");
+            }
+        }
         return static_cast<std::int64_t>(value);
     } else {
         return std::string_view{value};
@@ -264,8 +271,18 @@ bool valid_table(sqlite3* database,
            has_binary_primary_key(database, name, primary_key);
 }
 
+bool has_unexpected_schema_objects(sqlite3* database) {
+    auto query = prepare_stmt(
+        database,
+        "SELECT 1 FROM sqlite_schema WHERE type = 'view' "
+        "OR (type = 'table' AND upper(coalesce(sql, '')) LIKE 'CREATE VIRTUAL TABLE%') "
+        "LIMIT 1");
+    return step_stmt(query);
+}
+
 bool has_expected_schema(sqlite3* database) {
-    return valid_table(database, "nodes", "path", node_columns) &&
+    return !has_unexpected_schema_objects(database) &&
+           valid_table(database, "nodes", "path", node_columns) &&
            valid_table(
                database, "pending_materializations", "path", pending_columns) &&
            valid_table(database, "metadata", "key", metadata_columns) &&
@@ -337,6 +354,10 @@ std::vector<NodeRow> load_pending_materializations(sqlite3* database,
     while (step_stmt(query)) {
         if (rows.size() == maximum_pending_materializations) {
             throw std::runtime_error("too many pending materializations");
+        }
+        if (sqlite::is_null(query, 0) || sqlite::is_null(query, 1) ||
+            sqlite::is_null(query, 2) || sqlite::is_null(query, 3)) {
+            throw std::runtime_error("pending materialization contains NULL");
         }
         const auto hash = hash_from_hex(sqlite::text(query, 1));
         const auto size = sqlite::integer(query, 2);
@@ -422,6 +443,11 @@ std::expected<Snapshot, std::string> load_tree(sqlite3* database) {
             database, "SELECT path, hash, size, mtime, is_dir FROM nodes");
         Snapshot snapshot;
         while (step_stmt(query)) {
+            if (sqlite::is_null(query, 0) || sqlite::is_null(query, 1) ||
+                sqlite::is_null(query, 2) || sqlite::is_null(query, 3) ||
+                sqlite::is_null(query, 4)) {
+                throw std::runtime_error("node row contains NULL");
+            }
             auto hash = hash_from_hex(sqlite::text(query, 1));
             if (!hash) {
                 throw std::runtime_error(hash.error());
@@ -475,6 +501,12 @@ std::vector<FileCacheRow> read_cache_rows(sqlite3* database) {
         "FROM file_cache ORDER BY path");
     std::vector<FileCacheRow> rows;
     while (step_stmt(query)) {
+        if (sqlite::is_null(query, 0) || sqlite::is_null(query, 1) ||
+            sqlite::is_null(query, 2) || sqlite::is_null(query, 3) ||
+            sqlite::is_null(query, 4) || sqlite::is_null(query, 5) ||
+            sqlite::is_null(query, 6) || sqlite::is_null(query, 7)) {
+            continue;
+        }
         const auto size = sqlite::integer(query, 2);
         const auto kind = sqlite::integer(query, 3);
         const auto words = std::array{parse_word(sqlite::text(query, 4)),
@@ -668,6 +700,9 @@ load_state(const std::filesystem::path& database_path) {
             {"epoch_sequence", &epoch_sequence},
         };
         while (step_stmt(metadata)) {
+            if (sqlite::is_null(metadata, 0) || sqlite::is_null(metadata, 1)) {
+                return std::unexpected("state.db contains NULL metadata");
+            }
             const auto key = sqlite::text(metadata, 0);
             ++metadata_count;
             const auto it = std::ranges::find(

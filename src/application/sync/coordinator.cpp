@@ -1567,7 +1567,8 @@ bool same_operation(const Operation& left, const Operation& right) noexcept {
     return left.action == right.action && left.path == right.path &&
            left.hash == right.hash && left.alt_path == right.alt_path &&
            left.size == right.size &&
-           left.exclusive_destination == right.exclusive_destination;
+           left.exclusive_destination == right.exclusive_destination &&
+           left.expected_source_identity == right.expected_source_identity;
 }
 
 bool same_plan(const SyncPlan& left, const SyncPlan& right) noexcept {

@@ -73,12 +73,14 @@ add_library(kasumi_application_fault_test_objects OBJECT
     ${PROJECT_SOURCE_DIR}/src/application/sync/mutation_transaction.cpp
     ${PROJECT_SOURCE_DIR}/src/application/sync/coordinator.cpp
     ${PROJECT_SOURCE_DIR}/src/application/sync/reobservation.cpp
+    ${PROJECT_SOURCE_DIR}/src/platform/workspace.cpp
 )
 target_include_directories(kasumi_application_fault_test_objects PRIVATE
     ${PROJECT_SOURCE_DIR}/src
 )
 target_compile_definitions(kasumi_application_fault_test_objects PRIVATE
     KASUMI_MUTATION_FAULT_TESTS
+    KASUMI_WORKSPACE_FAULT_TESTS
 )
 target_link_libraries(kasumi_application_fault_test_objects PRIVATE
     kasumi_application
@@ -307,6 +309,7 @@ kasumi_add_test_suite(
         unit/cli/test_update.cpp
     LIBRARIES
         kasumi_cli
+        monocypher
 )
 
 # Substitute Application entry points to exercise CLI outcomes without I/O.

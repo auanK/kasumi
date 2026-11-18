@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -47,6 +48,7 @@ struct ScanFrame {
 struct ScanContext {
     ScanPolicy policy = ScanPolicy::FullHash;
     MetadataQuery metadata_query = cache::read_file_metadata;
+    std::int64_t scan_start_ns = 0;
     std::unordered_map<std::string_view, const state_storage::FileCacheRow*>
         previous;
     std::vector<state_storage::FileCacheRow> cache;
@@ -182,8 +184,16 @@ process_file(const std::filesystem::path& file_path,
                                             .file_high = cached_row.file_high},
             .is_valid = true};
 
-        if (cache::evaluate_cache_reuse(cached_meta, current_meta) ==
-            cache::CacheReuseResult::Reusable) {
+        constexpr std::int64_t racy_clean_window_ns = 20'000'000LL;
+        const std::int64_t mtime_delta =
+            context.scan_start_ns >= current_meta.mtime_nanoseconds
+                ? (context.scan_start_ns - current_meta.mtime_nanoseconds)
+                : (current_meta.mtime_nanoseconds - context.scan_start_ns);
+        const bool possibly_racy_clean = mtime_delta < racy_clean_window_ns;
+
+        if (!possibly_racy_clean &&
+            cache::evaluate_cache_reuse(cached_meta, current_meta) ==
+                cache::CacheReuseResult::Reusable) {
             row.hash = cached_row.hash;
             context.cache.push_back(cached_row);
             platform::perf_trace::count("local hash cache hits");
@@ -357,8 +367,13 @@ scan_result(const std::filesystem::path& local_root,
     if (auto valid = validate_ignore_list(local_root, ignore_list); !valid) {
         return std::unexpected(valid.error());
     }
+    const auto scan_start_ns = static_cast<std::int64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
     ScanContext context{.policy = policy,
                         .metadata_query = metadata_query,
+                        .scan_start_ns = scan_start_ns,
                         .previous = {},
                         .cache = {}};
     context.cache.reserve(previous_cache.size());
@@ -676,6 +691,14 @@ hash_disposable_candidates(
 
         std::size_t start = 0;
         auto current = local_root;
+        if (platform::private_storage::is_reparse_or_symlink(current)) {
+            return std::unexpected(ScanError{
+                .code = ScanErrorCode::Metadata,
+                .path = current,
+                .operation = "validate disposable candidate",
+                .detail = "local root is a symlink or reparse point",
+            });
+        }
         while (start < relative.size()) {
             const auto slash = relative.find('/', start);
             const auto component = std::string_view{relative}.substr(
@@ -695,6 +718,7 @@ hash_disposable_candidates(
             const auto status = std::filesystem::symlink_status(current, error);
             const bool final = slash == std::string::npos;
             if (error || std::filesystem::is_symlink(status) ||
+                platform::private_storage::is_reparse_or_symlink(current) ||
                 (final ? !std::filesystem::is_regular_file(status)
                        : !std::filesystem::is_directory(status))) {
                 return std::unexpected(ScanError{

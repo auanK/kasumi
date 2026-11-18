@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <blake3.h>
+#include <cstdlib>
+#include <memory>
 #include <utf8proc.h>
 #include <utility>
 #include <vector>
@@ -105,34 +107,69 @@ bool valid_logical_path(std::string_view path) noexcept {
 std::string portable_case_key(std::string_view logical_path) {
     std::string key;
     key.reserve(logical_path.size());
-    const auto* ptr =
-        reinterpret_cast<const utf8proc_uint8_t*>(logical_path.data());
-    utf8proc_ssize_t remaining =
-        static_cast<utf8proc_ssize_t>(logical_path.size());
 
-    while (remaining > 0) {
-        utf8proc_int32_t codepoint = 0;
-        utf8proc_ssize_t bytes_read =
-            utf8proc_iterate(ptr, remaining, &codepoint);
-        if (bytes_read <= 0) {
-            key.push_back(static_cast<char>(*ptr));
-            ptr += 1;
-            remaining -= 1;
-            continue;
+    auto append_fallback = [&](std::string_view segment) {
+        const auto* ptr =
+            reinterpret_cast<const utf8proc_uint8_t*>(segment.data());
+        utf8proc_ssize_t remaining =
+            static_cast<utf8proc_ssize_t>(segment.size());
+        while (remaining > 0) {
+            utf8proc_int32_t codepoint = 0;
+            const utf8proc_ssize_t bytes_read =
+                utf8proc_iterate(ptr, remaining, &codepoint);
+            if (bytes_read <= 0) {
+                key.push_back(static_cast<char>(*ptr));
+                ptr += 1;
+                remaining -= 1;
+                continue;
+            }
+            ptr += bytes_read;
+            remaining -= bytes_read;
+            const utf8proc_int32_t lower = utf8proc_tolower(codepoint);
+            utf8proc_uint8_t encoded[4];
+            const utf8proc_ssize_t encoded_bytes =
+                utf8proc_encode_char(lower, encoded);
+            if (encoded_bytes > 0) {
+                key.append(reinterpret_cast<const char*>(encoded),
+                           static_cast<std::size_t>(encoded_bytes));
+            } else {
+                key.append(reinterpret_cast<const char*>(ptr - bytes_read),
+                           static_cast<std::size_t>(bytes_read));
+            }
         }
-        ptr += bytes_read;
-        remaining -= bytes_read;
+    };
 
-        utf8proc_int32_t upper = utf8proc_toupper(codepoint);
-        utf8proc_uint8_t encoded[4];
-        utf8proc_ssize_t encoded_bytes = utf8proc_encode_char(upper, encoded);
-        if (encoded_bytes > 0) {
-            key.append(reinterpret_cast<const char*>(encoded),
-                       static_cast<std::size_t>(encoded_bytes));
-        } else {
-            key.append(reinterpret_cast<const char*>(ptr - bytes_read),
-                       static_cast<std::size_t>(bytes_read));
+    std::size_t start = 0;
+    while (start <= logical_path.size()) {
+        if (start > 0) {
+            key.push_back('/');
         }
+        const auto slash = logical_path.find('/', start);
+        const auto segment = logical_path.substr(
+            start,
+            slash == std::string_view::npos ? logical_path.size() - start
+                                            : slash - start);
+        if (!segment.empty()) {
+            utf8proc_uint8_t* mapped = nullptr;
+            const utf8proc_ssize_t mapped_bytes = utf8proc_map(
+                reinterpret_cast<const utf8proc_uint8_t*>(segment.data()),
+                static_cast<utf8proc_ssize_t>(segment.size()),
+                &mapped,
+                static_cast<utf8proc_option_t>(
+                    UTF8PROC_STABLE | UTF8PROC_COMPOSE | UTF8PROC_CASEFOLD));
+            std::unique_ptr<utf8proc_uint8_t, decltype(&std::free)> guard{
+                mapped, &std::free};
+            if (mapped_bytes >= 0 && mapped != nullptr) {
+                key.append(reinterpret_cast<const char*>(mapped),
+                           static_cast<std::size_t>(mapped_bytes));
+            } else {
+                append_fallback(segment);
+            }
+        }
+        if (slash == std::string_view::npos) {
+            break;
+        }
+        start = slash + 1;
     }
     return key;
 }
@@ -148,8 +185,6 @@ std::string make_conflict_path(std::string_view original_path,
 
     const std::size_t suffix_len =
         std::min(suffix.size(), maximum_logical_component_length);
-    const std::size_t max_orig_len =
-        maximum_logical_component_length - suffix_len;
 
     auto truncate_utf8 = [](std::string_view s,
                             std::size_t max_bytes) -> std::string_view {
@@ -163,20 +198,26 @@ std::string make_conflict_path(std::string_view original_path,
         return s.substr(0, len);
     };
 
-    auto orig_truncated = truncate_utf8(orig_name, max_orig_len);
+    auto suffix_part = truncate_utf8(suffix, suffix_len);
+    const std::size_t unprefixed_orig_len =
+        maximum_logical_component_length - suffix_part.size();
+    auto orig_truncated = truncate_utf8(orig_name, unprefixed_orig_len);
     std::string candidate_name =
-        std::string(orig_truncated) + std::string(suffix);
+        std::string(orig_truncated) + std::string(suffix_part);
 
     const auto dot = candidate_name.find('.');
     const auto base = dot == std::string_view::npos
                           ? std::string_view(candidate_name)
                           : std::string_view(candidate_name).substr(0, dot);
     if (is_windows_reserved_device_name(base)) {
+        const std::size_t max_with_prefix = maximum_logical_component_length - 1;
+        suffix_part =
+            truncate_utf8(suffix, std::min(suffix.size(), max_with_prefix));
         const std::size_t safe_max_orig_len =
-            max_orig_len > 1 ? max_orig_len - 1 : 0;
+            max_with_prefix - suffix_part.size();
         orig_truncated = truncate_utf8(orig_name, safe_max_orig_len);
         candidate_name =
-            "_" + std::string(orig_truncated) + std::string(suffix);
+            "_" + std::string(orig_truncated) + std::string(suffix_part);
     }
 
     if (parent.empty()) {

@@ -65,8 +65,7 @@ std::expected<KeyBytes, runtime::Error> decode_hex(std::string_view text) {
         return -1;
     };
     KeyBytes key{};
-    bool success = false;
-    WipeGuard guard{key, &success};
+    WipeGuard guard{key};
     for (std::size_t index = 0; index < key.size(); ++index) {
         const int high = digit(text[index * 2]);
         const int low = digit(text[index * 2 + 1]);
@@ -76,7 +75,6 @@ std::expected<KeyBytes, runtime::Error> decode_hex(std::string_view text) {
         }
         key[index] = static_cast<uint8_t>((high << 4) | low);
     }
-    success = true;
     return key;
 }
 
@@ -107,8 +105,7 @@ read_impl(const std::filesystem::path& path, bool protect) {
         }
     }
     KeyBytes key{};
-    bool success = false;
-    WipeGuard key_guard{key, &success};
+    WipeGuard key_guard{key};
     std::array<std::uint8_t, KEY_SIZE + 1> buf{};
     WipeGuard buf_guard{buf};
     std::size_t total = 0;
@@ -137,7 +134,6 @@ read_impl(const std::filesystem::path& path, bool protect) {
                     "<profile>' to re-enter the key");
     }
     obscure(key);
-    success = true;
     return key;
 }
 
@@ -283,6 +279,7 @@ decode_obscured_hex(std::string_view hex) {
     if (!decoded) {
         return fail(ErrorCode::KeyInvalid, "OS vault key has invalid format");
     }
+    WipeGuard guard{*decoded};
     obscure(*decoded);
     return *decoded;
 }
@@ -1391,6 +1388,7 @@ read_vault(const std::filesystem::path& key_path) {
         return fail(ErrorCode::KeyInvalid, "OS vault key has invalid size");
     }
     KeyBytes key{};
+    WipeGuard guard{key};
     std::memcpy(key.data(), cred->CredentialBlob, KEY_SIZE);
     obscure(key);
     return key;
@@ -1511,6 +1509,7 @@ std::expected<KeyBytes, runtime::Error> derive(std::string_view password,
         .salt_size = static_cast<uint32_t>(salt_password.size())};
 
     KeyBytes key{};
+    WipeGuard key_guard{key};
     crypto_argon2(key.data(),
                   KEY_SIZE,
                   work_area,

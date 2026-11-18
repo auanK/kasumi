@@ -1137,7 +1137,8 @@ apply_operation(const Operation& operation,
                 return std::unexpected(status.error());
             }
             if (!missing(*status)) {
-                if (std::filesystem::is_symlink(*status)) {
+                if (std::filesystem::is_symlink(*status) ||
+                    platform::private_storage::is_reparse_or_symlink(*path)) {
                     return std::unexpected(
                         make_error(MutationErrorCode::UnsafePath,
                                    "destination directory is a symlink",
@@ -1316,7 +1317,8 @@ apply_operation(const Operation& operation,
             if (missing(*status)) {
                 return {};
             }
-            if (std::filesystem::is_symlink(*status)) {
+            if (std::filesystem::is_symlink(*status) ||
+                platform::private_storage::is_reparse_or_symlink(*path)) {
                 return std::unexpected(
                     make_error(MutationErrorCode::UnsafePath,
                                "removing symlinks is not allowed",

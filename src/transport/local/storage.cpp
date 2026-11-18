@@ -1,6 +1,9 @@
 #include "../detail.hpp"
 #include "detail.hpp"
+#include "platform/durability.hpp"
 #include "platform/path.hpp"
+#include "platform/private_storage.hpp"
+#include "platform/random.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -53,10 +56,36 @@ bool valid_identifier(std::string_view identifier) noexcept {
     return detail::valid_relative_identifier(identifier, false);
 }
 
+Result reparse_rejected_error(std::string_view context) {
+    return std::unexpected(detail::make_error(
+        ErrorCode::InvalidContext, std::string{context}, 0));
+}
+
+bool contains_reparse_in_relative_chain(const std::filesystem::path& base,
+                                        const std::filesystem::path& relative) {
+    if (platform::private_storage::is_reparse_or_symlink(base)) {
+        return true;
+    }
+    std::filesystem::path current = base;
+    for (const auto& segment : relative) {
+        current /= segment;
+        if (platform::private_storage::is_reparse_or_symlink(current)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::expected<State*, Error> ready_local(void* context) {
     auto* state = local_state(context);
     if (state == nullptr || state->root.empty()) {
         return std::unexpected(invalid_context_error());
+    }
+    if (platform::private_storage::is_reparse_or_symlink(state->root)) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::InvalidContext,
+            "local storage root cannot be a symlink or reparse point",
+            0));
     }
     return state;
 }
@@ -66,9 +95,16 @@ resolve_object_path(const State& state, std::string_view identifier) {
     if (!valid_identifier(identifier)) {
         return std::unexpected(invalid_identifier_error());
     }
-
-    return objects_directory(state) /
-           platform::path::from_utf8(identifier).lexically_normal();
+    const auto base = objects_directory(state);
+    const auto normalized =
+        platform::path::from_utf8(identifier).lexically_normal();
+    if (contains_reparse_in_relative_chain(base, normalized)) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::InvalidContext,
+            "local storage cannot traverse a symlink or reparse point",
+            0));
+    }
+    return base / normalized;
 }
 
 std::expected<std::filesystem::path, Error>
@@ -101,42 +137,85 @@ Result ensure_parent_directory(const std::filesystem::path& path) {
 Result copy_file_overwrite(const std::filesystem::path& source,
                            const std::filesystem::path& destination) {
     std::error_code error;
+    if (platform::private_storage::is_reparse_or_symlink(source)) {
+        return reparse_rejected_error("source cannot be a symlink or reparse point");
+    }
     const auto dest_status =
         std::filesystem::symlink_status(destination, error);
     if (error && error != std::errc::no_such_file_or_directory) {
         return std::unexpected(make_error(error));
     }
     if (std::filesystem::is_symlink(dest_status) ||
-        std::filesystem::is_directory(dest_status)) {
+        std::filesystem::is_directory(dest_status) ||
+        platform::private_storage::is_reparse_or_symlink(destination)) {
         return std::unexpected(
             detail::make_error(ErrorCode::InvalidContext,
                                "destination cannot be a symlink or directory",
                                0));
     }
+
+    const auto nonce = platform::random::hex_id(8);
+    if (!nonce) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::Io, "could not generate temporary filename", 0));
+    }
+    auto staging = destination;
+    staging += ".kasumi-tmp-" + *nonce;
+
+    struct TempGuard {
+        const std::filesystem::path& path;
+        bool active = true;
+        ~TempGuard() noexcept {
+            if (active) {
+                std::error_code cleanup_error;
+                std::filesystem::remove(path, cleanup_error);
+            }
+        }
+    } guard{staging};
+
 #if defined(_WIN32)
-    if (!CopyFileW(source.c_str(), destination.c_str(), FALSE)) {
+    if (!CopyFileW(source.c_str(), staging.c_str(), TRUE)) {
         const auto win_err = GetLastError();
         return std::unexpected(make_error(std::error_code(
             static_cast<int>(win_err), std::system_category())));
     }
-    return {};
 #else
     error.clear();
     std::filesystem::copy_file(
-        source,
-        destination,
-        std::filesystem::copy_options::overwrite_existing,
-        error);
+        source, staging, std::filesystem::copy_options::none, error);
     if (error) {
         return std::unexpected(make_error(error));
     }
-    return {};
 #endif
+    if (const auto synced = platform::durability::sync_file(staging); !synced) {
+        return std::unexpected(
+            detail::make_error(ErrorCode::Io, synced.error(), 0));
+    }
+    if (const auto replaced =
+            platform::durability::replace_atomically(staging, destination);
+        !replaced) {
+        return std::unexpected(
+            detail::make_error(ErrorCode::Io, replaced.error(), 0));
+    }
+    guard.active = false;
+    if (const auto synced_dir =
+            platform::durability::sync_parent_directory(destination);
+        !synced_dir) {
+        return std::unexpected(
+            detail::make_error(ErrorCode::Io, synced_dir.error(), 0));
+    }
+    return {};
 }
 
 template <typename Iterator>
 ListingResult scan_directory(const std::filesystem::path& base,
                              bool use_filename_only) {
+    if (platform::private_storage::is_reparse_or_symlink(base)) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::InvalidContext,
+            "local storage directory cannot be a symlink or reparse point",
+            0));
+    }
     std::error_code error;
     std::vector<std::string> identifiers;
     Iterator iterator{
@@ -149,6 +228,17 @@ ListingResult scan_directory(const std::filesystem::path& base,
     for (const Iterator end; iterator != end; iterator.increment(error)) {
         if (error) {
             return std::unexpected(make_error(error));
+        }
+        const bool is_link = iterator->is_symlink(error);
+        if (error) {
+            return std::unexpected(make_error(error));
+        }
+        if (is_link ||
+            platform::private_storage::is_reparse_or_symlink(iterator->path())) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::InvalidContext,
+                "local storage cannot traverse a symlink or reparse point",
+                0));
         }
         const bool regular = iterator->is_regular_file(error);
         if (error) {
@@ -192,6 +282,7 @@ Result local_put(void* context,
         return std::unexpected(make_error(error));
     }
     if (std::filesystem::is_symlink(source_status) ||
+        platform::private_storage::is_reparse_or_symlink(source) ||
         !std::filesystem::is_regular_file(source_status)) {
         return std::unexpected(detail::make_error(
             ErrorCode::ObjectNotFound, "source file does not exist", 0));
@@ -244,11 +335,22 @@ ListingResult local_list(void* context) {
 
 ListingResult local_list_prefix(void* context, std::string_view prefix) {
     auto state = ready_local(context);
-    if (!state || !valid_identifier(prefix)) {
+    if (!state) {
+        return std::unexpected(state.error());
+    }
+    if (!valid_identifier(prefix)) {
         return std::unexpected(invalid_identifier_error());
     }
-    const auto base =
-        objects_directory(**state) / platform::path::from_utf8(prefix);
+    const auto normalized =
+        platform::path::from_utf8(prefix).lexically_normal();
+    if (contains_reparse_in_relative_chain(objects_directory(**state),
+                                           normalized)) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::InvalidContext,
+            "local storage cannot traverse a symlink or reparse point",
+            0));
+    }
+    const auto base = objects_directory(**state) / normalized;
     std::error_code error;
     if (!std::filesystem::is_directory(base, error)) {
         return std::unexpected(
@@ -274,6 +376,12 @@ RemovalResult local_remove(void* context, std::string_view identifier) {
 
 std::expected<void, Error>
 validate_destination(const std::filesystem::path& root) {
+    if (platform::private_storage::is_reparse_or_symlink(root)) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::InvalidContext,
+            "local destination cannot be a symlink or reparse point",
+            0));
+    }
     for (auto candidate = root;;) {
         std::error_code error;
         const auto status = std::filesystem::status(candidate, error);

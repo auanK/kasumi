@@ -5,7 +5,15 @@
 #include "runtime/profile.hpp"
 #include "runtime/vault.hpp"
 
+#if !defined(_WIN32)
+#include <pwd.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
+
 #include <string>
+#include <system_error>
+#include <vector>
 
 namespace kasumi::runtime {
 
@@ -29,10 +37,28 @@ GlobalPaths default_global_paths() {
     } else if (const auto home = platform::path::environment_value("HOME");
                home && home->is_absolute()) {
         app_dir = *home / ".config" / "kasumi";
+    } else {
+        long size = ::sysconf(_SC_GETPW_R_SIZE_MAX);
+        if (size <= 0 || size > 65536L) {
+            size = 16384L;
+        }
+        std::vector<char> buffer(static_cast<std::size_t>(size));
+        struct passwd pwd{};
+        struct passwd* result = nullptr;
+        if (::getpwuid_r(::geteuid(), &pwd, buffer.data(), buffer.size(), &result) == 0 &&
+            result != nullptr && pwd.pw_dir != nullptr && pwd.pw_dir[0] == '/') {
+            app_dir = std::filesystem::path{pwd.pw_dir} / ".config" / "kasumi";
+        }
     }
 #endif
     if (app_dir.empty()) {
-        app_dir = std::filesystem::current_path() / ".kasumi_data";
+        std::error_code ec;
+        const auto current = std::filesystem::current_path(ec);
+        if (!ec && !current.empty()) {
+            app_dir = current / ".kasumi_data";
+        } else {
+            return {};
+        }
     }
     return global_paths_from_root(app_dir);
 }

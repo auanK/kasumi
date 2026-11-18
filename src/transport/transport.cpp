@@ -33,10 +33,19 @@ bool windows_drive_path(std::string_view location) noexcept {
 }
 
 bool valid_remote_name(std::string_view name) noexcept {
-    return !name.empty() && name != "." && name != ".." &&
-           name.find_first_of(":/\\") == std::string_view::npos &&
-           !outer_whitespace(name) &&
-           std::none_of(name.begin(), name.end(), forbidden_character);
+    if (name.empty() || name.size() > 128) {
+        return false;
+    }
+    const auto is_alnum = [](char ch) noexcept {
+        return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+               (ch >= '0' && ch <= '9');
+    };
+    if (!is_alnum(name.front())) {
+        return false;
+    }
+    return std::all_of(name.begin(), name.end(), [&](char ch) noexcept {
+        return is_alnum(ch) || ch == '.' || ch == '_' || ch == '-';
+    });
 }
 
 bool valid_remote_root(std::string_view root) noexcept {
