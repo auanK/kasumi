@@ -110,7 +110,7 @@ TEST(RemoteLayoutTest, CommitObjectRoundTrip) {
 
     const auto obj = commit_object(layout, ref);
     EXPECT_EQ(obj,
-              layout.commits_prefix + ref.commit_id + "/" + ref.ciphertext_id);
+              layout.commits_prefix + ref.commit_id + "_" + ref.ciphertext_id);
 
     const auto parsed = parse_commit_object(layout, obj);
     ASSERT_TRUE(parsed.has_value());

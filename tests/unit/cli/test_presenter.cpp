@@ -1898,3 +1898,14 @@ TEST(CliPresenterTest, ResolveMissingSuccessIsLocalized) {
               std::string::npos);
     kasumi::cli::i18n::set_language(Language::English);
 }
+
+TEST(CliPresenterTest, SanitizesTerminalControlAndEscapeSequences) {
+    const std::string dirty = "bad\x1b[31mpath\x07\r\nnext\t\x7f\xc2\x9b" "ok";
+    const auto cleaned = kasumi::cli::sanitize_terminal_text(dirty);
+    EXPECT_EQ(cleaned.find('\x1b'), std::string::npos);
+    EXPECT_EQ(cleaned.find('\x07'), std::string::npos);
+    EXPECT_EQ(cleaned.find('\r'), std::string::npos);
+    EXPECT_EQ(cleaned.find('\x7f'), std::string::npos);
+    EXPECT_EQ(cleaned.find("\xc2\x9b"), std::string::npos);
+    EXPECT_EQ(cleaned, "bad?[31mpath??\nnext\t??ok");
+}

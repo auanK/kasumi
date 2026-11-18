@@ -235,7 +235,8 @@ try_load_variant(transport::Transport& storage,
                  const HeadReference& reference,
                  const std::filesystem::path& workspace,
                  std::size_t sequence) {
-    auto ciphertext = workspace / reference.commit_id / reference.ciphertext_id;
+    auto ciphertext =
+        workspace / (reference.commit_id + "_" + reference.ciphertext_id);
     std::error_code prefetched_error;
     const bool prefetched =
         std::filesystem::is_regular_file(ciphertext, prefetched_error);
@@ -410,7 +411,7 @@ prefetch_commit_batch(transport::Transport& storage,
     for (const auto& [unused, references] : commit_variants) {
         static_cast<void>(unused);
         for (const auto& reference : references) {
-            batch.identifiers.push_back(reference.commit_id + "/" +
+            batch.identifiers.push_back(reference.commit_id + "_" +
                                         reference.ciphertext_id);
         }
     }
@@ -493,29 +494,43 @@ discover_scoped_commit_variants(transport::Transport& storage,
         return std::unexpected(
             error(ErrorCode::InvalidIdentifier, "invalid commit identifier"));
     }
-    const auto prefix = layout.commits_prefix + std::string{commit_id};
+    if (inventory.all_commits_listed) {
+        return {};
+    }
+    const auto prefix = trim_trailing_slash(layout.commits_prefix);
     auto listing = list_identifiers(storage, prefix);
-    if (!listing || listing->empty()) {
-        return listing ? std::expected<void, Error>{}
-                       : std::unexpected(listing.error());
+    if (!listing) {
+        return std::unexpected(listing.error());
+    }
+    inventory.all_commits_listed = true;
+    if (listing->empty()) {
+        return {};
     }
 
-    auto& variants = inventory.commit_variants[std::string{commit_id}];
     for (const auto& name : *listing) {
-        const auto identifier = prefix + "/" + name;
+        const auto identifier = name.starts_with(layout.commits_prefix)
+                                    ? name
+                                    : layout.commits_prefix + name;
         auto reference = parse_commit_object(layout, identifier);
-        if (!reference || reference->commit_id != commit_id) {
+        if (!reference) {
             continue;
         }
         inventory.identifiers.push_back(identifier);
-        variants.push_back(std::move(*reference));
+        inventory.commit_variants[reference->commit_id].push_back(
+            std::move(*reference));
     }
     sort_unique(inventory.identifiers);
-    sort_unique(variants);
-    if (inventory.identifiers.size() > maximum_history_object_count ||
-        variants.size() > maximum_ciphertext_variants_per_commit) {
+    if (inventory.identifiers.size() > maximum_history_object_count) {
         return std::unexpected(
             error(ErrorCode::LimitExceeded, "history variant budget exceeded"));
+    }
+    for (auto& [unused, variants] : inventory.commit_variants) {
+        static_cast<void>(unused);
+        sort_unique(variants);
+        if (variants.size() > maximum_ciphertext_variants_per_commit) {
+            return std::unexpected(error(ErrorCode::LimitExceeded,
+                                         "history variant budget exceeded"));
+        }
     }
     return {};
 }
@@ -734,8 +749,11 @@ LoadResult load_impl(transport::Transport& storage,
         if (frontier && !frontier->anchors.empty()) {
             cached_anchor = &frontier->anchors.front();
         }
-        if (cached_anchor && (!valid_hex_id(cached_anchor->commit_id) ||
-                              !valid_snapshot(cached_anchor->tree, false))) {
+        if (cached_anchor &&
+            (!valid_hex_id(cached_anchor->commit_id) ||
+             !valid_snapshot(cached_anchor->tree, false) ||
+             !history::valid_storage_manifest(cached_anchor->storage,
+                                              cached_anchor->tree))) {
             return std::unexpected(
                 error(ErrorCode::InvalidInput, "invalid history anchor"));
         }
@@ -860,8 +878,8 @@ LoadResult load_impl(transport::Transport& storage,
                 // Classify stale/missing variants through the normal loader.
                 for (const auto& [id, references] : window) {
                     for (const auto& reference : references) {
-                        remove_file((*temporary)->workspace.root / id /
-                                    reference.ciphertext_id);
+                        remove_file((*temporary)->workspace.root /
+                                    (id + "_" + reference.ciphertext_id));
                     }
                 }
             }
@@ -1005,7 +1023,8 @@ LoadResult load_impl(transport::Transport& storage,
                 .id = cached_anchor->commit_id,
                 .commit = history::Commit{.height = cached_anchor->height,
                                           .parents = {},
-                                          .tree = cached_anchor->tree}});
+                                          .tree = cached_anchor->tree,
+                                          .storage = cached_anchor->storage}});
     }
 
     LoadedHistory result;

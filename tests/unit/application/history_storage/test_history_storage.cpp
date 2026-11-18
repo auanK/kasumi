@@ -2223,7 +2223,7 @@ TEST(HistoryStorageTest, ReobservationInvalidatesHintsWhenHeadOrEpochChanges) {
             fixture.storage, test_key(), root, &known);
         ASSERT_TRUE(second) << second.error().detail;
         EXPECT_EQ(fixture.state->get_batch_count, 0U);
-        EXPECT_GE(fixture.state->prefix_list_count, 9U);
+        EXPECT_EQ(fixture.state->prefix_list_count, 3U);
     }
 }
 

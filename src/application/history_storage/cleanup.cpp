@@ -58,14 +58,50 @@ RemoveMarkersResult remove_marker_variants_impl(
         std::ranges::sort(markers);
 
         RemovedMarkers result;
-        for (const auto& marker : markers) {
-            auto removed = transport::remove(storage, marker);
+        constexpr std::size_t kRemoveBatchChunk = 64;
+        constexpr std::size_t kRemoveBatchConcurrency = 8;
+        bool batch_unsupported = false;
+        std::size_t offset = 0;
+        while (offset < markers.size() && !batch_unsupported) {
+            const auto count =
+                std::min(kRemoveBatchChunk, markers.size() - offset);
+            transport::RemoveBatch batch{
+                .concurrency = kRemoveBatchConcurrency,
+            };
+            batch.items.reserve(count);
+            for (std::size_t i = 0; i < count; ++i) {
+                batch.items.push_back(
+                    transport::RemoveBatchItem{.identifier = markers[offset + i]});
+            }
+            auto removed_batch = transport::remove_batch(storage, batch);
+            if (!removed_batch) {
+                if (removed_batch.error().code ==
+                    transport::ErrorCode::Unsupported) {
+                    batch_unsupported = true;
+                    break;
+                }
+                return std::unexpected(transport_error(removed_batch.error()));
+            }
+            for (const auto& item : removed_batch->items) {
+                if (!item.result) {
+                    return std::unexpected(
+                        transport_error(item.result.error()));
+                }
+                if (*item.result == transport::Removal::Removed) {
+                    ++result.removed;
+                }
+            }
+            offset += count;
+        }
+        while (offset < markers.size()) {
+            auto removed = transport::remove(storage, markers[offset]);
             if (!removed) {
                 return std::unexpected(transport_error(removed.error()));
             }
             if (*removed == transport::Removal::Removed) {
                 ++result.removed;
             }
+            ++offset;
         }
         return result;
     });

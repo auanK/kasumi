@@ -168,10 +168,13 @@ TEST(PlatformMetadataTest, PreservesUnspecifiedNegativeAndChecksNativeRange) {
     ASSERT_TRUE(negative.has_value());
     EXPECT_EQ(kasumi::platform::metadata::unix_nanoseconds(*negative),
               std::chrono::duration_cast<std::chrono::nanoseconds>(
-                  std::chrono::duration_cast<
+                  std::chrono::floor<
                       std::filesystem::file_time_type::duration>(
                       std::chrono::nanoseconds{-123456789}))
                   .count());
+    EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(
+        -123456789,
+        *kasumi::platform::metadata::unix_nanoseconds(*negative)));
     for (const auto native :
          {std::filesystem::file_time_type{
               std::filesystem::file_time_type::duration::min()},

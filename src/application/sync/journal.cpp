@@ -900,7 +900,8 @@ bool same_identity(const transaction::Record& a, const transaction::Record& b) {
         const auto& y = b.plan.operations[i];
         if (x.action != y.action || x.path != y.path ||
             x.alt_path != y.alt_path || x.hash != y.hash || x.size != y.size ||
-            x.exclusive_destination != y.exclusive_destination)
+            x.exclusive_destination != y.exclusive_destination ||
+            x.expected_source_identity != y.expected_source_identity)
             return false;
     }
     return true;
@@ -1089,7 +1090,7 @@ artifact_state(const std::filesystem::path& path) {
     return ArtifactState{*identity, bytes};
 #else
     struct stat native{};
-    if (::stat(path.c_str(), &native) != 0)
+    if (::lstat(path.c_str(), &native) != 0 || !S_ISREG(native.st_mode))
         return std::unexpected("could not query journal artifact identity");
     platform::FileFingerprint identity{
         .kind = platform::FileFingerprintKind::PosixFileIdentity,

@@ -149,14 +149,15 @@ ensure_state(const runtime::RuntimeData& runtime_data,
     }
     return detail::save_state_checked(
         runtime_data.database_path,
-        state_storage::StoredState{.tree = commit.commit.tree,
-                                   .height = commit.commit.height,
-                                   .commit_id = commit.id,
-                                   .ciphertext_id = ciphertext_id,
-                                   .epoch_id = epoch_id,
-                                   .epoch_sequence = epoch_sequence,
-                                   .pending_materializations =
-                                       std::move(*target_pending)});
+        state_storage::StoredState{
+            .tree = commit.commit.tree,
+            .height = commit.commit.height,
+            .commit_id = commit.id,
+            .ciphertext_id = ciphertext_id,
+            .epoch_id = epoch_id,
+            .epoch_sequence = epoch_sequence,
+            .pending_materializations = std::move(*target_pending),
+            .storage_manifest = commit.commit.storage});
 }
 
 std::expected<history::LoadedCommit, Error>

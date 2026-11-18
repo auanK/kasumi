@@ -93,6 +93,12 @@ TEST(RcloneSessionTest, RemovesKasumiSecretsFromChildEnvironment) {
         "KASUMI_FUTURE_SECRET", "future-secret");
     auto inherited_rc = kasumi::test::scoped_environment_variable(
         "RCLONE_RC_PASS", "inherited-rc-secret");
+    auto ambient_rclone_secret = kasumi::test::scoped_environment_variable(
+        "RCLONE_DRIVE_TOKEN", "ambient-drive-token");
+    auto ambient_rc_no_auth = kasumi::test::scoped_environment_variable(
+        "RCLONE_RC_NO_AUTH", "true");
+    auto ambient_config = kasumi::test::scoped_environment_variable(
+        "RCLONE_CONFIG", "/tmp/allowed-ambient.conf");
 
     rclone_detail::State state;
     state.port = 4321;
@@ -106,6 +112,10 @@ TEST(RcloneSessionTest, RemovesKasumiSecretsFromChildEnvironment) {
     EXPECT_FALSE(environment_value(*result, "KASUMI_PASSWORD"));
     EXPECT_FALSE(environment_value(*result, "KASUMI_PASSWORD2"));
     EXPECT_FALSE(environment_value(*result, "KASUMI_FUTURE_SECRET"));
+    EXPECT_FALSE(environment_value(*result, "RCLONE_DRIVE_TOKEN"));
+    EXPECT_EQ(environment_value(*result, "RCLONE_RC_NO_AUTH"), "false");
+    EXPECT_EQ(environment_value(*result, "RCLONE_CONFIG"),
+              "/tmp/allowed-ambient.conf");
     EXPECT_EQ(environment_value(*result, "RCLONE_RC_PASS"),
               "ephemeral-password");
     EXPECT_EQ(std::ranges::count_if(*result,
@@ -728,7 +738,8 @@ TEST(RcloneStorageTest, StorageRequestsAreScopedToConfiguredRemoteRoot) {
            {{"recurse", true},
             {"filesOnly", true},
             {"noModTime", true},
-            {"noMimeType", true}}}}},
+            {"noMimeType", true}}},
+          {"_config", {{"FastList", true}}}}},
         {"operations/list",
          {{"fs", root},
           {"remote", "history/heads"},
@@ -2433,6 +2444,17 @@ TEST(RcloneStorageTest, ConcurrentlyExecutesBatchAndIndividualCopyfileReads) {
         << kasumi::transport::describe(epoch_res.error());
     ASSERT_TRUE(marker_res.has_value())
         << kasumi::transport::describe(marker_res.error());
+}
+
+TEST(RcloneSessionTest, RejectsUnsafeRemoteNamesBeforeSpawningProcess) {
+    for (const std::string_view bad :
+         {"-leading-dash:root", ".dotstart:root", "bad space:root", "a$b:root"}) {
+        const auto opened = kasumi::transport::open_transport(bad);
+        ASSERT_FALSE(opened.has_value()) << bad;
+        EXPECT_EQ(opened.error().code,
+                  kasumi::transport::ErrorCode::InvalidIdentifier)
+            << bad;
+    }
 }
 
 } // namespace

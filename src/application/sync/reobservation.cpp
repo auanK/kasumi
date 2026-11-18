@@ -67,6 +67,7 @@ bool same_storage(const reconciliation::StorageState& left,
            left.epoch_anchors == right.epoch_anchors &&
            left.generation == right.generation &&
            left.history_has_conflicts == right.history_has_conflicts &&
+           left.storage_manifest == right.storage_manifest &&
            normalized_ids(left.reachable_commit_ids) ==
                normalized_ids(right.reachable_commit_ids);
 }
@@ -265,26 +266,63 @@ std::expected<void, Error> observe_content_availability(
             platform::cleanup_workspace(workspace);
         }
     } cleanup{reuse_workspace};
-    std::vector<std::pair<Hash, std::string>> requested;
-    requested.reserve(hashes.size());
+    struct LogicalProbe {
+        Hash hash{};
+        std::vector<std::string> physical_ids;
+    };
+    std::vector<LogicalProbe> logical_probes;
+    logical_probes.reserve(hashes.size());
+    std::vector<std::string> requested_physical;
+    requested_physical.reserve(hashes.size());
+    bool has_chunked_probe = false;
     for (const auto& hash : hashes) {
-        requested.emplace_back(hash, crypto::content_identifier(key, hash));
+        LogicalProbe probe{.hash = hash, .physical_ids = {}};
+        if (const auto* packed = history::find_packed_blob(
+                input.storage.storage_manifest, hash)) {
+            probe.physical_ids.push_back(
+                crypto::pack_identifier(key, packed->pack_hash));
+        } else if (const auto* chunked = history::find_chunked_file(
+                       input.storage.storage_manifest, hash)) {
+            has_chunked_probe = true;
+            probe.physical_ids.reserve(chunked->chunks.size());
+            for (const auto& chunk : chunked->chunks) {
+                probe.physical_ids.push_back(
+                    crypto::content_identifier(key, chunk.hash));
+            }
+        } else {
+            probe.physical_ids.push_back(crypto::content_identifier(key, hash));
+        }
+        for (const auto& phys : probe.physical_ids) {
+            requested_physical.push_back(phys);
+        }
+        logical_probes.push_back(std::move(probe));
     }
-    std::ranges::sort(requested, {}, [](const auto& item) {
-        return item.second;
-    });
+    std::ranges::sort(requested_physical);
+    requested_physical.erase(std::ranges::unique(requested_physical).begin(),
+                             requested_physical.end());
 
     std::vector<transport::Presence> presences;
     bool probed = false;
-    if (storage.storage.control_read_batch != nullptr) {
-        transport::ControlReadBatchRequest request;
-        request.presence_identifiers.reserve(requested.size());
-        for (const auto& [hash, identifier] : requested) {
-            request.presence_identifiers.push_back(identifier);
+    if (has_chunked_probe && requested_physical.size() >= 8U &&
+        storage.storage.list != nullptr) {
+        if (auto listed = transport::list(storage)) {
+            const std::unordered_set<std::string> remote_set(listed->begin(),
+                                                             listed->end());
+            presences.reserve(requested_physical.size());
+            for (const auto& id : requested_physical) {
+                presences.push_back(remote_set.contains(id)
+                                        ? transport::Presence::Present
+                                        : transport::Presence::Absent);
+            }
+            probed = true;
         }
+    }
+    if (!probed && storage.storage.control_read_batch != nullptr) {
+        transport::ControlReadBatchRequest request;
+        request.presence_identifiers = requested_physical;
         auto batch = transport::control_read_batch(storage, request);
         if (batch) {
-            if (batch->presences.size() != requested.size()) {
+            if (batch->presences.size() != requested_physical.size()) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::ObservationFailure,
                     "presence batch returned an invalid result count"));
@@ -303,8 +341,8 @@ std::expected<void, Error> observe_content_availability(
                 ErrorCode::ObservationFailure,
                 "transport cannot verify required content availability"));
         }
-        presences.reserve(requested.size());
-        for (const auto& [hash, identifier] : requested) {
+        presences.reserve(requested_physical.size());
+        for (const auto& identifier : requested_physical) {
             auto observed = transport::presence(storage, identifier);
             if (!observed) {
                 return std::unexpected(
@@ -315,21 +353,39 @@ std::expected<void, Error> observe_content_availability(
         }
     }
 
+    std::unordered_map<std::string_view, bool> physical_present;
+    physical_present.reserve(requested_physical.size());
+    for (std::size_t i = 0; i < requested_physical.size(); ++i) {
+        physical_present.emplace(
+            requested_physical[i],
+            presences[i] == transport::Presence::Present);
+    }
+
     const bool inventory_available = input.audit_storage_objects;
     std::vector<Hash> missing;
-    missing.reserve(requested.size());
-    for (std::size_t index = 0; index < requested.size(); ++index) {
-        const auto& [hash, identifier] = requested[index];
-        const bool present = presences[index] == transport::Presence::Present;
+    missing.reserve(logical_probes.size());
+    for (std::size_t index = 0; index < logical_probes.size(); ++index) {
+        const auto& [hash, phys_ids] = logical_probes[index];
+        const bool present =
+            std::ranges::all_of(phys_ids, [&](const std::string& phys_id) {
+                return physical_present.at(phys_id);
+            });
         if (inventory_available) {
             const bool listed =
-                input.storage.object_identifiers.contains(identifier);
+                std::ranges::all_of(
+                    phys_ids,
+                    [&](const std::string& phys_id) {
+                        return input.storage.object_identifiers.contains(
+                            phys_id);
+                    }) ||
+                input.storage.object_identifiers.contains(hash_hex(hash));
             if (listed != present) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::ObservationFailure,
-                    "content availability disagreement for " + identifier +
-                        ": LIST says " + (listed ? "present" : "absent") +
-                        ", PRESENCE says " + (present ? "present" : "absent")));
+                    "content availability disagreement for " +
+                        phys_ids.front() + ": LIST says " +
+                        (listed ? "present" : "absent") + ", PRESENCE says " +
+                        (present ? "present" : "absent")));
             }
         }
         const auto upload_it = upload_sizes.find(hash);
@@ -380,7 +436,9 @@ stage_attempt(const runtime::RuntimeData& runtime_data,
               const reconciliation::Result& result,
               const std::filesystem::path& profile,
               std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-              std::optional<platform::Workspace>& workspace) {
+              std::optional<platform::Workspace>& workspace,
+              std::string& out_operation_id,
+              std::vector<transaction::OperationProgress>& out_progress) {
     auto record = journal::create_record(
         input.local_generation,
         input.storage.generation,
@@ -415,6 +473,8 @@ stage_attempt(const runtime::RuntimeData& runtime_data,
         }
         record->progress[index] = *prepared;
     }
+    out_operation_id = std::move(record->operation_id);
+    out_progress = std::move(record->progress);
     return {};
 }
 
@@ -604,7 +664,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
           bool content_availability_is_current,
           bool allow_unreferenced_content_reuse,
           bool trust_existing_content,
-          const std::unordered_set<std::string>* initial_content_identifiers) {
+          const std::unordered_set<std::string>* initial_content_identifiers,
+          bool retain_staged_workspace) {
     const auto no_work = [](const reconciliation::Result& candidate) {
         return !candidate.requires_publication &&
                !candidate.requires_local_mutation &&
@@ -699,6 +760,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
         }
 
         std::optional<platform::Workspace> workspace;
+        std::string staged_operation_id;
+        std::vector<transaction::OperationProgress> staged_progress;
         const auto fail_with_cleanup =
             [&](Error err) -> std::expected<StableExecution, Error> {
             if (auto removed =
@@ -709,8 +772,14 @@ stabilize(const runtime::RuntimeData& runtime_data,
             return std::unexpected(std::move(err));
         };
         if (!result.plan.operations.empty()) {
-            auto staged = stage_attempt(
-                runtime_data, input, result, *profile, key, workspace);
+            auto staged = stage_attempt(runtime_data,
+                                        input,
+                                        result,
+                                        *profile,
+                                        key,
+                                        workspace,
+                                        staged_operation_id,
+                                        staged_progress);
             if (!staged) {
                 return fail_with_cleanup(staged.error());
             }
@@ -770,13 +839,27 @@ stabilize(const runtime::RuntimeData& runtime_data,
         if (!refreshed) {
             return fail_with_cleanup(refreshed.error());
         }
+        if (same_observation(input, *observed)) {
+            if (retain_staged_workspace && workspace.has_value()) {
+                return StableExecution{
+                    .input = std::move(*observed),
+                    .result = std::move(*refreshed),
+                    .staged = StagedExecutionHandoff{
+                        .operation_id = std::move(staged_operation_id),
+                        .progress = std::move(staged_progress),
+                        .workspace = std::move(workspace)}};
+            }
+            if (auto removed =
+                    detail::remove_transaction_workspace(workspace, key);
+                !removed) {
+                return std::unexpected(removed.error());
+            }
+            return StableExecution{.input = std::move(*observed),
+                                   .result = std::move(*refreshed)};
+        }
         if (auto removed = detail::remove_transaction_workspace(workspace, key);
             !removed) {
             return std::unexpected(removed.error());
-        }
-        if (same_observation(input, *observed)) {
-            return StableExecution{.input = std::move(*observed),
-                                   .result = std::move(*refreshed)};
         }
 
         if (attempt + 1 == maximum_observation_attempts) {

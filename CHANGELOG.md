@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.14.0]
+
+### Added
+
+- Added Protocol v3 (`KASUMI\x03\x00`, `FILE_HEADER_SIZE = 57`) stream encryption with per-chunk in-memory Zstandard (`zstd` level 1) compression over `1 MiB` plaintext chunks (`CHUNK_SIZE = 1 MiB`), authenticated `FilePurpose` (`Content`, `History`, `Pack`) header binding, and a 5-byte chunk prefix (`CHUNK_PREFIX_SIZE = 5`) inside each XChaCha20-Poly1305 AEAD envelope.
+- Added Micro-Packs (`KPAK\x01`) under domain-separated `KeyPurpose::Pack` and `IdentifierPurpose::Pack`, packing small upload files (`<= 256 KiB`, excluding `.kasumiignore`) into deterministic content-addressed pack blobs up to `4 MiB` (`PACK_TARGET_MAX_SIZE`).
+- Added content-defined chunking (FastCDC) using a normalized 64-bit Gear rolling hash (`256 KiB` minimum, `1 MiB` average, `4 MiB` maximum chunk size) for files larger than `8 MiB` (`FASTCDC_FILE_THRESHOLD`), enabling block-level deduplication and delta transfers on both uploads and downloads (including client-side seed chunk reuse from the existing local file or local move/copy donors).
+- Added canonical `StorageManifest` metadata (`packed_blobs` and `chunked_files`, bounded to `16 MiB` per packed blob and `4 MiB` per chunk slice) to `Commit` (`KCOM` v3), deterministic manifest merging across DAG branches, and persistence in `db.sqlite` (`StoredState.storage_manifest`).
+
+### Changed
+
+- Flattened remote Commit variant storage paths to `<history-ns>/<commits-ns>/<commit-id>_<ciphertext-id>` so commit discovery completes in a single directory listing instead of per-commit prefix listings.
+- Updated `sync`, `fsck`, `gc`, `remote get`, and `remote contents [--audit]` to resolve, prefetch in parallel, deduplicate, audit, reassemble, and garbage-collect physical Pack IDs and FastCDC chunk Content IDs alongside loose Content objects, using single-call `transport::list` presence checks when probing batches containing chunked objects (`>= 8` physical IDs).
+- Optimized local and remote runtime execution with `rclone rcd` HTTP keep-alive connection pooling (`RcRuntime`), Windows BCrypt hardware-accelerated SHA-256 physical hashing, Win32 `FindFirstFileExW` bulk directory enumeration, parallel local file hashing and upload/download staging, and tuned SQLite WAL/mmap/cache PRAGMAs.
+- Hardened transport, platform vault (`dlopen` root/permission checks and D-Bus reply validation), SQLite statement lifecycles, manifest deserialization bounds, and TOCTOU `FileIdentity` checks across FastCDC slice reads and private temporary reassembly files.
+- Removed legacy format compatibility paths (`KASUMI\x02\x00` stream decoding, `KCOM` v2 commits, transaction journal format 9, and `config.toml` profiles omitting `key_storage`).
+
+### Upgrade Notes
+
+- `0.14.0` uses Protocol v3 remote objects (`KASUMI\x03\x00`), `KPAK\x01` Micro-Packs, `KCOM` v3 commits, flat remote commit paths (`<commit-id>_<ciphertext-id>`), transaction journal format 10, and explicit `key_storage` entries in `config.toml`, without backward-compatibility fallbacks for earlier pre-1.0 formats. Use the same release on all clients and follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi).
+
 ## [0.12.0]
 
 ### Added

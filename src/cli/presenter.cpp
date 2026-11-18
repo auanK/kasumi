@@ -40,10 +40,36 @@ std::string_view enum_tr(Enum value,
     return i18n::tr(enum_key(value, table, fallback));
 }
 
+std::string sanitize_terminal_text(std::string_view text) {
+    std::string cleaned;
+    cleaned.reserve(text.size());
+    for (std::size_t index = 0; index < text.size(); ++index) {
+        const auto byte = static_cast<unsigned char>(text[index]);
+        if (byte == 0xC2U && index + 1 < text.size()) {
+            const auto next = static_cast<unsigned char>(text[index + 1]);
+            if (next >= 0x80U && next <= 0x9FU) {
+                cleaned.push_back('?');
+                ++index;
+                continue;
+            }
+        }
+        if ((byte < 0x20U && byte != '\n' && byte != '\t') || byte == 0x7FU) {
+            cleaned.push_back('?');
+            continue;
+        }
+        cleaned.push_back(text[index]);
+    }
+    return cleaned;
+}
+
 void print_status_line(std::string_view color,
                        i18n::Key label,
                        std::string_view message) {
-    std::println("{}{}{} {}", color, i18n::tr(label), style::reset, message);
+    std::println("{}{}{} {}",
+                 color,
+                 i18n::tr(label),
+                 style::reset,
+                 sanitize_terminal_text(message));
 }
 
 void print_ok_line(std::string_view message) {
@@ -72,7 +98,9 @@ int present_help(std::string_view topic) {
 }
 
 int present_parse_error(std::string_view topic) {
-    const std::string suffix = topic.empty() ? "" : " " + std::string{topic};
+    const std::string sanitized_topic = sanitize_terminal_text(topic);
+    const std::string suffix =
+        sanitized_topic.empty() ? "" : " " + sanitized_topic;
     std::println(stderr,
                  "{} {}",
                  i18n::tr(i18n::Key::LabelError),
@@ -174,7 +202,8 @@ void render_pending_paths(const std::vector<std::filesystem::path>& paths,
     auto ordered = paths;
     std::ranges::sort(ordered);
     const auto print_path = [](const auto& path) {
-        std::println("  {}", platform::path::to_utf8(path));
+        std::println("  {}",
+                     sanitize_terminal_text(platform::path::to_utf8(path)));
     };
     const auto print_omitted = [](std::size_t omitted) {
         i18n::println(omitted == 1 ? i18n::Key::SyncPendingOmittedSingular
@@ -224,12 +253,14 @@ void render_plan_report(const application::PlanReport& report,
         if (idx < action_keys.size()) {
             std::print("  - [{}] {}",
                        i18n::tr(action_keys[idx]),
-                       platform::path::to_utf8(item.path));
+                       sanitize_terminal_text(
+                           platform::path::to_utf8(item.path)));
             if (item.action == application::PlanAction::RenameLocal ||
                 item.action == application::PlanAction::MoveLocal ||
                 item.action == application::PlanAction::CopyLocal) {
                 std::print(" -> {}",
-                           platform::path::to_utf8(item.alternative_path));
+                           sanitize_terminal_text(
+                               platform::path::to_utf8(item.alternative_path)));
             }
             if (item.action == application::PlanAction::Upload ||
                 item.action == application::PlanAction::Download) {
@@ -1066,7 +1097,7 @@ int present(const application::InspectionResponse& response) {
 namespace {
 
 std::string sanitize_error_detail(std::string_view detail) {
-    std::string result{detail};
+    std::string result = sanitize_terminal_text(detail);
     struct TokenReplacement {
         std::string_view token;
         std::string_view pt;
@@ -1134,9 +1165,10 @@ int present(const application::Error& error) {
     }
     const auto found = std::ranges::find(
         kErrorFormats, error.code, &std::pair<C, i18n::Key>::first);
+    const auto safe_detail = sanitize_terminal_text(error.detail);
     print_error_line(found != kErrorFormats.end()
-                         ? i18n::format(found->second, error.detail)
-                         : error.detail);
+                         ? i18n::format(found->second, safe_detail)
+                         : safe_detail);
 
     if (error.code == C::BarrierRemovalFailure && error.barrier_removal) {
         const auto& br = *error.barrier_removal;
@@ -1178,7 +1210,8 @@ int present(const application::Error& error) {
         if (br.transport_error) {
             std::println("  {}: {}",
                          i18n::tr(i18n::Key::LabelTransportError),
-                         transport::describe(*br.transport_error));
+                         sanitize_terminal_text(
+                             transport::describe(*br.transport_error)));
         }
     } else if (error.code == C::InventoryAuditFailure && error.sync_completed) {
         i18n::println(i18n::Key::ErrorInventoryAuditSyncCompleted);
@@ -1199,7 +1232,7 @@ int present(const application::InspectionError& error) {
          !error.candidate_ids.empty())) {
         i18n::println(i18n::Key::ErrorAvailableHeads);
         for (const auto& id : error.candidate_ids) {
-            std::println("  {}", id);
+            std::println("  {}", sanitize_terminal_text(id));
         }
         if (error.code ==
             application::InspectionErrorCode::HeadSelectionRequired) {

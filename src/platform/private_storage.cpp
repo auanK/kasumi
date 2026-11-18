@@ -69,10 +69,12 @@ using UniqueLocalMem = std::unique_ptr<void, decltype(&LocalFree)>;
 struct ProcessSecurityContext {
     std::array<std::byte, SECURITY_MAX_SID_SIZE> user_sid{};
     std::array<std::byte, SECURITY_MAX_SID_SIZE> system_sid{};
+    std::array<std::byte, SECURITY_MAX_SID_SIZE> admins_sid{};
+    bool has_admins_sid = false;
     bool valid = false;
 };
 
-ProcessSecurityContext get_process_security_context() noexcept {
+ProcessSecurityContext build_process_security_context() noexcept {
     ProcessSecurityContext context{};
     HANDLE token = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
@@ -106,8 +108,20 @@ ProcessSecurityContext get_process_security_context() noexcept {
         !IsValidSid(context.system_sid.data())) {
         return context;
     }
+    DWORD admins_sid_size = static_cast<DWORD>(context.admins_sid.size());
+    context.has_admins_sid =
+        CreateWellKnownSid(WinBuiltinAdministratorsSid,
+                           nullptr,
+                           context.admins_sid.data(),
+                           &admins_sid_size) != 0 &&
+        IsValidSid(context.admins_sid.data());
     context.valid = true;
     return context;
+}
+
+const ProcessSecurityContext& get_process_security_context() noexcept {
+    static const ProcessSecurityContext cached = build_process_security_context();
+    return cached;
 }
 
 std::expected<UniqueLocalMem, std::string> security_descriptor(bool directory) {
@@ -136,30 +150,57 @@ std::expected<UniqueLocalMem, std::string> security_descriptor(bool directory) {
     return UniqueLocalMem{descriptor, LocalFree};
 }
 
-bool is_dacl_compliant(const std::filesystem::path& path,
-                       bool directory) noexcept {
-    const auto context = get_process_security_context();
+enum class SecurityInspection {
+    Compliant,
+    NeedsDaclRepair,
+    UntrustedOwner,
+    QueryFailed,
+};
+
+SecurityInspection inspect_path_security(const std::filesystem::path& path,
+                                         bool directory) noexcept {
+    const auto& context = get_process_security_context();
     if (!context.valid) {
-        return false;
+        return SecurityInspection::QueryFailed;
     }
 
+    PSID owner_sid = nullptr;
     PACL current_dacl = nullptr;
     PSECURITY_DESCRIPTOR raw_sd = nullptr;
     if (GetNamedSecurityInfoW(const_cast<wchar_t*>(path.c_str()),
                               SE_FILE_OBJECT,
-                              DACL_SECURITY_INFORMATION,
-                              nullptr,
+                              OWNER_SECURITY_INFORMATION |
+                                  DACL_SECURITY_INFORMATION,
+                              &owner_sid,
                               nullptr,
                               &current_dacl,
                               nullptr,
                               &raw_sd) != ERROR_SUCCESS ||
-        !raw_sd || !current_dacl) {
+        !raw_sd) {
         if (raw_sd) {
             LocalFree(raw_sd);
         }
-        return false;
+        return SecurityInspection::QueryFailed;
     }
     UniqueLocalMem sd_guard{raw_sd, LocalFree};
+
+    if (!owner_sid || !IsValidSid(owner_sid)) {
+        return SecurityInspection::UntrustedOwner;
+    }
+    const bool trusted_owner =
+        EqualSid(owner_sid,
+                 const_cast<std::byte*>(context.user_sid.data())) ||
+        EqualSid(owner_sid,
+                 const_cast<std::byte*>(context.system_sid.data())) ||
+        (context.has_admins_sid &&
+         EqualSid(owner_sid,
+                  const_cast<std::byte*>(context.admins_sid.data())));
+    if (!trusted_owner) {
+        return SecurityInspection::UntrustedOwner;
+    }
+    if (!current_dacl) {
+        return SecurityInspection::NeedsDaclRepair;
+    }
 
     SECURITY_DESCRIPTOR_CONTROL control{};
     DWORD revision = 0;
@@ -169,7 +210,7 @@ bool is_dacl_compliant(const std::filesystem::path& path,
         !GetAclInformation(
             current_dacl, &info, sizeof(info), AclSizeInformation) ||
         info.AceCount != 2) {
-        return false;
+        return SecurityInspection::NeedsDaclRepair;
     }
 
     const DWORD expected_flags =
@@ -180,7 +221,7 @@ bool is_dacl_compliant(const std::filesystem::path& path,
     for (DWORD i = 0; i < info.AceCount; ++i) {
         void* ace_ptr = nullptr;
         if (!GetAce(current_dacl, i, &ace_ptr) || !ace_ptr) {
-            return false;
+            return SecurityInspection::NeedsDaclRepair;
         }
         const auto* header = static_cast<const ACE_HEADER*>(ace_ptr);
         const auto* ace = static_cast<const ACCESS_ALLOWED_ACE*>(ace_ptr);
@@ -188,7 +229,7 @@ bool is_dacl_compliant(const std::filesystem::path& path,
             (header->AceFlags & INHERITED_ACE) != 0 ||
             header->AceFlags != expected_flags ||
             (ace->Mask & FILE_ALL_ACCESS) != FILE_ALL_ACCESS) {
-            return false;
+            return SecurityInspection::NeedsDaclRepair;
         }
         auto* sid = const_cast<DWORD*>(&ace->SidStart);
         if (EqualSid(sid, const_cast<std::byte*>(context.user_sid.data()))) {
@@ -198,16 +239,22 @@ bool is_dacl_compliant(const std::filesystem::path& path,
                        const_cast<std::byte*>(context.system_sid.data()))) {
             system_seen = true;
         } else {
-            return false;
+            return SecurityInspection::NeedsDaclRepair;
         }
     }
-    return user_seen && system_seen;
+    return (user_seen && system_seen) ? SecurityInspection::Compliant
+                                      : SecurityInspection::NeedsDaclRepair;
 }
 
 std::expected<void, std::string> apply_acl(const std::filesystem::path& path,
                                            bool directory) {
-    if (is_dacl_compliant(path, directory)) {
+    const auto inspection = inspect_path_security(path, directory);
+    if (inspection == SecurityInspection::Compliant) {
         return {};
+    }
+    if (inspection == SecurityInspection::UntrustedOwner) {
+        return std::unexpected("unexpected owner on private path '" +
+                               platform::path::to_utf8(path) + "'");
     }
 
     auto descriptor = security_descriptor(directory);
@@ -336,16 +383,60 @@ protect_entry(const std::filesystem::path& path,
         return std::unexpected(std::string{mismatch_msg} + "'" +
                                platform::path::to_utf8(path) + "'");
     }
+    const uid_t expected_uid = ::geteuid();
+    if (status->st_uid != expected_uid) {
+        return std::unexpected("unexpected owner on private path '" +
+                               platform::path::to_utf8(path) + "'");
+    }
     const mode_t mode = directory ? 0700 : 0600;
     if ((status->st_mode & 0777) == mode) {
         return {};
     }
-    if (::chmod(path.c_str(), mode) != 0) {
-        return std::unexpected(
-            system_error(directory ? "chmod 0700 failed" : "chmod 0600 failed",
-                         std::error_code{errno, std::generic_category()}));
+    int flags = O_RDONLY | O_NOFOLLOW;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    if (directory) {
+#ifdef O_DIRECTORY
+        flags |= O_DIRECTORY;
+#endif
     }
-    return {};
+    const int fd = ::open(path.c_str(), flags);
+    if (fd >= 0) {
+        PrivateHandle fd_guard{fd};
+        struct stat opened_status{};
+        if (::fstat(fd, &opened_status) != 0) {
+            return std::unexpected(
+                system_error("fstat failed",
+                             std::error_code{errno, std::generic_category()}));
+        }
+        if ((directory ? !S_ISDIR(opened_status.st_mode)
+                       : !S_ISREG(opened_status.st_mode)) ||
+            opened_status.st_dev != status->st_dev ||
+            opened_status.st_ino != status->st_ino ||
+            opened_status.st_uid != expected_uid) {
+            return std::unexpected("private path identity changed during protection '" +
+                                   platform::path::to_utf8(path) + "'");
+        }
+        if (::fchmod(fd, mode) != 0) {
+            return std::unexpected(system_error(
+                directory ? "fchmod 0700 failed" : "fchmod 0600 failed",
+                std::error_code{errno, std::generic_category()}));
+        }
+        return {};
+    }
+    const int open_err = errno;
+    if (directory && open_err == EACCES) {
+        if (::chmod(path.c_str(), mode) != 0) {
+            return std::unexpected(system_error(
+                "chmod 0700 failed",
+                std::error_code{errno, std::generic_category()}));
+        }
+        return {};
+    }
+    return std::unexpected(system_error(
+        "open failed during private storage protection",
+        std::error_code{open_err, std::generic_category()}));
 #endif
 }
 
@@ -799,7 +890,10 @@ flush_and_close_private_file(PrivateOutputFile& file) {
     return {};
 #else
     int fd = static_cast<int>(file.handle);
-    if (fsync(fd) != 0) {
+    while (::fsync(fd) != 0) {
+        if (errno == EINTR) {
+            continue;
+        }
         const auto error = errno;
         close_private_file(file);
         return std::unexpected(system_error(
@@ -950,7 +1044,10 @@ publish_private_file(PrivateOutputFile& file,
     return {};
 #else
     int fd = static_cast<int>(file.handle);
-    if (fsync(fd) != 0) {
+    while (::fsync(fd) != 0) {
+        if (errno == EINTR) {
+            continue;
+        }
         return std::unexpected(system_error(
             "fsync failed", std::error_code{errno, std::generic_category()}));
     }
@@ -1275,6 +1372,20 @@ stream_regular_file_raw(const std::filesystem::path& path,
         }
     }
     return total_read;
+}
+
+bool is_reparse_or_symlink(const std::filesystem::path& path) noexcept {
+    if (path.empty()) {
+        return false;
+    }
+#if defined(_WIN32)
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+#else
+    struct stat status{};
+    return ::lstat(path.c_str(), &status) == 0 && S_ISLNK(status.st_mode);
+#endif
 }
 
 } // namespace kasumi::platform::private_storage

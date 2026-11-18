@@ -65,6 +65,7 @@ int present(const application::InspectionError& error);
 
 void print_ok_line(std::string_view message);
 void print_error_line(std::string_view message);
+std::string sanitize_terminal_text(std::string_view text);
 
 } // namespace kasumi::cli
 

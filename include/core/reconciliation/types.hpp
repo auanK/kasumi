@@ -82,6 +82,8 @@ struct StorageState {
     std::vector<std::string> logical_heads;
     // Ancestral marked heads eligible for pruning.
     std::vector<std::string> ancestral_marked_heads;
+    // Physical packing/chunking layout aligned with tree.
+    history::StorageManifest storage_manifest;
 
     // Authenticated remote Epoch accepted during observation.
     std::string epoch_vault_id;

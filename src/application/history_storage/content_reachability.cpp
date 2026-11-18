@@ -3,6 +3,8 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
+#include "crypto/key_derivation.hpp"
+#include "crypto/pack.hpp"
 
 #include <algorithm>
 #include <map>
@@ -18,6 +20,7 @@ constexpr std::size_t maximum_content_object_count = 1'000'000;
 struct ReferencedContent {
     std::string remote_id;
     std::string plaintext_hash;
+    bool is_pack = false;
     std::vector<ContentReference> references;
 };
 
@@ -74,7 +77,8 @@ audit_content_object(transport::Transport& storage,
                      std::optional<std::string_view> expected_plaintext_hash,
                      std::optional<std::uint64_t> expected_size,
                      const std::filesystem::path& workspace,
-                     std::size_t sequence) {
+                     std::size_t sequence,
+                     bool expect_pack) {
     const auto encrypted =
         workspace / ("content-" + std::to_string(sequence) + ".enc");
     const auto plaintext =
@@ -104,7 +108,7 @@ audit_content_object(transport::Transport& storage,
     }
 
     ContentAuditResult result{.state = ContentObjectState::Corrupt};
-    if (crypto::decrypt_file(encrypted, plaintext, key)) {
+    if (!expect_pack && crypto::decrypt_file(encrypted, plaintext, key)) {
         if (auto ok = check_temp_file(
                 plaintext, false, "file is not regular for verification");
             !ok) {
@@ -129,6 +133,32 @@ audit_content_object(transport::Transport& storage,
             result.state = ContentObjectState::Present;
             result.plaintext_hash = actual_hex;
             result.size = plain_size;
+        }
+    } else if (expect_pack || !expected_plaintext_hash) {
+        std::optional<Hash> expected_pack_hash;
+        bool hash_valid = true;
+        if (expected_plaintext_hash) {
+            auto parsed = hash_from_hex(*expected_plaintext_hash);
+            if (!parsed) {
+                hash_valid = false;
+            } else {
+                expected_pack_hash = *parsed;
+            }
+        }
+        Hash actual_pack_hash{};
+        if (hash_valid) {
+            auto verified = crypto::pack::decrypt_and_verify_pack(
+                encrypted, key, expected_pack_hash, nullptr, &actual_pack_hash);
+            if (verified &&
+                crypto::pack_identifier(key, actual_pack_hash) == content_id) {
+                std::uint64_t member_sum = 0;
+                for (const auto& member : *verified) {
+                    member_sum += member.size;
+                }
+                result.state = ContentObjectState::Present;
+                result.plaintext_hash = hash_hex(actual_pack_hash);
+                result.size = member_sum;
+            }
         }
     }
     if (auto cleaned = remove_temp_pair(encrypted, plaintext); !cleaned) {
@@ -172,33 +202,78 @@ inventory_impl(transport::Transport& storage,
                     detail::error(ErrorCode::InvalidCommit,
                                   "reachable commit has no valid tree"));
             }
-            for (const auto& row : commit.tree->tree.rows) {
-                if (row.is_directory) {
-                    continue;
-                }
+            const auto record_object =
+                [&](const std::string& remote_id,
+                    const Hash& obj_hash,
+                    bool is_pack,
+                    std::string_view logical_path,
+                    std::uint64_t ref_size) -> std::expected<void, Error> {
                 if (++reference_count > maximum_content_object_count) {
                     return std::unexpected(
                         detail::error(ErrorCode::LimitExceeded,
                                       "too many content references"));
                 }
-                const auto remote_id =
-                    crypto::content_identifier(key, row.hash);
                 auto [it, inserted] = by_remote_id.try_emplace(
                     remote_id,
                     ReferencedContent{.remote_id = remote_id,
-                                      .plaintext_hash = hash_hex(row.hash),
+                                      .plaintext_hash = hash_hex(obj_hash),
+                                      .is_pack = is_pack,
                                       .references = {}});
-                if (!inserted && !it->second.references.empty() &&
-                    it->second.references.front().size != row.size) {
-                    return std::unexpected(
-                        detail::error(ErrorCode::VerificationFailure,
-                                      "content reference sizes conflict"));
+                if (!inserted) {
+                    if (it->second.is_pack != is_pack ||
+                        (!is_pack && !it->second.references.empty() &&
+                         it->second.references.front().size != ref_size)) {
+                        return std::unexpected(
+                            detail::error(ErrorCode::VerificationFailure,
+                                          "content reference sizes conflict"));
+                    }
                 }
                 it->second.references.push_back(ContentReference{
                     .commit_id = commit.commit_id,
-                    .path = row.path,
-                    .size = row.size,
+                    .path = std::string{logical_path},
+                    .size = ref_size,
                 });
+                return {};
+            };
+            for (const auto& row : commit.tree->tree.rows) {
+                if (row.is_directory) {
+                    continue;
+                }
+                if (const auto* packed = history::find_packed_blob(
+                        commit.tree->storage, row.hash)) {
+                    const auto remote_id =
+                        crypto::pack_identifier(key, packed->pack_hash);
+                    if (auto ok = record_object(remote_id,
+                                                packed->pack_hash,
+                                                true,
+                                                row.path,
+                                                row.size);
+                        !ok) {
+                        return std::unexpected(ok.error());
+                    }
+                } else if (const auto* chunked = history::find_chunked_file(
+                               commit.tree->storage, row.hash)) {
+                    for (const auto& chunk : chunked->chunks) {
+                        const auto remote_id =
+                            crypto::content_identifier(key, chunk.hash);
+                        if (auto ok = record_object(remote_id,
+                                                    chunk.hash,
+                                                    false,
+                                                    row.path,
+                                                    chunk.size);
+                            !ok) {
+                            return std::unexpected(ok.error());
+                        }
+                    }
+                } else {
+                    const auto remote_id =
+                        crypto::content_identifier(key, row.hash);
+                    if (auto ok = record_object(
+                            remote_id, row.hash, false, row.path, row.size);
+                        !ok) {
+                        return std::unexpected(ok.error());
+                    }
+                }
             }
         }
 
@@ -258,7 +333,8 @@ inventory_impl(transport::Transport& storage,
         std::size_t sequence = 0;
         auto audit = [&](std::string_view id,
                          std::optional<std::string_view> plaintext_hash,
-                         std::optional<std::uint64_t> expected_size)
+                         std::optional<std::uint64_t> expected_size,
+                         bool expect_pack)
             -> std::expected<ContentObjectState, Error> {
             if (!audit_payloads) {
                 return ContentObjectState::Present;
@@ -269,7 +345,8 @@ inventory_impl(transport::Transport& storage,
                                                 plaintext_hash,
                                                 expected_size,
                                                 temporary->workspace.root,
-                                                sequence++);
+                                                sequence++,
+                                                expect_pack);
             if (!audited) {
                 return std::unexpected(audited.error());
             }
@@ -280,9 +357,14 @@ inventory_impl(transport::Transport& storage,
             std::ranges::sort(content.references);
             auto state = ContentObjectState::Missing;
             if (std::ranges::binary_search(physical, content.remote_id)) {
-                auto audited = audit(content.remote_id,
-                                     content.plaintext_hash,
-                                     content.references.front().size);
+                auto audited = audit(
+                    content.remote_id,
+                    content.plaintext_hash,
+                    content.is_pack
+                        ? std::nullopt
+                        : std::optional<std::uint64_t>{
+                              content.references.front().size},
+                    content.is_pack);
                 if (!audited) {
                     return std::unexpected(audited.error());
                 }
@@ -306,7 +388,7 @@ inventory_impl(transport::Transport& storage,
                 continue;
             }
             result.orphan_content_ids.push_back(content_id);
-            auto audited = audit(content_id, std::nullopt, std::nullopt);
+            auto audited = audit(content_id, std::nullopt, std::nullopt, false);
             if (!audited) {
                 return std::unexpected(audited.error());
             }

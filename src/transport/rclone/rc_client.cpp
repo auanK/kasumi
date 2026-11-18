@@ -12,14 +12,19 @@
 #include <cstdlib>
 #include <exception>
 #include <format>
+#ifndef CPPHTTPLIB_EXPECT_100_THRESHOLD
+#define CPPHTTPLIB_EXPECT_100_THRESHOLD (64U * 1024U * 1024U)
+#endif
 #include <httplib.h>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace kasumi::transport::rclone_detail {
 namespace {
@@ -79,6 +84,174 @@ Error with_request_context(const State& state,
     return error;
 }
 
+constexpr std::size_t maximum_pooled_clients = 16;
+constexpr auto idle_client_ttl = std::chrono::seconds{20};
+
+struct PooledClient {
+    std::unique_ptr<httplib::Client> client;
+    std::chrono::steady_clock::time_point last_used{};
+};
+
+struct InFlightRequest {
+    httplib::Client* client = nullptr;
+    std::chrono::steady_clock::time_point started{};
+    std::string endpoint;
+    int attempt = 1;
+    int attempts = 1;
+    std::function<void(std::string_view)> report_status;
+    bool reported = false;
+};
+
+} // namespace
+
+struct RcRuntime {
+    std::mutex pool_mutex;
+    std::vector<PooledClient> idle_clients;
+    std::mutex watcher_mutex;
+    std::condition_variable watcher_cv;
+    std::vector<InFlightRequest*> active_requests;
+    bool stop_watcher = false;
+    std::jthread watcher_thread;
+};
+
+namespace {
+
+void watcher_loop(RcRuntime& runtime) {
+    std::unique_lock lock(runtime.watcher_mutex);
+    while (!runtime.stop_watcher) {
+        if (runtime.active_requests.empty()) {
+            runtime.watcher_cv.wait(lock, [&] {
+                return runtime.stop_watcher || !runtime.active_requests.empty();
+            });
+            continue;
+        }
+        if (platform::cancellation::requested()) {
+            for (auto* request : runtime.active_requests) {
+                if (request->client != nullptr) {
+                    request->client->stop();
+                }
+            }
+            runtime.watcher_cv.wait_for(lock, std::chrono::milliseconds{25});
+            continue;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        struct PendingNotice {
+            std::function<void(std::string_view)> callback;
+            std::string message;
+        };
+        std::vector<PendingNotice> notices;
+        for (auto* request : runtime.active_requests) {
+            if (!request->reported && request->report_status &&
+                now - request->started >= std::chrono::seconds{1}) {
+                const auto operation = request->endpoint == "operations/list"
+                                           ? "remote LIST"
+                                           : "remote response";
+                notices.push_back(PendingNotice{
+                    .callback = request->report_status,
+                    .message = std::format(
+                        "[Network] waiting for {} (RC attempt {}/{}, endpoint={})",
+                        operation,
+                        request->attempt,
+                        request->attempts,
+                        request->endpoint),
+                });
+                request->reported = true;
+            }
+        }
+        if (!notices.empty()) {
+            lock.unlock();
+            for (const auto& notice : notices) {
+                notice.callback(notice.message);
+            }
+            lock.lock();
+            continue;
+        }
+        runtime.watcher_cv.wait_for(lock, std::chrono::milliseconds{50});
+    }
+}
+
+RcRuntime& ensure_rc_runtime(State& state) {
+    std::call_once(state.rc_runtime_once, [&] {
+        auto runtime = std::make_unique<RcRuntime>();
+        auto* raw = runtime.get();
+        runtime->watcher_thread = std::jthread([raw] {
+            watcher_loop(*raw);
+        });
+        state.rc_runtime.reset(runtime.release());
+    });
+    return *state.rc_runtime;
+}
+
+std::unique_ptr<httplib::Client> acquire_client(State& state,
+                                                RcRuntime& runtime) {
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard lock(runtime.pool_mutex);
+        while (!runtime.idle_clients.empty()) {
+            auto entry = std::move(runtime.idle_clients.back());
+            runtime.idle_clients.pop_back();
+            if (entry.client &&
+                now - entry.last_used < idle_client_ttl &&
+                entry.client->is_socket_open()) {
+                return std::move(entry.client);
+            }
+        }
+    }
+    auto client = std::make_unique<httplib::Client>("127.0.0.1", state.port);
+    client->set_basic_auth(state.username, state.password);
+    client->set_connection_timeout(std::chrono::seconds(1));
+    client->set_write_timeout(std::chrono::seconds(5));
+    client->set_follow_location(false);
+    client->set_payload_max_length(maximum_rc_payload_size);
+    client->set_keep_alive(true);
+    client->set_tcp_nodelay(true);
+    return client;
+}
+
+void release_client(RcRuntime& runtime,
+                    std::unique_ptr<httplib::Client> client) {
+    if (!client || !client->is_socket_open()) {
+        return;
+    }
+    std::lock_guard lock(runtime.pool_mutex);
+    if (runtime.idle_clients.size() < maximum_pooled_clients) {
+        runtime.idle_clients.push_back(PooledClient{
+            .client = std::move(client),
+            .last_used = std::chrono::steady_clock::now(),
+        });
+    }
+}
+
+} // namespace
+
+void destroy_rc_runtime(RcRuntime* runtime) noexcept {
+    if (runtime == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard lock(runtime->watcher_mutex);
+        runtime->stop_watcher = true;
+        for (auto* request : runtime->active_requests) {
+            if (request->client != nullptr) {
+                request->client->stop();
+            }
+        }
+    }
+    runtime->watcher_cv.notify_all();
+    runtime->watcher_thread = std::jthread{};
+    {
+        std::lock_guard lock(runtime->pool_mutex);
+        runtime->idle_clients.clear();
+    }
+    delete runtime;
+}
+
+void stop_rc_runtime(State& state) noexcept {
+    state.rc_runtime.reset();
+}
+
+namespace {
+
 bool drain_finished(const State& state) {
     return state.drain_future.valid() &&
            state.drain_future.wait_for(std::chrono::milliseconds(0)) ==
@@ -100,50 +273,37 @@ post_rc_impl(State& state,
             make_error(ErrorCode::ProtocolFailure, "invalid RC endpoint"));
     }
     const std::string path = state.base_url + "/" + std::string{path_suffix};
-    httplib::Client client("127.0.0.1", state.port);
-    client.set_basic_auth(state.username, state.password);
-    client.set_connection_timeout(std::chrono::seconds(1));
-    client.set_read_timeout(read_timeout);
-    client.set_write_timeout(std::chrono::seconds(5));
-    client.set_follow_location(false);
-    client.set_payload_max_length(maximum_rc_payload_size);
+    auto& runtime = ensure_rc_runtime(state);
+    auto client = acquire_client(state, runtime);
+    client->set_read_timeout(read_timeout);
     std::this_thread::sleep_for(artificial_latency());
     const auto started = std::chrono::steady_clock::now();
-    std::mutex watcher_mutex;
-    std::condition_variable watcher_wakeup;
-    std::jthread watcher([&](std::stop_token stop) {
-        std::stop_callback wake_on_stop(stop, [&] {
-            watcher_wakeup.notify_all();
-        });
-        std::unique_lock watcher_lock(watcher_mutex);
-        bool reported = false;
-        while (!stop.stop_requested()) {
-            if (platform::cancellation::requested()) {
-                client.stop();
-                return;
-            }
-            if (!reported && state.report_status &&
-                std::chrono::steady_clock::now() - started >=
-                    std::chrono::seconds{1}) {
-                const auto operation = path_suffix == "operations/list"
-                                           ? "remote LIST"
-                                           : "remote response";
-                state.report_status(std::format(
-                    "[Network] waiting for {} (RC attempt {}/{}, endpoint={})",
-                    operation,
-                    attempt,
-                    attempts,
-                    path_suffix));
-                reported = true;
-            }
-            watcher_wakeup.wait_for(watcher_lock,
-                                    std::chrono::milliseconds{50});
+    InFlightRequest in_flight{
+        .client = client.get(),
+        .started = started,
+        .endpoint = std::string{path_suffix},
+        .attempt = attempt,
+        .attempts = attempts,
+        .report_status = state.report_status,
+    };
+    {
+        std::lock_guard lock(runtime.watcher_mutex);
+        runtime.active_requests.push_back(&in_flight);
+    }
+    runtime.watcher_cv.notify_one();
+
+    struct RequestGuard {
+        RcRuntime& runtime;
+        InFlightRequest* entry;
+        ~RequestGuard() noexcept {
+            std::lock_guard lock(runtime.watcher_mutex);
+            std::erase(runtime.active_requests, entry);
         }
-    });
+    } request_guard{runtime, &in_flight};
+
     const auto trace = platform::perf_trace::begin();
     const auto response =
-        client.Post(path, std::string{request_body}, "application/json");
-    watcher.request_stop();
+        client->Post(path, std::string{request_body}, "application/json");
     if (trace.active) {
         platform::perf_trace::finish(
             std::string{"rc/"} + std::string{path_suffix}, trace);
@@ -158,6 +318,11 @@ post_rc_impl(State& state,
                        std::string{"RC HTTP failure: "} +
                            httplib::to_string(response.error()),
                        static_cast<int>(response.error())));
+    }
+    const bool server_closed =
+        response->get_header_value("Connection") == "close";
+    if (!server_closed) {
+        release_client(runtime, std::move(client));
     }
     if (response->body.size() > response_limit) {
         return std::unexpected(make_error(

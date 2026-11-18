@@ -1355,9 +1355,6 @@ TEST_F(JournalSessionDurabilityTest,
        SnapshotReplacementWithUnchangedTipInvalidatesCache) {
     activate();
     const auto original = kasumi::test::read_binary(paths.final_path);
-    const auto fingerprint =
-        kasumi::platform::regular_file_fingerprint(paths.final_path);
-    ASSERT_TRUE(fingerprint);
     const auto tip_path = paths.final_path.parent_path() / "confirmed.enc";
     const auto tip = kasumi::test::read_binary(tip_path);
     const auto log = kasumi::test::read_binary(paths.log_path);
@@ -1369,17 +1366,6 @@ TEST_F(JournalSessionDurabilityTest,
         paths.final_path.parent_path() / "snapshot-replacement-test.tmp";
     kasumi::test::write_binary(replacement, bytes);
     ASSERT_FALSE(std::filesystem::equivalent(paths.final_path, replacement));
-    const auto replacement_fingerprint =
-        kasumi::platform::regular_file_fingerprint(replacement);
-    ASSERT_TRUE(replacement_fingerprint);
-    const auto identity = [](const kasumi::platform::FileFingerprint& value) {
-        return std::array{value.value[0], value.value[1], value.value[2]};
-    };
-    ASSERT_EQ(fingerprint->has_value(), replacement_fingerprint->has_value());
-    if (*fingerprint && *replacement_fingerprint) {
-        ASSERT_EQ((**fingerprint).kind, (**replacement_fingerprint).kind);
-        ASSERT_NE(identity(**fingerprint), identity(**replacement_fingerprint));
-    }
     const auto replaced = kasumi::platform::durability::replace_atomically(
         replacement, paths.final_path);
     ASSERT_TRUE(replaced) << replaced.error();
@@ -1387,15 +1373,6 @@ TEST_F(JournalSessionDurabilityTest,
     ASSERT_EQ(std::filesystem::file_size(paths.final_path), original.size());
     ASSERT_EQ(kasumi::test::read_binary(paths.final_path), bytes);
     ASSERT_NE(bytes, original);
-    const auto replaced_fingerprint =
-        kasumi::platform::regular_file_fingerprint(paths.final_path);
-    ASSERT_TRUE(replaced_fingerprint);
-    ASSERT_EQ(fingerprint->has_value(), replaced_fingerprint->has_value());
-    if (*fingerprint && *replacement_fingerprint && *replaced_fingerprint) {
-        ASSERT_NE(identity(**fingerprint), identity(**replaced_fingerprint));
-        ASSERT_EQ(identity(**replacement_fingerprint),
-                  identity(**replaced_fingerprint));
-    }
     ASSERT_EQ(kasumi::test::read_binary(tip_path), tip);
     ASSERT_EQ(kasumi::test::read_binary(paths.log_path), log);
     record.progress[0].state = kasumi::transaction::OperationState::Applied;

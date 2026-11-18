@@ -52,6 +52,12 @@ open(const std::filesystem::path& path, int flags) {
     if (result != SQLITE_OK) {
         return std::unexpected(error(raw));
     }
+    if (sqlite3_db_config(raw, SQLITE_DBCONFIG_DEFENSIVE, 1, nullptr) !=
+            SQLITE_OK ||
+        sqlite3_db_config(raw, SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0, nullptr) !=
+            SQLITE_OK) {
+        return std::unexpected(error(raw));
+    }
     return database;
 }
 
@@ -153,6 +159,11 @@ inline std::string text(const Statement& statement, int column) {
 // Reads a column as a 64-bit integer.
 inline std::int64_t integer(const Statement& statement, int column) noexcept {
     return sqlite3_column_int64(statement.get(), column);
+}
+
+// Returns true when the given column holds SQL NULL.
+inline bool is_null(const Statement& statement, int column) noexcept {
+    return sqlite3_column_type(statement.get(), column) == SQLITE_NULL;
 }
 
 // Attempts to roll back the transaction without propagating errors.

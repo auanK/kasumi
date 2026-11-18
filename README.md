@@ -18,12 +18,14 @@ Machine C ───┘
 ## Features
 
 - **Bidirectional, multi-client sync** across independently operated machines.
-- **Client-side encryption and authentication** for file contents and history.
+- **Client-side encryption, authentication, and in-memory Zstandard compression** for file contents, Micro-Packs, chunks, and history.
+- **Adaptive storage layout** combining loose objects, `KPAK\x01` Micro-Packs for small files (`<= 256 KiB`), and FastCDC content-defined chunking (`> 8 MiB`) with block-level delta uploads and downloads.
+- **Configurable key storage (`vault`, `file`, `memory`)** supporting OS credential vaults (Windows Credential Manager, Linux Secret Service / KWallet), local `key.bin`, or stateless in-memory key derivation.
 - **Shared storage** through local paths, network shares, or rclone remotes.
 - **Immutable history and conflict handling** that preserve divergent file versions.
 - **Interrupted-operation recovery** through an authenticated transaction journal.
 - **Persistent BLAKE3 hash cache** shared by sync and read-only plan observation.
-- **Integrity and maintenance tools** to audit referenced content and directly remove authenticated orphan Content and redundant CommitVariants.
+- **Integrity and maintenance tools** to audit referenced content, packs, and chunks and directly remove authenticated orphan physical objects and redundant CommitVariants.
 
 ## Quick Start
 
@@ -35,13 +37,12 @@ kasumi status work
 kasumi sync work
 ```
 
-The wizard asks for the local folder, shared storage destination, Password, and
+The wizard asks for the local folder, shared storage destination, key storage mode (`vault` by default, `file`, or `memory`), Password, and
 Password Salt. Configure the next machine with the same storage and exactly the
 same two credentials. Follow [Getting Started](docs/getting-started.md) for the
 complete setup, download verification, and first synchronization on two machines.
 
-Keep a secure record of your credentials and local key. `key.bin` uses reversible
-masking and filesystem permissions; protect sensitive devices with disk encryption.
+Keep a secure record of your credentials and local key. Depending on the profile's `key_storage` setting, the derived master key is stored in the OS credential vault (`vault`), in `key.bin` with reversible masking and filesystem permissions (`file`), or derived on demand in RAM without persistence (`memory`); protect sensitive devices with disk encryption.
 See [Security](docs/security.md) for the protection limits and key-loss risks.
 
 ## Download and Documentation

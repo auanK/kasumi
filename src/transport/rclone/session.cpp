@@ -4,6 +4,10 @@
 
 #if defined(_WIN32)
 #include <winsock2.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #else
 #include <arpa/inet.h>
 #include <cerrno>
@@ -65,10 +69,16 @@ bool environment_name_starts_with(std::string_view name,
 
 bool excluded_environment_name(std::string_view name,
                                const ChildEnvironment& controlled) noexcept {
+    const bool allowed_ambient_rclone =
+        environment_name_equal(name, "RCLONE_CONFIG") ||
+        environment_name_equal(name, "RCLONE_CONFIG_PASS") ||
+        environment_name_equal(name, "RCLONE_PASSWORD_COMMAND");
     return environment_name_starts_with(name, "KASUMI_") ||
            std::ranges::any_of(controlled, [&](const auto& entry) {
                return environment_name_equal(name, entry.first);
-           });
+           }) ||
+           (environment_name_starts_with(name, "RCLONE_") &&
+            !allowed_ambient_rclone);
 }
 
 std::optional<std::filesystem::path>
@@ -336,6 +346,61 @@ void wait_for_drain(State& state) noexcept {
     }
 }
 
+void close_job_handle(State& state) noexcept {
+#if defined(_WIN32)
+    if (state.job_handle != nullptr) {
+        CloseHandle(static_cast<HANDLE>(state.job_handle));
+        state.job_handle = nullptr;
+    }
+#else
+    static_cast<void>(state);
+#endif
+}
+
+void attach_kill_on_close_job(State& state, int child_pid) noexcept {
+#if defined(_WIN32)
+    close_job_handle(state);
+    if (child_pid <= 0) {
+        return;
+    }
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job == nullptr) {
+        return;
+    }
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(
+            job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+        CloseHandle(job);
+        return;
+    }
+    HANDLE process = OpenProcess(
+        PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, static_cast<DWORD>(child_pid));
+    if (process == nullptr) {
+        CloseHandle(job);
+        return;
+    }
+    const BOOL assigned = AssignProcessToJobObject(job, process);
+    CloseHandle(process);
+    if (!assigned) {
+        CloseHandle(job);
+        return;
+    }
+    state.job_handle = static_cast<void*>(job);
+#else
+    static_cast<void>(state);
+    static_cast<void>(child_pid);
+#endif
+}
+
+void wipe_secret_string(std::string& value) noexcept {
+    volatile char* data = value.data();
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        data[index] = '\0';
+    }
+    value.clear();
+}
+
 bool stop_process(State& state) noexcept {
     if (!state.process_started) {
         return true;
@@ -374,15 +439,14 @@ bool stop_process(State& state) noexcept {
     if (stopped) {
         state.process_started = false;
     }
+    close_job_handle(state);
     return stopped;
 }
 
 void clear_secrets(State& state) noexcept {
-    std::fill(state.username.begin(), state.username.end(), '\0');
-    std::fill(state.password.begin(), state.password.end(), '\0');
-    state.username.clear();
-    state.password.clear();
-    state.base_url.clear();
+    wipe_secret_string(state.username);
+    wipe_secret_string(state.password);
+    wipe_secret_string(state.base_url);
 }
 
 bool reset_failed_attempt(State& state) noexcept {
@@ -422,6 +486,7 @@ std::expected<int, Error> start_process(State& state) {
                                           "could not query rclone PID",
                                           child_pid.second.value()));
     }
+    attach_kill_on_close_job(state, child_pid.first);
     try {
         state.drain_future = std::async(std::launch::async, [&state]() {
             return drain_process_output(state);
@@ -668,16 +733,10 @@ void destroy_state(void* context) noexcept {
     }
     state->stop_drain.store(true);
     wait_for_drain(*state);
-    if (request_core_quit_best_effort(*state)) {
-        try {
-            std::lock_guard process_lock(state->process_mutex);
-            (void)state->process.kill();
-        } catch (...) {
-        }
-    }
+    (void)request_core_quit_best_effort(*state);
     (void)stop_process(*state);
+    stop_rc_runtime(*state);
     clear_secrets(*state);
-    state->base_url.clear();
     delete state;
 }
 

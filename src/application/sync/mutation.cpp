@@ -1,6 +1,8 @@
 #include "application/sync/mutation.hpp"
 
 #include "crypto/content.hpp"
+#include "crypto/key_derivation.hpp"
+#include "crypto/pack.hpp"
 #include "mutation_detail.hpp"
 #include "mutation_fault_test.hpp"
 #include "platform/durability.hpp"
@@ -229,7 +231,9 @@ fetch_decrypt_and_verify(transport::Transport& storage,
         std::error_code size_error;
         const auto actual_size =
             std::filesystem::file_size(encrypted, size_error);
-        if (size_error || actual_size != *expected_ciphertext_size) {
+        const std::uint64_t minimum_size = crypto::FILE_HEADER_SIZE;
+        if (size_error || actual_size < minimum_size ||
+            actual_size > *expected_ciphertext_size) {
             return std::unexpected(
                 make_error(MutationErrorCode::IntegrityMismatch,
                            "ciphertext size does not match expected plaintext",
@@ -272,7 +276,9 @@ std::expected<void, MutationError> verify_uploaded_content_object(
     std::uint64_t expected_size,
     const platform::Workspace& workspace,
     std::size_t operation_index,
-    std::string_view local_physical_hash) {
+    std::string_view local_physical_hash,
+    bool is_pack,
+    std::optional<std::size_t> scratch_slot) {
     constexpr std::string_view physical_hash_algorithm = "sha256";
 
     auto remote_hash =
@@ -303,10 +309,11 @@ std::expected<void, MutationError> verify_uploaded_content_object(
     }
 
     // Without reliable remote hash, validates via GET, decryption, and BLAKE3.
-    const auto encrypted = platform::workspace_file(
-        workspace, operation_index, ".upload.verify.enc");
+    const auto verify_slot = scratch_slot.value_or(operation_index);
+    const auto encrypted =
+        platform::workspace_file(workspace, verify_slot, ".upload.verify.enc");
     const auto plaintext = platform::workspace_file(
-        workspace, operation_index, ".upload.verify.plain");
+        workspace, verify_slot, ".upload.verify.plain");
     if (encrypted.empty() || plaintext.empty()) {
         return std::unexpected(
             make_error(MutationErrorCode::LocalIo,
@@ -321,11 +328,46 @@ std::expected<void, MutationError> verify_uploaded_content_object(
     };
     cleanup();
 
-    if (!hash_from_hex(identifier) || !hash_from_hex(plaintext_hash)) {
+    const auto expected_hash = hash_from_hex(plaintext_hash);
+    if (!hash_from_hex(identifier) || !expected_hash) {
         return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
                                           "invalid encrypted object identifier",
                                           encrypted,
                                           operation_index));
+    }
+
+    if (is_pack) {
+        if (crypto::pack_identifier(key, *expected_hash) != identifier) {
+            return std::unexpected(
+                make_error(MutationErrorCode::IntegrityMismatch,
+                           "pack object identifier mismatch",
+                           encrypted,
+                           operation_index));
+        }
+        auto downloaded = transport::get(storage, identifier, encrypted);
+        if (!downloaded) {
+            cleanup();
+            return std::unexpected(make_error(
+                downloaded.error().code == transport::ErrorCode::ObjectNotFound
+                    ? MutationErrorCode::IntegrityMismatch
+                    : MutationErrorCode::TransportFailure,
+                downloaded.error().code == transport::ErrorCode::ObjectNotFound
+                    ? "remote pack object missing after upload"
+                    : transport::describe(downloaded.error()),
+                encrypted,
+                operation_index));
+        }
+        auto verified_pack = crypto::pack::decrypt_and_verify_pack(
+            encrypted, key, *expected_hash, nullptr);
+        cleanup();
+        if (!verified_pack) {
+            return std::unexpected(
+                make_error(MutationErrorCode::IntegrityMismatch,
+                           verified_pack.error(),
+                           encrypted,
+                           operation_index));
+        }
+        return {};
     }
 
     const auto expected_ciphertext_size =
@@ -443,32 +485,27 @@ apply_upload(const Operation& operation,
     return {};
 }
 
-MutationResult
-apply_download(const Operation& operation,
-               std::size_t operation_index,
-               const std::filesystem::path& destination,
-               transport::Transport& storage,
-               const platform::Workspace& workspace,
-               std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-               const transaction::OperationProgress& progress,
-               DownloadCacheMode download_cache,
-               const DestinationPrecondition* condition) {
-    auto expected_hash = hash_from_hex(operation.hash);
-    if (!expected_hash) {
-        return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
-                                          expected_hash.error(),
-                                          destination,
-                                          operation_index));
-    }
-    const auto remote_identifier =
-        crypto::content_identifier(key, *expected_hash);
+struct PreparedDownloadCandidate {
+    bool already_applied = false;
+    std::string_view prepared_hash;
+    std::filesystem::path candidate;
+};
+
+std::expected<PreparedDownloadCandidate, MutationError>
+prepare_download_candidate(const Operation& operation,
+                           std::size_t operation_index,
+                           const std::filesystem::path& destination,
+                           const platform::Workspace& workspace,
+                           const transaction::OperationProgress& progress,
+                           const DestinationPrecondition* condition) {
     const std::string_view prepared_hash =
         condition ? condition->hash : progress.previous_hash;
 
     auto prepared = detail::validate_prepared_operation(
         operation, operation_index, destination, workspace, progress);
-    if (!prepared)
-        return prepared;
+    if (!prepared) {
+        return std::unexpected(prepared.error());
+    }
     auto destination_status = read_status(destination, operation_index);
     if (!destination_status) {
         return std::unexpected(destination_status.error());
@@ -488,18 +525,20 @@ apply_download(const Operation& operation,
                                                              workspace,
                                                              progress,
                                                              condition);
-            if (!prepared)
-                return prepared;
+            if (!prepared) {
+                return std::unexpected(prepared.error());
+            }
             std::error_code error;
             const auto size = std::filesystem::file_size(destination, error);
-            if (error || size != operation.size)
-                return std::unexpected(
-                    make_error(MutationErrorCode::IntegrityMismatch,
-                               error ? error.message()
-                                     : "file size does not match expected size",
-                               destination,
-                               operation_index));
-            return {};
+            if (error || size != operation.size) {
+                return std::unexpected(make_error(
+                    MutationErrorCode::IntegrityMismatch,
+                    error ? error.message()
+                          : "file size does not match expected size",
+                    destination,
+                    operation_index));
+            }
+            return PreparedDownloadCandidate{.already_applied = true};
         }
     } else if (!missing(*destination_status)) {
         return std::unexpected(
@@ -512,7 +551,7 @@ apply_download(const Operation& operation,
     if (auto parent_ok =
             validate_parent_directory(destination, operation_index);
         !parent_ok) {
-        return parent_ok;
+        return std::unexpected(parent_ok.error());
     }
 
     const auto candidate = detail::download_candidate_path(
@@ -528,6 +567,95 @@ apply_download(const Operation& operation,
                        candidate,
                        operation_index));
     }
+    return PreparedDownloadCandidate{
+        .already_applied = false,
+        .prepared_hash = prepared_hash,
+        .candidate = candidate,
+    };
+}
+
+MutationResult install_download_candidate(
+    const Operation& operation,
+    std::size_t operation_index,
+    const std::filesystem::path& destination,
+    const platform::Workspace& workspace,
+    const transaction::OperationProgress& progress,
+    std::string_view prepared_hash,
+    const std::filesystem::path& candidate,
+    const DestinationPrecondition* condition) {
+    // shortcut: validation and replace are separate; upgrade if external-writer
+    // isolation becomes required.
+    auto prepared = detail::validate_prepared_destination(operation,
+                                                          operation_index,
+                                                          destination,
+                                                          workspace,
+                                                          progress,
+                                                          condition);
+    if (!prepared) {
+        return prepared;
+    }
+    if (!prepared_hash.empty()) {
+        mutation_fault_test::hit("before_download_replace", destination);
+        if (auto synced = sync_file_checked(candidate, operation_index);
+            !synced) {
+            remove_temporary_file(candidate);
+            return synced;
+        }
+        auto installed =
+            platform::durability::replace_atomically(candidate, destination);
+        if (!installed) {
+            remove_temporary_file(candidate);
+            return std::unexpected(
+                make_error(MutationErrorCode::LocalIo,
+                           "failed to replace local file: " + installed.error(),
+                           destination,
+                           operation_index));
+        }
+        mutation_fault_test::hit("after_download_replace", destination);
+    } else {
+        mutation_fault_test::hit("before_download_install", destination);
+        if (auto synced = sync_file_checked(candidate, operation_index);
+            !synced) {
+            return synced;
+        }
+        if (auto installed = install_without_overwrite_checked(
+                candidate, destination, operation_index);
+            !installed) {
+            return installed;
+        }
+    }
+    return sync_parent_checked(destination, operation_index);
+}
+
+MutationResult
+apply_download(const Operation& operation,
+               std::size_t operation_index,
+               const std::filesystem::path& destination,
+               transport::Transport& storage,
+               const platform::Workspace& workspace,
+               std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+               const transaction::OperationProgress& progress,
+               DownloadCacheMode download_cache,
+               const DestinationPrecondition* condition) {
+    auto expected_hash = hash_from_hex(operation.hash);
+    if (!expected_hash) {
+        return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
+                                          expected_hash.error(),
+                                          destination,
+                                          operation_index));
+    }
+    const auto remote_identifier =
+        crypto::content_identifier(key, *expected_hash);
+
+    auto prep = prepare_download_candidate(
+        operation, operation_index, destination, workspace, progress, condition);
+    if (!prep) {
+        return std::unexpected(prep.error());
+    }
+    if (prep->already_applied) {
+        return {};
+    }
+    const auto& candidate = prep->candidate;
 
     const bool cache_plaintext = download_cache != DownloadCacheMode::None &&
                                  operation.size >= crypto::CHUNK_SIZE;
@@ -626,13 +754,13 @@ apply_download(const Operation& operation,
             if (fetched.error().code ==
                     MutationErrorCode::RemoteContentMissing ||
                 fetched.error().code == MutationErrorCode::TransportFailure) {
-                prepared =
-                    detail::validate_prepared_destination(operation,
-                                                          operation_index,
-                                                          destination,
-                                                          workspace,
-                                                          progress,
-                                                          condition);
+                auto prepared = detail::validate_prepared_destination(
+                    operation,
+                    operation_index,
+                    destination,
+                    workspace,
+                    progress,
+                    condition);
                 if (!prepared) {
                     return prepared;
                 }
@@ -652,49 +780,16 @@ apply_download(const Operation& operation,
         }
     }
 
-    // shortcut: validation and replace are separate; upgrade if external-writer
-    // isolation becomes required.
-    prepared = detail::validate_prepared_destination(operation,
-                                                     operation_index,
-                                                     destination,
-                                                     workspace,
-                                                     progress,
-                                                     condition);
-    if (!prepared)
-        return prepared;
-    if (!prepared_hash.empty()) {
-        mutation_fault_test::hit("before_download_replace", destination);
-        if (auto synced = sync_file_checked(candidate, operation_index);
-            !synced) {
-            remove_temporary_file(candidate);
-            return synced;
-        }
-        auto installed =
-            platform::durability::replace_atomically(candidate, destination);
-        if (!installed) {
-            remove_temporary_file(candidate);
-            return std::unexpected(
-                make_error(MutationErrorCode::LocalIo,
-                           "failed to replace local file: " + installed.error(),
-                           destination,
-                           operation_index));
-        }
-        mutation_fault_test::hit("after_download_replace", destination);
-    } else {
-        mutation_fault_test::hit("before_download_install", destination);
-        if (auto synced = sync_file_checked(candidate, operation_index);
-            !synced) {
-            return synced;
-        }
-        if (auto installed = install_without_overwrite_checked(
-                candidate, destination, operation_index);
-            !installed) {
-            return installed;
-        }
-    }
-    if (auto synced = sync_parent_checked(destination, operation_index);
-        !synced) {
-        return synced;
+    if (auto installed = install_download_candidate(operation,
+                                                    operation_index,
+                                                    destination,
+                                                    workspace,
+                                                    progress,
+                                                    prep->prepared_hash,
+                                                    candidate,
+                                                    condition);
+        !installed) {
+        return installed;
     }
     if (download_cache == DownloadCacheMode::None) {
         std::error_code encrypted_cleanup_error;
@@ -1137,7 +1232,8 @@ apply_operation(const Operation& operation,
                 return std::unexpected(status.error());
             }
             if (!missing(*status)) {
-                if (std::filesystem::is_symlink(*status)) {
+                if (std::filesystem::is_symlink(*status) ||
+                    platform::private_storage::is_reparse_or_symlink(*path)) {
                     return std::unexpected(
                         make_error(MutationErrorCode::UnsafePath,
                                    "destination directory is a symlink",
@@ -1316,7 +1412,8 @@ apply_operation(const Operation& operation,
             if (missing(*status)) {
                 return {};
             }
-            if (std::filesystem::is_symlink(*status)) {
+            if (std::filesystem::is_symlink(*status) ||
+                platform::private_storage::is_reparse_or_symlink(*path)) {
                 return std::unexpected(
                     make_error(MutationErrorCode::UnsafePath,
                                "removing symlinks is not allowed",
@@ -1370,6 +1467,66 @@ apply_operation(const Operation& operation,
                                       "count action is not a mutable operation",
                                       operation.path,
                                       operation_index));
+}
+
+MutationResult apply_preverified_download(
+    const Operation& operation,
+    std::size_t operation_index,
+    const std::filesystem::path& local_root,
+    const std::filesystem::path& verified_plaintext_source,
+    const platform::Workspace& workspace,
+    const transaction::OperationProgress& progress,
+    const DestinationPrecondition* destination_condition) {
+    if (operation.action != Action::Download) {
+        return std::unexpected(make_error(
+            MutationErrorCode::InvalidOperation,
+            "preverified download requires a download operation",
+            operation.path,
+            operation_index));
+    }
+    auto destination =
+        resolve_local_path(local_root, operation.path, operation_index);
+    if (!destination) {
+        return std::unexpected(destination.error());
+    }
+    auto prep = prepare_download_candidate(operation,
+                                           operation_index,
+                                           *destination,
+                                           workspace,
+                                           progress,
+                                           destination_condition);
+    if (!prep) {
+        return std::unexpected(prep.error());
+    }
+    if (prep->already_applied) {
+        return {};
+    }
+
+    std::error_code ec;
+    std::filesystem::copy_file(
+        verified_plaintext_source, prep->candidate, ec);
+    if (ec) {
+        remove_temporary_file(prep->candidate);
+        return std::unexpected(make_error(
+            MutationErrorCode::LocalIo,
+            "failed to stage preverified download: " + ec.message(),
+            prep->candidate,
+            operation_index));
+    }
+    if (auto verified =
+            verify_local_file(prep->candidate, operation, operation_index);
+        !verified) {
+        remove_temporary_file(prep->candidate);
+        return verified;
+    }
+    return install_download_candidate(operation,
+                                      operation_index,
+                                      *destination,
+                                      workspace,
+                                      progress,
+                                      prep->prepared_hash,
+                                      prep->candidate,
+                                      destination_condition);
 }
 
 std::string describe(const MutationError& error) {

@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <fstream>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -15,9 +16,8 @@
 namespace kasumi::ignore {
 namespace {
 
-void close_glob_states(
-    std::string_view pattern,
-    std::array<unsigned char, max_ignore_pattern_size + 1>& states) {
+void close_glob_states(std::string_view pattern,
+                       std::span<unsigned char> states) {
     for (std::size_t index = 0; index < pattern.size(); ++index) {
         if (!states[index] || pattern[index] != '*')
             continue;
@@ -32,16 +32,15 @@ void close_glob_states(
     }
 }
 
-bool glob_matches(std::string_view pattern, std::string_view text) {
-    // Iterative arrays avoid recursion in the NFA.
-    if (pattern.size() > max_ignore_pattern_size)
-        return false;
-    std::array<unsigned char, max_ignore_pattern_size + 1> states{};
-    std::array<unsigned char, max_ignore_pattern_size + 1> next{};
+bool glob_matches_with_buffers(std::string_view pattern,
+                               std::string_view text,
+                               std::span<unsigned char> states,
+                               std::span<unsigned char> next) {
+    std::ranges::fill(states, 0);
     states[0] = 1;
     for (const char character : text) {
         close_glob_states(pattern, states);
-        next.fill(0);
+        std::ranges::fill(next, 0);
         for (std::size_t index = 0; index < pattern.size(); ++index) {
             if (!states[index])
                 continue;
@@ -56,10 +55,30 @@ bool glob_matches(std::string_view pattern, std::string_view text) {
                 next[index + 1] = 1;
             }
         }
-        states = next;
+        std::ranges::copy(next, states.begin());
     }
     close_glob_states(pattern, states);
     return states[pattern.size()] != 0;
+}
+
+bool glob_matches(std::string_view pattern, std::string_view text) {
+    // Iterative buffers avoid recursion in the NFA while keeping small globs
+    // stack-only.
+    if (pattern.size() > max_ignore_pattern_size) {
+        return false;
+    }
+    if (pattern.size() <= 256) {
+        std::array<unsigned char, 257> states{};
+        std::array<unsigned char, 257> next{};
+        return glob_matches_with_buffers(
+            pattern,
+            text,
+            std::span<unsigned char>{states.data(), pattern.size() + 1},
+            std::span<unsigned char>{next.data(), pattern.size() + 1});
+    }
+    std::vector<unsigned char> states(pattern.size() + 1, 0);
+    std::vector<unsigned char> next(pattern.size() + 1, 0);
+    return glob_matches_with_buffers(pattern, text, states, next);
 }
 
 bool generated_internal_name(std::string_view name) noexcept {
@@ -235,12 +254,10 @@ void parse_rule_line(std::string line,
         return;
     }
     if (line.size() > max_ignore_pattern_size) {
-        if (rule.disposable) {
-            result.parse_error = IgnoreParseError{
-                line_number,
-                "disposable pattern exceeds the maximum size of " +
-                    std::to_string(max_ignore_pattern_size)};
-        }
+        result.parse_error = IgnoreParseError{
+            line_number,
+            "pattern exceeds the maximum size of " +
+                std::to_string(max_ignore_pattern_size)};
         return;
     }
     rule.pattern = std::move(line);

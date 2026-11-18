@@ -125,6 +125,7 @@ struct KnownHistoryAnchor {
     std::string commit_id;
     std::uint64_t height = 0;
     Snapshot tree;
+    history::StorageManifest storage;
 };
 
 // Local trust used to detect rollback and, without a remote Epoch, shorten

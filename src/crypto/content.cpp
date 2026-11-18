@@ -16,31 +16,32 @@ namespace kasumi::crypto::content {
 
 std::expected<Hash, std::string> hash_file(const std::filesystem::path& path) {
     try {
-        std::ifstream input(path, std::ios::binary);
-        if (!input) {
-            return std::unexpected("could not open file for hashing: " +
-                                   platform::path::to_utf8(path));
-        }
-
         blake3_hasher state;
         blake3_hasher_init(&state);
         secure_memory::WipeGuard state_guard{state};
-        constexpr std::size_t buffer_size = 64U * 1024U;
+        constexpr std::size_t buffer_size = 256U * 1024U;
         std::vector<std::uint8_t> buffer(buffer_size);
         secure_memory::WipeGuard wipe_guard{buffer};
 
-        while (input) {
-            input.read(reinterpret_cast<char*>(buffer.data()),
-                       static_cast<std::streamsize>(buffer_size));
-            if (const auto count = input.gcount(); count > 0) {
-                blake3_hasher_update(
-                    &state, buffer.data(), static_cast<std::size_t>(count));
-            }
-        }
-
-        if (input.bad() || (input.fail() && !input.eof())) {
-            return std::unexpected("failed to read file for hashing: " +
-                                   platform::path::to_utf8(path));
+        auto streamed = platform::private_storage::stream_regular_file(
+            path,
+            buffer,
+            [&](std::span<const std::uint8_t> chunk) {
+                if (!chunk.empty()) {
+                    blake3_hasher_update(&state, chunk.data(), chunk.size());
+                }
+            });
+        if (!streamed) {
+            const bool open_failure =
+                streamed.error().kind ==
+                    platform::private_storage::StreamErrorKind::OpenFailed ||
+                streamed.error().kind ==
+                    platform::private_storage::StreamErrorKind::NotFound;
+            return std::unexpected(
+                std::string{open_failure ? "could not open file for hashing: "
+                                         : "failed to read file for hashing: "} +
+                platform::path::to_utf8(path) + ": " +
+                streamed.error().detail);
         }
 
         Hash result{};

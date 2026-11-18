@@ -18,6 +18,8 @@ constexpr std::string_view domain(KeyPurpose purpose) noexcept {
             return "kasumi/v2/key/journal";
         case KeyPurpose::RemoteIdentifier:
             return "kasumi/v2/key/remote-id";
+        case KeyPurpose::Pack:
+            return "kasumi-v3-pack-key";
     }
     return {};
 }
@@ -32,6 +34,8 @@ constexpr std::string_view domain(IdentifierPurpose purpose) noexcept {
             return "kasumi/v2/id/epoch";
         case IdentifierPurpose::Namespace:
             return "kasumi/v2/id/namespace";
+        case IdentifierPurpose::Pack:
+            return "kasumi-v3-pack-id";
     }
     return {};
 }
@@ -78,6 +82,15 @@ content_identifier(std::span<const std::uint8_t, KEY_SIZE> master_key,
         plaintext_hash.size()};
     return hash_hex(
         derive_identifier(master_key, IdentifierPurpose::Content, bytes));
+}
+
+std::string pack_identifier(std::span<const std::uint8_t, KEY_SIZE> master_key,
+                            const Hash& pack_hash) {
+    const std::span<const std::uint8_t> bytes{
+        reinterpret_cast<const std::uint8_t*>(pack_hash.data()),
+        pack_hash.size()};
+    return hash_hex(
+        derive_identifier(master_key, IdentifierPurpose::Pack, bytes));
 }
 
 std::string

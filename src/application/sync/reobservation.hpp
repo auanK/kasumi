@@ -19,6 +19,7 @@ namespace kasumi::application::sync::coordinator::reobservation {
 struct StableExecution {
     reconciliation::Input input;
     reconciliation::Result result;
+    std::optional<StagedExecutionHandoff> staged;
 };
 
 // Compares data used to detect concurrent changes.
@@ -55,7 +56,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
           bool allow_unreferenced_content_reuse = false,
           bool trust_existing_content = false,
           const std::unordered_set<std::string>* initial_content_identifiers =
-              nullptr);
+              nullptr,
+          bool retain_staged_workspace = false);
 
 } // namespace kasumi::application::sync::coordinator::reobservation
 

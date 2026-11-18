@@ -24,6 +24,7 @@ struct StagedUploadObject {
     std::uint64_t plaintext_size = 0;
     std::string ciphertext_sha256;
     std::vector<std::size_t> operation_indices;
+    bool is_pack = false;
 };
 
 // Collection of pending encrypted contents grouped under a staging root.

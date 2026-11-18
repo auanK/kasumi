@@ -247,12 +247,18 @@ TEST(IgnoreTest, ParsingBOMCommentsEscapingAndWhitespace) {
 }
 
 TEST(IgnoreTest, PatternSizeLimitSkipped) {
-    std::string long_pattern(300, 'x');
-    long_pattern += "\nvalid.txt\n";
-    const auto list = parse_ignore_rules(long_pattern);
+    std::string allowed_pattern(300, 'x');
+    allowed_pattern += "\nvalid.txt\n";
+    const auto allowed = parse_ignore_rules(allowed_pattern);
+    EXPECT_FALSE(allowed.parse_error.has_value());
+    EXPECT_EQ(allowed.rules.size(), 2u);
+    EXPECT_TRUE(is_ignored(std::string(300, 'x'), allowed, false));
+    EXPECT_TRUE(is_ignored("valid.txt", allowed, false));
 
-    EXPECT_EQ(list.rules.size(), 1u);
-    EXPECT_TRUE(is_ignored("valid.txt", list, false));
+    std::string oversized_pattern(kasumi::ignore::max_ignore_pattern_size + 1, 'x');
+    oversized_pattern += "\nvalid.txt\n";
+    const auto oversized = parse_ignore_rules(oversized_pattern);
+    ASSERT_TRUE(oversized.parse_error.has_value());
 }
 
 TEST(IgnoreTest, AnchoredWildcardDoesNotMatchSubdirectories) {

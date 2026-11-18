@@ -42,23 +42,29 @@ std::optional<std::filesystem::file_time_type>
 add_nanoseconds_to_unix_epoch(std::int64_t unix_ns) noexcept {
     using Duration = std::filesystem::file_time_type::duration;
     using Rep = Duration::rep;
+    using Count = std::common_type_t<Rep, std::int64_t>;
     static_assert(std::is_integral_v<Rep> && std::is_signed_v<Rep>);
-    static_assert(
-        std::ratio_greater_equal_v<typename Duration::period, std::nano>);
+    using Factor = std::ratio_divide<typename Duration::period, std::nano>;
+    static_assert(Factor::den == 1);
 
     const auto origin =
         file_clock_from_sys(std::chrono::system_clock::time_point{})
             .time_since_epoch();
-    const auto delta =
-        std::chrono::duration_cast<Duration>(std::chrono::nanoseconds{unix_ns});
-    if ((delta.count() > 0 &&
-         origin.count() > std::numeric_limits<Rep>::max() - delta.count()) ||
-        (delta.count() < 0 &&
-         origin.count() < std::numeric_limits<Rep>::lowest() - delta.count())) {
+    const auto quotient = unix_ns / Factor::num;
+    const auto delta = static_cast<Count>(
+        unix_ns % Factor::num < 0 ? quotient - 1 : quotient);
+    if (delta > std::numeric_limits<Rep>::max() ||
+        delta < std::numeric_limits<Rep>::lowest()) {
+        return std::nullopt;
+    }
+    if ((delta > 0 &&
+         origin.count() > std::numeric_limits<Rep>::max() - delta) ||
+        (delta < 0 &&
+         origin.count() < std::numeric_limits<Rep>::lowest() - delta)) {
         return std::nullopt;
     }
     return std::filesystem::file_time_type{
-        Duration{origin.count() + delta.count()}};
+        Duration{origin.count() + static_cast<Rep>(delta)}};
 }
 
 } // namespace
@@ -102,15 +108,15 @@ from_windows_ticks(std::uint64_t ticks) noexcept {
 
 std::expected<std::uint64_t, std::string>
 to_windows_ticks(std::filesystem::file_time_type value) noexcept {
-    using file_ticks =
-        std::chrono::duration<std::int64_t, std::ratio<1, 10000000>>;
+    using file_ticks = std::chrono::duration<
+        std::filesystem::file_time_type::rep, std::ratio<1, 10000000>>;
 #if defined(_MSC_VER)
     const auto ticks =
         std::chrono::duration_cast<file_ticks>(value.time_since_epoch())
             .count();
 #else
     constexpr std::int64_t unix_to_windows_epoch_ticks = 116444736000000000LL;
-    const auto sys_ticks = std::chrono::duration_cast<file_ticks>(
+    const auto sys_ticks = std::chrono::floor<file_ticks>(
                                file_clock_to_sys(value).time_since_epoch())
                                .count();
     if (sys_ticks > std::numeric_limits<std::int64_t>::max() -
@@ -131,48 +137,18 @@ to_windows_ticks(std::filesystem::file_time_type value) noexcept {
 
 namespace {
 
-template <typename Duration>
 std::optional<std::int64_t>
-duration_to_nanoseconds(Duration duration) noexcept {
-    using Rep = typename Duration::rep;
+duration_to_nanoseconds(
+    std::filesystem::file_time_type::duration duration) noexcept {
+    using Duration = std::filesystem::file_time_type::duration;
     using Factor = std::ratio_divide<typename Duration::period, std::nano>;
-    static_assert(std::is_integral_v<Rep> && std::is_signed_v<Rep>);
-    static_assert(Factor::num > 0 && Factor::den > 0);
-
-    const auto value = static_cast<std::intmax_t>(duration.count());
-    const bool negative = value < 0;
-    const auto magnitude = negative
-                               ? static_cast<std::uintmax_t>(-(value + 1)) + 1U
-                               : static_cast<std::uintmax_t>(value);
-    const auto numerator = static_cast<std::uintmax_t>(Factor::num);
-    const auto denominator = static_cast<std::uintmax_t>(Factor::den);
-    const auto whole = magnitude / denominator;
-    const auto remainder = magnitude % denominator;
-    if (whole > std::numeric_limits<std::uintmax_t>::max() / numerator ||
-        remainder > std::numeric_limits<std::uintmax_t>::max() / numerator) {
+    static_assert(Factor::den == 1);
+    const auto ticks = duration.count();
+    if (ticks > std::numeric_limits<std::int64_t>::max() / Factor::num ||
+        ticks < std::numeric_limits<std::int64_t>::lowest() / Factor::num) {
         return std::nullopt;
     }
-    const auto whole_nanos = whole * numerator;
-    const auto fractional_nanos = (remainder * numerator) / denominator;
-    if (whole_nanos >
-        std::numeric_limits<std::uintmax_t>::max() - fractional_nanos) {
-        return std::nullopt;
-    }
-    const auto nanos = whole_nanos + fractional_nanos;
-    constexpr auto positive_limit =
-        static_cast<std::uintmax_t>(std::numeric_limits<std::int64_t>::max());
-    constexpr auto negative_limit = positive_limit + 1U;
-    if ((!negative && nanos > positive_limit) ||
-        (negative && nanos > negative_limit)) {
-        return std::nullopt;
-    }
-    if (negative) {
-        if (nanos == negative_limit) {
-            return std::numeric_limits<std::int64_t>::lowest();
-        }
-        return -static_cast<std::int64_t>(nanos);
-    }
-    return static_cast<std::int64_t>(nanos);
+    return static_cast<std::int64_t>(ticks) * Factor::num;
 }
 
 std::expected<std::filesystem::file_status, std::string>

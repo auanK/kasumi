@@ -708,7 +708,359 @@ reconcile_merge_bases(const Index& index, std::vector<std::string> bases) {
     return base;
 }
 
+void write_storage_manifest(wire::Writer& writer,
+                            const StorageManifest& manifest) {
+    wire::write(writer,
+                static_cast<std::uint32_t>(manifest.packed_blobs.size()));
+    for (const auto& entry : manifest.packed_blobs) {
+        wire::write_array(writer, entry.blob_hash);
+        wire::write(writer, static_cast<std::uint64_t>(entry.size));
+        wire::write_array(writer, entry.pack_hash);
+    }
+    wire::write(writer,
+                static_cast<std::uint32_t>(manifest.chunked_files.size()));
+    for (const auto& entry : manifest.chunked_files) {
+        wire::write_array(writer, entry.file_hash);
+        wire::write(writer, static_cast<std::uint64_t>(entry.file_size));
+        wire::write(writer, static_cast<std::uint32_t>(entry.chunks.size()));
+        for (const auto& chunk : entry.chunks) {
+            wire::write_array(writer, chunk.hash);
+            wire::write(writer, static_cast<std::uint32_t>(chunk.size));
+        }
+    }
+}
+
+std::expected<StorageManifest, Error>
+read_storage_manifest(wire::Reader& reader) {
+    const auto fail = [](ErrorCode code, const char* msg) {
+        return std::unexpected(Error{code, msg});
+    };
+
+    auto packed_count = wire::read<std::uint32_t>(reader);
+    if (!packed_count) {
+        return fail(ErrorCode::InvalidEncoding, "truncated packed blob count");
+    }
+    if (*packed_count > maximum_packed_blob_entries ||
+        static_cast<std::uint64_t>(*packed_count) * 72ULL >
+            reader.data.size()) {
+        return fail(ErrorCode::LimitExceeded,
+                    "packed blob manifest exceeds bounds");
+    }
+
+    StorageManifest manifest;
+    manifest.packed_blobs.reserve(*packed_count);
+    for (std::uint32_t i = 0; i < *packed_count; ++i) {
+        auto blob_hash = wire::read_array<HASH_SIZE>(reader);
+        auto size = wire::read<std::uint64_t>(reader);
+        auto pack_hash = wire::read_array<HASH_SIZE>(reader);
+        if (!blob_hash || !size || !pack_hash ||
+            *size > maximum_packed_blob_size) {
+            return fail(ErrorCode::InvalidEncoding,
+                        "truncated or oversized packed blob entry");
+        }
+        if (i > 0 && !(manifest.packed_blobs.back().blob_hash < *blob_hash)) {
+            return fail(ErrorCode::InvalidEncoding,
+                        "packed blobs not strictly sorted");
+        }
+        manifest.packed_blobs.push_back(PackedBlobEntry{
+            .blob_hash = *blob_hash,
+            .size = *size,
+            .pack_hash = *pack_hash,
+        });
+    }
+
+    auto chunked_count = wire::read<std::uint32_t>(reader);
+    if (!chunked_count) {
+        return fail(ErrorCode::InvalidEncoding, "truncated chunked file count");
+    }
+    if (*chunked_count > maximum_chunked_file_entries ||
+        static_cast<std::uint64_t>(*chunked_count) * 44ULL >
+            reader.data.size()) {
+        return fail(ErrorCode::LimitExceeded,
+                    "chunked file manifest exceeds bounds");
+    }
+
+    manifest.chunked_files.reserve(*chunked_count);
+    for (std::uint32_t i = 0; i < *chunked_count; ++i) {
+        auto file_hash = wire::read_array<HASH_SIZE>(reader);
+        auto file_size = wire::read<std::uint64_t>(reader);
+        auto chunk_count = wire::read<std::uint32_t>(reader);
+        if (!file_hash || !file_size || !chunk_count) {
+            return fail(ErrorCode::InvalidEncoding,
+                        "truncated chunked file entry");
+        }
+        if (*chunk_count == 0 || *chunk_count > maximum_chunks_per_file ||
+            static_cast<std::uint64_t>(*chunk_count) * 36ULL >
+                reader.data.size()) {
+            return fail(ErrorCode::LimitExceeded,
+                        "chunk list exceeds bounds or is empty");
+        }
+        if (i > 0 && !(manifest.chunked_files.back().file_hash < *file_hash)) {
+            return fail(ErrorCode::InvalidEncoding,
+                        "chunked files not strictly sorted");
+        }
+
+        ChunkedFileEntry entry{.file_hash = *file_hash,
+                               .file_size = *file_size,
+                               .chunks = {}};
+        entry.chunks.reserve(*chunk_count);
+        std::uint64_t total_chunk_bytes = 0;
+        for (std::uint32_t c = 0; c < *chunk_count; ++c) {
+            auto chunk_hash = wire::read_array<HASH_SIZE>(reader);
+            auto chunk_size = wire::read<std::uint32_t>(reader);
+            if (!chunk_hash || !chunk_size) {
+                return fail(ErrorCode::InvalidEncoding,
+                            "truncated chunk entry");
+            }
+            if (*chunk_size == 0 || *chunk_size > maximum_chunk_slice_size ||
+                *chunk_size > *file_size - total_chunk_bytes) {
+                return fail(ErrorCode::InvalidEncoding,
+                            "invalid chunk size sum");
+            }
+            total_chunk_bytes += *chunk_size;
+            entry.chunks.push_back(ChunkSlice{
+                .hash = *chunk_hash,
+                .size = *chunk_size,
+            });
+        }
+        if (total_chunk_bytes != *file_size) {
+            return fail(ErrorCode::InvalidEncoding,
+                        "chunked file size does not match chunks");
+        }
+        manifest.chunked_files.push_back(std::move(entry));
+    }
+
+    return manifest;
+}
+
 } // namespace
+
+bool valid_storage_manifest(const StorageManifest& manifest,
+                            const Snapshot& tree) noexcept {
+    try {
+        if (manifest.packed_blobs.size() > maximum_packed_blob_entries ||
+            manifest.chunked_files.size() > maximum_chunked_file_entries) {
+            return false;
+        }
+        if (manifest.empty()) {
+            return true;
+        }
+
+        std::vector<std::pair<Hash, std::uint64_t>> live_files;
+        live_files.reserve(tree.rows.size());
+        for (const auto& row : tree.rows) {
+            if (!row.is_directory && row.path != ".kasumiignore") {
+                live_files.emplace_back(row.hash, row.size);
+            }
+        }
+        std::ranges::sort(live_files);
+        live_files.erase(std::ranges::unique(live_files).begin(),
+                         live_files.end());
+
+        for (std::size_t i = 0; i < manifest.packed_blobs.size(); ++i) {
+            const auto& entry = manifest.packed_blobs[i];
+            if (i > 0 &&
+                !(manifest.packed_blobs[i - 1].blob_hash < entry.blob_hash)) {
+                return false;
+            }
+            if (entry.size > maximum_packed_blob_size) {
+                return false;
+            }
+            if (!std::ranges::binary_search(
+                    live_files, std::pair{entry.blob_hash, entry.size})) {
+                return false;
+            }
+        }
+
+        for (std::size_t i = 0; i < manifest.chunked_files.size(); ++i) {
+            const auto& entry = manifest.chunked_files[i];
+            if (i > 0 &&
+                !(manifest.chunked_files[i - 1].file_hash < entry.file_hash)) {
+                return false;
+            }
+            if (find_packed_blob(manifest, entry.file_hash) != nullptr) {
+                return false;
+            }
+            if (entry.chunks.empty() ||
+                entry.chunks.size() > maximum_chunks_per_file) {
+                return false;
+            }
+            std::uint64_t sum = 0;
+            for (const auto& chunk : entry.chunks) {
+                if (chunk.size == 0 || chunk.size > maximum_chunk_slice_size ||
+                    chunk.size > entry.file_size - sum) {
+                    return false;
+                }
+                sum += chunk.size;
+            }
+            if (sum != entry.file_size) {
+                return false;
+            }
+            if (!std::ranges::binary_search(
+                    live_files, std::pair{entry.file_hash, entry.file_size})) {
+                return false;
+            }
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+const PackedBlobEntry* find_packed_blob(const StorageManifest& manifest,
+                                        const Hash& blob_hash) noexcept {
+    const auto it = std::ranges::lower_bound(
+        manifest.packed_blobs, blob_hash, {}, &PackedBlobEntry::blob_hash);
+    if (it != manifest.packed_blobs.end() && it->blob_hash == blob_hash) {
+        return &*it;
+    }
+    return nullptr;
+}
+
+const ChunkedFileEntry* find_chunked_file(const StorageManifest& manifest,
+                                          const Hash& file_hash) noexcept {
+    const auto it = std::ranges::lower_bound(
+        manifest.chunked_files, file_hash, {}, &ChunkedFileEntry::file_hash);
+    if (it != manifest.chunked_files.end() && it->file_hash == file_hash) {
+        return &*it;
+    }
+    return nullptr;
+}
+
+BytesResult serialize_storage_manifest(const StorageManifest& manifest) {
+    try {
+        wire::Writer writer;
+        write_storage_manifest(writer, manifest);
+        if (writer.buffer.size() > maximum_commit_plaintext_size) {
+            return std::unexpected(
+                Error{ErrorCode::LimitExceeded, "manifest exceeds max size"});
+        }
+        std::vector<std::uint8_t> result(writer.buffer.size());
+        if (!result.empty()) {
+            std::memcpy(
+                result.data(), writer.buffer.data(), writer.buffer.size());
+        }
+        return result;
+    } catch (const std::bad_alloc&) {
+        return std::unexpected(
+            Error{ErrorCode::LimitExceeded, "allocation failed"});
+    } catch (...) {
+        return std::unexpected(
+            Error{ErrorCode::InvalidEncoding, "exception encoding manifest"});
+    }
+}
+
+std::expected<StorageManifest, Error>
+deserialize_storage_manifest(std::span<const std::uint8_t> bytes,
+                             const Snapshot& tree) {
+    if (bytes.size() > maximum_commit_plaintext_size) {
+        return std::unexpected(
+            Error{ErrorCode::LimitExceeded, "manifest exceeds max size"});
+    }
+    try {
+        wire::Reader reader{
+            {reinterpret_cast<const std::byte*>(bytes.data()), bytes.size()}};
+        auto manifest = read_storage_manifest(reader);
+        if (!manifest) {
+            return std::unexpected(manifest.error());
+        }
+        if (!reader.data.empty()) {
+            return std::unexpected(Error{ErrorCode::InvalidEncoding,
+                                         "trailing bytes in storage manifest"});
+        }
+        if (!valid_storage_manifest(*manifest, tree)) {
+            return std::unexpected(Error{ErrorCode::InvalidCommit,
+                                         "storage manifest invalid for tree"});
+        }
+        return manifest;
+    } catch (const std::bad_alloc&) {
+        return std::unexpected(
+            Error{ErrorCode::LimitExceeded, "allocation failed"});
+    } catch (...) {
+        return std::unexpected(
+            Error{ErrorCode::InvalidEncoding, "exception decoding manifest"});
+    }
+}
+
+StorageManifest
+filter_and_merge_storage_manifests(const Snapshot& tree,
+                                   std::span<const StorageManifest> manifests) {
+    StorageManifest merged;
+    if (std::ranges::all_of(manifests, [](const auto& m) {
+            return m.empty();
+        })) {
+        return merged;
+    }
+
+    std::unordered_map<Hash, std::uint64_t, decltype(&hash_key)> live{
+        0, hash_key};
+    live.reserve(tree.rows.size());
+    for (const auto& row : tree.rows) {
+        if (!row.is_directory && row.path != ".kasumiignore") {
+            live.emplace(row.hash, row.size);
+        }
+    }
+    if (live.empty()) {
+        return merged;
+    }
+
+    std::unordered_map<Hash, PackedBlobEntry, decltype(&hash_key)> packed_map{
+        0, hash_key};
+    std::unordered_map<Hash, ChunkedFileEntry, decltype(&hash_key)> chunked_map{
+        0, hash_key};
+
+    for (const auto& candidate : manifests) {
+        for (const auto& entry : candidate.packed_blobs) {
+            const auto found_live = live.find(entry.blob_hash);
+            if (found_live == live.end() || found_live->second != entry.size) {
+                continue;
+            }
+            auto [it, inserted] = packed_map.try_emplace(entry.blob_hash, entry);
+            if (!inserted && entry.pack_hash < it->second.pack_hash) {
+                it->second = entry;
+            }
+        }
+        for (const auto& entry : candidate.chunked_files) {
+            const auto found_live = live.find(entry.file_hash);
+            if (found_live == live.end() ||
+                found_live->second != entry.file_size ||
+                entry.chunks.empty()) {
+                continue;
+            }
+            auto [it, inserted] =
+                chunked_map.try_emplace(entry.file_hash, entry);
+            if (!inserted) {
+                const bool smaller = std::ranges::lexicographical_compare(
+                    entry.chunks,
+                    it->second.chunks,
+                    [](const ChunkSlice& a, const ChunkSlice& b) {
+                        return a.hash != b.hash ? a.hash < b.hash
+                                                : a.size < b.size;
+                    });
+                if (smaller) {
+                    it->second = entry;
+                }
+            }
+        }
+    }
+
+    merged.packed_blobs.reserve(packed_map.size());
+    for (auto& [unused, entry] : packed_map) {
+        static_cast<void>(unused);
+        merged.packed_blobs.push_back(std::move(entry));
+    }
+    std::ranges::sort(merged.packed_blobs, {}, &PackedBlobEntry::blob_hash);
+
+    merged.chunked_files.reserve(chunked_map.size());
+    for (auto& [unused, entry] : chunked_map) {
+        static_cast<void>(unused);
+        if (!packed_map.contains(entry.file_hash)) {
+            merged.chunked_files.push_back(std::move(entry));
+        }
+    }
+    std::ranges::sort(merged.chunked_files, {}, &ChunkedFileEntry::file_hash);
+    return merged;
+}
 
 bool valid_commit_id(std::string_view id) noexcept {
     return id.size() == HASH_HEX_SIZE && is_lowercase_hex(id);
@@ -738,7 +1090,8 @@ validate_parent_ids(std::span<const std::string> parents, bool require_sorted) {
 CommitResult make_commit(std::uint64_t height,
                          std::vector<std::string> parents,
                          Snapshot tree,
-                         std::int64_t created_at) {
+                         std::int64_t created_at,
+                         StorageManifest storage) {
     try {
         if (auto valid = validate_parent_ids(parents, false); !valid) {
             return std::unexpected(valid.error());
@@ -752,10 +1105,15 @@ CommitResult make_commit(std::uint64_t height,
         if (!valid) {
             return std::unexpected(valid.error());
         }
+        if (!valid_storage_manifest(storage, tree)) {
+            return std::unexpected(
+                Error{ErrorCode::InvalidCommit, "invalid storage manifest"});
+        }
         return Commit{.height = height,
                       .created_at = created_at,
                       .parents = std::move(parents),
-                      .tree = std::move(tree)};
+                      .tree = std::move(tree),
+                      .storage = std::move(storage)};
     } catch (const std::bad_alloc&) {
         return std::unexpected(
             Error{ErrorCode::LimitExceeded, "allocation failed"});
@@ -765,9 +1123,12 @@ CommitResult make_commit(std::uint64_t height,
     }
 }
 
-CommitResult
-make_bootstrap(Snapshot tree, std::uint64_t height, std::int64_t created_at) {
-    return make_commit(height, {}, std::move(tree), created_at);
+CommitResult make_bootstrap(Snapshot tree,
+                            std::uint64_t height,
+                            std::int64_t created_at,
+                            StorageManifest storage) {
+    return make_commit(
+        height, {}, std::move(tree), created_at, std::move(storage));
 }
 
 CommitResult make_empty_bootstrap(std::int64_t created_at) {
@@ -795,19 +1156,27 @@ BytesResult serialize(const Commit& commit) {
             return std::unexpected(parents_valid.error());
         }
 
+        if (auto valid_manifest =
+                valid_storage_manifest(commit.storage, commit.tree);
+            !valid_manifest) {
+            return std::unexpected(
+                Error{ErrorCode::InvalidCommit, "invalid storage manifest"});
+        }
+
         auto tree_bytes = serialize_tree(commit.tree, commit.height);
         if (tree_bytes.size() > maximum_commit_plaintext_size) {
             return std::unexpected(Error{ErrorCode::LimitExceeded,
                                          "tree size exceeds maximum size"});
         }
 
+        constexpr std::uint8_t format_version = 3U;
         wire::Writer writer;
         wire::write_array(writer,
                           std::array<std::byte, 4>{std::byte{'K'},
                                                    std::byte{'C'},
                                                    std::byte{'O'},
                                                    std::byte{'M'}});
-        wire::write(writer, static_cast<uint8_t>(2));
+        wire::write(writer, format_version);
         wire::write(writer, static_cast<uint64_t>(commit.height));
         wire::write<int64_t>(writer, commit.created_at);
         wire::write(writer, static_cast<uint32_t>(commit.parents.size()));
@@ -821,6 +1190,7 @@ BytesResult serialize(const Commit& commit) {
         }
         wire::write(writer, static_cast<uint64_t>(tree_bytes.size()));
         wire::write_bytes(writer, tree_bytes);
+        write_storage_manifest(writer, commit.storage);
         if (writer.buffer.size() > maximum_commit_plaintext_size) {
             return std::unexpected(
                 Error{ErrorCode::LimitExceeded, "commit exceeds maximum size"});
@@ -857,7 +1227,7 @@ CommitResult deserialize(std::span<const std::uint8_t> bytes) {
                         magic ? "invalid magic" : "truncated magic");
         }
         auto version = wire::read<uint8_t>(reader);
-        if (!version || *version != 2) {
+        if (!version || *version != 3) {
             return fail(version ? ErrorCode::UnsupportedVersion
                                 : ErrorCode::InvalidEncoding,
                         version ? "unsupported version" : "truncated version");
@@ -896,9 +1266,17 @@ CommitResult deserialize(std::span<const std::uint8_t> bytes) {
         }
         auto tree_bytes =
             wire::read_bytes(reader, static_cast<std::size_t>(*tree_size));
-        if (!tree_bytes || !reader.data.empty()) {
-            return fail(ErrorCode::InvalidEncoding,
-                        tree_bytes ? "trailing bytes" : "truncated tree");
+        if (!tree_bytes) {
+            return fail(ErrorCode::InvalidEncoding, "truncated tree");
+        }
+
+        auto parsed_manifest = read_storage_manifest(reader);
+        if (!parsed_manifest) {
+            return std::unexpected(parsed_manifest.error());
+        }
+        StorageManifest storage = std::move(*parsed_manifest);
+        if (!reader.data.empty()) {
+            return fail(ErrorCode::InvalidEncoding, "trailing bytes");
         }
 
         uint64_t generation = 0;
@@ -913,10 +1291,15 @@ CommitResult deserialize(std::span<const std::uint8_t> bytes) {
         if (auto valid = validate_snapshot_structure(*tree); !valid) {
             return std::unexpected(valid.error());
         }
+        if (!valid_storage_manifest(storage, *tree)) {
+            return fail(ErrorCode::InvalidCommit,
+                        "commit storage manifest does not match tree");
+        }
         return Commit{.height = *height,
                       .created_at = *created_at,
                       .parents = std::move(parents),
-                      .tree = std::move(*tree)};
+                      .tree = std::move(*tree),
+                      .storage = std::move(storage)};
     } catch (const std::bad_alloc&) {
         return fail(ErrorCode::LimitExceeded, "allocation failed");
     } catch (...) {
@@ -997,6 +1380,12 @@ resolve_impl(std::span<const LoadedCommit> commits,
             auto valid = validate_snapshot_structure(loaded.commit.tree);
             if (!valid)
                 return std::unexpected(valid.error());
+            if (!valid_storage_manifest(loaded.commit.storage,
+                                        loaded.commit.tree)) {
+                return std::unexpected(
+                    Error{ErrorCode::InvalidCommit,
+                          "commit storage manifest is invalid for snapshot"});
+            }
             if (trusted_anchors.contains(loaded.id)) {
                 if (!loaded.commit.parents.empty()) {
                     return std::unexpected(
@@ -1099,7 +1488,8 @@ resolve_impl(std::span<const LoadedCommit> commits,
             return Resolution{.tree = index.at(head)->commit.tree,
                               .height = index.at(head)->commit.height,
                               .heads = {head},
-                              .has_conflicts = false};
+                              .has_conflicts = false,
+                              .storage = index.at(head)->commit.storage};
         }
 
         std::unordered_set<std::string> common_ancestors =
@@ -1149,10 +1539,27 @@ resolve_impl(std::span<const LoadedCommit> commits,
         std::uint64_t height = 0;
         for (const auto& head : logical_heads)
             height = std::max(height, index.at(head)->commit.height);
+        std::vector<StorageManifest> candidate_manifests;
+        std::unordered_set<std::string_view> seen_manifest_commits;
+        for (const auto& head : logical_heads) {
+            for (const auto& ancestor_id : ancestor_sets.at(head)) {
+                if (seen_manifest_commits.insert(ancestor_id).second) {
+                    const auto it = index.find(ancestor_id);
+                    if (it != index.end() &&
+                        !it->second->commit.storage.empty()) {
+                        candidate_manifests.push_back(
+                            it->second->commit.storage);
+                    }
+                }
+            }
+        }
+        auto resolved_storage = filter_and_merge_storage_manifests(
+            *merged, candidate_manifests);
         return Resolution{.tree = std::move(*merged),
                           .height = height,
                           .heads = std::move(logical_heads),
-                          .has_conflicts = has_conflicts};
+                          .has_conflicts = has_conflicts,
+                          .storage = std::move(resolved_storage)};
     } catch (const std::bad_alloc&) {
         return std::unexpected(
             Error{ErrorCode::LimitExceeded, "memory allocation failed"});

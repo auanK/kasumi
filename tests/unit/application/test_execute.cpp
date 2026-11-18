@@ -53,7 +53,8 @@ void write_profile(const TempWorkspace& workspace) {
             kasumi::test::workspace_path(workspace, "local").string() +
             "'\nremote_dir = '" +
             kasumi::test::workspace_path(workspace, "remote").string() +
-            "'\nmin_history_depth = 5\nmin_history_age_hours = 6\n");
+            "'\nmin_history_depth = 5\nmin_history_age_hours = 6\n"
+            "key_storage = 'file'\n");
     ASSERT_TRUE(kasumi::state_storage::initialize(kasumi::test::workspace_path(
         workspace, "app/profiles/demo/db.sqlite")));
 }
@@ -765,7 +766,7 @@ TEST(ApplicationExecuteTest,
         "[profiles.demo]\nlocal_dir = '" +
             kasumi::test::workspace_path(workspace, "local").string() +
             "'\nremote_dir = 'remote:root'\nmin_history_depth = 4097\n"
-            "min_history_age_hours = 6\n");
+            "min_history_age_hours = 6\nkey_storage = 'file'\n");
 
     const auto result =
         kasumi::application::execute({Request{Operation::Preview, "demo"},
@@ -956,7 +957,7 @@ TEST(ApplicationExecuteTest,
         kasumi::test::workspace_path(workspace, "app/config.toml"),
         "[profiles.demo]\nlocal_dir = '" + profile.local_dir.string() +
             "'\nremote_dir = 'rclone:'\nmin_history_depth = 5\n"
-            "min_history_age_hours = 6\n");
+            "min_history_age_hours = 6\nkey_storage = 'file'\n");
 
     kasumi::application::detail::OperationContext context{};
     const auto prepared = kasumi::application::detail::prepare_operation(

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(kasumi VERSION 0.12.0 LANGUAGES C CXX)
+project(kasumi VERSION 0.14.0 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 23)
@@ -70,11 +70,14 @@ add_library(kasumi_hardening INTERFACE)
 if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
     target_compile_options(kasumi_hardening INTERFACE
         /GS
+        /guard:cf
     )
     target_link_options(kasumi_hardening INTERFACE
         /DYNAMICBASE
         /NXCOMPAT
         /HIGHENTROPYVA
+        /guard:cf
+        /CETCOMPAT
     )
 else()
     include(CheckCXXCompilerFlag)
@@ -84,6 +87,18 @@ else()
     check_cxx_compiler_flag("-fstack-protector-strong" KASUMI_HAS_STACK_PROTECTOR_STRONG)
     if(KASUMI_HAS_STACK_PROTECTOR_STRONG)
         target_compile_options(kasumi_hardening INTERFACE -fstack-protector-strong)
+    endif()
+
+    check_cxx_compiler_flag("-fstack-clash-protection" KASUMI_HAS_STACK_CLASH_PROTECTION)
+    if(KASUMI_HAS_STACK_CLASH_PROTECTION)
+        target_compile_options(kasumi_hardening INTERFACE -fstack-clash-protection)
+    endif()
+
+    if(NOT WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i.86)$")
+        check_cxx_compiler_flag("-fcf-protection=full" KASUMI_HAS_CF_PROTECTION)
+        if(KASUMI_HAS_CF_PROTECTION)
+            target_compile_options(kasumi_hardening INTERFACE -fcf-protection=full)
+        endif()
     endif()
 
     if(WIN32)
@@ -229,6 +244,17 @@ if(WIN32)
     set(HTTPLIB_USE_NON_BLOCKING_GETADDRINFO OFF CACHE BOOL "" FORCE)
 endif()
 
+include(CheckPIESupported)
+check_pie_supported(OUTPUT_VARIABLE pie_check_output LANGUAGES C CXX)
+set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
+
+include(CheckIPOSupported)
+check_ipo_supported(RESULT ipo_supported)
+if(ipo_supported AND NOT (CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND WIN32))
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
+endif()
+
 FetchContent_Declare(
     reproc
     GIT_REPOSITORY https://github.com/DaanDeMeyer/reproc.git
@@ -236,12 +262,34 @@ FetchContent_Declare(
     SYSTEM
 )
 
+include(CheckPIESupported)
+check_pie_supported(OUTPUT_VARIABLE pie_check_output LANGUAGES C CXX)
+set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
+
+include(CheckIPOSupported)
+check_ipo_supported(RESULT ipo_supported)
+if(ipo_supported AND NOT (CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND WIN32))
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
+endif()
+
 FetchContent_Declare(
     cpp_httplib
     GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
     GIT_TAG d66d9a95997d51a8ba9822a611d1267757741535
     SYSTEM
 )
+
+include(CheckPIESupported)
+check_pie_supported(OUTPUT_VARIABLE pie_check_output LANGUAGES C CXX)
+set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
+
+include(CheckIPOSupported)
+check_ipo_supported(RESULT ipo_supported)
+if(ipo_supported AND NOT (CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND WIN32))
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
+endif()
 
 FetchContent_Declare(
     nlohmann_json
@@ -269,6 +317,17 @@ endif()
 set(UTF8PROC_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
 set(UTF8PROC_INSTALL OFF CACHE BOOL "" FORCE)
 
+include(CheckPIESupported)
+check_pie_supported(OUTPUT_VARIABLE pie_check_output LANGUAGES C CXX)
+set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
+
+include(CheckIPOSupported)
+check_ipo_supported(RESULT ipo_supported)
+if(ipo_supported AND NOT (CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND WIN32))
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
+endif()
+
 FetchContent_Declare(
     utf8proc
     URL https://github.com/JuliaStrings/utf8proc/archive/refs/tags/v2.11.3.tar.gz
@@ -288,6 +347,24 @@ fetchcontent_declare(
 )
 fetchcontent_makeavailable(blake3)
 
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "" FORCE)
+set(ZSTD_MULTITHREAD_SUPPORT OFF CACHE BOOL "" FORCE)
+fetchcontent_declare(
+    zstd
+    GIT_REPOSITORY https://github.com/facebook/zstd.git
+    GIT_TAG f8745da6ff1ad1e7bab384bd1f9d742439278e99
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR build/cmake
+    EXCLUDE_FROM_ALL
+    SYSTEM
+)
+fetchcontent_makeavailable(zstd)
+
 fetchcontent_declare(
     sqlite_amalgamation
     URL https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip
@@ -301,6 +378,14 @@ add_library(kasumi_sqlite3 STATIC
 target_include_directories(kasumi_sqlite3 PUBLIC
     ${sqlite_amalgamation_SOURCE_DIR}
 )
+target_compile_definitions(kasumi_sqlite3 PRIVATE
+    SQLITE_DQS=0
+    SQLITE_DEFAULT_MEMSTATUS=0
+    SQLITE_OMIT_LOAD_EXTENSION=1
+    SQLITE_LIKE_DOESNT_MATCH_BLOBS=1
+    SQLITE_MAX_EXPR_DEPTH=64
+)
+target_link_libraries(kasumi_sqlite3 PRIVATE kasumi_hardening)
 if(CMAKE_C_COMPILER_ID MATCHES "GNU")
     target_compile_options(kasumi_sqlite3 PRIVATE -Wno-stringop-overread $<$<CONFIG:Release>:-O2>)
 endif()
@@ -340,6 +425,7 @@ fetchcontent_makeavailable(monocypher)
 
 add_library(monocypher STATIC ${monocypher_SOURCE_DIR}/src/monocypher.c)
 target_include_directories(monocypher PUBLIC ${monocypher_SOURCE_DIR}/src)
+target_link_libraries(monocypher PRIVATE kasumi_hardening)
 
 add_library(kasumi_platform STATIC
     src/platform/cancellation.cpp
@@ -359,10 +445,6 @@ target_include_directories(
     PUBLIC
     include
 )
-
-if(BUILD_TESTING)
-    target_compile_definitions(kasumi_platform PRIVATE KASUMI_WORKSPACE_FAULT_TESTS)
-endif()
 
 target_link_libraries(
     kasumi_platform
@@ -398,6 +480,7 @@ add_library(kasumi_crypto STATIC
     src/crypto/content.cpp
     src/crypto/file_crypto.cpp
     src/crypto/key_derivation.cpp
+    src/crypto/pack.cpp
     src/crypto/physical_hash.cpp
     src/crypto/secure_memory.cpp
 )
@@ -406,6 +489,8 @@ target_include_directories(
     kasumi_crypto
     PUBLIC
     include
+    PRIVATE
+    ${zstd_SOURCE_DIR}/lib
 )
 
 target_link_libraries(
@@ -415,6 +500,7 @@ target_link_libraries(
     PRIVATE
     kasumi_platform
     blake3
+    libzstd_static
     monocypher
     kasumi_warnings
     kasumi_release_optimizations
@@ -590,6 +676,7 @@ target_link_libraries(
     kasumi_application
     PRIVATE
     kasumi_crypto
+    monocypher
     kasumi_warnings
     kasumi_release_optimizations
     kasumi_hardening

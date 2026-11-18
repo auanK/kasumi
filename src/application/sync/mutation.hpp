@@ -101,6 +101,17 @@ apply_operation(const Operation& operation,
                 DownloadCacheMode download_cache = DownloadCacheMode::None,
                 const DestinationPrecondition* destination = nullptr);
 
+// Installs a previously extracted/reassembled verified plaintext file into the
+// local destination with full transactional backup/atomic-install guarantees.
+MutationResult apply_preverified_download(
+    const Operation& operation,
+    std::size_t operation_index,
+    const std::filesystem::path& local_root,
+    const std::filesystem::path& verified_plaintext_source,
+    const platform::Workspace& workspace,
+    const transaction::OperationProgress& progress,
+    const DestinationPrecondition* destination = nullptr);
+
 // Formats a mutation failure.
 std::string describe(const MutationError& error);
 

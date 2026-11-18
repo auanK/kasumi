@@ -128,8 +128,8 @@ Snapshot (Merkle Tree)
  History Commit DAG
 ```
 
-A Commit contains a canonical Snapshot together with its parent commit IDs, height, and authenticated timestamp metadata. Parent commit IDs connect the commit into the history DAG. Multi-parent merge resolution is detailed in [History DAG, Concurrency & Retention](history-and-concurrency.md).
+A Commit contains a canonical Snapshot together with its parent commit IDs, height, authenticated timestamp metadata, and a canonical `StorageManifest` (`packed_blobs` and `chunked_files`). While every file `NodeRow` in the `Snapshot` always records the whole-file logical BLAKE3 hash and total byte size—keeping Merkle tree hashing and logical snapshot comparison independent of how payloads are stored—the `StorageManifest` maps packed small files (`<= 256 KiB`) to their `KPAK\x01` Pack ID and slice bounds, and maps FastCDC-chunked large files (`> 8 MiB`) to their ordered sequence of `ChunkSlice` hashes and sizes. Files not listed in `StorageManifest` are stored as loose whole-file Content objects. Parent commit IDs connect the commit into the history DAG. Multi-parent merge resolution is detailed in [History DAG, Concurrency & Retention](history-and-concurrency.md).
 
 ## Accepted State and Observation
 
-SQLite `StoredState` persists an accepted Snapshot and its history reference, making it the [reconciliation base](local-state.md#sqlites-two-distinct-responsibilities) for the next run. The [Local Observation](local-observation.md) page owns uniform metadata scanning, persistent file-hash reuse, and full hashing.
+SQLite `StoredState` persists an accepted Snapshot, its `StorageManifest`, and its history reference, making it the [reconciliation base](local-state.md#sqlites-two-distinct-responsibilities) for the next run. The [Local Observation](local-observation.md) page owns uniform metadata scanning, persistent file-hash reuse, and full hashing.

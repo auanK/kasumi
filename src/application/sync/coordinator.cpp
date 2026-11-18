@@ -16,7 +16,10 @@
 #include "core/history.hpp"
 #include "core/reconciliation/plan.hpp"
 #include "core/transaction/types.hpp"
+#include "crypto/content.hpp"
 #include "crypto/key_derivation.hpp"
+#include "crypto/pack.hpp"
+#include "crypto/secure_memory.hpp"
 #include "journal_fault_test.hpp"
 #include "platform/clock.hpp"
 #include "platform/durability.hpp"
@@ -24,6 +27,7 @@
 #include "platform/path.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
+#include "platform/workspace.hpp"
 #include "state_storage/database.hpp"
 
 #include <algorithm>
@@ -1385,6 +1389,7 @@ struct ContentWorkItem {
     std::size_t index = 0;
     transaction::OperationProgress progress;
     std::optional<mutation::DestinationPrecondition> destination;
+    mutation::DownloadCacheMode cache_mode = mutation::DownloadCacheMode::None;
 };
 
 struct ContentWindowState {
@@ -1426,7 +1431,7 @@ void run_content_worker(std::stop_token stop,
                 key,
                 workspace,
                 task.progress,
-                mutation::DownloadCacheMode::None,
+                task.cache_mode,
                 task.destination ? &*task.destination : nullptr);
             if (!applied) {
                 result.error = applied.error();
@@ -1467,6 +1472,7 @@ run_content_window(
     const platform::Workspace& workspace,
     std::span<const std::optional<mutation::DestinationPrecondition>>
         destinations,
+    std::span<const mutation::DownloadCacheMode> cache_modes,
     journal::Session* session = nullptr) {
     const auto worker_count = std::min(parallelism, indices.size());
     ContentWindowState state;
@@ -1497,9 +1503,13 @@ run_content_window(
     const auto admit = [&](std::size_t slot) {
         {
             std::lock_guard lock(state.mutex);
-            const auto index = indices[next++];
+            const auto pos = next++;
+            const auto index = indices[pos];
+            const auto mode = pos < cache_modes.size()
+                                  ? cache_modes[pos]
+                                  : mutation::DownloadCacheMode::None;
             state.tasks[slot] = ContentWorkItem{
-                index, record.progress[index], destinations[index]};
+                index, record.progress[index], destinations[index], mode};
             ++outstanding;
         }
         state.changed.notify_all();
@@ -1510,9 +1520,10 @@ run_content_window(
 
     std::optional<std::pair<std::size_t, mutation::MutationError>> failure;
     std::optional<Error> checkpoint_failure;
+    std::vector<std::pair<std::size_t, ContentWorkResult>> batch;
+    batch.reserve(worker_count);
     while (outstanding != 0) {
-        std::size_t slot = 0;
-        ContentWorkResult result;
+        batch.clear();
         {
             std::unique_lock lock(state.mutex);
             state.changed.wait(lock, [&] {
@@ -1521,30 +1532,29 @@ run_content_window(
                                                return item.has_value();
                                            });
             });
-            auto completed =
-                std::ranges::find_if(state.completions, [](const auto& item) {
-                    return item && item->error.has_value();
-                });
-            if (completed == state.completions.end()) {
-                completed = std::ranges::find_if(state.completions,
-                                                 [](const auto& item) {
-                                                     return item.has_value();
-                                                 });
+            for (std::size_t slot = 0; slot < worker_count; ++slot) {
+                if (state.completions[slot].has_value()) {
+                    batch.emplace_back(slot, std::move(*state.completions[slot]));
+                    state.completions[slot].reset();
+                }
             }
-            slot =
-                static_cast<std::size_t>(completed - state.completions.begin());
-            result = std::move(**completed);
-            completed->reset();
         }
-        --outstanding;
+        outstanding -= batch.size();
 
-        if (result.error) {
-            if (!failure) {
-                failure = std::pair{result.index, std::move(*result.error)};
+        bool any_applied = false;
+        for (auto& [slot, result] : batch) {
+            static_cast<void>(slot);
+            if (result.error) {
+                if (!failure || result.index < failure->first) {
+                    failure = std::pair{result.index, std::move(*result.error)};
+                }
+            } else {
+                record.progress[result.index].state =
+                    transaction::OperationState::Applied;
+                any_applied = true;
             }
-        } else {
-            record.progress[result.index].state =
-                transaction::OperationState::Applied;
+        }
+        if (any_applied) {
             auto saved = detail::save_record(
                 paths, record, key, journal::SaveMode::Advance, session);
             if (!saved && !checkpoint_failure) {
@@ -1552,8 +1562,13 @@ run_content_window(
             }
         }
 
-        if (!failure && !checkpoint_failure && next < indices.size()) {
-            admit(slot);
+        if (!failure && !checkpoint_failure) {
+            for (const auto& [slot, result] : batch) {
+                static_cast<void>(result);
+                if (next < indices.size()) {
+                    admit(slot);
+                }
+            }
         }
     }
 
@@ -1567,7 +1582,8 @@ bool same_operation(const Operation& left, const Operation& right) noexcept {
     return left.action == right.action && left.path == right.path &&
            left.hash == right.hash && left.alt_path == right.alt_path &&
            left.size == right.size &&
-           left.exclusive_destination == right.exclusive_destination;
+           left.exclusive_destination == right.exclusive_destination &&
+           left.expected_source_identity == right.expected_source_identity;
 }
 
 bool same_plan(const SyncPlan& left, const SyncPlan& right) noexcept {
@@ -1625,6 +1641,1078 @@ std::vector<bool> required_content_uploads(const reconciliation::Input& input,
         required[index] = available.insert(std::move(content_identity)).second;
     }
     return required;
+}
+
+struct PlannedSmallUpload {
+    Hash hash{};
+    std::uint32_t size = 0;
+    std::size_t op_index = 0;
+};
+
+struct PlannedPack {
+    Hash pack_hash{};
+    std::string pack_identifier;
+    std::vector<PlannedSmallUpload> blobs;
+    std::vector<std::size_t> operation_indices;
+};
+
+struct PlannedChunkUpload {
+    Hash file_hash{};
+    std::uint64_t file_size = 0;
+    std::size_t primary_op_index = 0;
+    std::vector<crypto::pack::FastCdcChunk> chunks;
+    std::vector<std::size_t> operation_indices;
+};
+
+struct UploadLayoutPlan {
+    history::StorageManifest target_manifest;
+    std::vector<PlannedPack> packs;
+    std::vector<PlannedChunkUpload> chunked_uploads;
+    std::unordered_map<Hash, std::size_t, decltype(&hash_key)> pack_by_hash{
+        0, hash_key};
+    std::unordered_map<Hash, std::size_t, decltype(&hash_key)> chunked_by_hash{
+        0, hash_key};
+};
+
+std::filesystem::path
+resolve_pre_mutation_source_path(const std::filesystem::path& local_root,
+                                 const Operation& operation,
+                                 const Hash& expected_hash,
+                                 const Snapshot& observed_local_tree,
+                                 std::size_t op_index) {
+    auto resolved =
+        mutation::detail::resolve_local_path(local_root, operation.path, op_index);
+    if (resolved) {
+        std::error_code ec;
+        const auto status = std::filesystem::symlink_status(*resolved, ec);
+        if (!ec && !std::filesystem::is_symlink(status) &&
+            !platform::private_storage::is_reparse_or_symlink(*resolved) &&
+            std::filesystem::is_regular_file(status)) {
+            return *resolved;
+        }
+    }
+    for (const auto& row : observed_local_tree.rows) {
+        if (!row.is_directory && row.hash == expected_hash &&
+            row.size == operation.size) {
+            auto candidate = mutation::detail::resolve_local_path(
+                local_root, platform::path::from_utf8(row.path), op_index);
+            if (candidate) {
+                return *candidate;
+            }
+        }
+    }
+    return resolved ? *resolved : (local_root / operation.path);
+}
+
+std::expected<UploadLayoutPlan, Error>
+build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
+                         const transport::Transport& storage,
+                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                         const reconciliation::Input& observed_input,
+                         const reconciliation::Result& reconciliation_result,
+                         const transaction::Record& record,
+                         const std::vector<bool>& content_upload_required,
+                         bool enable_micro_packs) {
+    UploadLayoutPlan layout;
+
+    const auto& ref_tree = record.publication_required
+                               ? reconciliation_result.candidate_shared_tree
+                               : observed_input.storage.tree;
+    std::unordered_map<Hash, std::uint64_t, decltype(&hash_key)> live_files{
+        0, hash_key};
+    live_files.reserve(ref_tree.rows.size());
+    for (const auto& row : ref_tree.rows) {
+        if (!row.is_directory && row.path != ".kasumiignore" &&
+            !reconciliation_result.missing_objects.contains(row.hash)) {
+            live_files.emplace(row.hash, row.size);
+        }
+    }
+
+    for (const auto& entry : observed_input.storage.storage_manifest.packed_blobs) {
+        const auto found = live_files.find(entry.blob_hash);
+        if (found != live_files.end() && found->second == entry.size) {
+            layout.target_manifest.packed_blobs.push_back(entry);
+        }
+    }
+    for (const auto& entry :
+         observed_input.storage.storage_manifest.chunked_files) {
+        const auto found = live_files.find(entry.file_hash);
+        if (found != live_files.end() && found->second == entry.file_size) {
+            layout.target_manifest.chunked_files.push_back(entry);
+        }
+    }
+
+    if (record.publication_required && enable_micro_packs) {
+        std::vector<PlannedSmallUpload> small_candidates;
+        HashSet seen_upload{0, hash_key};
+        for (std::size_t index = 0; index < record.plan.operations.size();
+             ++index) {
+            const auto& op = record.plan.operations[index];
+            if (op.action != Action::Upload || !content_upload_required[index] ||
+                platform::path::to_logical_utf8(op.path) == ".kasumiignore") {
+                continue;
+            }
+            const auto op_hash = hash_from_hex(op.hash);
+            if (!op_hash || !seen_upload.insert(*op_hash).second) {
+                continue;
+            }
+            if (history::find_packed_blob(layout.target_manifest, *op_hash) ||
+                history::find_chunked_file(layout.target_manifest, *op_hash)) {
+                continue;
+            }
+
+            if (op.size > crypto::pack::FASTCDC_FILE_THRESHOLD) {
+                const auto src = resolve_pre_mutation_source_path(
+                    runtime_data.local_dir,
+                    op,
+                    *op_hash,
+                    observed_input.local_tree,
+                    index);
+                auto cdc = crypto::pack::chunk_file_fastcdc(src);
+                if (!cdc) {
+                    return std::unexpected(detail::make_error(
+                        ErrorCode::ConcurrentModification,
+                        "failed to chunk upload source: " + cdc.error(),
+                        index));
+                }
+                if (cdc->file_hash != *op_hash || cdc->file_size != op.size ||
+                    cdc->chunks.empty() ||
+                    cdc->chunks.size() > history::maximum_chunks_per_file) {
+                    return std::unexpected(detail::make_error(
+                        ErrorCode::ConcurrentModification,
+                        "large upload source changed before publication",
+                        index));
+                }
+                history::ChunkedFileEntry entry{.file_hash = *op_hash,
+                                                .file_size = op.size,
+                                                .chunks = {}};
+                entry.chunks.reserve(cdc->chunks.size());
+                for (const auto& c : cdc->chunks) {
+                    entry.chunks.push_back(
+                        history::ChunkSlice{.hash = c.hash, .size = c.size});
+                }
+                layout.target_manifest.chunked_files.push_back(std::move(entry));
+                layout.chunked_uploads.push_back(PlannedChunkUpload{
+                    .file_hash = *op_hash,
+                    .file_size = op.size,
+                    .primary_op_index = index,
+                    .chunks = std::move(cdc->chunks),
+                    .operation_indices = {index},
+                });
+            } else if (op.size <= crypto::pack::MAX_MICRO_PACK_BLOB_SIZE) {
+                small_candidates.push_back(PlannedSmallUpload{
+                    .hash = *op_hash,
+                    .size = static_cast<std::uint32_t>(op.size),
+                    .op_index = index,
+                });
+            }
+        }
+
+        std::ranges::sort(small_candidates, {}, &PlannedSmallUpload::hash);
+        const std::size_t min_pack_blobs =
+            (storage.storage.physical_hash_batch != nullptr) ? 2U : 16U;
+        if (small_candidates.size() >= min_pack_blobs) {
+            std::size_t cursor = 0;
+            while (cursor < small_candidates.size()) {
+                std::uint64_t bin_bytes = 0;
+                std::size_t end = cursor;
+                while (end < small_candidates.size() &&
+                       (end - cursor) < crypto::pack::MAXIMUM_PACK_MEMBERS &&
+                       (end == cursor ||
+                        bin_bytes + small_candidates[end].size <=
+                            crypto::pack::TARGET_MICRO_PACK_SIZE)) {
+                    bin_bytes += small_candidates[end].size;
+                    ++end;
+                }
+                if (end - cursor >= 2) {
+                    std::vector<crypto::pack::PackMemberDescriptor> descriptors;
+                    descriptors.reserve(end - cursor);
+                    PlannedPack pack;
+                    pack.blobs.reserve(end - cursor);
+                    pack.operation_indices.reserve(end - cursor);
+                    for (std::size_t k = cursor; k < end; ++k) {
+                        descriptors.push_back(
+                            crypto::pack::PackMemberDescriptor{
+                                .hash = small_candidates[k].hash,
+                                .size = small_candidates[k].size,
+                            });
+                        pack.blobs.push_back(small_candidates[k]);
+                        pack.operation_indices.push_back(
+                            small_candidates[k].op_index);
+                    }
+                    std::ranges::sort(pack.operation_indices);
+                    if (const auto pack_hash =
+                            crypto::pack::compute_pack_hash(descriptors)) {
+                        pack.pack_hash = *pack_hash;
+                        pack.pack_identifier =
+                            crypto::pack_identifier(key, *pack_hash);
+                        for (const auto& d : descriptors) {
+                            layout.target_manifest.packed_blobs.push_back(
+                                history::PackedBlobEntry{
+                                    .blob_hash = d.hash,
+                                    .size = d.size,
+                                    .pack_hash = *pack_hash,
+                                });
+                        }
+                        layout.packs.push_back(std::move(pack));
+                    }
+                }
+                cursor = end;
+            }
+        }
+    } else if (!record.publication_required &&
+               reconciliation_result.requires_storage_repair &&
+               !observed_input.storage.storage_manifest.empty()) {
+        std::unordered_map<Hash, std::vector<std::size_t>, decltype(&hash_key)>
+            repair_ops_by_hash{0, hash_key};
+        for (std::size_t index = 0; index < record.plan.operations.size();
+             ++index) {
+            const auto& op = record.plan.operations[index];
+            if (op.action == Action::Upload && content_upload_required[index]) {
+                if (const auto h = hash_from_hex(op.hash)) {
+                    repair_ops_by_hash[*h].push_back(index);
+                }
+            }
+        }
+        HashSet handled_packs{0, hash_key};
+        for (const auto& [op_hash, indices] : repair_ops_by_hash) {
+            if (const auto* chunked = history::find_chunked_file(
+                    observed_input.storage.storage_manifest, op_hash)) {
+                PlannedChunkUpload upload{
+                    .file_hash = chunked->file_hash,
+                    .file_size = chunked->file_size,
+                    .primary_op_index = indices.front(),
+                    .chunks = {},
+                    .operation_indices = indices,
+                };
+                upload.chunks.reserve(chunked->chunks.size());
+                std::uint64_t offset = 0;
+                for (const auto& c : chunked->chunks) {
+                    upload.chunks.push_back(crypto::pack::FastCdcChunk{
+                        .hash = c.hash,
+                        .offset = offset,
+                        .size = c.size,
+                    });
+                    offset += c.size;
+                }
+                layout.chunked_uploads.push_back(std::move(upload));
+            } else if (const auto* packed = history::find_packed_blob(
+                           observed_input.storage.storage_manifest, op_hash)) {
+                if (!handled_packs.insert(packed->pack_hash).second) {
+                    continue;
+                }
+                PlannedPack pack{.pack_hash = packed->pack_hash,
+                                 .pack_identifier = crypto::pack_identifier(
+                                     key, packed->pack_hash),
+                                 .blobs = {},
+                                 .operation_indices = {}};
+                bool complete = true;
+                for (const auto& entry :
+                     observed_input.storage.storage_manifest.packed_blobs) {
+                    if (entry.pack_hash != packed->pack_hash) {
+                        continue;
+                    }
+                    const auto found = repair_ops_by_hash.find(entry.blob_hash);
+                    if (found == repair_ops_by_hash.end()) {
+                        complete = false;
+                        break;
+                    }
+                    pack.blobs.push_back(PlannedSmallUpload{
+                        .hash = entry.blob_hash,
+                        .size = static_cast<std::uint32_t>(entry.size),
+                        .op_index = found->second.front(),
+                    });
+                    pack.operation_indices.push_back(found->second.front());
+                }
+                if (complete && pack.blobs.size() >= 2) {
+                    std::ranges::sort(pack.operation_indices);
+                    layout.packs.push_back(std::move(pack));
+                }
+            }
+        }
+    }
+
+    std::ranges::sort(
+        layout.target_manifest.packed_blobs, {}, &history::PackedBlobEntry::blob_hash);
+    std::ranges::sort(layout.target_manifest.chunked_files,
+                      {},
+                      &history::ChunkedFileEntry::file_hash);
+
+    for (std::size_t i = 0; i < layout.packs.size(); ++i) {
+        for (const auto op_idx : layout.packs[i].operation_indices) {
+            if (const auto h =
+                    hash_from_hex(record.plan.operations[op_idx].hash)) {
+                layout.pack_by_hash.emplace(*h, i);
+            }
+        }
+    }
+    for (std::size_t i = 0; i < layout.chunked_uploads.size(); ++i) {
+        layout.chunked_by_hash.emplace(layout.chunked_uploads[i].file_hash, i);
+    }
+    return layout;
+}
+
+std::expected<void, detail::UploadBatchError> execute_packed_upload_batch(
+    std::span<const PlannedPack* const> packs,
+    const transaction::Record& record,
+    const std::filesystem::path& local_root,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const platform::Workspace& workspace,
+    std::size_t parallelism) {
+    if (packs.empty()) {
+        return {};
+    }
+    const auto first_op = packs.front()->operation_indices.front();
+    auto staging = platform::create_workspace("pack-upload-batch");
+    if (!staging) {
+        return std::unexpected(detail::UploadBatchError{
+            .transport_after_unknown_transfer = false,
+            .mutation = mutation::MutationError{
+                .code = mutation::MutationErrorCode::LocalIo,
+                .detail = staging.error(),
+                .path = local_root,
+                .operation_index = first_op,
+            }});
+    }
+    mutation::StagedUploadBatch batch;
+    batch.root = staging->root;
+    batch.objects.resize(packs.size());
+    detail::ScopedUploadBatchCleanup cleanup{batch};
+
+    std::vector<std::optional<mutation::MutationError>> stage_errors(
+        packs.size());
+    application::parallel_for_indexed(
+        packs.size(),
+        std::min<std::size_t>(parallelism, packs.size()),
+        [&](std::size_t i) {
+            const auto& pack = *packs[i];
+            std::vector<crypto::pack::PackMemberSource> sources;
+            sources.reserve(pack.blobs.size());
+            for (const auto& blob : pack.blobs) {
+                auto resolved = mutation::detail::resolve_local_path(
+                    local_root,
+                    record.plan.operations[blob.op_index].path,
+                    blob.op_index);
+                if (!resolved) {
+                    stage_errors[i] = resolved.error();
+                    return;
+                }
+                sources.push_back(crypto::pack::PackMemberSource{
+                    .hash = blob.hash,
+                    .size = blob.size,
+                    .source_path = std::move(*resolved),
+                });
+            }
+            const auto dest = batch.root / pack.pack_identifier;
+            auto res =
+                crypto::pack::write_encrypted_pack(sources, dest, key);
+            if (!res) {
+                stage_errors[i] = mutation::MutationError{
+                    .code = mutation::MutationErrorCode::IntegrityMismatch,
+                    .detail = res.error(),
+                    .path = local_root,
+                    .operation_index = pack.operation_indices.front(),
+                };
+                return;
+            }
+            batch.objects[i] = mutation::StagedUploadObject{
+                .identifier = pack.pack_identifier,
+                .plaintext_hash = hash_hex(res->pack_hash),
+                .plaintext_size = res->pack_plaintext_size,
+                .ciphertext_sha256 = std::move(res->ciphertext_sha256),
+                .operation_indices = pack.operation_indices,
+                .is_pack = true,
+            };
+        });
+
+    std::optional<mutation::MutationError> lowest_err;
+    for (const auto& err : stage_errors) {
+        if (err &&
+            (!lowest_err || err->operation_index < lowest_err->operation_index)) {
+            lowest_err = *err;
+        }
+    }
+    if (lowest_err) {
+        return std::unexpected(detail::UploadBatchError{
+            .transport_after_unknown_transfer = false,
+            .mutation = std::move(*lowest_err),
+        });
+    }
+
+    auto transferred = detail::transfer_and_verify_upload_batch(
+        batch, storage, key, workspace, parallelism);
+    if (!transferred) {
+        if (!transferred.error().transport_after_unknown_transfer) {
+            return transferred;
+        }
+        cleanup.dismissed = true;
+        static_cast<void>(mutation::cleanup_upload_batch(batch));
+        return transferred;
+    }
+    cleanup.dismissed = true;
+    static_cast<void>(mutation::cleanup_upload_batch(batch));
+    return {};
+}
+
+std::expected<void, detail::UploadBatchError> execute_chunked_upload_batch(
+    std::span<const PlannedChunkUpload* const> uploads,
+    const transaction::Record& record,
+    const reconciliation::Input& observed_input,
+    const reconciliation::Result& reconciliation_result,
+    const std::filesystem::path& local_root,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const platform::Workspace& workspace,
+    std::size_t parallelism) {
+    if (uploads.empty()) {
+        return {};
+    }
+
+    HashSet known_live_chunks{0, hash_key};
+    if (observed_input.storage.history_present) {
+        for (const auto& entry :
+             observed_input.storage.storage_manifest.chunked_files) {
+            if (!reconciliation_result.missing_objects.contains(entry.file_hash)) {
+                for (const auto& c : entry.chunks) {
+                    known_live_chunks.insert(c.hash);
+                }
+            }
+        }
+    }
+
+    struct PendingChunkWork {
+        Hash chunk_hash{};
+        std::string chunk_id;
+        std::string chunk_hex;
+        std::uint64_t offset = 0;
+        std::uint32_t size = 0;
+        std::filesystem::path source_path;
+        std::size_t operation_index = 0;
+    };
+
+    std::vector<PendingChunkWork> unique_chunks;
+    HashSet seen_chunks{0, hash_key};
+    std::vector<std::string> candidate_present_ids;
+
+    for (const auto* upload : uploads) {
+        const auto op_idx = upload->primary_op_index;
+        auto resolved = mutation::detail::resolve_local_path(
+            local_root, record.plan.operations[op_idx].path, op_idx);
+        if (!resolved) {
+            return std::unexpected(detail::UploadBatchError{
+                .transport_after_unknown_transfer = false,
+                .mutation = resolved.error(),
+            });
+        }
+        for (const auto& chunk : upload->chunks) {
+            if (!seen_chunks.insert(chunk.hash).second) {
+                continue;
+            }
+            auto id = crypto::content_identifier(key, chunk.hash);
+            if (known_live_chunks.contains(chunk.hash)) {
+                candidate_present_ids.push_back(id);
+            }
+            unique_chunks.push_back(PendingChunkWork{
+                .chunk_hash = chunk.hash,
+                .chunk_id = std::move(id),
+                .chunk_hex = hash_hex(chunk.hash),
+                .offset = chunk.offset,
+                .size = chunk.size,
+                .source_path = *resolved,
+                .operation_index = op_idx,
+            });
+        }
+    }
+
+    std::unordered_set<std::string> present_chunk_ids;
+    if (!candidate_present_ids.empty()) {
+        std::ranges::sort(candidate_present_ids);
+        candidate_present_ids.erase(
+            std::ranges::unique(candidate_present_ids).begin(),
+            candidate_present_ids.end());
+        bool probed = false;
+        if (candidate_present_ids.size() >= 8U &&
+            storage.storage.list != nullptr) {
+            if (auto listed = transport::list(storage)) {
+                const std::unordered_set<std::string> remote_set(
+                    listed->begin(), listed->end());
+                for (const auto& id : candidate_present_ids) {
+                    if (remote_set.contains(id)) {
+                        present_chunk_ids.insert(id);
+                    }
+                }
+                probed = true;
+            }
+        }
+        if (!probed && storage.storage.control_read_batch != nullptr) {
+            transport::ControlReadBatchRequest req;
+            req.presence_identifiers = candidate_present_ids;
+            auto batch = transport::control_read_batch(storage, req);
+            if (batch &&
+                batch->presences.size() == candidate_present_ids.size()) {
+                for (std::size_t i = 0; i < candidate_present_ids.size(); ++i) {
+                    if (batch->presences[i] == transport::Presence::Present) {
+                        present_chunk_ids.insert(candidate_present_ids[i]);
+                    }
+                }
+                probed = true;
+            }
+        }
+        if (!probed && storage.storage.presence != nullptr) {
+            for (const auto& cid : candidate_present_ids) {
+                if (auto res = transport::presence(storage, cid);
+                    res && *res == transport::Presence::Present) {
+                    present_chunk_ids.insert(cid);
+                }
+            }
+        }
+    }
+
+    std::vector<PendingChunkWork> to_upload;
+    to_upload.reserve(unique_chunks.size());
+    for (auto& chunk : unique_chunks) {
+        if (!present_chunk_ids.contains(chunk.chunk_id)) {
+            to_upload.push_back(std::move(chunk));
+        }
+    }
+    if (to_upload.empty()) {
+        return {};
+    }
+
+    const auto first_op = to_upload.front().operation_index;
+    auto staging = platform::create_workspace("chunk-upload-batch");
+    if (!staging) {
+        return std::unexpected(detail::UploadBatchError{
+            .transport_after_unknown_transfer = false,
+            .mutation = mutation::MutationError{
+                .code = mutation::MutationErrorCode::LocalIo,
+                .detail = staging.error(),
+                .path = local_root,
+                .operation_index = first_op,
+            }});
+    }
+
+    mutation::StagedUploadBatch batch;
+    batch.root = staging->root;
+    batch.objects.resize(to_upload.size());
+    detail::ScopedUploadBatchCleanup cleanup{batch};
+
+    std::vector<std::optional<mutation::MutationError>> stage_errors(
+        to_upload.size());
+    application::parallel_for_indexed(
+        to_upload.size(),
+        std::min<std::size_t>(parallelism, to_upload.size()),
+        [&](std::size_t i) {
+            const auto& chunk = to_upload[i];
+            std::string detail_err;
+            const auto dest = batch.root / chunk.chunk_id;
+            auto enc = crypto::pack::encrypt_file_slice_with_hashes(
+                chunk.source_path,
+                chunk.offset,
+                chunk.size,
+                chunk.chunk_hash,
+                dest,
+                key,
+                &detail_err);
+            if (!enc) {
+                stage_errors[i] = mutation::MutationError{
+                    .code = mutation::MutationErrorCode::IntegrityMismatch,
+                    .detail =
+                        detail_err.empty()
+                            ? "failed to encrypt FastCDC chunk slice"
+                            : std::move(detail_err),
+                    .path = chunk.source_path,
+                    .operation_index = chunk.operation_index,
+                };
+                return;
+            }
+            batch.objects[i] = mutation::StagedUploadObject{
+                .identifier = chunk.chunk_id,
+                .plaintext_hash = chunk.chunk_hex,
+                .plaintext_size = chunk.size,
+                .ciphertext_sha256 = std::move(enc->ciphertext_sha256),
+                .operation_indices = {chunk.operation_index},
+                .is_pack = false,
+            };
+        });
+
+    std::optional<mutation::MutationError> lowest_err;
+    for (const auto& err : stage_errors) {
+        if (err &&
+            (!lowest_err || err->operation_index < lowest_err->operation_index)) {
+            lowest_err = *err;
+        }
+    }
+    if (lowest_err) {
+        return std::unexpected(detail::UploadBatchError{
+            .transport_after_unknown_transfer = false,
+            .mutation = std::move(*lowest_err),
+        });
+    }
+
+    auto transferred = detail::transfer_and_verify_upload_batch(
+        batch, storage, key, workspace, parallelism);
+    if (!transferred) {
+        if (!transferred.error().transport_after_unknown_transfer) {
+            return transferred;
+        }
+        cleanup.dismissed = true;
+        static_cast<void>(mutation::cleanup_upload_batch(batch));
+        return transferred;
+    }
+    cleanup.dismissed = true;
+    static_cast<void>(mutation::cleanup_upload_batch(batch));
+    return {};
+}
+
+std::expected<std::unordered_map<std::string, std::filesystem::path>,
+              mutation::MutationError>
+prefetch_manifest_downloads(
+    const history::StorageManifest& manifest,
+    std::span<const std::size_t> apply_order,
+    const transaction::Record& record,
+    const std::filesystem::path& local_root,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const platform::Workspace& workspace,
+    std::size_t parallelism) {
+    std::unordered_map<std::string, std::filesystem::path> ready;
+    if (manifest.empty()) {
+        return ready;
+    }
+
+    struct PackDownloadJob {
+        Hash pack_hash{};
+        std::string identifier;
+        std::size_t first_op_index = 0;
+    };
+    struct ChunkDownloadJob {
+        Hash chunk_hash{};
+        std::string chunk_hex;
+        std::string identifier;
+        std::uint32_t size = 0;
+        std::size_t first_op_index = 0;
+    };
+    struct ChunkedFileJob {
+        std::string file_hex;
+        std::uint64_t file_size = 0;
+        const history::ChunkedFileEntry* entry = nullptr;
+        std::size_t first_op_index = 0;
+    };
+
+    std::vector<PackDownloadJob> pack_jobs;
+    HashSet seen_packs{0, hash_key};
+    std::vector<ChunkedFileJob> file_jobs;
+    HashSet seen_files{0, hash_key};
+    std::vector<ChunkDownloadJob> chunk_jobs;
+    HashSet seen_chunks{0, hash_key};
+
+    for (const auto op_idx : apply_order) {
+        if (record.progress[op_idx].state ==
+            transaction::OperationState::Applied) {
+            continue;
+        }
+        const auto& op = record.plan.operations[op_idx];
+        if (op.action != Action::Download) {
+            continue;
+        }
+        const auto h = hash_from_hex(op.hash);
+        if (!h) {
+            continue;
+        }
+        if (const auto* packed = history::find_packed_blob(manifest, *h)) {
+            if (seen_packs.insert(packed->pack_hash).second) {
+                pack_jobs.push_back(PackDownloadJob{
+                    .pack_hash = packed->pack_hash,
+                    .identifier = crypto::pack_identifier(key, packed->pack_hash),
+                    .first_op_index = op_idx,
+                });
+            }
+        } else if (const auto* chunked =
+                       history::find_chunked_file(manifest, *h)) {
+            if (seen_files.insert(chunked->file_hash).second) {
+                file_jobs.push_back(ChunkedFileJob{
+                    .file_hex = op.hash,
+                    .file_size = op.size,
+                    .entry = chunked,
+                    .first_op_index = op_idx,
+                });
+            }
+        }
+    }
+
+    if (pack_jobs.empty() && file_jobs.empty()) {
+        return ready;
+    }
+
+    const auto batch_fetch =
+        [&](const std::filesystem::path& dir,
+            const std::vector<std::string>& ids) {
+            if (ids.size() >= 2 && storage.storage.get_batch != nullptr) {
+                transport::GetBatch req;
+                req.destination_root = dir;
+                req.identifiers = ids;
+                if (transport::get_batch(storage, req)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+    if (!pack_jobs.empty()) {
+        const auto dl_dir = workspace.root / "pack-dl";
+        const auto extract_dir = workspace.root / "pack-extract";
+        if (auto ok = platform::private_storage::ensure_directory(dl_dir); !ok) {
+            return std::unexpected(mutation::detail::make_error(
+                mutation::MutationErrorCode::LocalIo,
+                ok.error(),
+                dl_dir,
+                pack_jobs.front().first_op_index));
+        }
+        if (auto ok = platform::private_storage::ensure_directory(extract_dir);
+            !ok) {
+            return std::unexpected(mutation::detail::make_error(
+                mutation::MutationErrorCode::LocalIo,
+                ok.error(),
+                extract_dir,
+                pack_jobs.front().first_op_index));
+        }
+
+        std::vector<std::string> ids;
+        ids.reserve(pack_jobs.size());
+        for (const auto& p : pack_jobs) {
+            ids.push_back(p.identifier);
+        }
+        const bool batch_ok = batch_fetch(dl_dir, ids);
+
+        std::vector<std::optional<mutation::MutationError>> errors(
+            pack_jobs.size());
+        application::parallel_for_indexed(
+            pack_jobs.size(),
+            std::min<std::size_t>(parallelism, pack_jobs.size()),
+            [&](std::size_t i) {
+                const auto& job = pack_jobs[i];
+                const auto enc_path = dl_dir / job.identifier;
+                if (!batch_ok &&
+                    !std::filesystem::is_regular_file(enc_path)) {
+                    auto fetched =
+                        transport::get(storage, job.identifier, enc_path);
+                    if (!fetched) {
+                        errors[i] = mutation::detail::make_error(
+                            fetched.error().code ==
+                                    transport::ErrorCode::ObjectNotFound
+                                ? mutation::MutationErrorCode::
+                                      RemoteContentMissing
+                                : mutation::MutationErrorCode::
+                                      TransportFailure,
+                            transport::describe(fetched.error()),
+                            record.plan.operations[job.first_op_index].path,
+                            job.first_op_index);
+                        return;
+                    }
+                }
+                auto extracted = crypto::pack::decrypt_and_verify_pack(
+                    enc_path, key, job.pack_hash, &extract_dir);
+                std::error_code ignored;
+                std::filesystem::remove(enc_path, ignored);
+                if (!extracted) {
+                    errors[i] = mutation::detail::make_error(
+                        mutation::MutationErrorCode::CryptoFailure,
+                        "Micro-Pack authentication/extraction failed: " +
+                            extracted.error(),
+                        record.plan.operations[job.first_op_index].path,
+                        job.first_op_index);
+                }
+            });
+
+        std::optional<mutation::MutationError> first_err;
+        for (const auto& e : errors) {
+            if (e &&
+                (!first_err || e->operation_index < first_err->operation_index)) {
+                first_err = *e;
+            }
+        }
+        if (first_err) {
+            return std::unexpected(*first_err);
+        }
+
+        for (const auto op_idx : apply_order) {
+            const auto& op = record.plan.operations[op_idx];
+            if (op.action != Action::Download) {
+                continue;
+            }
+            if (const auto h = hash_from_hex(op.hash);
+                h && history::find_packed_blob(manifest, *h) != nullptr) {
+                ready.emplace(op.hash, extract_dir / (op.hash + ".plain"));
+            }
+        }
+    }
+
+    if (!file_jobs.empty()) {
+        const auto chunk_dl_dir = workspace.root / "chunk-dl";
+        const auto chunk_plain_dir = workspace.root / "chunk-plain";
+        if (auto ok = platform::private_storage::ensure_directory(chunk_dl_dir);
+            !ok) {
+            return std::unexpected(mutation::detail::make_error(
+                mutation::MutationErrorCode::LocalIo,
+                ok.error(),
+                chunk_dl_dir,
+                file_jobs.front().first_op_index));
+        }
+        if (auto ok =
+                platform::private_storage::ensure_directory(chunk_plain_dir);
+            !ok) {
+            return std::unexpected(mutation::detail::make_error(
+                mutation::MutationErrorCode::LocalIo,
+                ok.error(),
+                chunk_plain_dir,
+                file_jobs.front().first_op_index));
+        }
+
+        struct LocalChunkSeed {
+            std::filesystem::path source_path;
+            platform::private_storage::FileIdentity identity{};
+            std::uint64_t offset = 0;
+            std::uint32_t size = 0;
+        };
+        std::unordered_map<Hash, LocalChunkSeed, decltype(&hash_key)>
+            local_seeds{0, hash_key};
+        for (const auto& fjob : file_jobs) {
+            const auto& op = record.plan.operations[fjob.first_op_index];
+            std::vector<std::filesystem::path> candidates;
+            if (auto resolved = mutation::detail::resolve_local_path(
+                    local_root, op.path, fjob.first_op_index)) {
+                candidates.push_back(std::move(*resolved));
+            }
+            const auto slot = record.progress[fjob.first_op_index].backup_slot;
+            if (slot != std::numeric_limits<std::uint32_t>::max()) {
+                auto bpath =
+                    platform::workspace_file(workspace, slot, ".backup");
+                if (!bpath.empty()) {
+                    candidates.push_back(std::move(bpath));
+                }
+            }
+            for (const auto& cand : candidates) {
+                std::error_code ec;
+                const auto st = std::filesystem::symlink_status(cand, ec);
+                if (ec || std::filesystem::is_symlink(st) ||
+                    !std::filesystem::is_regular_file(st) ||
+                    platform::private_storage::is_reparse_or_symlink(cand)) {
+                    continue;
+                }
+                const auto fsize = std::filesystem::file_size(cand, ec);
+                if (ec || fsize < crypto::pack::FASTCDC_MIN_CHUNK) {
+                    continue;
+                }
+                const auto id =
+                    platform::private_storage::query_file_identity(cand);
+                if (!id.valid) {
+                    continue;
+                }
+                if (auto cdc = crypto::pack::chunk_file_fastcdc(cand)) {
+                    const auto post_id =
+                        platform::private_storage::query_file_identity(cand);
+                    if (!post_id.valid || !(post_id == id)) {
+                        continue;
+                    }
+                    for (const auto& sc : cdc->chunks) {
+                        local_seeds.try_emplace(sc.hash,
+                                                LocalChunkSeed{
+                                                    .source_path = cand,
+                                                    .identity = id,
+                                                    .offset = sc.offset,
+                                                    .size = sc.size,
+                                                });
+                    }
+                    break;
+                }
+            }
+        }
+
+        std::vector<std::string> staged_chunk_hexes;
+        for (const auto& fjob : file_jobs) {
+            for (const auto& c : fjob.entry->chunks) {
+                if (!seen_chunks.insert(c.hash).second) {
+                    continue;
+                }
+                auto chunk_hex = hash_hex(c.hash);
+                staged_chunk_hexes.push_back(chunk_hex);
+                if (const auto seed = local_seeds.find(c.hash);
+                    seed != local_seeds.end() && seed->second.size == c.size &&
+                    c.size > 0 && c.size <= crypto::pack::FASTCDC_MAX_CHUNK &&
+                    seed->second.offset <=
+                        static_cast<std::uint64_t>(
+                            (std::numeric_limits<std::streamoff>::max)())) {
+                    const auto pre_id =
+                        platform::private_storage::query_file_identity(
+                            seed->second.source_path);
+                    if (pre_id.valid && pre_id == seed->second.identity &&
+                        !platform::private_storage::is_reparse_or_symlink(
+                            seed->second.source_path)) {
+                        std::ifstream source(seed->second.source_path,
+                                             std::ios::binary);
+                        source.seekg(
+                            static_cast<std::streamoff>(seed->second.offset));
+                        std::vector<std::uint8_t> buf(c.size);
+                        crypto::secure_memory::WipeGuard wipe{buf};
+                        const bool read_ok =
+                            source.read(
+                                reinterpret_cast<char*>(buf.data()),
+                                static_cast<std::streamsize>(buf.size())) &&
+                            source.gcount() ==
+                                static_cast<std::streamsize>(buf.size()) &&
+                            !source.bad();
+                        source.close();
+                        const auto post_id =
+                            platform::private_storage::query_file_identity(
+                                seed->second.source_path);
+                        if (read_ok && post_id.valid &&
+                            post_id == seed->second.identity &&
+                            hasher::hash_bytes(buf.data(), buf.size()) ==
+                                c.hash &&
+                            platform::private_storage::write_atomically(
+                                chunk_plain_dir / (chunk_hex + ".chunk"),
+                                std::string_view{
+                                    reinterpret_cast<const char*>(buf.data()),
+                                    buf.size()})) {
+                            continue;
+                        }
+                    }
+                }
+                chunk_jobs.push_back(ChunkDownloadJob{
+                    .chunk_hash = c.hash,
+                    .chunk_hex = std::move(chunk_hex),
+                    .identifier = crypto::content_identifier(key, c.hash),
+                    .size = c.size,
+                    .first_op_index = fjob.first_op_index,
+                });
+            }
+        }
+
+        if (!chunk_jobs.empty()) {
+            std::vector<std::string> chunk_ids;
+            chunk_ids.reserve(chunk_jobs.size());
+            for (const auto& c : chunk_jobs) {
+                chunk_ids.push_back(c.identifier);
+            }
+            const bool batch_ok = batch_fetch(chunk_dl_dir, chunk_ids);
+
+            std::vector<std::optional<mutation::MutationError>> chunk_errors(
+                chunk_jobs.size());
+            application::parallel_for_indexed(
+                chunk_jobs.size(),
+                std::min<std::size_t>(parallelism, chunk_jobs.size()),
+                [&](std::size_t i) {
+                    const auto& job = chunk_jobs[i];
+                    const auto enc = chunk_dl_dir / job.identifier;
+                    const auto plain =
+                        chunk_plain_dir / (job.chunk_hex + ".chunk");
+                    if (!batch_ok && !std::filesystem::is_regular_file(enc)) {
+                        auto fetched =
+                            transport::get(storage, job.identifier, enc);
+                        if (!fetched) {
+                            chunk_errors[i] = mutation::detail::make_error(
+                                fetched.error().code ==
+                                        transport::ErrorCode::ObjectNotFound
+                                    ? mutation::MutationErrorCode::
+                                          RemoteContentMissing
+                                    : mutation::MutationErrorCode::
+                                          TransportFailure,
+                                transport::describe(fetched.error()),
+                                record.plan.operations[job.first_op_index].path,
+                                job.first_op_index);
+                            return;
+                        }
+                    }
+                    if (!crypto::decrypt_file(enc, plain, key) ||
+                        !crypto::content::verify_file(
+                            plain, job.chunk_hex, job.size)) {
+                        chunk_errors[i] = mutation::detail::make_error(
+                            mutation::MutationErrorCode::CryptoFailure,
+                            "FastCDC chunk failed authentication",
+                            record.plan.operations[job.first_op_index].path,
+                            job.first_op_index);
+                    }
+                    std::error_code ignored;
+                    std::filesystem::remove(enc, ignored);
+                });
+
+            std::optional<mutation::MutationError> first_err;
+            for (const auto& e : chunk_errors) {
+                if (e && (!first_err ||
+                          e->operation_index < first_err->operation_index)) {
+                    first_err = *e;
+                }
+            }
+            if (first_err) {
+                return std::unexpected(*first_err);
+            }
+        }
+
+        std::vector<std::uint8_t> copy_buf(256U * 1024U);
+        crypto::secure_memory::WipeGuard copy_buf_guard{copy_buf};
+        for (const auto& job : file_jobs) {
+            const auto out_path = chunk_plain_dir / (job.file_hex + ".plain");
+            std::error_code rm_ec;
+            std::filesystem::remove(out_path, rm_ec);
+            auto private_out =
+                platform::private_storage::create_private_file(out_path);
+            if (!private_out) {
+                return std::unexpected(mutation::detail::make_error(
+                    mutation::MutationErrorCode::LocalIo,
+                    "failed to create reassembled download file: " +
+                        private_out.error().message,
+                    out_path,
+                    job.first_op_index));
+            }
+            bool write_failed = false;
+            for (const auto& chunk : job.entry->chunks) {
+                const auto chunk_path =
+                    chunk_plain_dir / (hash_hex(chunk.hash) + ".chunk");
+                auto streamed = platform::private_storage::stream_regular_file(
+                    chunk_path,
+                    copy_buf,
+                    [&](std::span<const std::uint8_t> slab) {
+                        if (!slab.empty() &&
+                            !platform::private_storage::write_private_file(
+                                *private_out, slab.data(), slab.size())) {
+                            write_failed = true;
+                            return false;
+                        }
+                        return true;
+                    },
+                    chunk.size);
+                if (!streamed || write_failed) {
+                    static_cast<void>(platform::private_storage::
+                                          remove_private_file_if_owned(
+                                              *private_out));
+                    return std::unexpected(mutation::detail::make_error(
+                        mutation::MutationErrorCode::LocalIo,
+                        "failed to concatenate FastCDC chunk",
+                        out_path,
+                        job.first_op_index));
+                }
+            }
+            platform::private_storage::close_private_file(*private_out);
+            if (!crypto::content::verify_file(
+                    out_path, job.file_hex, job.file_size)) {
+                return std::unexpected(mutation::detail::make_error(
+                    mutation::MutationErrorCode::IntegrityMismatch,
+                    "reassembled FastCDC file failed verification",
+                    out_path,
+                    job.first_op_index));
+            }
+            ready.emplace(job.file_hex, out_path);
+        }
+        for (const auto& chunk_hex : staged_chunk_hexes) {
+            std::error_code ignored;
+            std::filesystem::remove(chunk_plain_dir / (chunk_hex + ".chunk"),
+                                    ignored);
+        }
+    }
+
+    return ready;
 }
 
 std::expected<void, Error>
@@ -1788,12 +2876,37 @@ std::string describe(const Error& error) {
 }
 
 std::expected<void, Error>
+discard_staged_handoff(std::optional<StagedExecutionHandoff>& staged,
+                       std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+    if (!staged) {
+        return {};
+    }
+    auto workspace = std::move(staged->workspace);
+    staged.reset();
+    return detail::remove_transaction_workspace(workspace, key);
+}
+
+std::expected<void, Error>
 execute(const runtime::RuntimeData& runtime_data,
         transport::Transport& storage,
         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
         const reconciliation::Input& observed_input,
         const reconciliation::Result& reconciliation_result,
-        observation::LocalObservationSession* session) {
+        observation::LocalObservationSession* session,
+        StagedExecutionHandoff* staged_handoff,
+        bool enable_micro_packs) {
+    struct StagedHandoffGuard {
+        StagedExecutionHandoff* handoff = nullptr;
+        std::span<const std::uint8_t, crypto::KEY_SIZE> key;
+        ~StagedHandoffGuard() noexcept {
+            if (handoff != nullptr && handoff->workspace.has_value()) {
+                static_cast<void>(detail::remove_transaction_workspace(
+                    handoff->workspace, key));
+                handoff->workspace.reset();
+            }
+        }
+    } handoff_guard{staged_handoff, key};
+
     if (runtime_data.local_dir.empty() || runtime_data.database_path.empty() ||
         !transport::valid(storage) ||
         !reconciliation::has_safe_paths(reconciliation_result.plan)) {
@@ -1855,6 +2968,8 @@ execute(const runtime::RuntimeData& runtime_data,
                                       : std::string{};
 
     std::optional<transaction::Record> record_storage;
+    std::optional<platform::Workspace> handoff_workspace;
+    std::vector<transaction::OperationProgress> handoff_progress;
     if (*existing) {
         if ((*existing)->publication_required ==
                 reconciliation_result.requires_publication &&
@@ -1887,6 +3002,16 @@ execute(const runtime::RuntimeData& runtime_data,
         record_storage->observed_pending_paths =
             std::move(observed_pending_paths);
         record_storage->pending_paths = std::move(pending_paths);
+        if (staged_handoff != nullptr &&
+            staged_handoff->workspace.has_value() &&
+            staged_handoff->progress.size() ==
+                record_storage->plan.operations.size()) {
+            record_storage->operation_id =
+                std::move(staged_handoff->operation_id);
+            handoff_workspace = std::move(staged_handoff->workspace);
+            staged_handoff->workspace.reset();
+            handoff_progress = std::move(staged_handoff->progress);
+        }
     }
     auto& record = record_storage;
     const auto save_active_record = [&](journal::SaveMode mode =
@@ -1903,10 +3028,18 @@ execute(const runtime::RuntimeData& runtime_data,
         observed_input, reconciliation_result, record->plan);
     auto saved = save_active_record();
     if (!saved) {
+        if (handoff_workspace.has_value()) {
+            static_cast<void>(
+                detail::remove_transaction_workspace(handoff_workspace, key));
+        }
         return std::unexpected(saved.error());
     }
-    auto workspace = detail::create_transaction_workspace(
-        *profile, record->operation_id, key);
+    std::expected<platform::Workspace, Error> workspace =
+        handoff_workspace.has_value()
+            ? std::expected<platform::Workspace, Error>{std::move(
+                  *handoff_workspace)}
+            : detail::create_transaction_workspace(
+                  *profile, record->operation_id, key);
     if (!workspace) {
         return std::unexpected(workspace.error());
     }
@@ -1931,14 +3064,19 @@ execute(const runtime::RuntimeData& runtime_data,
                                            std::move(original));
     };
 
+    const bool use_handoff_progress =
+        handoff_progress.size() == record->plan.operations.size();
     for (std::size_t index = 0; index < record->plan.operations.size();
          ++index) {
+        const auto& current_progress =
+            use_handoff_progress ? handoff_progress[index]
+                                 : record->progress[index];
         auto prepared =
             mutation::prepare_operation(record->plan.operations[index],
                                         index,
                                         runtime_data.local_dir,
                                         *workspace,
-                                        record->progress[index],
+                                        current_progress,
                                         record->plan.operations);
         if (!prepared) {
             return detail::fail_after_rollback(
@@ -1955,6 +3093,18 @@ execute(const runtime::RuntimeData& runtime_data,
     saved = save_active_record();
     if (!saved)
         return std::unexpected(saved.error());
+
+    auto layout_plan = build_upload_layout_plan(runtime_data,
+                                                storage,
+                                                key,
+                                                observed_input,
+                                                reconciliation_result,
+                                                *record,
+                                                content_upload_required,
+                                                enable_micro_packs);
+    if (!layout_plan) {
+        return fail_terminal(layout_plan.error());
+    }
 
     std::optional<publication::PreparedCommit> prepared_commit;
     std::optional<CommitTimeDecision> commit_time;
@@ -1981,7 +3131,8 @@ execute(const runtime::RuntimeData& runtime_data,
             observed_input.storage.generation,
             observed_input.storage.logical_heads,
             commit_time->created_at,
-            key);
+            key,
+            layout_plan->target_manifest);
         if (!prepared) {
             return fail_terminal(publication_error(prepared.error()));
         }
@@ -2175,54 +3326,120 @@ execute(const runtime::RuntimeData& runtime_data,
                               std::to_string(operation.size)];
         }
     }
+    auto preverified_downloads = prefetch_manifest_downloads(
+        observed_input.storage.storage_manifest,
+        apply_order,
+        *record,
+        runtime_data.local_dir,
+        storage,
+        key,
+        *workspace,
+        parallelism);
+    if (!preverified_downloads) {
+        return fail_mutation(preverified_downloads.error().operation_index,
+                             preverified_downloads.error());
+    }
     std::unordered_set<std::string> populated_downloads;
     for (std::size_t position = 0; position < apply_order.size();) {
         const auto first = apply_order[position];
         const auto& first_operation = record->plan.operations[first];
         if (auto prepared = prepare_destination(first); !prepared)
             return std::unexpected(prepared.error());
+        if (first_operation.action == Action::Download &&
+            preverified_downloads->contains(first_operation.hash)) {
+            std::size_t end = position;
+            while (end < apply_order.size()) {
+                const auto op_idx = apply_order[end];
+                const auto& op = record->plan.operations[op_idx];
+                const auto it = op.action == Action::Download
+                                    ? preverified_downloads->find(op.hash)
+                                    : preverified_downloads->end();
+                if (it == preverified_downloads->end()) {
+                    break;
+                }
+                if (end > position) {
+                    if (auto prepared = prepare_destination(op_idx); !prepared)
+                        return std::unexpected(prepared.error());
+                }
+                auto applied = mutation::apply_preverified_download(
+                    op,
+                    op_idx,
+                    runtime_data.local_dir,
+                    it->second,
+                    *workspace,
+                    record->progress[op_idx],
+                    destinations[op_idx] ? &*destinations[op_idx] : nullptr);
+                if (!applied) {
+                    return fail_mutation(op_idx, applied.error());
+                }
+                record->progress[op_idx].state =
+                    transaction::OperationState::Applied;
+                ++end;
+            }
+            if (auto saved_batch = save_active_record(); !saved_batch) {
+                return std::unexpected(saved_batch.error());
+            }
+            position = end;
+            continue;
+        }
         if (first_operation.action == Action::Download) {
-            const auto content_key = first_operation.hash + ':' +
-                                     std::to_string(first_operation.size);
-            if (download_counts[content_key] == 1) {
-                std::size_t end = position;
-                while (end < apply_order.size()) {
-                    const auto& operation =
-                        record->plan.operations[apply_order[end]];
-                    if (operation.action != Action::Download ||
-                        download_counts[operation.hash + ':' +
-                                        std::to_string(operation.size)] != 1) {
-                        break;
-                    }
-                    ++end;
+            std::unordered_set<std::string> window_keys;
+            std::vector<mutation::DownloadCacheMode> window_modes;
+            std::vector<std::string> populated_in_window;
+            std::size_t end = position;
+            while (end < apply_order.size()) {
+                const auto& operation =
+                    record->plan.operations[apply_order[end]];
+                if (operation.action != Action::Download ||
+                    preverified_downloads->contains(operation.hash)) {
+                    break;
                 }
-                if (end != position + 1) {
-                    for (std::size_t i = position + 1; i < end; ++i)
-                        if (auto prepared = prepare_destination(apply_order[i]);
-                            !prepared)
-                            return std::unexpected(prepared.error());
-                    auto failure = run_content_window(
-                        std::span<const std::size_t>{apply_order}.subspan(
-                            position, end - position),
-                        parallelism,
-                        *record,
-                        *paths,
-                        runtime_data.local_dir,
-                        storage,
-                        key,
-                        *workspace,
-                        destinations,
-                        &journal_session);
-                    if (!failure) {
-                        return std::unexpected(failure.error());
-                    }
-                    if (*failure) {
-                        return fail_mutation((*failure)->first,
-                                             (*failure)->second);
-                    }
-                    position = end;
-                    continue;
+                auto content_key =
+                    operation.hash + ':' + std::to_string(operation.size);
+                if (populated_downloads.contains(content_key) ||
+                    window_keys.contains(content_key)) {
+                    break;
                 }
+                const bool multi = download_counts[content_key] > 1;
+                window_modes.push_back(
+                    multi ? mutation::DownloadCacheMode::Populate
+                          : mutation::DownloadCacheMode::None);
+                window_keys.insert(content_key);
+                if (multi) {
+                    populated_in_window.push_back(std::move(content_key));
+                }
+                ++end;
+            }
+            if (end > position + 1) {
+                for (std::size_t i = position + 1; i < end; ++i)
+                    if (auto prepared = prepare_destination(apply_order[i]);
+                        !prepared)
+                        return std::unexpected(prepared.error());
+                auto failure = run_content_window(
+                    std::span<const std::size_t>{apply_order}.subspan(
+                        position, end - position),
+                    parallelism,
+                    *record,
+                    *paths,
+                    runtime_data.local_dir,
+                    storage,
+                    key,
+                    *workspace,
+                    destinations,
+                    window_modes,
+                    &journal_session);
+                if (!failure) {
+                    return std::unexpected(failure.error());
+                }
+                if (*failure) {
+                    return fail_mutation((*failure)->first,
+                                         (*failure)->second);
+                }
+                for (auto& content_key : populated_in_window) {
+                    populated_downloads.insert(std::move(content_key));
+                }
+                position = end;
+                continue;
             }
         }
         if (record->plan.operations[first].action != Action::Upload) {
@@ -2272,10 +3489,97 @@ execute(const runtime::RuntimeData& runtime_data,
             ++end;
         }
 
+        std::vector<const PlannedPack*> planned_packs_pending;
+        std::unordered_set<std::size_t> pack_seen;
+        std::vector<const PlannedChunkUpload*> planned_chunks_pending;
+        std::unordered_set<std::size_t> chunk_seen;
+        std::vector<std::size_t> loose_pending_uploads;
+        loose_pending_uploads.reserve(pending_uploads.size());
+
+        for (const auto op_index : pending_uploads) {
+            const auto h = hash_from_hex(record->plan.operations[op_index].hash);
+            if (h) {
+                if (const auto it = layout_plan->pack_by_hash.find(*h);
+                    it != layout_plan->pack_by_hash.end()) {
+                    if (pack_seen.insert(it->second).second) {
+                        planned_packs_pending.push_back(
+                            &layout_plan->packs[it->second]);
+                    }
+                    continue;
+                }
+                if (const auto it = layout_plan->chunked_by_hash.find(*h);
+                    it != layout_plan->chunked_by_hash.end()) {
+                    if (chunk_seen.insert(it->second).second) {
+                        planned_chunks_pending.push_back(
+                            &layout_plan->chunked_uploads[it->second]);
+                    }
+                    continue;
+                }
+            }
+            loose_pending_uploads.push_back(op_index);
+        }
+
+        if (!planned_packs_pending.empty()) {
+            if (auto pack_ok = execute_packed_upload_batch(planned_packs_pending,
+                                                           *record,
+                                                           runtime_data.local_dir,
+                                                           storage,
+                                                           key,
+                                                           *workspace,
+                                                           parallelism);
+                !pack_ok) {
+                if (pack_ok.error().transport_after_unknown_transfer) {
+                    return std::unexpected(
+                        mutation_error(pack_ok.error().mutation));
+                }
+                return fail_mutation(pack_ok.error().mutation.operation_index,
+                                     pack_ok.error().mutation);
+            }
+            for (const auto* pack : planned_packs_pending) {
+                for (const auto op_idx : pack->operation_indices) {
+                    record->progress[op_idx].state =
+                        transaction::OperationState::Applied;
+                }
+            }
+            if (auto saved_pack = save_active_record(); !saved_pack) {
+                return std::unexpected(saved_pack.error());
+            }
+        }
+
+        if (!planned_chunks_pending.empty()) {
+            if (auto chunk_ok = execute_chunked_upload_batch(
+                    planned_chunks_pending,
+                    *record,
+                    observed_input,
+                    reconciliation_result,
+                    runtime_data.local_dir,
+                    storage,
+                    key,
+                    *workspace,
+                    parallelism);
+                !chunk_ok) {
+                if (chunk_ok.error().transport_after_unknown_transfer) {
+                    return std::unexpected(
+                        mutation_error(chunk_ok.error().mutation));
+                }
+                return fail_mutation(chunk_ok.error().mutation.operation_index,
+                                     chunk_ok.error().mutation);
+            }
+            for (const auto* cu : planned_chunks_pending) {
+                for (const auto op_idx : cu->operation_indices) {
+                    record->progress[op_idx].state =
+                        transaction::OperationState::Applied;
+                }
+            }
+            if (auto saved_chunk = save_active_record(); !saved_chunk) {
+                return std::unexpected(saved_chunk.error());
+            }
+        }
+
         for (std::size_t chunk_start = 0;
-             chunk_start < pending_uploads.size();) {
+             chunk_start < loose_pending_uploads.size();) {
             const auto chunk = detail::next_upload_batch_chunk(
-                pending_uploads, chunk_start, record->plan.operations);
+                loose_pending_uploads, chunk_start, record->plan.operations);
 
             auto staged_batch = mutation::stage_upload_batch(
                 chunk, *record, runtime_data.local_dir, key, *workspace);
@@ -2442,7 +3746,8 @@ execute(const runtime::RuntimeData& runtime_data,
                     .epoch_id = observed_input.storage.epoch_id,
                     .epoch_sequence = observed_input.storage.epoch_sequence,
                     .pending_materializations =
-                        reconciliation_result.pending_materializations});
+                        reconciliation_result.pending_materializations,
+                    .storage_manifest = found->commit.storage});
             !saved_state) {
             auto rolled = rollback_terminal();
             if (!rolled) {
@@ -2666,7 +3971,8 @@ execute(const runtime::RuntimeData& runtime_data,
                 .epoch_sequence =
                     *epoch_reference ? (**epoch_reference).sequence : 0,
                 .pending_materializations =
-                    reconciliation_result.pending_materializations});
+                    reconciliation_result.pending_materializations,
+                .storage_manifest = prepared_commit->commit.storage});
         !saved_state) {
         return std::unexpected(saved_state.error());
     }

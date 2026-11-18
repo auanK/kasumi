@@ -6,6 +6,19 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <optional>
+#include <vector>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <bcrypt.h>
+#endif
 
 namespace kasumi::crypto::physical {
 namespace {
@@ -91,6 +104,86 @@ std::string hex_digest(const std::array<std::uint32_t, 8>& state) {
     return output;
 }
 
+std::string hex_bytes(std::span<const std::uint8_t> bytes) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string output;
+    output.reserve(bytes.size() * 2U);
+    for (const auto byte : bytes) {
+        output.push_back(digits[(byte >> 4U) & 0xFU]);
+        output.push_back(digits[byte & 0xFU]);
+    }
+    return output;
+}
+
+#if defined(_WIN32)
+struct BcryptHashGuard {
+    BCRYPT_HASH_HANDLE handle = nullptr;
+    ~BcryptHashGuard() noexcept {
+        if (handle != nullptr) {
+            BCryptDestroyHash(handle);
+        }
+    }
+    BcryptHashGuard() = default;
+    BcryptHashGuard(const BcryptHashGuard&) = delete;
+    BcryptHashGuard& operator=(const BcryptHashGuard&) = delete;
+};
+
+std::expected<std::optional<std::string>, std::string>
+hash_file_bcrypt(const std::filesystem::path& path) {
+    static const BCRYPT_ALG_HANDLE alg = []() noexcept {
+        BCRYPT_ALG_HANDLE handle = nullptr;
+        return BCryptOpenAlgorithmProvider(
+                   &handle, BCRYPT_SHA256_ALGORITHM, nullptr, 0) == 0
+                   ? handle
+                   : nullptr;
+    }();
+    if (alg == nullptr) {
+        return std::nullopt;
+    }
+
+    BcryptHashGuard hash;
+    if (BCryptCreateHash(
+            alg, &hash.handle, nullptr, 0, nullptr, 0, 0) != 0) {
+        return std::nullopt;
+    }
+
+    std::vector<std::uint8_t> buffer(256U * 1024U);
+    bool bcrypt_failed = false;
+    auto streamed = platform::private_storage::stream_regular_file(
+        path, buffer, [&](std::span<const std::uint8_t> chunk) {
+            if (chunk.empty()) {
+                return true;
+            }
+            if (BCryptHashData(hash.handle,
+                               const_cast<PUCHAR>(chunk.data()),
+                               static_cast<ULONG>(chunk.size()),
+                               0) != 0) {
+                bcrypt_failed = true;
+                return false;
+            }
+            return true;
+        });
+    if (bcrypt_failed) {
+        return std::nullopt;
+    }
+    if (!streamed) {
+        return std::unexpected(
+            streamed.error().kind ==
+                    platform::private_storage::StreamErrorKind::ReadFailed
+                ? "could not read file for physical hash calculation"
+                : "could not open file for physical hash calculation");
+    }
+
+    std::array<std::uint8_t, 32> digest{};
+    if (BCryptFinishHash(
+            hash.handle, digest.data(), static_cast<ULONG>(digest.size()), 0) !=
+        0) {
+        return std::nullopt;
+    }
+    return hex_bytes(digest);
+}
+#endif
+
 } // namespace
 
 Sha256State sha256_init() noexcept {
@@ -150,8 +243,18 @@ hash_file(const std::filesystem::path& path, std::string_view algorithm) {
         return std::unexpected("unsupported physical hash algorithm");
     }
 
+#if defined(_WIN32)
+    auto hw_hashed = hash_file_bcrypt(path);
+    if (!hw_hashed) {
+        return std::unexpected(hw_hashed.error());
+    }
+    if (hw_hashed->has_value()) {
+        return std::move(**hw_hashed);
+    }
+#endif
+
     auto state = sha256_init();
-    std::array<std::uint8_t, 64U * 1024U> buffer{};
+    std::vector<std::uint8_t> buffer(256U * 1024U);
     auto streamed = platform::private_storage::stream_regular_file(
         path, buffer, [&](std::span<const std::uint8_t> chunk) {
             sha256_update(state, chunk);

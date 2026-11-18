@@ -1,6 +1,7 @@
 #include "application/execute.hpp"
 #include "application/profile.hpp"
 #include "application/observation/state.hpp"
+#include "platform/metadata.hpp"
 #include "platform/perf_trace.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
@@ -42,15 +43,21 @@ void setup_test_profile(const TempWorkspace& workspace, int file_count = 5) {
         app / "config.toml",
         "[profiles.demo]\nlocal_dir = '" + local.string() + "'\n"
         "remote_dir = '" + remote.string() + "'\n"
-        "min_history_depth = 5\nmin_history_age_hours = 6\n");
+        "min_history_depth = 5\nmin_history_age_hours = 6\n"
+        "key_storage = 'file'\n");
     std::filesystem::create_directories(app / "profiles" / "demo");
     ASSERT_TRUE(kasumi::state_storage::initialize(
         app / "profiles" / "demo" / "db.sqlite"));
 
+    // Give the warm scan files outside the scanner's recent-write window.
+    const auto mtime =
+        std::filesystem::file_time_type::clock::now() - std::chrono::seconds{1};
     for (int i = 1; i <= file_count; ++i) {
+        const auto file = local / ("file_" + std::to_string(i) + ".txt");
         kasumi::test::write_text(
-            local / ("file_" + std::to_string(i) + ".txt"),
+            file,
             "Payload content for test file " + std::to_string(i) + " with some bytes.");
+        ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(file, mtime));
     }
 }
 

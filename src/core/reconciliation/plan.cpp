@@ -432,6 +432,8 @@ candidate_shared_tree(const Input& input,
         .changed = false,
     };
 
+    std::optional<std::unordered_map<Hash, const NodeRow*, decltype(&hash_key)>>
+        local_by_hash;
     const auto find_local_row =
         [&](const Operation& operation) -> const NodeRow* {
         const auto direct = find_row(
@@ -446,11 +448,17 @@ candidate_shared_tree(const Input& input,
         if (!hash) {
             return static_cast<const NodeRow*>(nullptr);
         }
-        const auto found =
-            std::ranges::find_if(local_tree.rows, [&](const NodeRow& row) {
-                return !row.is_directory && row.hash == *hash;
-            });
-        return found == local_tree.rows.end() ? nullptr : &*found;
+        if (!local_by_hash) {
+            local_by_hash.emplace(0, hash_key);
+            local_by_hash->reserve(local_tree.rows.size());
+            for (const auto& row : local_tree.rows) {
+                if (!row.is_directory) {
+                    local_by_hash->try_emplace(row.hash, &row);
+                }
+            }
+        }
+        const auto found = local_by_hash->find(*hash);
+        return found == local_by_hash->end() ? nullptr : found->second;
     };
 
     const auto matches_file = [](const NodeRow* row,
@@ -859,18 +867,23 @@ select_disposable_operations(const Input& input,
     std::vector<std::string> candidate_paths(selected_files.begin(),
                                              selected_files.end());
     std::ranges::sort(candidate_paths, path_less);
+    std::unordered_map<std::string_view, const IgnoredEntryEvidence*>
+        ignored_by_path;
+    ignored_by_path.reserve(input.local_physical_evidence.ignored_entries.size());
+    for (const auto& entry : input.local_physical_evidence.ignored_entries) {
+        ignored_by_path.try_emplace(entry.path, &entry);
+    }
     for (const auto& path : candidate_paths) {
         const auto found = content.find(path);
         if (found == content.end()) {
             selection.paths_to_hash.push_back(platform::path::from_utf8(path));
             continue;
         }
-        const auto evidence =
-            std::ranges::find(input.local_physical_evidence.ignored_entries,
-                              path,
-                              &IgnoredEntryEvidence::path);
+        const auto evidence_it = ignored_by_path.find(path);
+        const auto* evidence =
+            evidence_it == ignored_by_path.end() ? nullptr : evidence_it->second;
         const auto hash = hash_from_hex(found->second->hash);
-        if (evidence == input.local_physical_evidence.ignored_entries.end() ||
+        if (evidence == nullptr ||
             !hash || hash_hex(*hash) != found->second->hash ||
             found->second->size != evidence->size ||
             found->second->identity != evidence->identity ||
@@ -1447,6 +1460,11 @@ ReconcileResult reconcile(const Input& input) {
         std::span<const std::string>{repair_upload_paths});
     if (!candidate) {
         return std::unexpected(std::move(candidate.error()));
+    }
+    if (!valid_snapshot(candidate->tree, false)) {
+        return std::unexpected(
+            fail_error(ErrorCode::UnsafePlan,
+                       "candidate shared tree violates snapshot invariants"));
     }
     auto disposable =
         select_disposable_operations(input, candidate->tree, plan);

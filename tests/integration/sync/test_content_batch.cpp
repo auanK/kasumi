@@ -11,6 +11,7 @@
 #include "core/reconciliation/plan.hpp"
 #include "core/transaction/types.hpp"
 #include "crypto/file_crypto.hpp"
+#include "crypto/pack.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
@@ -475,7 +476,20 @@ kasumi::transport::PresenceResult recording_presence(void* context,
     return kasumi::transport::presence(*state->base, id);
 }
 
+kasumi::transport::Result
+recording_get_batch(void* context, const kasumi::transport::GetBatch& batch) {
+    for (const auto& id : batch.identifiers) {
+        if (auto fetched =
+                recording_get(context, id, batch.destination_root / id);
+            !fetched) {
+            return fetched;
+        }
+    }
+    return {};
+}
+
 kasumi::transport::ListingResult recording_list(void* context) {
+    record_event(*recording_state(context), "list");
     return kasumi::transport::list(*recording_state(context)->base);
 }
 
@@ -1334,6 +1348,123 @@ TEST(SyncContentBatchTest,
     const auto transactions_dir = fixture->profile / ".transactions";
     EXPECT_TRUE(!std::filesystem::exists(transactions_dir) ||
                 std::filesystem::is_empty(transactions_dir));
+}
+
+TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
+    auto fixture = make_fixture("fastcdc-download-delta");
+    fixture->storage.storage.get_batch = recording_get_batch;
+    ContentWindowProbe probe;
+    attach_probe(*fixture, probe);
+    const auto first_profile = fixture->profile;
+    const auto first_local = fixture->local;
+    const auto second_profile = fixture->workspace->root / "second-profile";
+    const auto second_local = fixture->workspace->root / "second-local";
+    ASSERT_TRUE(std::filesystem::create_directory(second_profile));
+    ASSERT_TRUE(std::filesystem::create_directory(second_local));
+
+    std::vector<std::byte> data(24U * 1024U * 1024U);
+    std::uint32_t rng = 0x12345678U;
+    for (std::size_t i = 0; i < data.size(); i += 4U) {
+        rng = rng * 1664525U + 1013904223U;
+        for (std::size_t j = 0; j < 4U; ++j) {
+            data[i + j] = static_cast<std::byte>((rng >> (8U * j)) & 0xffU);
+        }
+    }
+    kasumi::test::write_binary(first_local / "large.bin", data);
+
+    const auto synchronize = [&]() -> ::testing::AssertionResult {
+        probe.profile = fixture->profile;
+        auto observed =
+            kasumi::application::observation::collect_reconciliation_input(
+                runtime_data(*fixture), fixture->storage, fixture->key, false);
+        if (!observed) {
+            return ::testing::AssertionFailure() << observed.error().detail;
+        }
+        auto planned = kasumi::reconciliation::reconcile(*observed);
+        if (!planned) {
+            return ::testing::AssertionFailure() << planned.error().detail;
+        }
+        const auto executed = sync::coordinator::execute(
+            runtime_data(*fixture),
+            fixture->storage,
+            fixture->key,
+            *observed,
+            *planned,
+            nullptr,
+            nullptr,
+            true);
+        if (!executed) {
+            return ::testing::AssertionFailure() << executed.error().detail;
+        }
+        return ::testing::AssertionSuccess();
+    };
+
+    ASSERT_TRUE(synchronize());
+    fixture->profile = second_profile;
+    fixture->local = second_local;
+    probe.content_get_count = 0;
+    ASSERT_TRUE(synchronize());
+    const auto original =
+        kasumi::crypto::pack::chunk_file_fastcdc(second_local / "large.bin");
+    ASSERT_TRUE(original.has_value()) << original.error();
+    kasumi::HashSet local_hashes{0, kasumi::hash_key};
+    for (const auto& c : original->chunks) {
+        local_hashes.insert(c.hash);
+    }
+    ASSERT_GE(local_hashes.size(), 8U);
+    EXPECT_EQ(probe.content_get_count, local_hashes.size());
+    EXPECT_EQ(kasumi::test::read_binary(second_local / "large.bin"), data);
+
+    for (const bool reorder_only : {false, true}) {
+        SCOPED_TRACE(reorder_only ? "all chunks local" : "4 KiB delta");
+        fixture->profile = first_profile;
+        fixture->local = first_local;
+        if (reorder_only) {
+            const auto cdc = kasumi::crypto::pack::chunk_file_fastcdc(
+                first_local / "large.bin");
+            ASSERT_TRUE(cdc.has_value()) << cdc.error();
+            std::rotate(data.begin(),
+                        data.begin() + cdc->chunks[0].size,
+                        data.begin() + cdc->chunks[0].size +
+                            cdc->chunks[1].size);
+        } else {
+            for (std::size_t i = 0; i < 4096U; ++i) {
+                data[9U * 1024U * 1024U + i] ^= std::byte{0x5a};
+            }
+        }
+        kasumi::test::write_binary(first_local / "large.bin", data);
+        fixture->events.clear();
+        ASSERT_TRUE(synchronize());
+        EXPECT_NE(std::ranges::find(fixture->events, "list"),
+                  fixture->events.end());
+
+        const auto updated =
+            kasumi::crypto::pack::chunk_file_fastcdc(first_local / "large.bin");
+        ASSERT_TRUE(updated.has_value()) << updated.error();
+        kasumi::HashSet needed_hashes{0, kasumi::hash_key};
+        for (const auto& c : updated->chunks) {
+            if (!local_hashes.contains(c.hash)) {
+                needed_hashes.insert(c.hash);
+            }
+        }
+        if (reorder_only) {
+            ASSERT_TRUE(needed_hashes.empty());
+        } else {
+            ASSERT_GT(needed_hashes.size(), 0U);
+            ASSERT_LT(needed_hashes.size(), updated->chunks.size());
+        }
+
+        fixture->profile = second_profile;
+        fixture->local = second_local;
+        probe.content_get_count = 0;
+        ASSERT_TRUE(synchronize());
+        EXPECT_EQ(probe.content_get_count, needed_hashes.size());
+        EXPECT_EQ(kasumi::test::read_binary(second_local / "large.bin"), data);
+        local_hashes.clear();
+        for (const auto& c : updated->chunks) {
+            local_hashes.insert(c.hash);
+        }
+    }
 }
 
 } // namespace

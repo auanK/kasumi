@@ -886,6 +886,44 @@ create_profile(const ExecutionEnvironment& environment,
     return result;
 }
 
+struct ScopedProfileLock {
+    std::intptr_t handle = -1;
+    ScopedProfileLock() = default;
+    explicit ScopedProfileLock(std::intptr_t value) noexcept
+        : handle(value) {}
+    ScopedProfileLock(const ScopedProfileLock&) = delete;
+    ScopedProfileLock& operator=(const ScopedProfileLock&) = delete;
+    ScopedProfileLock(ScopedProfileLock&& other) noexcept
+        : handle(std::exchange(other.handle, -1)) {}
+    ScopedProfileLock& operator=(ScopedProfileLock&& other) noexcept {
+        if (this != &other) {
+            if (handle >= 0) {
+                platform::release_profile_lock(handle);
+            }
+            handle = std::exchange(other.handle, -1);
+        }
+        return *this;
+    }
+    ~ScopedProfileLock() noexcept {
+        if (handle >= 0) {
+            platform::release_profile_lock(handle);
+        }
+    }
+};
+
+std::expected<ScopedProfileLock, ProfileError>
+acquire_target_profile_lock(const std::filesystem::path& app_data_dir,
+                            std::string_view profile_name) {
+    const auto lock_path =
+        app_data_dir / ("profile-" + std::string(profile_name) + ".lock");
+    auto profile_lock = platform::acquire_profile_lock(lock_path);
+    if (!profile_lock) {
+        return fail_profile(ProfileErrorCode::LockFailure,
+                            profile_lock.error());
+    }
+    return ScopedProfileLock{*profile_lock};
+}
+
 std::expected<void, ProfileError>
 update_profile(const ExecutionEnvironment& environment, Profile profile) {
     if (!valid_retention_policy(profile)) {
@@ -908,25 +946,10 @@ update_profile(const ExecutionEnvironment& environment, Profile profile) {
 
     const auto old_storage = it->key_storage;
     const auto new_storage = to_runtime_key_storage(profile.key_storage);
-    struct LockGuard {
-        std::intptr_t handle = -1;
-        ~LockGuard() noexcept {
-            if (handle >= 0) {
-                platform::release_profile_lock(handle);
-            }
-        }
-    } profile_lock_guard;
-
-    if (old_storage != new_storage) {
-        const auto lock_path =
-            environment.app_data_dir /
-            ("profile-" + std::string(profile.name) + ".lock");
-        auto profile_lock = platform::acquire_profile_lock(lock_path);
-        if (!profile_lock) {
-            return fail_profile(ProfileErrorCode::LockFailure,
-                                profile_lock.error());
-        }
-        profile_lock_guard.handle = *profile_lock;
+    auto profile_lock =
+        acquire_target_profile_lock(environment.app_data_dir, profile.name);
+    if (!profile_lock) {
+        return std::unexpected(profile_lock.error());
     }
 
     it->local_dir = profile.local_dir;
@@ -1053,6 +1076,12 @@ delete_profile(const ExecutionEnvironment& environment,
         return fail_profile(ProfileErrorCode::NotFound, "profile not found");
     }
 
+    auto profile_lock =
+        acquire_target_profile_lock(environment.app_data_dir, profile_name);
+    if (!profile_lock) {
+        return std::unexpected(profile_lock.error());
+    }
+
     auto original_profiles = loaded->profiles;
     loaded->profiles.erase(it);
 
@@ -1104,6 +1133,25 @@ rename_profile(const ExecutionEnvironment& environment,
     if (find_profile(loaded->profiles, new_name) != loaded->profiles.end()) {
         return fail_profile(ProfileErrorCode::AlreadyExists,
                             "a profile with this name already exists");
+    }
+
+    const auto first_lock_name =
+        current_name <= new_name ? current_name : new_name;
+    const auto second_lock_name =
+        current_name <= new_name ? new_name : current_name;
+    auto first_lock = acquire_target_profile_lock(
+        environment.app_data_dir, first_lock_name);
+    if (!first_lock) {
+        return std::unexpected(first_lock.error());
+    }
+    ScopedProfileLock second_lock;
+    if (second_lock_name != first_lock_name) {
+        auto second = acquire_target_profile_lock(
+            environment.app_data_dir, second_lock_name);
+        if (!second) {
+            return std::unexpected(second.error());
+        }
+        second_lock = std::move(*second);
     }
 
     auto old_paths_res =

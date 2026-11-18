@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <monocypher.h>
 #include <string>
 #include <vector>
 
@@ -1336,4 +1337,72 @@ TEST(CliUpdateTest, PublicUpdateHonorsCancellationBeforeAnyInstallationWork) {
     EXPECT_EQ(code, 130);
     EXPECT_EQ(output.find("Checking"), std::string::npos);
     EXPECT_EQ(output.find("installation destination"), std::string::npos);
+}
+
+TEST(CliUpdateTest, VerifiesEd25519ReleaseSignaturesAndRejectsTampering) {
+    std::array<std::uint8_t, 32> seed{};
+    for (std::size_t index = 0; index < seed.size(); ++index) {
+        seed[index] = static_cast<std::uint8_t>(index + 1);
+    }
+    std::array<std::uint8_t, 64> secret_key{};
+    std::array<std::uint8_t, 32> public_key{};
+    crypto_eddsa_key_pair(secret_key.data(), public_key.data(), seed.data());
+
+    const std::string payload = "kasumi-v0.14.0 sha256 manifest";
+    std::array<std::uint8_t, 64> signature{};
+    crypto_eddsa_sign(signature.data(),
+                      secret_key.data(),
+                      reinterpret_cast<const std::uint8_t*>(payload.data()),
+                      payload.size());
+    crypto_wipe(secret_key.data(), secret_key.size());
+    crypto_wipe(seed.data(), seed.size());
+
+    const auto bytes = std::as_bytes(std::span{payload});
+    EXPECT_TRUE(kasumi::cli::update::verify_release_signature(
+        bytes, signature, public_key));
+
+    auto tampered_sig = signature;
+    tampered_sig[0] ^= 0x01U;
+    EXPECT_FALSE(kasumi::cli::update::verify_release_signature(
+        bytes, tampered_sig, public_key));
+
+    std::string tampered_payload = payload;
+    tampered_payload[0] = 'K';
+    EXPECT_FALSE(kasumi::cli::update::verify_release_signature(
+        std::as_bytes(std::span{tampered_payload}), signature, public_key));
+}
+
+TEST(CliUpdateTest, PrunesOlderPreviousRecoveryCopiesOnSuccessfulInstall) {
+    auto workspace = kasumi::test::make_temp_workspace("update-prune-previous");
+    const auto target = kasumi::test::workspace_path(workspace, "kasumi");
+    const auto prepared = kasumi::test::workspace_path(workspace, "prepared");
+    const auto stale =
+        kasumi::test::workspace_path(workspace, ".kasumi-previous-stale");
+    {
+        std::ofstream output(target, std::ios::binary);
+        output << "current executable";
+    }
+    {
+        std::ofstream output(prepared, std::ios::binary);
+        output << "updated executable";
+    }
+    {
+        std::ofstream output(stale, std::ios::binary);
+        output << "stale recovery executable";
+    }
+    const auto expected = kasumi::cli::update::sha256_file(prepared);
+    ASSERT_TRUE(expected.has_value());
+    const auto installed = kasumi::cli::update::install_prepared_executable(
+        prepared, target, *expected);
+    ASSERT_TRUE(installed.has_value()) << installed.error().detail;
+
+    EXPECT_FALSE(std::filesystem::exists(stale));
+    std::size_t recovery_copies = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(
+             kasumi::test::workspace_root(workspace))) {
+        if (entry.path().filename().string().starts_with(".kasumi-previous-")) {
+            ++recovery_copies;
+        }
+    }
+    EXPECT_EQ(recovery_copies, 1U);
 }

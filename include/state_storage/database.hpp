@@ -1,6 +1,7 @@
 #ifndef KASUMI_STATE_STORAGE_DATABASE_HPP
 #define KASUMI_STATE_STORAGE_DATABASE_HPP
 
+#include "core/history.hpp"
 #include "core/node.hpp"
 
 #include <cstdint>
@@ -24,6 +25,8 @@ struct StoredState {
     std::uint64_t epoch_sequence = 0;
     // Logical files accepted but not yet materialized locally.
     std::vector<NodeRow> pending_materializations;
+    // Physical packing/chunking layout persisted with the accepted commit.
+    history::StorageManifest storage_manifest;
 };
 
 // Persisted entry for safe reuse of the local hash.

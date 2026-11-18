@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <monocypher.h>
 #include <nlohmann/json.hpp>
 #include <print>
 #include <reproc++/run.hpp>
@@ -358,6 +359,71 @@ void apply_linux_process_environment(reproc::options& options,
 }
 #endif
 
+#if defined(_WIN32)
+std::expected<std::filesystem::path, std::string> windows_system_directory() {
+    std::wstring buffer(MAX_PATH + 1, L'\0');
+    for (;;) {
+        const UINT written =
+            GetSystemDirectoryW(buffer.data(), static_cast<UINT>(buffer.size()));
+        if (written == 0) {
+            return std::unexpected("could not resolve Windows system directory");
+        }
+        if (written < buffer.size()) {
+            buffer.resize(written);
+            break;
+        }
+        buffer.resize(written + 1);
+    }
+    const std::filesystem::path dir{std::move(buffer)};
+    if (!dir.is_absolute()) {
+        return std::unexpected("Windows system directory is not absolute");
+    }
+    auto current = dir.root_path();
+    if (current.empty() ||
+        platform::private_storage::is_reparse_or_symlink(current)) {
+        return std::unexpected("Windows system directory root is unsafe");
+    }
+    for (const auto& component : dir.relative_path()) {
+        if (component.empty() || component == L".") {
+            continue;
+        }
+        current /= component;
+        if (platform::private_storage::is_reparse_or_symlink(current)) {
+            return std::unexpected(
+                "Windows system directory contains a reparse point");
+        }
+    }
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(dir, error);
+    if (error || std::filesystem::is_symlink(status) ||
+        !std::filesystem::is_directory(status)) {
+        return std::unexpected("Windows system directory is invalid");
+    }
+    return dir;
+}
+
+std::expected<std::filesystem::path, std::string>
+resolve_windows_system_tool(std::string_view name) {
+    if (name != "tar") {
+        return std::unexpected(
+            "tool is not on the Windows updater allowlist");
+    }
+    const auto system_dir = windows_system_directory();
+    if (!system_dir) {
+        return std::unexpected(system_dir.error());
+    }
+    const auto candidate = *system_dir / L"tar.exe";
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(candidate, error);
+    if (error || std::filesystem::is_symlink(status) ||
+        platform::private_storage::is_reparse_or_symlink(candidate) ||
+        !std::filesystem::is_regular_file(status)) {
+        return std::unexpected("trusted Windows tar.exe is unavailable");
+    }
+    return candidate;
+}
+#endif
+
 std::expected<ProcessResult, std::string>
 run_capture(const std::vector<std::string>& arguments,
             std::size_t output_limit = PROCESS_OUTPUT_LIMIT,
@@ -379,7 +445,16 @@ run_capture(const std::vector<std::string>& arguments,
         inherit_in_out ? reproc::redirect::parent : reproc::redirect::pipe;
     options.redirect.err.type = reproc::redirect::pipe;
     options.stop = default_process_stop_actions();
-#if defined(__linux__)
+#if defined(_WIN32)
+    const auto tool = resolve_windows_system_tool(arguments.front());
+    if (!tool) {
+        return std::unexpected(tool.error());
+    }
+    child_arguments.front() = platform::path::to_utf8(*tool);
+    const std::string system_dir_utf8 =
+        platform::path::to_utf8(tool->parent_path());
+    options.working_directory = system_dir_utf8.c_str();
+#elif defined(__linux__)
     const auto tool = resolve_linux_system_tool(arguments.front());
     if (!tool) {
         return std::unexpected(tool.error());
@@ -1926,6 +2001,33 @@ InstallResult install_prepared_executable(const std::filesystem::path& prepared,
                             platform::path::to_utf8(backup)));
     }
     files.preserve_backup = true;
+    const auto parent_dir = target.parent_path();
+    if (!parent_dir.empty()) {
+        std::error_code dir_error;
+        for (std::filesystem::directory_iterator it(parent_dir, dir_error), end;
+             !dir_error && it != end;
+             it.increment(dir_error)) {
+            const auto& entry_path = it->path();
+            if (entry_path == backup) {
+                continue;
+            }
+            const auto filename = platform::path::to_utf8(entry_path.filename());
+            if (!filename.starts_with(".kasumi-previous-")) {
+                continue;
+            }
+            std::error_code status_error;
+            const auto entry_status =
+                std::filesystem::symlink_status(entry_path, status_error);
+            if (!status_error &&
+                !std::filesystem::is_symlink(entry_status) &&
+                !platform::private_storage::is_reparse_or_symlink(entry_path) &&
+                std::filesystem::is_regular_file(entry_status)) {
+                std::error_code remove_error;
+                static_cast<void>(
+                    std::filesystem::remove(entry_path, remove_error));
+            }
+        }
+    }
     return {};
 }
 
@@ -2729,6 +2831,11 @@ start_windows_helper(const std::filesystem::path& executable,
     startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
     startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    const auto system_dir = windows_system_directory();
+    if (!system_dir) {
+        std::filesystem::remove(helper, error);
+        return std::unexpected(system_dir.error());
+    }
     PROCESS_INFORMATION process{};
     if (!CreateProcessW(helper.c_str(),
                         mutable_command.data(),
@@ -2737,7 +2844,7 @@ start_windows_helper(const std::filesystem::path& executable,
                         TRUE,
                         CREATE_UNICODE_ENVIRONMENT,
                         nullptr,
-                        nullptr,
+                        system_dir->c_str(),
                         &startup,
                         &process)) {
         std::filesystem::remove(helper, error);
@@ -3659,6 +3766,20 @@ int run(int argc, char* argv[]) {
     }
 #endif
     return report_failure("unknown internal update mode");
+}
+
+bool verify_release_signature(
+    std::span<const std::byte> message,
+    std::span<const std::uint8_t, 64> signature,
+    std::span<const std::uint8_t, 32> public_key) noexcept {
+    static constexpr std::uint8_t kEmptyByte = 0;
+    const auto* payload =
+        message.empty()
+            ? &kEmptyByte
+            : reinterpret_cast<const std::uint8_t*>(message.data());
+    return crypto_eddsa_check(
+               signature.data(), public_key.data(), payload, message.size()) ==
+           0;
 }
 
 } // namespace kasumi::cli::update

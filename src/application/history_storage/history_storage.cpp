@@ -101,7 +101,7 @@ inspect_commit_variants(transport::Transport& storage,
         }
 
         const auto layout = derive_remote_layout(key);
-        const auto prefix = layout.commits_prefix + std::string{commit_id};
+        const auto prefix = trim_trailing_slash(layout.commits_prefix);
         auto listed = list_identifiers(storage, prefix);
         if (!listed) {
             return std::unexpected(listed.error());
@@ -113,7 +113,10 @@ inspect_commit_variants(transport::Transport& storage,
         std::vector<HeadReference> references;
         references.reserve(listed->size());
         for (const auto& name : *listed) {
-            auto reference = parse_commit_object(layout, prefix + "/" + name);
+            const auto identifier = name.starts_with(layout.commits_prefix)
+                                        ? name
+                                        : layout.commits_prefix + name;
+            auto reference = parse_commit_object(layout, identifier);
             if (reference && reference->commit_id == commit_id) {
                 references.push_back(std::move(*reference));
             }

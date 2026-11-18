@@ -129,6 +129,19 @@ validate_entry(const std::filesystem::path& path,
                                std::string{label} + " '" +
                                platform::path::to_utf8(path) + "'");
     }
+#if defined(_WIN32)
+    const DWORD attributes = GetFileAttributesW(path.wstring().c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        return std::unexpected(
+            native_error(std::string{operation} + ": GetFileAttributesW failed",
+                         GetLastError()));
+    }
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return std::unexpected(std::string{operation} + ": invalid " +
+                               std::string{label} + " '" +
+                               platform::path::to_utf8(path) + "'");
+    }
+#endif
     return {};
 }
 
@@ -360,11 +373,26 @@ std::expected<void, std::string> sync_file(const std::filesystem::path& path) {
                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                     nullptr,
                     OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
                     nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         return std::unexpected(
             native_error("sync_file: CreateFileW failed", GetLastError()));
+    }
+
+    FILE_ATTRIBUTE_TAG_INFO tag_info{};
+    if (!GetFileInformationByHandleEx(
+            file, FileAttributeTagInfo, &tag_info, sizeof(tag_info))) {
+        const auto attr_error = GetLastError();
+        CloseHandle(file);
+        return std::unexpected(native_error(
+            "sync_file: GetFileInformationByHandleEx failed", attr_error));
+    }
+    if ((tag_info.FileAttributes &
+         (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0) {
+        CloseHandle(file);
+        return std::unexpected("sync_file: target cannot be a reparse point "
+                               "or directory");
     }
 
     const bool flushed = FlushFileBuffers(file) != 0;
