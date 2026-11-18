@@ -1363,12 +1363,12 @@ TEST(IntegrityMaintenanceTest,
             if (progress.stage ==
                     kasumi::application::FsckStage::AuditingContent &&
                 progress.completed_objects == 1) {
+                kasumi::platform::cancellation::request();
                 {
                     std::lock_guard lock(probe.mutex);
                     probe.progress_completions = 1;
                 }
                 probe.changed.notify_all();
-                kasumi::platform::cancellation::request();
             }
         });
     ASSERT_FALSE(checked.has_value());

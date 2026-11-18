@@ -22,7 +22,6 @@
 #include <algorithm>
 #include <atomic>
 #include <blake3.h>
-#include <condition_variable>
 #include <deque>
 #include <exception>
 #include <filesystem>
@@ -32,6 +31,7 @@
 #include <mutex>
 #include <optional>
 #include <ranges>
+#include <semaphore>
 #include <string_view>
 #include <system_error>
 #include <thread>
@@ -515,8 +515,7 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                 std::uint64_t size = 0;
                 std::atomic<bool> ready{false};
             };
-            std::condition_variable progress_cv;
-            std::mutex progress_wait_mutex;
+            std::counting_semaphore<> progress_signal{0};
             std::vector<CompletedObject> completed(on_progress ? total_objects
                                                                : 0);
             std::atomic<std::size_t> next_completion{0};
@@ -568,6 +567,10 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                                                     std::move(audited.error()));
                                 return;
                             }
+                            if (platform::cancellation::requested()) {
+                                request_window_stop();
+                                return;
+                            }
                             if (ref_chunks[index] &&
                                 *audited == AuditState::Healthy) {
                                 files_reassembled.fetch_add(
@@ -589,7 +592,7 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                                 completion.size = reference.size;
                                 completion.ready.store(
                                     true, std::memory_order_release);
-                                progress_cv.notify_one();
+                                progress_signal.release();
                             }
                         } catch (const std::exception& exception) {
                             record_hard_failure(
@@ -609,7 +612,7 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                 std::jthread driver([&] {
                     run_workers();
                     workers_done.store(true, std::memory_order_release);
-                    progress_cv.notify_one();
+                    progress_signal.release();
                 });
                 try {
                     std::size_t cursor = 0;
@@ -640,14 +643,8 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                             }
                             break;
                         }
-                        std::unique_lock lock(progress_wait_mutex);
-                        progress_cv.wait_for(
-                            lock, std::chrono::milliseconds(200), [&] {
-                                return ready() ||
-                                       workers_done.load(
-                                           std::memory_order_relaxed);
-                            });
-                        if (!ready() &&
+                        if (!progress_signal.try_acquire_for(
+                                std::chrono::milliseconds(200)) &&
                             metrics.download.bytes.load(
                                 std::memory_order_relaxed) != last_wire_bytes) {
                             report_progress(
