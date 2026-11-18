@@ -66,6 +66,18 @@ encrypt_file_with_hashes(const std::filesystem::path& input_path,
                          FilePurpose purpose = FilePurpose::Content,
                          std::string* error_detail = nullptr);
 
+// Streams and encrypts a [offset, offset + length) file slice using KASUMI v3
+// framing, verifying its plaintext BLAKE3 before publishing output_path.
+std::optional<EncryptionResult>
+encrypt_file_slice(const std::filesystem::path& input_path,
+                   std::uint64_t offset,
+                   std::uint64_t length,
+                   const Hash& expected_slice_hash,
+                   const std::filesystem::path& output_path,
+                   std::span<const std::uint8_t, KEY_SIZE> master_key,
+                   FilePurpose purpose = FilePurpose::Content,
+                   std::string* error_detail = nullptr);
+
 // Encrypts with chunk-level authentication; removes partial output on failure.
 bool encrypt_file(const std::filesystem::path& input_path,
                   const std::filesystem::path& output_path,
