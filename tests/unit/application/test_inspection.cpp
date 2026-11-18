@@ -611,7 +611,8 @@ TEST(ApplicationInspectionTest,
         .name = "demo",
         .local_dir = local,
         .remote_dir = kasumi::platform::path::to_utf8(
-            kasumi::test::workspace_path(fixture.workspace, "storage"))};
+            kasumi::test::workspace_path(fixture.workspace, "storage")),
+        .key_storage = kasumi::application::KeyStorage::File};
     ASSERT_TRUE(kasumi::application::create_profile(
         environment, profile, MasterKeyHex{test_key_hex()}));
 
@@ -741,7 +742,8 @@ TEST(ApplicationInspectionTest, UsesPersistedKeyFromProfileCreatedNormally) {
         .name = "demo",
         .local_dir = local,
         .remote_dir = kasumi::platform::path::to_utf8(
-            kasumi::test::workspace_path(fixture.workspace, "storage"))};
+            kasumi::test::workspace_path(fixture.workspace, "storage")),
+        .key_storage = kasumi::application::KeyStorage::File};
 
     ASSERT_TRUE(kasumi::application::create_profile(
         environment, profile, MasterKeyHex{test_key_hex()}));

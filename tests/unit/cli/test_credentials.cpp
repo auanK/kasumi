@@ -360,7 +360,8 @@ TEST(CliWizardTest, ListsAllLocalStatesInBothLanguagesWithoutSideEffects) {
         const kasumi::application::Profile profile{
             .name = name,
             .local_dir = local_dir,
-            .remote_dir = "unavailable:must-not-be-read"};
+            .remote_dir = "unavailable:must-not-be-read",
+            .key_storage = kasumi::application::KeyStorage::File};
         ASSERT_TRUE(kasumi::application::create_profile(
             environment,
             profile,

@@ -515,6 +515,9 @@ target_link_libraries(kasumi_runtime
     kasumi_release_optimizations
     kasumi_hardening
 )
+if(WIN32)
+    target_link_libraries(kasumi_runtime PRIVATE advapi32)
+endif()
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(NOT Python3_Interpreter_FOUND)

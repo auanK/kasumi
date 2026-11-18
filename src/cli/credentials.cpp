@@ -1,5 +1,6 @@
 #include "cli/credentials.hpp"
 
+#include "application/profile.hpp"
 #include "cli/i18n.hpp"
 #include "cli/style.hpp"
 #include "crypto/secure_memory.hpp"
@@ -229,6 +230,43 @@ application::Credentials from_environment() {
         return application::MasterKeyHex{std::string(env)};
     }
     return application::NoCredentials{};
+}
+
+application::Credentials
+for_profile(const application::ExecutionEnvironment& environment,
+            std::string_view profile_name) {
+    auto env_creds = from_environment();
+    if (!std::holds_alternative<application::NoCredentials>(env_creds)) {
+        return env_creds;
+    }
+    const auto profiles = application::list_profiles(environment);
+    if (!profiles) {
+        return application::NoCredentials{};
+    }
+    const auto it =
+        std::ranges::find(*profiles, profile_name, &application::Profile::name);
+    if (it == profiles->end() ||
+        it->key_storage != application::KeyStorage::Memory) {
+        return application::NoCredentials{};
+    }
+    auto password = read_secret(
+        "KASUMI_PASSWORD", std::string{i18n::tr(i18n::Key::PromptPassword)});
+    if (platform::cancellation::requested()) {
+        wipe(password);
+        return application::NoCredentials{};
+    }
+    auto salt = read_secret("KASUMI_PASSWORD2",
+                            std::string{i18n::tr(i18n::Key::PromptSalt)});
+    if (platform::cancellation::requested()) {
+        wipe(password);
+        wipe(salt);
+        return application::NoCredentials{};
+    }
+    application::Credentials creds{
+        application::PasswordPair{std::move(password), std::move(salt)}};
+    wipe(password);
+    wipe(salt);
+    return creds;
 }
 
 application::PasswordPair read_password_pair() {

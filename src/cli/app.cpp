@@ -118,7 +118,8 @@ int run(int argc, char* argv[]) {
     std::signal(SIGINT, request_cancellation);
     std::signal(SIGTERM, request_cancellation);
 #else
-    if (std::holds_alternative<ConfigureInvocation>(*parse_result)) {
+    if (std::holds_alternative<ConfigureInvocation>(*parse_result) ||
+        std::holds_alternative<KeyInvocation>(*parse_result)) {
         // The wizard's blocking stdin read must not restart after SIGINT.
         struct sigaction action{};
         action.sa_handler = request_cancellation;
@@ -151,13 +152,27 @@ int run(int argc, char* argv[]) {
                    ? present_cancellation(application::Operation::Preview)
                    : code;
     }
+    if (const auto* key_inv = std::get_if<KeyInvocation>(&*parse_result)) {
+        const int code = run_profile_key(environment, key_inv->profile_name);
+        return code == 130
+                   ? present_cancellation(application::Operation::Preview)
+                   : code;
+    }
     if (std::holds_alternative<application::InspectionRequest>(*parse_result)) {
         auto request = std::get<application::InspectionRequest>(*parse_result);
+        auto creds =
+            credentials::for_profile(environment, request.profile_name);
+        if (platform::cancellation::requested()) {
+            application::wipe_credentials(creds);
+            return finish(
+                present_cancellation(application::Operation::Preview));
+        }
         auto result = application::inspect({
             .request = request,
-            .credentials = credentials::from_environment(),
+            .credentials = std::move(creds),
             .environment = environment,
         });
+        application::wipe_credentials(creds);
 
         if (platform::cancellation::requested()) {
             return finish(
@@ -222,11 +237,17 @@ int run(int argc, char* argv[]) {
         break;
     }
 
-    auto result =
-        application::execute({.request = request,
-                              .credentials = credentials::from_environment(),
-                              .environment = environment,
-                              .on_progress = std::move(on_progress)});
+    auto creds = credentials::for_profile(environment, request.profile_name);
+    if (platform::cancellation::requested()) {
+        application::wipe_credentials(creds);
+        return finish(present_cancellation(request.operation));
+    }
+
+    auto result = application::execute({.request = request,
+                                        .credentials = std::move(creds),
+                                        .environment = environment,
+                                        .on_progress = std::move(on_progress)});
+    application::wipe_credentials(creds);
 
     if (platform::cancellation::requested()) {
         return finish(present_cancellation(request.operation));

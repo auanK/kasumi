@@ -2,7 +2,9 @@
 #define KASUMI_RUNTIME_RESOLVER_HPP
 
 #include "runtime/error.hpp"
+#include "runtime/profile.hpp"
 
+#include <cstdint>
 #include <expected>
 #include <filesystem>
 #include <string>
@@ -29,6 +31,8 @@ struct RuntimeData {
     // History retention policy.
     std::uint32_t min_history_depth = 5;
     std::uint32_t min_history_age_hours = 6;
+    // Key storage mode. Defaults to File for direct fixture construction.
+    KeyStorage key_storage = KeyStorage::File;
 };
 
 // Validates the profile and resolves its paths.

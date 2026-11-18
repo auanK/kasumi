@@ -109,4 +109,35 @@ TEST(VaultTest, RejectsWeakPasswordInputs) {
     EXPECT_FALSE(kasumi::runtime::vault::derive("password-long", "short"));
 }
 
+#if defined(_WIN32)
+TEST(VaultTest, OsVaultRoundTripsOverwritesAndDeletes) {
+    auto workspace = kasumi::test::make_temp_workspace("vault-os-win");
+    const auto key_path =
+        kasumi::test::workspace_path(workspace, "app/profiles/demo/key.bin");
+
+    EXPECT_EQ(kasumi::runtime::vault::read_vault(key_path).error().code,
+              kasumi::runtime::ErrorCode::KeyNotFound);
+
+    KeyBytes key{};
+    key.fill(0x3c);
+    ASSERT_TRUE(kasumi::runtime::vault::write_vault(key_path, key));
+    EXPECT_FALSE(std::filesystem::exists(key_path));
+    const auto restored = kasumi::runtime::vault::read_vault(key_path);
+    ASSERT_TRUE(restored.has_value());
+    EXPECT_EQ(*restored, key);
+
+    KeyBytes updated{};
+    updated.fill(0x9a);
+    ASSERT_TRUE(kasumi::runtime::vault::write_vault(key_path, updated));
+    const auto restored_updated = kasumi::runtime::vault::read_vault(key_path);
+    ASSERT_TRUE(restored_updated.has_value());
+    EXPECT_EQ(*restored_updated, updated);
+
+    ASSERT_TRUE(kasumi::runtime::vault::delete_vault(key_path));
+    EXPECT_EQ(kasumi::runtime::vault::read_vault(key_path).error().code,
+              kasumi::runtime::ErrorCode::KeyNotFound);
+    EXPECT_TRUE(kasumi::runtime::vault::delete_vault(key_path));
+}
+#endif
+
 } // namespace

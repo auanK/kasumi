@@ -104,7 +104,7 @@ TEST(CliI18nTest, ExtractsStandaloneLanguageFlagPrefix) {
 
 TEST(CliI18nTest, AllKeysHaveValidTranslations) {
     constexpr std::size_t count =
-        static_cast<std::size_t>(Key::WizardConfigReadFailed) + 1;
+        static_cast<std::size_t>(Key::WizardKeyStorageMemoryNoPersist) + 1;
     ASSERT_EQ(count, embedded::KEY_COUNT);
     for (const Language lang : {Language::English, Language::Portuguese}) {
         set_language(lang);

@@ -6,8 +6,23 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <limits>
 #include <monocypher.h>
+#include <string>
 #include <string_view>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+// clang-format off
+#include <windows.h>
+#include <wincred.h>
+// clang-format on
+#endif
 
 namespace kasumi::runtime::vault {
 
@@ -79,7 +94,8 @@ read_impl(const std::filesystem::path& path, bool protect) {
             std::filesystem::is_symlink(status) ||
             !std::filesystem::is_regular_file(status)) {
             return fail(ErrorCode::KeyNotFound,
-                        "key.bin file is missing or invalid");
+                        "key.bin file is missing or invalid; run 'kasumi key "
+                        "<profile>' to re-enter the key");
         }
     }
     KeyBytes key{};
@@ -104,11 +120,13 @@ read_impl(const std::filesystem::path& path, bool protect) {
             return fail(ErrorCode::KeyInvalid, "key.bin file has invalid size");
         }
         return fail(ErrorCode::KeyNotFound,
-                    "key.bin file is missing or corrupted");
+                    "key.bin file is missing or corrupted; run 'kasumi key "
+                    "<profile>' to re-enter the key");
     }
     if (total != key.size()) {
         return fail(ErrorCode::KeyNotFound,
-                    "key.bin file is missing or corrupted");
+                    "key.bin file is missing or corrupted; run 'kasumi key "
+                    "<profile>' to re-enter the key");
     }
     obscure(key);
     success = true;
@@ -188,6 +206,111 @@ write_new(const std::filesystem::path& path,
         return fail(ErrorCode::KeyWriteFailure, synced.error());
     }
     return {};
+}
+
+namespace {
+
+#if defined(_WIN32)
+std::wstring vault_target_name(const std::filesystem::path& key_path) {
+    std::error_code ec;
+    const auto abs = std::filesystem::absolute(key_path, ec);
+    const auto normalized = (ec ? key_path : abs).lexically_normal();
+    std::wstring target = L"kasumi:" + normalized.generic_wstring();
+    for (auto& ch : target) {
+        if (ch >= L'A' && ch <= L'Z') {
+            ch = static_cast<wchar_t>(ch - L'A' + L'a');
+        }
+    }
+    return target;
+}
+#endif
+
+} // namespace
+
+std::expected<KeyBytes, runtime::Error>
+read_vault(const std::filesystem::path& key_path) {
+#if defined(_WIN32)
+    const auto target = vault_target_name(key_path);
+    PCREDENTIALW cred = nullptr;
+    if (!CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &cred)) {
+        if (GetLastError() == ERROR_NOT_FOUND) {
+            return fail(ErrorCode::KeyNotFound,
+                        "profile key is missing in OS vault; run 'kasumi key "
+                        "<profile>' to re-enter the key");
+        }
+        return fail(ErrorCode::KeyNotFound,
+                    "failed to read key from Windows Credential Manager");
+    }
+    struct CredGuard {
+        PCREDENTIALW ptr;
+        ~CredGuard() noexcept {
+            if (ptr != nullptr) {
+                if (ptr->CredentialBlob != nullptr &&
+                    ptr->CredentialBlobSize > 0) {
+                    crypto_wipe(ptr->CredentialBlob, ptr->CredentialBlobSize);
+                }
+                CredFree(ptr);
+            }
+        }
+    } cred_guard{cred};
+
+    if (cred->CredentialBlob == nullptr ||
+        cred->CredentialBlobSize != static_cast<DWORD>(KEY_SIZE)) {
+        return fail(ErrorCode::KeyInvalid, "OS vault key has invalid size");
+    }
+    KeyBytes key{};
+    std::memcpy(key.data(), cred->CredentialBlob, KEY_SIZE);
+    obscure(key);
+    return key;
+#else
+    static_cast<void>(key_path);
+    return fail(ErrorCode::KeyNotFound,
+                "OS credential vault is not supported on this platform yet");
+#endif
+}
+
+std::expected<void, runtime::Error>
+write_vault(const std::filesystem::path& key_path, const KeyBytes& clear_key) {
+#if defined(_WIN32)
+    auto target = vault_target_name(key_path);
+    KeyBytes stored = clear_key;
+    obscure(stored);
+    WipeGuard guard{stored};
+
+    CREDENTIALW cred{};
+    cred.Type = CRED_TYPE_GENERIC;
+    cred.TargetName = target.data();
+    cred.CredentialBlobSize = static_cast<DWORD>(stored.size());
+    cred.CredentialBlob = stored.data();
+    cred.Persist = CRED_PERSIST_LOCAL_MACHINE;
+
+    if (!CredWriteW(&cred, 0)) {
+        return fail(ErrorCode::KeyWriteFailure,
+                    "failed to store key in Windows Credential Manager");
+    }
+    return {};
+#else
+    static_cast<void>(key_path);
+    static_cast<void>(clear_key);
+    return fail(ErrorCode::KeyWriteFailure,
+                "OS credential vault is not supported on this platform yet");
+#endif
+}
+
+std::expected<void, runtime::Error>
+delete_vault(const std::filesystem::path& key_path) {
+#if defined(_WIN32)
+    const auto target = vault_target_name(key_path);
+    if (!CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0) &&
+        GetLastError() != ERROR_NOT_FOUND) {
+        return fail(ErrorCode::IoFailure,
+                    "failed to delete key from Windows Credential Manager");
+    }
+    return {};
+#else
+    static_cast<void>(key_path);
+    return {};
+#endif
 }
 
 std::expected<KeyBytes, runtime::Error> derive(std::string_view password,

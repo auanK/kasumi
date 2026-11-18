@@ -25,6 +25,9 @@ void wipe_string(std::string& value) noexcept {
 void wipe_credentials(Credentials& credentials) noexcept {
     if (auto* mk = std::get_if<MasterKeyHex>(&credentials)) {
         wipe_string(mk->value);
+    } else if (auto* pp = std::get_if<PasswordPair>(&credentials)) {
+        wipe_string(pp->password);
+        wipe_string(pp->salt_password);
     }
 }
 

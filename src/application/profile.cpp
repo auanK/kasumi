@@ -686,7 +686,47 @@ struct KeyBytesWiper {
         release();
     }
 };
+
+runtime::KeyStorage to_runtime_key_storage(KeyStorage storage) noexcept {
+    switch (storage) {
+        case KeyStorage::Vault:
+            return runtime::KeyStorage::Vault;
+        case KeyStorage::File:
+            return runtime::KeyStorage::File;
+        case KeyStorage::Memory:
+            return runtime::KeyStorage::Memory;
+    }
+    return runtime::KeyStorage::Vault;
+}
+
+KeyStorage to_app_key_storage(runtime::KeyStorage storage) noexcept {
+    switch (storage) {
+        case runtime::KeyStorage::Vault:
+            return KeyStorage::Vault;
+        case runtime::KeyStorage::File:
+            return KeyStorage::File;
+        case runtime::KeyStorage::Memory:
+            return KeyStorage::Memory;
+    }
+    return KeyStorage::Vault;
+}
+
+std::expected<runtime::vault::KeyBytes, runtime::Error>
+resolve_profile_credentials(const ProfileCredentials& credentials) {
+    if (const auto* hex = std::get_if<MasterKeyHex>(&credentials)) {
+        return runtime::vault::decode_hex(hex->value);
+    }
+    if (const auto* pair = std::get_if<PasswordPair>(&credentials)) {
+        return runtime::vault::derive(pair->password, pair->salt_password);
+    }
+    return std::unexpected(runtime::Error{
+        .code = runtime::ErrorCode::KeyInvalid, .detail = "uninitialized"});
+}
 } // namespace
+
+std::string_view to_string(KeyStorage storage) noexcept {
+    return runtime::to_string(to_runtime_key_storage(storage));
+}
 
 std::expected<void, ProfileError>
 validate_profile_field(ProfileField field, std::string_view value) {
@@ -728,7 +768,8 @@ list_profiles(const ExecutionEnvironment& environment) {
                     .local_dir = p.local_dir,
                     .remote_dir = p.remote_dir,
                     .min_history_depth = p.min_history_depth,
-                    .min_history_age_hours = p.min_history_age_hours});
+                    .min_history_age_hours = p.min_history_age_hours,
+                    .key_storage = to_app_key_storage(p.key_storage)});
     }
     return result;
 }
@@ -754,12 +795,7 @@ create_profile(const ExecutionEnvironment& environment,
             return valid;
         }
 
-        if (const auto* hex = std::get_if<MasterKeyHex>(&credentials)) {
-            master_key_res = runtime::vault::decode_hex(hex->value);
-        } else if (const auto* pair = std::get_if<PasswordPair>(&credentials)) {
-            master_key_res =
-                runtime::vault::derive(pair->password, pair->salt_password);
-        }
+        master_key_res = resolve_profile_credentials(credentials);
 
         if (!master_key_res) {
             return std::unexpected(map_runtime_error(master_key_res.error()));
@@ -804,9 +840,18 @@ create_profile(const ExecutionEnvironment& environment,
             return fail_profile(code, std::move(detail));
         };
 
-        if (!runtime::vault::write(paths_res->key_path, *master_key_res)) {
-            return rollback_failure(ProfileErrorCode::StorageFailure,
-                                    "failed to save vault");
+        if (profile.key_storage == KeyStorage::File) {
+            if (!runtime::vault::write(paths_res->key_path, *master_key_res)) {
+                return rollback_failure(ProfileErrorCode::StorageFailure,
+                                        "failed to save vault");
+            }
+        } else if (profile.key_storage == KeyStorage::Vault) {
+            if (auto vault_res = runtime::vault::write_vault(
+                    paths_res->key_path, *master_key_res);
+                !vault_res) {
+                return rollback_failure(ProfileErrorCode::StorageFailure,
+                                        vault_res.error().detail);
+            }
         }
 
         if (!state_storage::initialize(paths_res->database_path)) {
@@ -814,11 +859,13 @@ create_profile(const ExecutionEnvironment& environment,
                                     "failed to initialize profile database");
         }
 
-        profiles.push_back(runtime::ProfileData{profile.name,
-                                                profile.local_dir,
-                                                profile.remote_dir,
-                                                profile.min_history_depth,
-                                                profile.min_history_age_hours});
+        profiles.push_back(
+            runtime::ProfileData{profile.name,
+                                 profile.local_dir,
+                                 profile.remote_dir,
+                                 profile.min_history_depth,
+                                 profile.min_history_age_hours,
+                                 to_runtime_key_storage(profile.key_storage)});
         if (auto save_res = runtime::save_profiles(config_path, profiles);
             !save_res) {
             return rollback_failure(ProfileErrorCode::ConfigFailure,
@@ -863,6 +910,7 @@ update_profile(const ExecutionEnvironment& environment, Profile profile) {
     it->remote_dir = profile.remote_dir;
     it->min_history_depth = profile.min_history_depth;
     it->min_history_age_hours = profile.min_history_age_hours;
+    it->key_storage = to_runtime_key_storage(profile.key_storage);
 
     auto save_res =
         runtime::save_profiles(loaded->config_path, loaded->profiles);
@@ -871,6 +919,84 @@ update_profile(const ExecutionEnvironment& environment, Profile profile) {
     }
 
     return {};
+}
+
+std::expected<void, ProfileError>
+set_profile_key(const ExecutionEnvironment& environment,
+                std::string_view profile_name,
+                ProfileCredentials credentials) {
+    std::expected<runtime::vault::KeyBytes, runtime::Error> master_key_res =
+        std::unexpected(runtime::Error{.code = runtime::ErrorCode::KeyInvalid,
+                                       .detail = "uninitialized"});
+
+    auto do_set = [&]() -> std::expected<void, ProfileError> {
+        if (!runtime::is_valid_profile_name(profile_name)) {
+            return fail_profile(ProfileErrorCode::InvalidName,
+                                "invalid profile name");
+        }
+        master_key_res = resolve_profile_credentials(credentials);
+        if (!master_key_res) {
+            return std::unexpected(map_runtime_error(master_key_res.error()));
+        }
+        auto loaded = load_profiles_locked(environment.app_data_dir);
+        if (!loaded) {
+            return std::unexpected(loaded.error());
+        }
+        const auto it = find_profile(loaded->profiles, profile_name);
+        if (it == loaded->profiles.end()) {
+            return fail_profile(ProfileErrorCode::NotFound,
+                                "profile not found");
+        }
+        if (it->key_storage == runtime::KeyStorage::Memory) {
+            return fail_profile(
+                ProfileErrorCode::ConfigFailure,
+                "profile uses 'memory' key_storage and does not persist keys");
+        }
+        auto paths_res = runtime::resolve_profile_paths(
+            environment.app_data_dir, profile_name);
+        if (!paths_res) {
+            return std::unexpected(map_runtime_error(paths_res.error()));
+        }
+        const auto lock_path =
+            environment.app_data_dir /
+            ("profile-" + std::string(profile_name) + ".lock");
+        auto profile_lock = platform::acquire_profile_lock(lock_path);
+        if (!profile_lock) {
+            return fail_profile(ProfileErrorCode::LockFailure,
+                                profile_lock.error());
+        }
+        struct LockGuard {
+            std::intptr_t handle;
+            ~LockGuard() noexcept {
+                platform::release_profile_lock(handle);
+            }
+        } lock_guard{*profile_lock};
+
+        if (auto ensure_res = runtime::ensure_profile_directory(*paths_res);
+            !ensure_res) {
+            return std::unexpected(map_runtime_error(ensure_res.error()));
+        }
+        std::expected<void, runtime::Error> write_res;
+        if (it->key_storage == runtime::KeyStorage::Vault) {
+            write_res = runtime::vault::write_vault(paths_res->key_path,
+                                                    *master_key_res);
+        } else {
+            write_res =
+                runtime::vault::write(paths_res->key_path, *master_key_res);
+        }
+        if (!write_res) {
+            return std::unexpected(map_runtime_error(write_res.error()));
+        }
+        return {};
+    };
+
+    auto result = do_set();
+    wipe_credentials(credentials);
+    if (master_key_res) {
+        crypto::secure_memory::wipe(master_key_res->data(),
+                                    master_key_res->size());
+    }
+    return result;
 }
 
 std::expected<void, ProfileError>
@@ -970,12 +1096,16 @@ rename_profile(const ExecutionEnvironment& environment,
         phys_renamed = true;
     }
 
-    it_current->name = std::string(new_name);
-
-    auto save_res =
-        runtime::save_profiles(loaded->config_path, loaded->profiles);
-    if (!save_res) {
-        std::string detail = save_res.error().detail;
+    bool vault_copied = false;
+    const auto rollback_rename_phys = [&](std::string& detail) {
+        if (vault_copied) {
+            if (auto rb_vault =
+                    runtime::vault::delete_vault(new_paths_res->key_path);
+                !rb_vault) {
+                detail +=
+                    " (vault rollback failed: " + rb_vault.error().detail + ")";
+            }
+        }
         if (phys_renamed) {
             auto rb_res = runtime::rename_profile_directory(*new_paths_res,
                                                             *old_paths_res);
@@ -985,7 +1115,39 @@ rename_profile(const ExecutionEnvironment& environment,
                     ")";
             }
         }
+    };
+    if (it_current->key_storage == runtime::KeyStorage::Vault) {
+        auto vault_key = runtime::vault::read_vault(old_paths_res->key_path);
+        if (vault_key) {
+            KeyBytesWiper key_wiper{*vault_key};
+            if (auto write_res = runtime::vault::write_vault(
+                    new_paths_res->key_path, *vault_key);
+                !write_res) {
+                std::string detail = write_res.error().detail;
+                rollback_rename_phys(detail);
+                return fail_profile(ProfileErrorCode::StorageFailure, detail);
+            }
+            vault_copied = true;
+        } else if (vault_key.error().code != runtime::ErrorCode::KeyNotFound) {
+            std::string detail = vault_key.error().detail;
+            rollback_rename_phys(detail);
+            return fail_profile(ProfileErrorCode::CredentialFailure, detail);
+        }
+    }
+
+    it_current->name = std::string(new_name);
+
+    auto save_res =
+        runtime::save_profiles(loaded->config_path, loaded->profiles);
+    if (!save_res) {
+        std::string detail = save_res.error().detail;
+        rollback_rename_phys(detail);
         return fail_profile(ProfileErrorCode::StorageFailure, detail);
+    }
+
+    if (vault_copied) {
+        static_cast<void>(
+            runtime::vault::delete_vault(old_paths_res->key_path));
     }
 
     return {};
@@ -1038,11 +1200,39 @@ clone_profile(const ExecutionEnvironment& environment,
         });
     }
 
-    auto master_key_res = runtime::vault::read_only(source_paths_res->key_path);
-    if (!master_key_res) {
-        return std::unexpected(map_runtime_error(master_key_res.error()));
+    std::optional<runtime::vault::KeyBytes> master_key;
+    struct OptionalKeyWiper {
+        std::optional<runtime::vault::KeyBytes>& key;
+        void release() noexcept {
+            if (key) {
+                crypto::secure_memory::wipe(key->data(), key->size());
+                key.reset();
+            }
+        }
+        ~OptionalKeyWiper() {
+            release();
+        }
+    } key_wiper{master_key};
+
+    if (source_it->key_storage == runtime::KeyStorage::File) {
+        auto master_key_res =
+            runtime::vault::read_only(source_paths_res->key_path);
+        if (!master_key_res) {
+            return std::unexpected(map_runtime_error(master_key_res.error()));
+        }
+        master_key = *master_key_res;
+        crypto::secure_memory::wipe(master_key_res->data(),
+                                    master_key_res->size());
+    } else if (source_it->key_storage == runtime::KeyStorage::Vault) {
+        auto master_key_res =
+            runtime::vault::read_vault(source_paths_res->key_path);
+        if (!master_key_res) {
+            return std::unexpected(map_runtime_error(master_key_res.error()));
+        }
+        master_key = *master_key_res;
+        crypto::secure_memory::wipe(master_key_res->data(),
+                                    master_key_res->size());
     }
-    KeyBytesWiper key_wiper{*master_key_res};
 
     for (const auto& directory : {environment.app_data_dir,
                                   dest_paths_res->profile_dir.parent_path()}) {
@@ -1226,7 +1416,16 @@ clone_profile(const ExecutionEnvironment& environment,
             "could not verify ownership of destination directory");
     }
 
+    bool vault_written = false;
     const auto fail_with_rollback = [&](std::string detail) {
+        if (vault_written) {
+            if (auto vault_rb =
+                    runtime::vault::delete_vault(dest_paths_res->key_path);
+                !vault_rb) {
+                detail +=
+                    "; vault rollback also failed: " + vault_rb.error().detail;
+            }
+        }
         if (auto remove_res = rollback_directory(); !remove_res) {
             detail += "; rollback also failed: " + remove_res.error();
         }
@@ -1247,18 +1446,30 @@ clone_profile(const ExecutionEnvironment& environment,
     } else
 #endif
     {
-        auto write_res = runtime::vault::write_new(
-            dest_paths_res->key_path, *master_key_res, key_identity);
-        write_ok = write_res.has_value();
+        if (source_it->key_storage == runtime::KeyStorage::File) {
+            auto write_res = runtime::vault::write_new(
+                dest_paths_res->key_path, *master_key, key_identity);
+            write_ok = write_res.has_value();
+            if (key_identity.valid) {
+                clone_files.emplace_back(dest_paths_res->key_path,
+                                         key_identity);
+            }
+            write_ok = write_ok && key_identity.valid;
+        } else if (source_it->key_storage == runtime::KeyStorage::Vault) {
+            auto write_res = runtime::vault::write_vault(
+                dest_paths_res->key_path, *master_key);
+            write_ok = write_res.has_value();
+            vault_written = write_ok;
+        } else {
+            write_ok = true;
+        }
     }
-    if (key_identity.valid) {
-        clone_files.emplace_back(dest_paths_res->key_path, key_identity);
-    }
-    const bool key_owned = write_ok && key_identity.valid;
     key_wiper.release();
-    if (!write_ok || !key_owned) {
-        return fail_with_rollback(write_ok
-                                      ? "could not verify cloned key ownership"
+    if (!write_ok) {
+        return fail_with_rollback(source_it->key_storage ==
+                                              runtime::KeyStorage::File &&
+                                          !key_identity.valid
+                                      ? "failed to save or verify cloned key"
                                       : "failed to save vault");
     }
 
@@ -1337,6 +1548,14 @@ clone_profile(const ExecutionEnvironment& environment,
         if (!remove_res) {
             detail += "; rollback also failed: " + remove_res.error().detail;
         }
+        if (vault_written) {
+            if (auto vault_rb =
+                    runtime::vault::delete_vault(dest_paths_res->key_path);
+                !vault_rb) {
+                detail +=
+                    "; vault rollback also failed: " + vault_rb.error().detail;
+            }
+        }
         return fail_profile(ProfileErrorCode::ConfigFailure, detail);
     }
 
@@ -1375,15 +1594,41 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
         }
     }
 
-    const auto key = query_entry(paths->key_path);
-    if (!key.is_plain_file() || key.size != crypto::KEY_SIZE) {
-        return fail_inspection(ProfileLocalProblem::Key);
+    runtime::KeyStorage key_storage = runtime::KeyStorage::File;
+    if (auto loaded_profile = runtime::load_profile(
+            environment.app_data_dir / "config.toml", profile_name)) {
+        key_storage = loaded_profile->key_storage;
     }
-    auto key_bytes = runtime::vault::read_only(paths->key_path);
-    if (!key_bytes) {
-        return fail_inspection(ProfileLocalProblem::Key);
+
+    std::optional<runtime::vault::KeyBytes> key_bytes;
+    struct OptionalKeyWiper {
+        std::optional<runtime::vault::KeyBytes>& key;
+        ~OptionalKeyWiper() noexcept {
+            if (key) {
+                crypto::secure_memory::wipe(key->data(), key->size());
+            }
+        }
+    } key_wiper{key_bytes};
+
+    if (key_storage == runtime::KeyStorage::File) {
+        const auto key = query_entry(paths->key_path);
+        if (!key.is_plain_file() || key.size != crypto::KEY_SIZE) {
+            return fail_inspection(ProfileLocalProblem::Key);
+        }
+        auto read_res = runtime::vault::read_only(paths->key_path);
+        if (!read_res) {
+            return fail_inspection(ProfileLocalProblem::Key);
+        }
+        key_bytes = *read_res;
+        crypto::secure_memory::wipe(read_res->data(), read_res->size());
+    } else if (key_storage == runtime::KeyStorage::Vault) {
+        auto read_res = runtime::vault::read_vault(paths->key_path);
+        if (!read_res) {
+            return fail_inspection(ProfileLocalProblem::Key);
+        }
+        key_bytes = *read_res;
+        crypto::secure_memory::wipe(read_res->data(), read_res->size());
     }
-    KeyBytesWiper key_wiper{*key_bytes};
 
     const auto database = query_entry(paths->database_path);
     if (!database.is_plain_file()) {
@@ -1425,7 +1670,45 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
     if (!journal_paths) {
         return fail_inspection(ProfileLocalProblem::Journal);
     }
-    const auto journal = sync::journal::inspect(*journal_paths, *key_bytes);
+    const auto inspect_journal = [&]() {
+        if (key_bytes) {
+            return sync::journal::inspect(*journal_paths, *key_bytes);
+        }
+        const auto active_dir =
+            query_entry(journal_paths->final_path.parent_path());
+        const auto retired_dir =
+            query_entry(paths->profile_dir / "transaction.bin.enc.cleared");
+        if (active_dir.state == EntryState::Error ||
+            retired_dir.state == EntryState::Error) {
+            return sync::journal::InspectionResult::Corrupted;
+        }
+        if ((active_dir.state == EntryState::Present &&
+             !active_dir.is_plain_dir()) ||
+            (retired_dir.state == EntryState::Present &&
+             !retired_dir.is_plain_dir()) ||
+            (active_dir.state == EntryState::Present &&
+             retired_dir.state == EntryState::Present)) {
+            return sync::journal::InspectionResult::Corrupted;
+        }
+        if (active_dir.state == EntryState::Absent &&
+            retired_dir.state == EntryState::Absent) {
+            return sync::journal::InspectionResult::Absent;
+        }
+        if (retired_dir.state == EntryState::Present) {
+            return sync::journal::InspectionResult::Retired;
+        }
+        const auto retired_marker = query_entry(
+            journal_paths->final_path.parent_path() / "retired.enc");
+        if (retired_marker.state == EntryState::Error ||
+            (retired_marker.state == EntryState::Present &&
+             !retired_marker.is_plain_file())) {
+            return sync::journal::InspectionResult::Corrupted;
+        }
+        return retired_marker.state == EntryState::Present
+                   ? sync::journal::InspectionResult::Retired
+                   : sync::journal::InspectionResult::Active;
+    };
+    const auto journal = inspect_journal();
     if (journal == sync::journal::InspectionResult::Corrupted) {
         return fail_inspection(ProfileLocalProblem::Journal);
     }
@@ -1531,8 +1814,7 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
         return fail_inspection(ProfileLocalProblem::Database);
     }
 
-    const auto final_journal =
-        sync::journal::inspect(*journal_paths, *key_bytes);
+    const auto final_journal = inspect_journal();
     if (final_journal == sync::journal::InspectionResult::Corrupted) {
         return fail_inspection(ProfileLocalProblem::Journal);
     }

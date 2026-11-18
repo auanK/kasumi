@@ -80,3 +80,6 @@ target_link_libraries(kasumi_test_support
     kasumi_sqlite3
     kasumi_warnings
 )
+if(WIN32)
+    target_link_libraries(kasumi_test_support PRIVATE advapi32)
+endif()

@@ -3,6 +3,7 @@
 #include "platform/path.hpp"
 #include "platform/private_storage.hpp"
 #include "runtime/profile.hpp"
+#include "runtime/vault.hpp"
 
 #include <string>
 
@@ -79,11 +80,12 @@ std::expected<void, Error> ensure_profile_directory(const ProfilePaths& paths) {
 }
 
 std::expected<void, Error> remove_profile_directory(const ProfilePaths& paths) {
+    auto vault_removed = vault::delete_vault(paths.key_path);
     std::error_code ec;
     const auto status = std::filesystem::symlink_status(paths.profile_dir, ec);
     if (ec == std::errc::no_such_file_or_directory ||
         status.type() == std::filesystem::file_type::not_found) {
-        return {};
+        return vault_removed;
     }
     if (ec) {
         return fail(ErrorCode::IoFailure, ec.message());
@@ -97,7 +99,7 @@ std::expected<void, Error> remove_profile_directory(const ProfilePaths& paths) {
     if (ec) {
         return fail(ErrorCode::IoFailure, ec.message());
     }
-    return {};
+    return vault_removed;
 }
 
 std::expected<void, Error>
