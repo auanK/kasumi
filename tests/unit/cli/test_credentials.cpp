@@ -295,7 +295,7 @@ TEST(CliWizardTest, CreatesProfileWithHiddenRetentionDefaults) {
     const auto output =
         run_wizard_out(environment,
                        "n\nbad/name\nnew-profile\nrelative\n" + local.string() +
-                           "\ngdrive:../invalid\n" + remote.string() + "\nq\n");
+                           "\ngdrive:../invalid\n" + remote.string() + "\n\nq\n");
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
     EXPECT_EQ(output.find("invalid profile name"), std::string::npos);
     EXPECT_EQ(output.find("local path must be absolute"), std::string::npos);

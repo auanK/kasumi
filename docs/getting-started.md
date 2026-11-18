@@ -104,7 +104,7 @@ Select **New (`n`)** and supply:
 1. **Profile name:** `work` (letters, digits, `_`, or `-`).
 2. **Local directory:** an absolute path, such as `/home/user/documents` or `D:/Documents`.
 3. **Remote directory:** the shared destination chosen above.
-4. **Key storage mode:** `vault` (default, storing the derived key in the OS credential vault), `file` (`profiles/<profile>/key.bin`), or `memory` (deriving the key in RAM on every command without saving it).
+4. **Key storage mode:** Press Enter for `vault` (the OS credential vault), or type `file` (`profiles/<profile>/key.bin`) or `memory` (derive the key in RAM on every command).
 5. **Password:** a master passphrase of at least 12 characters.
 6. **Password Salt:** a separate passphrase of at least 16 characters.
 

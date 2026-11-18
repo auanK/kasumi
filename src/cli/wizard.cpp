@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <print>
 #include <string>
 
@@ -139,6 +140,33 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         return confirmation == "y" || confirmation == "yes" ||
                confirmation == "s" || confirmation == "sim";
     };
+    const auto prompt_key_storage = [&](application::KeyStorage default_mode)
+        -> std::optional<application::KeyStorage> {
+        const std::string prompt =
+            i18n::format(i18n::Key::WizardPromptKeyStorage,
+                         application::to_string(default_mode));
+        std::string mode;
+        while (prompt_line(prompt, mode)) {
+            const auto first = mode.find_first_not_of(" \t\r\n");
+            if (first == std::string::npos) {
+                return default_mode;
+            }
+            const auto last = mode.find_last_not_of(" \t\r\n");
+            mode = mode.substr(first, last - first + 1);
+            std::ranges::transform(mode, mode.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            for (const auto storage : {application::KeyStorage::Vault,
+                                        application::KeyStorage::File,
+                                        application::KeyStorage::Memory}) {
+                if (mode == application::to_string(storage)) {
+                    return storage;
+                }
+            }
+            print_error_line(i18n::tr(i18n::Key::WizardInvalidKeyStorage));
+        }
+        return std::nullopt;
+    };
     const auto report_result =
         [&](const std::expected<void, application::ProfileError>& result,
             std::string_view ok_message) {
@@ -255,6 +283,11 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                               new_remote)) {
                 break;
             }
+            const auto key_storage =
+                prompt_key_storage(application::KeyStorage::Vault);
+            if (!key_storage) {
+                break;
+            }
             std::println();
             application::ProfileCredentials creds =
                 credentials::read_password_pair();
@@ -266,7 +299,8 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             application::Profile p{.name = new_profile,
                                    .local_dir =
                                        platform::path::from_utf8(new_local),
-                                   .remote_dir = new_remote};
+                                   .remote_dir = new_remote,
+                                   .key_storage = *key_storage};
             auto res =
                 application::create_profile(environment, p, std::move(creds));
             application::wipe_credentials(creds);
@@ -404,62 +438,28 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 print_error_line(i18n::tr(i18n::Key::WizardProfileNotFound));
                 continue;
             }
-            application::KeyStorage chosen = selected->key_storage;
-            bool cancelled = false;
-            const std::string prompt =
-                i18n::format(i18n::Key::WizardPromptKeyStorage,
-                             application::to_string(selected->key_storage));
-            while (true) {
-                std::string raw_mode;
-                if (!prompt_line(prompt, raw_mode)) {
-                    cancelled = true;
-                    break;
-                }
-                const auto first = raw_mode.find_first_not_of(" \t\r\n");
-                if (first == std::string::npos) {
-                    chosen = selected->key_storage;
-                    break;
-                }
-                const auto last = raw_mode.find_last_not_of(" \t\r\n");
-                std::string mode = raw_mode.substr(first, last - first + 1);
-                std::ranges::transform(mode, mode.begin(), [](unsigned char c) {
-                    return static_cast<char>(std::tolower(c));
-                });
-                if (mode == "vault") {
-                    chosen = application::KeyStorage::Vault;
-                    break;
-                }
-                if (mode == "file") {
-                    chosen = application::KeyStorage::File;
-                    break;
-                }
-                if (mode == "memory") {
-                    chosen = application::KeyStorage::Memory;
-                    break;
-                }
-                print_error_line(i18n::tr(i18n::Key::WizardInvalidKeyStorage));
-            }
-            if (cancelled) {
+            const auto chosen = prompt_key_storage(selected->key_storage);
+            if (!chosen) {
                 break;
             }
-            if (chosen == selected->key_storage) {
+            if (*chosen == selected->key_storage) {
                 continue;
             }
             application::Profile updated = *selected;
-            updated.key_storage = chosen;
+            updated.key_storage = *chosen;
             auto res = application::update_profile(environment, updated);
             if (!res) {
                 print_error_line(res.error().detail);
-            } else if (chosen == application::KeyStorage::Memory) {
+            } else if (*chosen == application::KeyStorage::Memory) {
                 print_ok_line(
                     i18n::format(i18n::Key::WizardProfileKeyStorageUpdated,
                                  target,
-                                 application::to_string(chosen)));
+                                 application::to_string(*chosen)));
             } else {
                 print_ok_line(i18n::format(
                     i18n::Key::WizardProfileKeyStorageUpdatedNeedKey,
                     target,
-                    application::to_string(chosen)));
+                    application::to_string(*chosen)));
             }
 
         } else if (choice == "r") {

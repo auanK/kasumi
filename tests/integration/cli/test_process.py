@@ -144,6 +144,7 @@ class CliProcessTest(unittest.TestCase):
             (b"n\n", self.environment),
             (f"n\nnew\n{local}\n".encode(), self.environment),
             (f"n\nnew\n{local}\n{remote}\n".encode(), without_credentials),
+            (f"n\nnew\n{local}\n{remote}\n\n".encode(), without_credentials),
             (b"c\n", self.environment),
         )
         for input_bytes, environment in inputs:
@@ -304,7 +305,7 @@ class CliProcessTest(unittest.TestCase):
         sentinel = local / "keep.txt"
         sentinel.write_text("outside profile state", encoding="utf-8")
         local_snapshot = sentinel.read_bytes()
-        create = f"n\ndemo\n{local}\n{remote}\nq\n".encode()
+        create = f"n\ndemo\n{local}\n{remote}\n\nq\n".encode()
         created = self.invoke("config", input=create)
 
         data = self.root / "kasumi"
@@ -440,7 +441,7 @@ class CliProcessTest(unittest.TestCase):
                 (local / f"{name}.txt").write_text(name, encoding="utf-8")
             remote = self.root / f"remote-{name}"
             if name == "initialized":
-                inputs.extend(("n", name, str(local), str(remote)))
+                inputs.extend(("n", name, str(local), str(remote), ""))
             else:
                 inputs.extend(
                     ("c", "initialized", name, "e", name, str(local), str(remote), "y")
@@ -507,7 +508,7 @@ class CliProcessTest(unittest.TestCase):
         filename = "--álbum-日本-😀.txt"
         contents = "Unicode payload\n".encode()
         (local / filename).write_bytes(contents)
-        self.invoke("config", input=f"n\ndemo\n{local}\n{remote}\nq\n".encode())
+        self.invoke("config", input=f"n\ndemo\n{local}\n{remote}\n\nq\n".encode())
         self.invoke("sync", "demo")
         output = self.invoke("remote", "stat", "demo", "--", filename)
         self.assertIn(filename.encode(), output)
@@ -515,11 +516,34 @@ class CliProcessTest(unittest.TestCase):
         self.invoke("remote", "get", "demo", "--", filename, str(destination))
         self.assertEqual(destination.read_bytes(), contents)
 
+    def test_new_profile_selects_key_storage_before_password(self):
+        environment = self.environment.copy()
+        password = environment.pop("KASUMI_PASSWORD")
+        salt = environment.pop("KASUMI_PASSWORD2")
+        data = self.root / "kasumi"
+
+        for mode in ("file", "memory"):
+            with self.subTest(mode=mode):
+                local = self.root / f"{mode}-local"
+                remote = self.root / f"{mode}-remote"
+                local.mkdir()
+                output = self.invoke(
+                    "config", environment=environment,
+                    input=(f"n\n{mode}\n{local}\n{remote}\ninvalid\n{mode}\n"
+                           f"{password}\n{password}\n{salt}\n{salt}\nq\n").encode(),
+                )
+                self.assertLess(output.index(b"Key storage mode"), output.index(b"Password:"))
+                self.assertIn(b"Invalid key storage mode", output)
+                self.assertIn(b"Profile created.", output)
+                config = tomllib.loads((data / "config.toml").read_text(encoding="utf-8"))
+                self.assertEqual(config["profiles"][mode]["key_storage"], mode)
+                self.assertEqual((data / "profiles" / mode / "key.bin").is_file(), mode == "file")
+
     def test_key_storage_modes_and_manual_key_command(self):
         local, remote = self.root / "local", self.root / "remote"
         local.mkdir()
         (local / "item.txt").write_text("payload", encoding="utf-8")
-        self.invoke("config", input=f"n\ndemo\n{local}\n{remote}\nq\n".encode())
+        self.invoke("config", input=f"n\ndemo\n{local}\n{remote}\n\nq\n".encode())
         self.invoke("sync", "demo")
 
         config = self.root / "kasumi" / "config.toml"
