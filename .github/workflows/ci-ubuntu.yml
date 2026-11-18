@@ -25,10 +25,14 @@ jobs:
 
       - name: Install dependencies
         run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf 'http://azure.archive.ubuntu.com/ubuntu/\nhttp://archive.ubuntu.com/ubuntu/\n' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build gcc-14 g++-14 git unzip \
+          sudo apt-get install -y --no-install-recommends cmake ninja-build gcc-14 g++-14 git unzip \
             gnome-keyring libsecret-1-0 libsecret-tools dbus-x11 python3-dbus
-          sudo apt-get install -y kwallet6 || sudo apt-get install -y libkf5wallet-bin
+          sudo apt-get install -y --no-install-recommends kwallet6 || \
+            sudo apt-get install -y --no-install-recommends libkf5wallet-bin
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 --slave /usr/bin/g++ g++ /usr/bin/g++-14
           sudo update-alternatives --set gcc /usr/bin/gcc-14
 
@@ -80,8 +84,11 @@ jobs:
 
       - name: Install dependencies
         run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf 'http://azure.archive.ubuntu.com/ubuntu/\nhttp://archive.ubuntu.com/ubuntu/\n' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build clang-19 clang-tools-19 libclang-rt-19-dev libstdc++-14-dev git unzip \
+          sudo apt-get install -y --no-install-recommends cmake ninja-build clang-19 clang-tools-19 libclang-rt-19-dev libstdc++-14-dev git unzip \
             gnome-keyring libsecret-1-0 libsecret-tools dbus-x11
 
       - name: Configure (Debug, ASan + UBSan)
@@ -113,8 +120,11 @@ jobs:
 
       - name: Install dependencies
         run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf 'http://azure.archive.ubuntu.com/ubuntu/\nhttp://archive.ubuntu.com/ubuntu/\n' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build clang-19 clang-tools-19 lld-19 libstdc++-14-dev git unzip \
+          sudo apt-get install -y --no-install-recommends cmake ninja-build clang-19 clang-tools-19 lld-19 libstdc++-14-dev git unzip \
             gnome-keyring libsecret-1-0 libsecret-tools dbus-x11
 
       - name: Display tool versions

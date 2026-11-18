@@ -28,8 +28,11 @@ jobs:
 
       - name: Install dependencies
         run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf 'http://azure.archive.ubuntu.com/ubuntu/\nhttp://archive.ubuntu.com/ubuntu/\n' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build gcc-14 g++-14 git \
+          sudo apt-get install -y --no-install-recommends cmake ninja-build gcc-14 g++-14 git \
             gnome-keyring libsecret-1-0 dbus-x11
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 --slave /usr/bin/g++ g++ /usr/bin/g++-14
           sudo update-alternatives --set gcc /usr/bin/gcc-14
