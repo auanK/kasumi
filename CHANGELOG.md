@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.12.0]
+
+### Added
+
+- Added configurable per-profile `key_storage` modes (`vault`, `file`, and `memory`), defaulting new profiles to the OS credential vault (`vault`: Windows Credential Manager on Windows; Freedesktop Secret Service / GNOME Keyring and KDE KWallet via on-demand `dlopen` on Linux).
+- Added `kasumi key <profile>` and `[k] Key` / `[s] Storage` actions in `kasumi config` to change key storage modes and re-enter profile keys (password and salt).
+
+### Changed
+
+- Profiles in `config.toml` without an explicit `key_storage` field load as `file`, preserving existing `key.bin` installations across upgrades. Switching a profile's `key_storage` removes the previous persisted key and requires `kasumi key <profile>` when moving to `vault` or `file`.
+
+### Development
+
+- Added isolated Linux D-Bus vault test runner (`scripts/run_with_linux_vault.py`) covering GNOME Keyring, KDE KWallet, and headless `file`/`memory` portability in CI and release checks.
+
+### Upgrade Notes
+
+- Existing profiles without `key_storage` in `config.toml` continue using `key.bin` (`file` mode) automatically. Remote formats, encryption schemes, SQLite schema, and supported journal formats remain unchanged from v0.11.0. Use the same release on all clients and follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi).
+
 ## [0.11.2]
 
 ### Fixed
