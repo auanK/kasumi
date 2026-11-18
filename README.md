@@ -15,6 +15,8 @@ Machine B ───┼──> Shared Storage
 Machine C ───┘
 ```
 
+Interactive runs show live progress on one terminal line. Sync reports physical transfer bytes and object counts alongside its logical plan summary.
+
 ## Features
 
 - **Bidirectional, multi-client sync** across independently operated machines.

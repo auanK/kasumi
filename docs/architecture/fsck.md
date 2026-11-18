@@ -31,3 +31,7 @@ detail only as text. Incomplete audits remain failures.
 | [`remote contents <profile> --audit`](remote-content-inspection.md) | Inspection inventory plus byte validation of **all physically present** content, including orphans; reports per-object states, without prior transaction recovery. |
 | [`remote health`](remote-maintenance-inspection.md) | Diagnostic composition of history, availability, reachability, controls, and unknowns; no content-payload AEAD audit by default. |
 | [Garbage Collection](garbage-collection.md) | Direct removal of eligible orphan Content and redundant CommitVariants under cooperative maintenance controls. |
+
+## Live audit progress
+
+The audit driver samples download bytes while its workers are running. It reports physical objects downloaded, logical objects verified, and FastCDC files reconstructed. Transfer counters are atomic and progress observers run outside the audit workers.

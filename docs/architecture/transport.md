@@ -24,3 +24,9 @@ after upload is unchanged. Downloads retain their existing copy options.
 ## Control Read Batches
 
 `control_read_batch` aggregates read-only remote checks during observation and writer admission into single backend requests (such as rclone `job/batch`). Batches containing directory prefix listings (`list_prefixes`) preserve strict sequential execution (`concurrency = 1`) to uphold writer admission ordering (`LIST writers -> STAT barrier`). Independent content presence checks (`presence_identifiers` only) are partitioned into bounded chunks of up to 128 items executed with bounded concurrency (8 workers) to prevent request deadlines from expiring on large vaults. Results are correlated positionally, and any transport, parse, or timeout error fails closed without converting failures into false content absences.
+
+## Transfer telemetry
+
+Payload copies with a progress observer use rclone's asynchronous RC jobs. Each job has a unique stats group. Kasumi polls job status and core stats about every 250 ms and sends a best-effort job stop on cancellation. The original paths and batch inputs still govern the copy. Synchronous copy responses and transfers without a progress observer retain the existing result checks.
+
+Local copies with an observer stream in 256 KiB blocks into the same atomic staging flow. Transport counters track bytes and objects reported by these copies. The transfer mechanism introduces no content presence probes.

@@ -350,3 +350,9 @@ For example:
 Distinct names that do not collide under uppercase mapping, such as `日本.txt` and `日本2.txt`, are valid distinct paths.
 
 Kasumi does not normalize Unicode filename spelling.
+
+## Progress and transfer metrics
+
+Interactive terminals update one progress line during each stage. The line can show scan counts, cache hits, bytes read, physical transfers, rate, and an ETA when the total is known. Redirected output uses plain stage lines and spaced audit milestones.
+
+Sync keeps its logical plan summary and reports the actual encoded payload bytes and physical object counts separately. The local reuse counter includes verified FastCDC slices and deduplicated uploads. These payload measurements exclude HTTP headers and protocol control objects.

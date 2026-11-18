@@ -85,3 +85,7 @@ If publication is required, sync prepares a canonical Commit whose parents are t
 ## Other Operations
 
 `sync --dry-run` is [Preview](planning-and-status.md), not this execution path; `status` shares its planner. [Fsck](fsck.md) and [Garbage Collection](garbage-collection.md) run transaction recovery before their own distinct maintenance lifecycles.
+
+## Live execution progress
+
+Sync samples counters from local observation, upload staging, transport, verification, and installation. Transfer totals count encoded payloads, including validation readbacks and repeated transfers. The reuse counter tracks verified seed slices and eligible upload deduplication. Reobservation is labeled with its retry attempt. Progress introduces no presence checks or listings in no-op sync or active sync.
