@@ -314,7 +314,7 @@
     "header": "\n=== Kasumi Profiles ===",
     "no_profiles": "No profiles registered.",
     "profile_list_entry": "{:<24} {}",
-    "menu": "\n[e] Edit  [n] New  [c] Clone  [k] Key  [d] Delete  [r] Rename  [q] Quit\n\n> ",
+    "menu": "\n[e] Edit  [n] New  [c] Clone  [k] Key  [s] Storage  [d] Delete  [r] Rename  [q] Quit\n\n> ",
     "prompt_profile_name": "Profile name: ",
     "profile_already_exists": "The profile '{}' already exists.",
     "prompt_local_path": "Synchronized local path (e.g. C:/MyData or /home/user/MyData): ",
@@ -335,6 +335,11 @@
     "prompt_profile_to_key": "Profile name to set key: ",
     "profile_key_updated": "Key saved for profile '{}'.",
     "key_storage_memory_no_persist": "Profile '{}' uses 'memory' key storage and does not persist keys.",
+    "prompt_profile_to_storage": "Profile name to change key storage: ",
+    "prompt_key_storage": "Key storage mode (vault, file, memory) [{}]: ",
+    "invalid_key_storage": "Invalid key storage mode. Choose 'vault', 'file', or 'memory'.",
+    "profile_key_storage_updated": "Key storage for profile '{}' set to '{}'.",
+    "profile_key_storage_updated_need_key": "Key storage for profile '{0}' set to '{1}'. Run 'kasumi key {0}' or use [k] to save the key.",
     "invalid_option": "Invalid option.",
     "config_read_failed": "Failed to read config: {}",
     "prompt_source_profile": "Source profile: ",
@@ -384,7 +389,7 @@
     "gc_remove-barrier": "Usage: kasumi gc remove-barrier <profile> --confirm-abandoned\n\nRemove an abandoned maintenance barrier after manual verification.\n--confirm-abandoned is required; verify no GC or Sync is active on any device.\nVerifies physical identity and confirms absence; never runs Sync or GC.\nExample: kasumi gc remove-barrier Programming --confirm-abandoned\n",
     "resolve-missing": "Usage: kasumi resolve-missing <profile>\n\nResolve unavailable content as logical deletions. Review pending paths first.\nExample: kasumi resolve-missing Programming\n",
     "remote": "Usage: kasumi remote <subcommand> <profile> [arguments] [options]\n\nRemote inspection. Subcommands:\n  heads, tree, commits, summary, stat, commit, get, epochs, epoch,\n  contents, content, markers, objects, orphans, writers, health\nUse kasumi remote <subcommand> --help for required arguments and restrictions.\nExample: kasumi remote summary Programming\n",
-    "config": "Usage: kasumi config\n\nInteractive profile wizard: create, clone, edit, rename and delete profiles.\nNo profile operand. Changes are saved by each wizard action.\nExample: kasumi config\n",
+    "config": "Usage: kasumi config\n\nInteractive profile wizard: create, clone, edit, set key, change key storage, rename and delete profiles.\nNo profile operand. Changes are saved by each wizard action.\nExample: kasumi config\n",
     "update": "Usage: kasumi update\n\nCheck and install the latest supported official release. No profile operand.\nRequires network access and installation permissions. Windows may hand off to an installer.\nExample: kasumi update\n",
     "remote_heads": "Usage: kasumi remote heads <profile>\n\nList current logical heads.\n",
     "remote_tree": "Usage: kasumi remote tree <profile> [--head <selector>]\n\nShow a remote tree. --head must select a current logical head; required when multiple heads exist.\nExample: kasumi remote tree Programming --head <commit>\n",
@@ -405,7 +410,7 @@
     "options": "\nGlobal option: --lang <code>, before the command (en or pt-BR).\nHelp: -h, --help. Duplicate, unknown or valueless options are rejected.\n",
     "list": "Usage: kasumi list\n\nList configured profile names, one per line.\n",
     "show": "Usage: kasumi show <profile>\n\nShow local profile settings and state without contacting remote storage.\n",
-    "key": "Usage: kasumi key <profile>\n\nRe-enter and save the cryptographic key (password and salt) for a profile.\nUse after switching key_storage in config.toml.\nExample: kasumi key Programming\n"
+    "key": "Usage: kasumi key <profile>\n\nRe-enter and save the cryptographic key (password and salt) for a profile.\nUse after switching key_storage in kasumi config or config.toml.\nExample: kasumi key Programming\n"
   },
   "resolve_missing": {
     "singular": "resolved 1 missing path",

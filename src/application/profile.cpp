@@ -906,16 +906,57 @@ update_profile(const ExecutionEnvironment& environment, Profile profile) {
         return fail_profile(ProfileErrorCode::NotFound, "profile not found");
     }
 
+    const auto old_storage = it->key_storage;
+    const auto new_storage = to_runtime_key_storage(profile.key_storage);
+    struct LockGuard {
+        std::intptr_t handle = -1;
+        ~LockGuard() noexcept {
+            if (handle >= 0) {
+                platform::release_profile_lock(handle);
+            }
+        }
+    } profile_lock_guard;
+
+    if (old_storage != new_storage) {
+        const auto lock_path =
+            environment.app_data_dir /
+            ("profile-" + std::string(profile.name) + ".lock");
+        auto profile_lock = platform::acquire_profile_lock(lock_path);
+        if (!profile_lock) {
+            return fail_profile(ProfileErrorCode::LockFailure,
+                                profile_lock.error());
+        }
+        profile_lock_guard.handle = *profile_lock;
+    }
+
     it->local_dir = profile.local_dir;
     it->remote_dir = profile.remote_dir;
     it->min_history_depth = profile.min_history_depth;
     it->min_history_age_hours = profile.min_history_age_hours;
-    it->key_storage = to_runtime_key_storage(profile.key_storage);
+    it->key_storage = new_storage;
 
     auto save_res =
         runtime::save_profiles(loaded->config_path, loaded->profiles);
     if (!save_res) {
         return std::unexpected(map_runtime_error(save_res.error()));
+    }
+
+    if (old_storage != new_storage) {
+        if (auto paths_res = runtime::resolve_profile_paths(
+                environment.app_data_dir, profile.name)) {
+            if (old_storage == runtime::KeyStorage::Vault) {
+                static_cast<void>(
+                    runtime::vault::delete_vault(paths_res->key_path));
+            } else if (old_storage == runtime::KeyStorage::File) {
+                std::error_code ec;
+                const auto st =
+                    std::filesystem::symlink_status(paths_res->key_path, ec);
+                if (!ec && !std::filesystem::is_symlink(st) &&
+                    std::filesystem::is_regular_file(st)) {
+                    std::filesystem::remove(paths_res->key_path, ec);
+                }
+            }
+        }
     }
 
     return {};

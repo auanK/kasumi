@@ -524,13 +524,12 @@ class CliProcessTest(unittest.TestCase):
 
         config = self.root / "kasumi" / "config.toml"
         key_file = self.root / "kasumi" / "profiles" / "demo" / "key.bin"
-        config.write_text(
-            re.sub(
-                r"(key_storage\s*=\s*['\"])vault(['\"])",
-                r"\1file\2",
-                config.read_text(encoding="utf-8"),
-            ),
-            encoding="utf-8",
+
+        switched_file = self.invoke("config", input=b"s\ndemo\nfile\nq\n")
+        self.assertIn(b"kasumi key demo", switched_file)
+        self.assertEqual(
+            tomllib.loads(config.read_text(encoding="utf-8"))["profiles"]["demo"]["key_storage"],
+            "file",
         )
 
         missing = self.invoke("status", "demo", expected=1)
@@ -541,15 +540,14 @@ class CliProcessTest(unittest.TestCase):
         self.assertTrue(key_file.is_file())
         self.invoke("status", "demo")
 
-        config.write_text(
-            re.sub(
-                r"(key_storage\s*=\s*['\"])file(['\"])",
-                r"\1memory\2",
-                config.read_text(encoding="utf-8"),
-            ),
-            encoding="utf-8",
+        switched_memory = self.invoke("config", input=b"s\ndemo\nmemory\nq\n")
+        self.assertIn(b"set to 'memory'", switched_memory)
+        self.assertEqual(
+            tomllib.loads(config.read_text(encoding="utf-8"))["profiles"]["demo"]["key_storage"],
+            "memory",
         )
-        key_file.unlink()
+        self.assertFalse(key_file.exists())
+
         (local / "item2.txt").write_text("payload-2", encoding="utf-8")
         self.invoke("sync", "demo")
         self.assertFalse(key_file.exists())

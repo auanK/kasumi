@@ -314,7 +314,7 @@
     "header": "\n=== Perfis Kasumi ===",
     "no_profiles": "Nenhum perfil cadastrado.",
     "profile_list_entry": "{:<24} {}",
-    "menu": "\n[e] Editar  [n] Novo  [c] Clonar  [k] Chave  [d] Deletar  [r] Renomear  [q] Sair\n\n> ",
+    "menu": "\n[e] Editar  [n] Novo  [c] Clonar  [k] Chave  [s] Armazenamento  [d] Deletar  [r] Renomear  [q] Sair\n\n> ",
     "prompt_profile_name": "Nome do Perfil: ",
     "profile_already_exists": "O perfil '{}' ja existe.",
     "prompt_local_path": "Caminho local sincronizado (ex: C:/MeusDados ou /home/user/MeusDados): ",
@@ -335,6 +335,11 @@
     "prompt_profile_to_key": "Nome do perfil para definir a chave: ",
     "profile_key_updated": "Chave salva para o perfil '{}'.",
     "key_storage_memory_no_persist": "O perfil '{}' usa armazenamento 'memory' e não persiste chaves.",
+    "prompt_profile_to_storage": "Nome do perfil para alterar o armazenamento da chave: ",
+    "prompt_key_storage": "Modo de armazenamento da chave (vault, file, memory) [{}]: ",
+    "invalid_key_storage": "Modo de armazenamento inválido. Escolha 'vault', 'file' ou 'memory'.",
+    "profile_key_storage_updated": "Armazenamento da chave do perfil '{}' alterado para '{}'.",
+    "profile_key_storage_updated_need_key": "Armazenamento da chave do perfil '{0}' alterado para '{1}'. Execute 'kasumi key {0}' ou use [k] para salvar a chave.",
     "invalid_option": "Opção inválida.",
     "config_read_failed": "Falha ao ler config: {}",
     "prompt_source_profile": "Perfil de origem: ",
@@ -384,7 +389,7 @@
     "gc_remove-barrier": "Uso: kasumi gc remove-barrier <perfil> --confirm-abandoned\n\nRemove uma barrier de manutenção abandonada após verificação manual.\n--confirm-abandoned é obrigatório; confirme que não há GC ou Sync ativo em dispositivo algum.\nVerifica identidade física e confirma ausência; não executa Sync nem GC.\nExemplo: kasumi gc remove-barrier Programming --confirm-abandoned\n",
     "resolve-missing": "Uso: kasumi resolve-missing <perfil>\n\nResolve conteúdo indisponível como exclusões lógicas. Revise as pendências antes.\nExemplo: kasumi resolve-missing Programming\n",
     "remote": "Uso: kasumi remote <subcomando> <perfil> [argumentos] [opções]\n\nInspeção remota. Subcomandos:\n  heads, tree, commits, summary, stat, commit, get, epochs, epoch,\n  contents, content, markers, objects, orphans, writers, health\nUse kasumi remote <subcomando> --help para argumentos e restrições.\nExemplo: kasumi remote summary Programming\n",
-    "config": "Uso: kasumi config\n\nAssistente interativo: criar, clonar, editar, renomear e excluir perfis.\nNão recebe perfil como argumento. Cada ação salva suas alterações.\nExemplo: kasumi config\n",
+    "config": "Uso: kasumi config\n\nAssistente interativo: criar, clonar, editar, definir chave, alterar armazenamento da chave, renomear e excluir perfis.\nNão recebe perfil como argumento. Cada ação salva suas alterações.\nExemplo: kasumi config\n",
     "update": "Uso: kasumi update\n\nVerifica e instala a versão oficial compatível mais recente. Não recebe perfil.\nExige rede e permissão de instalação. Windows pode iniciar um instalador auxiliar.\nExemplo: kasumi update\n",
     "remote_heads": "Uso: kasumi remote heads <perfil>\n\nLista heads lógicas atuais.\n",
     "remote_tree": "Uso: kasumi remote tree <perfil> [--head <seletor>]\n\nExibe árvore remota. --head deve selecionar uma head lógica atual; obrigatório com múltiplas heads.\nExemplo: kasumi remote tree Programming --head <commit>\n",
@@ -405,7 +410,7 @@
     "options": "\nOpção global: --lang <código>, antes do comando (en ou pt-BR).\nAjuda: -h, --help. Opções repetidas, desconhecidas ou sem valor são rejeitadas.\n",
     "list": "Uso: kasumi list\n\nLista os nomes dos perfis configurados, um por linha.\n",
     "show": "Uso: kasumi show <perfil>\n\nMostra configurações e estado local do perfil sem acessar o remoto.\n",
-    "key": "Uso: kasumi key <perfil>\n\nReinsere e salva a chave criptográfica (senha e salto) de um perfil.\nUse após alterar key_storage no config.toml.\nExemplo: kasumi key Programming\n"
+    "key": "Uso: kasumi key <perfil>\n\nReinsere e salva a chave criptográfica (senha e salto) de um perfil.\nUse após alterar key_storage no kasumi config ou config.toml.\nExemplo: kasumi key Programming\n"
   },
   "resolve_missing": {
     "singular": "1 caminho ausente resolvido",

@@ -392,6 +392,76 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             report_result(
                 res, i18n::format(i18n::Key::WizardProfileKeyUpdated, target));
 
+        } else if (choice == "s") {
+            std::string target;
+            if (!prompt_existing(i18n::Key::WizardPromptProfileToStorage,
+                                 target)) {
+                break;
+            }
+            const auto selected = std::ranges::find(
+                profiles, target, &application::Profile::name);
+            if (selected == profiles.end()) {
+                print_error_line(i18n::tr(i18n::Key::WizardProfileNotFound));
+                continue;
+            }
+            application::KeyStorage chosen = selected->key_storage;
+            bool cancelled = false;
+            const std::string prompt =
+                i18n::format(i18n::Key::WizardPromptKeyStorage,
+                             application::to_string(selected->key_storage));
+            while (true) {
+                std::string raw_mode;
+                if (!prompt_line(prompt, raw_mode)) {
+                    cancelled = true;
+                    break;
+                }
+                const auto first = raw_mode.find_first_not_of(" \t\r\n");
+                if (first == std::string::npos) {
+                    chosen = selected->key_storage;
+                    break;
+                }
+                const auto last = raw_mode.find_last_not_of(" \t\r\n");
+                std::string mode = raw_mode.substr(first, last - first + 1);
+                std::ranges::transform(mode, mode.begin(), [](unsigned char c) {
+                    return static_cast<char>(std::tolower(c));
+                });
+                if (mode == "vault") {
+                    chosen = application::KeyStorage::Vault;
+                    break;
+                }
+                if (mode == "file") {
+                    chosen = application::KeyStorage::File;
+                    break;
+                }
+                if (mode == "memory") {
+                    chosen = application::KeyStorage::Memory;
+                    break;
+                }
+                print_error_line(i18n::tr(i18n::Key::WizardInvalidKeyStorage));
+            }
+            if (cancelled) {
+                break;
+            }
+            if (chosen == selected->key_storage) {
+                continue;
+            }
+            application::Profile updated = *selected;
+            updated.key_storage = chosen;
+            auto res = application::update_profile(environment, updated);
+            if (!res) {
+                print_error_line(res.error().detail);
+            } else if (chosen == application::KeyStorage::Memory) {
+                print_ok_line(
+                    i18n::format(i18n::Key::WizardProfileKeyStorageUpdated,
+                                 target,
+                                 application::to_string(chosen)));
+            } else {
+                print_ok_line(i18n::format(
+                    i18n::Key::WizardProfileKeyStorageUpdatedNeedKey,
+                    target,
+                    application::to_string(chosen)));
+            }
+
         } else if (choice == "r") {
             std::string target, new_name;
             if (!prompt_pair(

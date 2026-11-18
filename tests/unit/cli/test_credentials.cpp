@@ -430,3 +430,60 @@ TEST(CliWizardTest, ListsAllLocalStatesInBothLanguagesWithoutSideEffects) {
         before,
         kasumi::test::snapshot_tree(kasumi::test::workspace_root(workspace)));
 }
+
+TEST(CliWizardTest, ChangesProfileKeyStorageAndCleansPreviousKey) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("cli-profile-key-storage");
+    const kasumi::application::ExecutionEnvironment environment{
+        kasumi::test::workspace_path(workspace, "app")};
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto remote = kasumi::test::workspace_path(workspace, "remote");
+    const kasumi::application::Profile profile{
+        .name = "storage_demo",
+        .local_dir = local,
+        .remote_dir = remote.string(),
+        .key_storage = kasumi::application::KeyStorage::File};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment,
+        profile,
+        kasumi::application::MasterKeyHex{std::string(64, '2')}));
+    const auto paths = kasumi::runtime::resolve_profile_paths(
+        environment.app_data_dir, "storage_demo");
+    ASSERT_TRUE(paths.has_value());
+    ASSERT_TRUE(std::filesystem::exists(paths->key_path));
+
+    auto password = kasumi::test::scoped_environment_variable("KASUMI_PASSWORD",
+                                                              "password-long");
+    auto salt = kasumi::test::scoped_environment_variable("KASUMI_PASSWORD2",
+                                                          "salt-password-long");
+
+    const auto to_memory =
+        run_wizard_out(environment, "s\nstorage_demo\ninvalid\nmemory\nq\n");
+    EXPECT_NE(to_memory.find("Invalid key storage mode"), std::string::npos);
+    EXPECT_NE(to_memory.find("set to 'memory'"), std::string::npos);
+    EXPECT_FALSE(std::filesystem::exists(paths->key_path));
+
+    auto profiles = kasumi::application::list_profiles(environment);
+    ASSERT_TRUE(profiles.has_value());
+    ASSERT_EQ(profiles->size(), 1U);
+    EXPECT_EQ(profiles->front().key_storage,
+              kasumi::application::KeyStorage::Memory);
+    EXPECT_EQ(kasumi::application::inspect_profile_local_state(environment,
+                                                               "storage_demo"),
+              kasumi::application::ProfileLocalState::Initialized);
+
+    const auto to_file =
+        run_wizard_out(environment, "s\nstorage_demo\nfile\nq\n");
+    EXPECT_NE(to_file.find("kasumi key storage_demo"), std::string::npos);
+    EXPECT_EQ(kasumi::application::inspect_profile_local_state(environment,
+                                                               "storage_demo"),
+              kasumi::application::ProfileLocalState::Problem);
+
+    const auto rekey = run_wizard_out(environment, "k\nstorage_demo\nq\n");
+    EXPECT_NE(rekey.find("Key saved for profile 'storage_demo'"),
+              std::string::npos);
+    EXPECT_TRUE(std::filesystem::exists(paths->key_path));
+    EXPECT_EQ(kasumi::application::inspect_profile_local_state(environment,
+                                                               "storage_demo"),
+              kasumi::application::ProfileLocalState::Initialized);
+}

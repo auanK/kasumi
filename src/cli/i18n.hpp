@@ -423,6 +423,11 @@ enum class Key {
     WizardPromptProfileToKey,
     WizardProfileKeyUpdated,
     WizardKeyStorageMemoryNoPersist,
+    WizardPromptProfileToStorage,
+    WizardPromptKeyStorage,
+    WizardInvalidKeyStorage,
+    WizardProfileKeyStorageUpdated,
+    WizardProfileKeyStorageUpdatedNeedKey,
 };
 
 Language current_language() noexcept;
