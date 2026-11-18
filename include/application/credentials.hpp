@@ -25,7 +25,7 @@ struct PasswordPair {
 };
 
 // Accepted forms for operations on an existing profile.
-using Credentials = std::variant<NoCredentials, MasterKeyHex>;
+using Credentials = std::variant<NoCredentials, MasterKeyHex, PasswordPair>;
 
 // Accepted forms only during profile creation.
 using ProfileCredentials = std::variant<MasterKeyHex, PasswordPair>;

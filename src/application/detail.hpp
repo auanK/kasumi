@@ -72,18 +72,6 @@ resolve_vault_key(const Credentials& credentials,
                   const VaultKeyPolicy<ErrorT>& policy,
                   MakeErrorFn&& make_error) {
     crypto::secure_memory::wipe(output.data(), output.size());
-    std::error_code fs_err;
-    const auto status =
-        std::filesystem::symlink_status(runtime_data.key_path, fs_err);
-    if (fs_err && fs_err != std::errc::no_such_file_or_directory) {
-        return std::unexpected(
-            make_error(policy.io_code, "failed to verify persisted key"));
-    }
-    const bool present = status.type() != std::filesystem::file_type::not_found;
-    if (std::holds_alternative<NoCredentials>(credentials) && !present) {
-        return std::unexpected(
-            make_error(policy.missing_code, policy.missing_detail));
-    }
 
     WipedBytes<runtime::vault::KEY_SIZE> candidate;
     bool has_master = false;
@@ -96,6 +84,77 @@ resolve_vault_key(const Credentials& credentials,
         candidate.data = *decoded;
         crypto::secure_memory::wipe(decoded->data(), decoded->size());
         has_master = true;
+    } else if (const auto* pair = std::get_if<PasswordPair>(&credentials)) {
+        auto derived =
+            runtime::vault::derive(pair->password, pair->salt_password);
+        if (!derived) {
+            return std::unexpected(
+                make_error(policy.credential_code, derived.error().detail));
+        }
+        candidate.data = *derived;
+        crypto::secure_memory::wipe(derived->data(), derived->size());
+        has_master = true;
+    }
+
+    if (runtime_data.key_storage == runtime::KeyStorage::Memory) {
+        if (!has_master) {
+            return std::unexpected(make_error(
+                policy.missing_code,
+                std::string{policy.missing_detail} +
+                    " (profile uses in-memory key storage; password and salt "
+                    "are required)"));
+        }
+        output = candidate.data;
+        return {};
+    }
+
+    const auto match_or_return_stored =
+        [&](runtime::vault::KeyBytes& raw_stored)
+        -> std::expected<void, ErrorT> {
+        WipedBytes<runtime::vault::KEY_SIZE> stored_wiped;
+        stored_wiped.data = raw_stored;
+        crypto::secure_memory::wipe(raw_stored.data(), raw_stored.size());
+        if (has_master && stored_wiped.data != candidate.data) {
+            return std::unexpected(make_error(
+                policy.mismatch_code, "credential does not match profile"));
+        }
+        output = has_master ? candidate.data : stored_wiped.data;
+        return {};
+    };
+
+    if (runtime_data.key_storage == runtime::KeyStorage::Vault) {
+        auto stored = runtime::vault::read_vault(runtime_data.key_path);
+        if (stored) {
+            return match_or_return_stored(*stored);
+        }
+        if (stored.error().code == runtime::ErrorCode::KeyNotFound) {
+            if (!has_master) {
+                return std::unexpected(
+                    make_error(policy.missing_code,
+                               std::string{policy.missing_detail} + "; " +
+                                   stored.error().detail));
+            }
+            output = candidate.data;
+            return {};
+        }
+        return std::unexpected(
+            make_error(policy.credential_code, stored.error().detail));
+    }
+
+    std::error_code fs_err;
+    const auto status =
+        std::filesystem::symlink_status(runtime_data.key_path, fs_err);
+    if (fs_err && fs_err != std::errc::no_such_file_or_directory) {
+        return std::unexpected(
+            make_error(policy.io_code, "failed to verify persisted key"));
+    }
+    const bool present = status.type() != std::filesystem::file_type::not_found;
+    if (!has_master && !present) {
+        return std::unexpected(
+            make_error(policy.missing_code,
+                       std::string{policy.missing_detail} +
+                           "; key.bin not found, run 'kasumi key <profile>' to "
+                           "re-enter the key"));
     }
 
     if (present) {
@@ -108,17 +167,7 @@ resolve_vault_key(const Credentials& credentials,
                 policy.read_only ? "failed to read profile persisted key"
                                  : stored.error().detail));
         }
-        WipedBytes<runtime::vault::KEY_SIZE> stored_wiped;
-        stored_wiped.data = *stored;
-        crypto::secure_memory::wipe(stored->data(), stored->size());
-        if (has_master && stored_wiped.data != candidate.data) {
-            return std::unexpected(make_error(
-                policy.mismatch_code, "credential does not match profile"));
-        }
-        if (!has_master) {
-            output = stored_wiped.data;
-            return {};
-        }
+        return match_or_return_stored(*stored);
     }
 
     output = candidate.data;

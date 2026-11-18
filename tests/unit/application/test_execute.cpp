@@ -231,7 +231,10 @@ TEST(ApplicationExecuteTest,
     const auto local = kasumi::test::workspace_path(workspace, "local");
     const auto remote = kasumi::test::workspace_path(workspace, "remote");
     const ExecutionEnvironment environment{app};
-    const Profile profile{"demo", local, remote.string()};
+    const Profile profile{.name = "demo",
+                          .local_dir = local,
+                          .remote_dir = remote.string(),
+                          .key_storage = kasumi::application::KeyStorage::File};
     ASSERT_TRUE(std::filesystem::create_directories(local));
     kasumi::test::write_text(local / "reused.txt", "reused-content");
     kasumi::test::write_text(local / "replaced.txt", "replaced-content");
@@ -321,7 +324,10 @@ TEST(ApplicationExecuteTest,
     const auto local = kasumi::test::workspace_path(workspace, "local");
     const auto remote = kasumi::test::workspace_path(workspace, "remote");
     const ExecutionEnvironment environment{app};
-    const Profile profile{"demo", local, remote.string()};
+    const Profile profile{.name = "demo",
+                          .local_dir = local,
+                          .remote_dir = remote.string(),
+                          .key_storage = kasumi::application::KeyStorage::File};
     ASSERT_TRUE(std::filesystem::create_directories(local));
     kasumi::test::write_text(local / "reused.txt", "reused-content");
     kasumi::test::write_text(local / "corrupt.txt", "corrupt-content");
@@ -378,7 +384,10 @@ TEST(ApplicationExecuteTest,
     const auto local = kasumi::test::workspace_path(workspace, "local");
     const auto remote = kasumi::test::workspace_path(workspace, "remote");
     const ExecutionEnvironment environment{app};
-    const Profile profile{"demo", local, remote.string()};
+    const Profile profile{.name = "demo",
+                          .local_dir = local,
+                          .remote_dir = remote.string(),
+                          .key_storage = kasumi::application::KeyStorage::File};
     ASSERT_TRUE(std::filesystem::create_directories(local));
     kasumi::test::write_text(local / "existing.txt", "existing-content");
     kasumi::test::write_text(local / "missing.txt", "missing-content");
@@ -573,7 +582,10 @@ TEST(ApplicationExecuteTest,
     const auto local = kasumi::test::workspace_path(workspace, "local");
     const auto remote = kasumi::test::workspace_path(workspace, "remote");
     const ExecutionEnvironment environment{app};
-    const Profile profile{"demo", local, remote.string()};
+    const Profile profile{.name = "demo",
+                          .local_dir = local,
+                          .remote_dir = remote.string(),
+                          .key_storage = kasumi::application::KeyStorage::File};
     ASSERT_TRUE(std::filesystem::create_directories(local));
     kasumi::test::write_text(local / "file.txt", "existing-history");
     ASSERT_TRUE(
@@ -606,7 +618,10 @@ TEST(ApplicationExecuteTest,
     const auto local = kasumi::test::workspace_path(workspace, "local");
     const auto remote = kasumi::test::workspace_path(workspace, "remote");
     const ExecutionEnvironment environment{app};
-    const Profile profile{"demo", local, remote.string()};
+    const Profile profile{.name = "demo",
+                          .local_dir = local,
+                          .remote_dir = remote.string(),
+                          .key_storage = kasumi::application::KeyStorage::File};
     ASSERT_TRUE(std::filesystem::create_directories(local));
     ASSERT_TRUE(
         kasumi::application::create_profile(environment, profile, key()));
@@ -678,7 +693,10 @@ TEST(ApplicationExecuteTest,
     const auto local = kasumi::test::workspace_path(workspace, "local");
     const auto remote = kasumi::test::workspace_path(workspace, "remote");
     const ExecutionEnvironment environment{app};
-    const Profile profile{"demo", local, remote.string()};
+    const Profile profile{.name = "demo",
+                          .local_dir = local,
+                          .remote_dir = remote.string(),
+                          .key_storage = kasumi::application::KeyStorage::File};
     kasumi::test::write_text(local, "not a directory");
     ASSERT_TRUE(
         kasumi::application::create_profile(environment, profile, key()));
@@ -1161,7 +1179,10 @@ TEST(ApplicationExecuteTest,
     const auto local = kasumi::test::workspace_path(workspace, "local");
     const auto remote = kasumi::test::workspace_path(workspace, "remote");
     const ExecutionEnvironment env{app};
-    const Profile profile{"demo", local, remote.string()};
+    const Profile profile{.name = "demo",
+                          .local_dir = local,
+                          .remote_dir = remote.string(),
+                          .key_storage = kasumi::application::KeyStorage::File};
     ASSERT_TRUE(std::filesystem::create_directories(local));
     ASSERT_TRUE(std::filesystem::create_directories(remote));
 
@@ -1289,5 +1310,72 @@ TEST(ApplicationExecuteTest, RemoveBarrierFailurePreservesDiagnosticContext) {
               kasumi::application::BarrierRemovalStage::ValidatingPayload);
     EXPECT_EQ(result.error().barrier_removal->mutation_state,
               kasumi::application::BarrierRemovalMutationState::NotAttempted);
+}
+
+TEST(ApplicationExecuteTest,
+     MemoryModeRequiresPasswordPairAndSwitchingStorageRequiresSetProfileKey) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("exec-key-storage-modes");
+    const auto app = kasumi::test::workspace_path(workspace, "app");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto remote = kasumi::test::workspace_path(workspace, "remote");
+    const ExecutionEnvironment env{app};
+    const Profile profile{.name = "demo",
+                          .local_dir = local,
+                          .remote_dir = remote.string(),
+                          .key_storage =
+                              kasumi::application::KeyStorage::Memory};
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    kasumi::test::write_text(local / "note.txt", "hello-memory");
+    const kasumi::application::PasswordPair pass_pair{"memory-secret-pass",
+                                                      "memory-secret-salt-16"};
+    ASSERT_TRUE(kasumi::application::create_profile(env, profile, pass_pair));
+    EXPECT_FALSE(std::filesystem::exists(app / "profiles/demo/key.bin"));
+
+    const auto no_creds = kasumi::application::execute(
+        {Request{.operation = Operation::Sync, .profile_name = "demo"},
+         Credentials{NoCredentials{}},
+         env});
+    ASSERT_FALSE(no_creds.has_value());
+    EXPECT_EQ(no_creds.error().code,
+              kasumi::application::ErrorCode::CredentialFailure);
+
+    const auto with_pass = kasumi::application::execute(
+        {Request{.operation = Operation::Sync, .profile_name = "demo"},
+         Credentials{pass_pair},
+         env});
+    ASSERT_TRUE(with_pass.has_value())
+        << (with_pass ? "" : with_pass.error().detail);
+    EXPECT_FALSE(std::filesystem::exists(app / "profiles/demo/key.bin"));
+
+    // Switch config.toml key_storage to "file"; missing key must report error
+    // until set_profile_key re-enters it.
+    const auto config_path = app / "config.toml";
+    auto config_text = kasumi::test::read_text(config_path);
+    const auto dq = config_text.find("\"memory\"");
+    const auto sq = config_text.find("'memory'");
+    if (dq != std::string::npos) {
+        config_text.replace(dq, 8, "\"file\"");
+    } else {
+        ASSERT_NE(sq, std::string::npos) << config_text;
+        config_text.replace(sq, 8, "'file'");
+    }
+    kasumi::test::write_text(config_path, config_text);
+
+    const auto missing_file = kasumi::application::execute(
+        {Request{.operation = Operation::Status, .profile_name = "demo"},
+         Credentials{NoCredentials{}},
+         env});
+    ASSERT_FALSE(missing_file.has_value());
+    EXPECT_NE(missing_file.error().detail.find("kasumi key"),
+              std::string::npos);
+
+    ASSERT_TRUE(kasumi::application::set_profile_key(env, "demo", pass_pair));
+    const auto restored = kasumi::application::execute(
+        {Request{.operation = Operation::Status, .profile_name = "demo"},
+         Credentials{NoCredentials{}},
+         env});
+    ASSERT_TRUE(restored.has_value())
+        << (restored ? "" : restored.error().detail);
 }
 } // namespace

@@ -11,6 +11,7 @@
 #include <array>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <print>
 #include <string>
@@ -39,6 +40,7 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
                           platform::path::to_utf8(profile.local_dir),
                           profile.remote_dir,
                           application::to_string(state),
+                          application::to_string(profile.key_storage),
                           profile.min_history_depth,
                           profile.min_history_age_hours);
             if (state == application::ProfileLocalState::Problem) {
@@ -69,6 +71,47 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
     if (!profile_name.empty()) {
         return fail_query(i18n::tr(i18n::Key::WizardProfileNotFound));
     }
+    return 0;
+}
+
+int run_profile_key(const application::ExecutionEnvironment& environment,
+                    std::string_view profile_name) {
+    auto profiles = application::list_profiles(environment);
+    if (!profiles) {
+        print_error_line(profiles.error().detail);
+        return 1;
+    }
+    const auto it =
+        std::ranges::find(*profiles, profile_name, &application::Profile::name);
+    if (it == profiles->end()) {
+        print_error_line(i18n::tr(i18n::Key::WizardProfileNotFound));
+        return 1;
+    }
+    if (it->key_storage == application::KeyStorage::Memory) {
+        print_error_line(i18n::format(
+            i18n::Key::WizardKeyStorageMemoryNoPersist, profile_name));
+        return 1;
+    }
+    application::ProfileCredentials creds =
+        [&]() -> application::ProfileCredentials {
+        if (const char* env = std::getenv("KASUMI_MASTER_KEY")) {
+            return application::MasterKeyHex{std::string(env)};
+        }
+        return credentials::read_password_pair();
+    }();
+    if (platform::cancellation::requested()) {
+        application::wipe_credentials(creds);
+        return 130;
+    }
+    auto res = application::set_profile_key(
+        environment, profile_name, std::move(creds));
+    application::wipe_credentials(creds);
+    if (!res) {
+        print_error_line(res.error().detail);
+        return 1;
+    }
+    print_ok_line(
+        i18n::format(i18n::Key::WizardProfileKeyUpdated, profile_name));
     return 0;
 }
 
@@ -299,7 +342,8 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                     platform::path::from_utf8(edit_local),
                     edit_remote,
                     it->min_history_depth,
-                    it->min_history_age_hours};
+                    it->min_history_age_hours,
+                    it->key_storage};
                 if (updated.local_dir == it->local_dir &&
                     updated.remote_dir == it->remote_dir) {
                     continue;
@@ -318,6 +362,104 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                     i18n::format(i18n::Key::WizardProfileEdited, target));
             } else {
                 print_error_line(i18n::tr(i18n::Key::WizardProfileNotFound));
+            }
+
+        } else if (choice == "k") {
+            std::string target;
+            if (!prompt_existing(i18n::Key::WizardPromptProfileToKey, target)) {
+                break;
+            }
+            const auto selected = std::ranges::find(
+                profiles, target, &application::Profile::name);
+            if (selected == profiles.end()) {
+                print_error_line(i18n::tr(i18n::Key::WizardProfileNotFound));
+                continue;
+            }
+            if (selected->key_storage == application::KeyStorage::Memory) {
+                print_error_line(i18n::format(
+                    i18n::Key::WizardKeyStorageMemoryNoPersist, target));
+                continue;
+            }
+            application::ProfileCredentials creds =
+                credentials::read_password_pair();
+            if (platform::cancellation::requested()) {
+                application::wipe_credentials(creds);
+                break;
+            }
+            auto res = application::set_profile_key(
+                environment, target, std::move(creds));
+            application::wipe_credentials(creds);
+            report_result(
+                res, i18n::format(i18n::Key::WizardProfileKeyUpdated, target));
+
+        } else if (choice == "s") {
+            std::string target;
+            if (!prompt_existing(i18n::Key::WizardPromptProfileToStorage,
+                                 target)) {
+                break;
+            }
+            const auto selected = std::ranges::find(
+                profiles, target, &application::Profile::name);
+            if (selected == profiles.end()) {
+                print_error_line(i18n::tr(i18n::Key::WizardProfileNotFound));
+                continue;
+            }
+            application::KeyStorage chosen = selected->key_storage;
+            bool cancelled = false;
+            const std::string prompt =
+                i18n::format(i18n::Key::WizardPromptKeyStorage,
+                             application::to_string(selected->key_storage));
+            while (true) {
+                std::string raw_mode;
+                if (!prompt_line(prompt, raw_mode)) {
+                    cancelled = true;
+                    break;
+                }
+                const auto first = raw_mode.find_first_not_of(" \t\r\n");
+                if (first == std::string::npos) {
+                    chosen = selected->key_storage;
+                    break;
+                }
+                const auto last = raw_mode.find_last_not_of(" \t\r\n");
+                std::string mode = raw_mode.substr(first, last - first + 1);
+                std::ranges::transform(mode, mode.begin(), [](unsigned char c) {
+                    return static_cast<char>(std::tolower(c));
+                });
+                if (mode == "vault") {
+                    chosen = application::KeyStorage::Vault;
+                    break;
+                }
+                if (mode == "file") {
+                    chosen = application::KeyStorage::File;
+                    break;
+                }
+                if (mode == "memory") {
+                    chosen = application::KeyStorage::Memory;
+                    break;
+                }
+                print_error_line(i18n::tr(i18n::Key::WizardInvalidKeyStorage));
+            }
+            if (cancelled) {
+                break;
+            }
+            if (chosen == selected->key_storage) {
+                continue;
+            }
+            application::Profile updated = *selected;
+            updated.key_storage = chosen;
+            auto res = application::update_profile(environment, updated);
+            if (!res) {
+                print_error_line(res.error().detail);
+            } else if (chosen == application::KeyStorage::Memory) {
+                print_ok_line(
+                    i18n::format(i18n::Key::WizardProfileKeyStorageUpdated,
+                                 target,
+                                 application::to_string(chosen)));
+            } else {
+                print_ok_line(i18n::format(
+                    i18n::Key::WizardProfileKeyStorageUpdatedNeedKey,
+                    target,
+                    application::to_string(chosen)));
             }
 
         } else if (choice == "r") {

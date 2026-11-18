@@ -168,6 +168,26 @@ struct RcloneHarness {
             return;
         }
         const auto root = workspace.root;
+        std::vector<std::filesystem::path> app_dirs{root / "cli-home/kasumi"};
+        std::error_code dir_ec;
+        for (const auto& entry :
+             std::filesystem::directory_iterator(root, dir_ec)) {
+            if (entry.is_directory(dir_ec)) {
+                app_dirs.push_back(entry.path() / "app-data");
+            }
+        }
+        for (const auto& app_dir : app_dirs) {
+            std::error_code cfg_ec;
+            if (std::filesystem::exists(app_dir / "config.toml", cfg_ec)) {
+                if (const auto profs =
+                        kasumi::application::list_profiles({app_dir})) {
+                    for (const auto& p : *profs) {
+                        static_cast<void>(kasumi::application::delete_profile(
+                            {app_dir}, p.name));
+                    }
+                }
+            }
+        }
         rclone_cache.reset();
         rclone_config.reset();
         current_directory.reset();

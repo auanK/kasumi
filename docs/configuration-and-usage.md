@@ -22,7 +22,7 @@ A configuration read failure returns 1; cancellation or EOF at a wizard prompt
 returns 130. EOF or interruption during a prompt stops before that profile
 mutation.
 
-The wizard lists profiles and allows creating, cloning, editing, renaming, and deleting them. It displays each profile's local state: `Initialized`, `Ready`, `Pending`, or `Problem`. During creation, it prompts for the profile name, local synchronized path, remote destination, Password, and Password Salt. Profile names contain only letters, digits, `_`, or `-`; the local path must be absolute. Cloning reuses configuration and the master key but creates fresh SQLite state without copying accepted history or remote data. Editing changes the configured local and remote paths, not the key. Renaming moves private profile state. Deleting removes local configuration, key, and state, while leaving the synchronized folder and remote objects intact. See [Profile Management](architecture/profile-management.md) for state meanings, the lifecycle, and rollback boundaries. For operational guidance, see [Best Practices](best-practices.md); for troubleshooting operational issues, see [Troubleshooting](troubleshooting.md).
+The wizard lists profiles and allows creating, cloning, editing paths, changing key storage (`[s] Storage`), re-entering keys (`[k] Key`), renaming, and deleting them. It displays each profile's local state: `Initialized`, `Ready`, `Pending`, or `Problem`. During creation, it prompts for the profile name, local synchronized path, remote destination, Password, and Password Salt. New profiles default to `key_storage = "vault"` (Windows Credential Manager on Windows; GNOME Keyring / Freedesktop Secret Service or KDE KWallet on Linux). You can switch any profile between `vault`, `file` (stored locally in `profiles/<name>/key.bin`), and `memory` (prompted on every command without persisting the key) via `[s] Storage` in `kasumi config` or by editing `config.toml`; switching away from `vault` or `file` removes the previously saved key and requires `kasumi key <profile>` (or `[k] Key`) when entering `vault` or `file`. Profile names contain only letters, digits, `_`, or `-`; the local path must be absolute. Cloning reuses configuration and the master key but creates fresh SQLite state without copying accepted history or remote data. Editing changes the configured local and remote paths, not the key. Renaming moves private profile state and OS vault entries. Deleting removes local configuration, key, and state, while leaving the synchronized folder and remote objects intact. See [Profile Management](architecture/profile-management.md) for state meanings, the lifecycle, and rollback boundaries. For operational guidance, see [Best Practices](best-practices.md); for troubleshooting operational issues, see [Troubleshooting](troubleshooting.md).
 
 * **Password**: Minimum 12 characters.
 * **Password Salt**: Minimum 16 characters. A reproducible, user-provided passphrase used as the cryptographic salt for Argon2id key derivation (not an automatically generated or stored random salt). When configuring another machine for the same vault through the interactive wizard, use the same Password and Password Salt so that it derives the same vault master key.
@@ -64,9 +64,10 @@ local_dir = "D:/Documents"
 remote_dir = "drive:kasumi/my-profile"
 min_history_depth = 5
 min_history_age_hours = 6
+key_storage = "vault"
 ```
 
-New profiles default to a minimum retention depth of 5 commits and a minimum retention age of 6 hours. Manual editing of `config.toml` allows adjusting both values using positive integers; runtime operations limit depth to 4096. Unknown fields and missing required profile values are rejected rather than migrated. The local profile policy is used when planning or publishing retention state. Published authenticated Epochs carry the retention policy and anchors used by the remote history and maintenance protocol.
+New profiles default to `key_storage = "vault"`, a minimum retention depth of 5 commits, and a minimum retention age of 6 hours. Legacy profiles in `config.toml` that omit `key_storage` default to `file` so existing `key.bin` setups continue working unchanged. Manual editing of `config.toml` allows adjusting `key_storage` (`vault`, `file`, or `memory`) and retention values using positive integers; runtime operations limit depth to 4096. Unknown fields and missing required profile values are rejected rather than migrated. The local profile policy is used when planning or publishing retention state. Published authenticated Epochs carry the retention policy and anchors used by the remote history and maintenance protocol.
 
 ## Core Commands
 
@@ -75,6 +76,7 @@ Use `kasumi <command> --help` for the complete arguments, options and examples.
 | Purpose | Command |
 |---|---|
 | Manage local profiles | `kasumi config` |
+| Re-enter or save profile key | `kasumi key <profile>` |
 | List profile names | `kasumi list` |
 | Show profile settings and local state | `kasumi show <profile>` |
 | Inspect the current plan | `kasumi status <profile>` or `kasumi sync <profile> --dry-run` |

@@ -3,14 +3,22 @@
 
 #include "runtime/error.hpp"
 
+#include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace kasumi::runtime {
+
+enum class KeyStorage {
+    Vault,
+    File,
+    Memory,
+};
 
 // Record persisted in the global configuration.
 struct ProfileData {
@@ -22,7 +30,12 @@ struct ProfileData {
     // Retention policy.
     std::uint32_t min_history_depth = 5;
     std::uint32_t min_history_age_hours = 6;
+    // Where the derived master key is persisted (or Memory for prompt-only).
+    KeyStorage key_storage = KeyStorage::Vault;
 };
+
+std::string_view to_string(KeyStorage storage) noexcept;
+std::optional<KeyStorage> parse_key_storage(std::string_view value) noexcept;
 
 // Accepts alphanumeric characters, '-', and '_', excluding empty, ".", and
 // "..".

@@ -65,6 +65,7 @@ using kasumi::application::ExecutionEnvironment;
 namespace app_fault = kasumi::application::fault_test;
 using kasumi::application::clone_profile;
 using kasumi::application::inspect_profile_local_state;
+using kasumi::application::KeyStorage;
 using kasumi::application::MasterKeyHex;
 using kasumi::application::Profile;
 using kasumi::application::ProfileCredentials;
@@ -275,7 +276,8 @@ struct ProfileEnv {
                        kasumi::test::workspace_path(workspace, local_subdir),
                        std::move(remote),
                        depth,
-                       age_hours};
+                       age_hours,
+                       KeyStorage::File};
     }
 
     Profile create_profile(std::string name = "source",
@@ -388,9 +390,11 @@ TEST(ApplicationProfileTest, ListMissingConfigIsEmptyAndCreateListsProfile) {
     EXPECT_TRUE(before->empty());
 
     const Profile profile{
-        "main",
-        kasumi::test::workspace_path(workspace, "local"),
-        kasumi::test::workspace_path(workspace, "remote").string()};
+        .name = "main",
+        .local_dir = kasumi::test::workspace_path(workspace, "local"),
+        .remote_dir =
+            kasumi::test::workspace_path(workspace, "remote").string(),
+        .key_storage = KeyStorage::File};
     ASSERT_TRUE(
         kasumi::application::create_profile(environment, profile, key()));
     const auto listed = kasumi::application::list_profiles(environment);
@@ -411,9 +415,11 @@ TEST(ApplicationProfileTest, RejectsDuplicateNames) {
     const ExecutionEnvironment environment{
         kasumi::test::workspace_path(workspace, "app")};
     const Profile profile{
-        "main",
-        kasumi::test::workspace_path(workspace, "local"),
-        kasumi::test::workspace_path(workspace, "remote").string()};
+        .name = "main",
+        .local_dir = kasumi::test::workspace_path(workspace, "local"),
+        .remote_dir =
+            kasumi::test::workspace_path(workspace, "remote").string(),
+        .key_storage = KeyStorage::File};
     ASSERT_TRUE(
         kasumi::application::create_profile(environment, profile, key()));
     const auto duplicate =
@@ -594,9 +600,11 @@ TEST(ApplicationProfileTest,
     ProfileCredentials credentials =
         kasumi::application::PasswordPair{"test password", "test salt secret"};
     const Profile profile{
-        "password",
-        kasumi::test::workspace_path(workspace, "local"),
-        kasumi::test::workspace_path(workspace, "remote").string()};
+        .name = "password",
+        .local_dir = kasumi::test::workspace_path(workspace, "local"),
+        .remote_dir =
+            kasumi::test::workspace_path(workspace, "remote").string(),
+        .key_storage = KeyStorage::File};
     ASSERT_TRUE(kasumi::application::create_profile(
         environment, profile, std::move(credentials)));
     EXPECT_TRUE(std::filesystem::exists(kasumi::test::workspace_path(
@@ -1634,9 +1642,10 @@ struct ProfileFixture {
     explicit ProfileFixture(std::string name)
         : workspace(kasumi::test::make_temp_workspace(std::move(name))),
           environment{kasumi::test::workspace_path(workspace, "app")},
-          profile{"main",
-                  kasumi::test::workspace_path(workspace, "local"),
-                  "remote:root"} {
+          profile{.name = "main",
+                  .local_dir = kasumi::test::workspace_path(workspace, "local"),
+                  .remote_dir = "remote:root",
+                  .key_storage = KeyStorage::File} {
         EXPECT_TRUE(
             kasumi::application::create_profile(environment, profile, key()));
     }
@@ -1670,7 +1679,10 @@ struct ProfileFixture {
 TEST(ApplicationProfileTest, ClonesAndConfigReadersKeepCompleteSnapshots) {
     ProfileFixture fixture{"app-profile-clone-readers"};
     ASSERT_TRUE(save_height(fixture.database_path(), 7));
-    const Profile other{"other", fixture.profile.local_dir, "remote:other"};
+    const Profile other{.name = "other",
+                        .local_dir = fixture.profile.local_dir,
+                        .remote_dir = "remote:other",
+                        .key_storage = KeyStorage::File};
     ASSERT_TRUE(
         kasumi::application::create_profile(fixture.environment, other, key()));
     const auto other_paths = kasumi::runtime::resolve_profile_paths(
@@ -3427,6 +3439,115 @@ TEST(ApplicationProfileTest,
               capture_directory_snapshot(fixture.environment.app_data_dir));
     EXPECT_FALSE(std::filesystem::exists(fixture.environment.app_data_dir /
                                          "profile-main.lock"));
+}
+
+#if defined(_WIN32) || defined(__linux__)
+TEST(ApplicationProfileTest, DefaultVaultStorageLifecycleDoesNotWriteKeyFile) {
+    auto workspace = kasumi::test::make_temp_workspace("app-profile-vault-os");
+    const ExecutionEnvironment environment{
+        kasumi::test::workspace_path(workspace, "app")};
+    const Profile profile{
+        .name = "main",
+        .local_dir = kasumi::test::workspace_path(workspace, "local"),
+        .remote_dir =
+            kasumi::test::workspace_path(workspace, "remote").string()};
+    EXPECT_EQ(profile.key_storage, KeyStorage::Vault);
+    ASSERT_TRUE(
+        kasumi::application::create_profile(environment, profile, key()));
+    const auto paths = kasumi::runtime::resolve_profile_paths(
+        environment.app_data_dir, "main");
+    ASSERT_TRUE(paths.has_value());
+    EXPECT_FALSE(std::filesystem::exists(paths->key_path));
+    auto problem = kasumi::application::ProfileLocalProblem::None;
+    EXPECT_EQ(inspect_profile_local_state(environment, "main", &problem),
+              ProfileLocalState::Initialized);
+    EXPECT_EQ(problem, kasumi::application::ProfileLocalProblem::None);
+
+    const auto listed = kasumi::application::list_profiles(environment);
+    ASSERT_TRUE(listed.has_value());
+    ASSERT_EQ(listed->size(), 1U);
+    EXPECT_EQ(listed->front().key_storage, KeyStorage::Vault);
+
+    ASSERT_TRUE(clone_profile(environment, "main", "copy"));
+    const auto copy_paths = kasumi::runtime::resolve_profile_paths(
+        environment.app_data_dir, "copy");
+    ASSERT_TRUE(copy_paths.has_value());
+    EXPECT_FALSE(std::filesystem::exists(copy_paths->key_path));
+    EXPECT_EQ(inspect_profile_local_state(environment, "copy"),
+              ProfileLocalState::Initialized);
+
+    ASSERT_TRUE(rename_profile(environment, "copy", "renamed"));
+    const auto renamed_paths = kasumi::runtime::resolve_profile_paths(
+        environment.app_data_dir, "renamed");
+    ASSERT_TRUE(renamed_paths.has_value());
+    EXPECT_FALSE(kasumi::runtime::vault::read_vault(copy_paths->key_path));
+    EXPECT_EQ(inspect_profile_local_state(environment, "renamed"),
+              ProfileLocalState::Initialized);
+
+    ASSERT_TRUE(delete_profile(environment, "renamed"));
+    EXPECT_FALSE(kasumi::runtime::vault::read_vault(renamed_paths->key_path));
+    ASSERT_TRUE(delete_profile(environment, "main"));
+    EXPECT_FALSE(kasumi::runtime::vault::read_vault(paths->key_path));
+}
+#endif
+
+TEST(ApplicationProfileTest,
+     MemoryStorageAndSwitchToFileDetectsMissingKeyUntilSetProfileKey) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("app-profile-memory-switch");
+    const ExecutionEnvironment environment{
+        kasumi::test::workspace_path(workspace, "app")};
+    const Profile profile{
+        .name = "mem",
+        .local_dir = kasumi::test::workspace_path(workspace, "local"),
+        .remote_dir =
+            kasumi::test::workspace_path(workspace, "remote").string(),
+        .key_storage = KeyStorage::Memory};
+    ProfileCredentials creds = kasumi::application::PasswordPair{
+        "memory-password-long", "memory-salt-secret-16"};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment, profile, std::move(creds)));
+
+    const auto paths =
+        kasumi::runtime::resolve_profile_paths(environment.app_data_dir, "mem");
+    ASSERT_TRUE(paths.has_value());
+    EXPECT_FALSE(std::filesystem::exists(paths->key_path));
+    EXPECT_EQ(inspect_profile_local_state(environment, "mem"),
+              ProfileLocalState::Initialized);
+
+    const auto set_mem = kasumi::application::set_profile_key(
+        environment, "mem", MasterKeyHex{std::string(64, '4')});
+    EXPECT_FALSE(set_mem.has_value());
+
+    const auto config_path = environment.app_data_dir / "config.toml";
+    auto config_text = kasumi::test::read_text(config_path);
+    const auto pos = config_text.find("key_storage = 'memory'");
+    const auto pos_dq = config_text.find("key_storage = \"memory\"");
+    if (pos != std::string::npos) {
+        config_text.replace(pos,
+                            std::string("key_storage = 'memory'").size(),
+                            "key_storage = 'file'");
+    } else {
+        ASSERT_NE(pos_dq, std::string::npos) << config_text;
+        config_text.replace(pos_dq,
+                            std::string("key_storage = \"memory\"").size(),
+                            "key_storage = \"file\"");
+    }
+    kasumi::test::write_text(config_path, config_text);
+
+    auto problem = kasumi::application::ProfileLocalProblem::None;
+    EXPECT_EQ(inspect_profile_local_state(environment, "mem", &problem),
+              ProfileLocalState::Problem);
+    EXPECT_EQ(problem, kasumi::application::ProfileLocalProblem::Key);
+
+    ASSERT_TRUE(kasumi::application::set_profile_key(
+        environment,
+        "mem",
+        kasumi::application::PasswordPair{"memory-password-long",
+                                          "memory-salt-secret-16"}));
+    EXPECT_TRUE(std::filesystem::exists(paths->key_path));
+    EXPECT_EQ(inspect_profile_local_state(environment, "mem"),
+              ProfileLocalState::Initialized);
 }
 
 } // namespace

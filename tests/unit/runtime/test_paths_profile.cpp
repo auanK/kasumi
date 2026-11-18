@@ -208,6 +208,41 @@ TEST(RuntimeProfileTest, SaveRejectsZeroWithoutCreatingPartialConfig) {
     EXPECT_FALSE(std::filesystem::exists(config.parent_path()));
 }
 
+TEST(RuntimeProfileTest, KeyStorageRoundTripsAndRejectsInvalidValues) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("runtime-key-storage-modes");
+    const auto config = kasumi::test::workspace_path(workspace, "config.toml");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const std::vector<kasumi::runtime::ProfileData> profiles{
+        {"a_vault", local, "remote:", 5, 6, kasumi::runtime::KeyStorage::Vault},
+        {"b_file", local, "remote:", 5, 6, kasumi::runtime::KeyStorage::File},
+        {"c_memory",
+         local,
+         "remote:",
+         5,
+         6,
+         kasumi::runtime::KeyStorage::Memory},
+    };
+    ASSERT_TRUE(kasumi::runtime::save_profiles(config, profiles));
+    const auto loaded = kasumi::runtime::load_profiles(config);
+    ASSERT_TRUE(loaded.has_value());
+    ASSERT_EQ(loaded->size(), 3U);
+    EXPECT_EQ(loaded->at(0).key_storage, kasumi::runtime::KeyStorage::Vault);
+    EXPECT_EQ(loaded->at(1).key_storage, kasumi::runtime::KeyStorage::File);
+    EXPECT_EQ(loaded->at(2).key_storage, kasumi::runtime::KeyStorage::Memory);
+
+    kasumi::test::write_text(
+        config,
+        "[profiles.bad]\nlocal_dir = '" +
+            kasumi::platform::path::to_utf8(local) +
+            "'\nremote_dir = 'remote:'\nmin_history_depth = 5\n"
+            "min_history_age_hours = 6\nkey_storage = 'invalid'\n");
+    const auto rejected = kasumi::runtime::load_profiles(config);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(rejected.error().code,
+              kasumi::runtime::ErrorCode::ProfileInvalid);
+}
+
 TEST(RuntimePathsTest, DefaultPathsRestoreEnvironmentOverrides) {
     auto workspace = kasumi::test::make_temp_workspace("runtime-env");
 #if defined(_WIN32)

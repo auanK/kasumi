@@ -4,6 +4,7 @@
 #include "application/credentials.hpp"
 #include "application/environment.hpp"
 
+#include <cstdint>
 #include <expected>
 #include <filesystem>
 #include <string>
@@ -11,6 +12,12 @@
 #include <vector>
 
 namespace kasumi::application {
+
+enum class KeyStorage {
+    Vault,
+    File,
+    Memory,
+};
 
 // Configuration for a synchronization profile.
 struct Profile {
@@ -22,7 +29,11 @@ struct Profile {
     // Retention policy.
     std::uint32_t min_history_depth = 5;
     std::uint32_t min_history_age_hours = 6;
+    // Key storage mechanism.
+    KeyStorage key_storage = KeyStorage::Vault;
 };
+
+std::string_view to_string(KeyStorage storage) noexcept;
 
 // Possible failures in profile management.
 enum class ProfileErrorCode {
@@ -62,6 +73,12 @@ create_profile(const ExecutionEnvironment& environment,
 // Updates profile directories and retention policy.
 std::expected<void, ProfileError>
 update_profile(const ExecutionEnvironment& environment, Profile profile);
+
+// Derives or decodes credentials and saves them to the profile's key storage.
+std::expected<void, ProfileError>
+set_profile_key(const ExecutionEnvironment& environment,
+                std::string_view profile_name,
+                ProfileCredentials credentials);
 
 // Removes configuration, key, and state; preserves synchronized directory.
 std::expected<void, ProfileError>

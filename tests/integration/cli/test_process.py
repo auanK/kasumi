@@ -1,8 +1,11 @@
 """Exercise the real executable, including the operating system argument boundary."""
 
 import argparse
+import ctypes
 import os
 from pathlib import Path
+import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -22,14 +25,43 @@ class CliProcessTest(unittest.TestCase):
         self.root = Path(self.directory.name).resolve()
         self.assertEqual(self.root.parent, binary.parent)
         self.addCleanup(self.directory.cleanup)
+        self.addCleanup(self._cleanup_os_vault)
         self.environment = {
             name: value for name, value in os.environ.items()
-            if not name.upper().startswith(("KASUMI_", "RCLONE_"))
+            if name == "KASUMI_LINUX_VAULT_BACKEND"
+            or not name.upper().startswith(("KASUMI_", "RCLONE_"))
         }
         self.environment.update(
             APPDATA=str(self.root), XDG_CONFIG_HOME=str(self.root), KASUMI_LANG="en",
             KASUMI_PASSWORD="process-test-password", KASUMI_PASSWORD2="process-test-salt",
         )
+
+    def _cleanup_os_vault(self):
+        profiles_dir = self.root / "kasumi" / "profiles"
+        if not profiles_dir.is_dir():
+            return
+        if sys.platform == "win32":
+            cred_delete = ctypes.windll.advapi32.CredDeleteW
+            cred_delete.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
+            cred_delete.restype = ctypes.c_int
+            for entry in profiles_dir.iterdir():
+                if entry.is_dir():
+                    target = "kasumi:" + (entry / "key.bin").resolve().as_posix().lower()
+                    cred_delete(target, 1, 0)
+        elif (
+            os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+            and os.environ.get("KASUMI_LINUX_VAULT_BACKEND") != "kwallet"
+            and shutil.which("secret-tool")
+        ):
+            for entry in profiles_dir.iterdir():
+                if entry.is_dir():
+                    target = "kasumi:" + (entry / "key.bin").resolve().as_posix()
+                    subprocess.run(
+                        ["secret-tool", "clear", "target", target],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
 
     def invoke(self, *arguments, input=None, expected=0, environment=None):
         result = self.invoke_raw(
@@ -42,7 +74,7 @@ class CliProcessTest(unittest.TestCase):
             if len(arguments) >= 3 and arguments[0] == "--lang"
             else arguments[0]
         )
-        if command not in ("config", "list", "show"):
+        if command not in ("config", "list", "show", "key"):
             self.assertRegex(
                 result.stdout,
                 rb"(?:Duration|Dura\xc3\xa7\xc3\xa3o): [0-9]+\.[0-9]{3} s\r?\n",
@@ -282,11 +314,12 @@ class CliProcessTest(unittest.TestCase):
         source_db = source_dir / "db.sqlite"
         self.assertIn(b"Profile created.", created)
         self.assertFalse(remote.exists())
-        self.assertTrue(source_key.is_file())
+        self.assertFalse(source_key.exists())
         self.assertTrue(source_db.is_file())
         profiles = tomllib.loads(config.read_text(encoding="utf-8"))["profiles"]
         self.assertEqual(Path(profiles["demo"]["local_dir"]), local)
         self.assertEqual(profiles["demo"]["remote_dir"], str(remote))
+        self.assertEqual(profiles["demo"]["key_storage"], "vault")
         before = self._tree_snapshot(data)
         names = self.invoke_raw("list")
         self.assertEqual(names.returncode, 0, names.stderr)
@@ -295,7 +328,7 @@ class CliProcessTest(unittest.TestCase):
         self.assertEqual(details.returncode, 0, details.stderr)
         self.assertIn(str(local).encode(), details.stdout)
         self.assertIn(str(remote).encode(), details.stdout)
-        self.assertNotIn(source_key.read_bytes(), details.stdout)
+        self.assertIn(b"Key storage: vault", details.stdout)
         missing = self.invoke_raw("show", "absent")
         self.assertEqual(missing.returncode, 1)
         self.assertEqual(missing.stdout, b"")
@@ -311,7 +344,6 @@ class CliProcessTest(unittest.TestCase):
         listed = self.invoke("config", input=b"q\n")
         self.assertRegex(listed, rb"\bdemo\s+Ready\b")
         remote_snapshot = self._tree_snapshot(remote)
-        source_key_bytes = source_key.read_bytes()
         source_db_bytes = source_db.read_bytes()
 
         without_passwords = self.environment.copy()
@@ -326,13 +358,14 @@ class CliProcessTest(unittest.TestCase):
         clone_db = clone_dir / "db.sqlite"
         self.assertIn(b'created from "demo"', cloned)
         self.assertNotIn(b"Password:", cloned)
-        self.assertEqual(clone_key.read_bytes(), source_key_bytes)
+        self.assertFalse(clone_key.exists())
         self.assertTrue(clone_db.is_file())
         self.assertFalse(source_db.samefile(clone_db))
         self.assertRegex(cloned, rb"\bcopy\s+Initialized\b")
         profiles = tomllib.loads(config.read_text(encoding="utf-8"))["profiles"]
         self.assertEqual(profiles["copy"]["local_dir"], str(local))
         self.assertEqual(profiles["copy"]["remote_dir"], str(remote))
+        self.assertEqual(profiles["copy"]["key_storage"], "vault")
         for journal in (
             "transaction.bin.enc", "transaction.log.enc", "confirmed.enc",
             "retired.enc", ".transactions",
@@ -340,6 +373,7 @@ class CliProcessTest(unittest.TestCase):
             self.assertFalse((clone_dir / journal).exists())
         self.assertEqual(source_db.read_bytes(), source_db_bytes)
         self.assertEqual(self._tree_snapshot(remote), remote_snapshot)
+        self.invoke("status", "copy", environment=without_passwords)
 
         new_local = self.root / "edited-local"
         new_remote = self.root / "edited-remote"
@@ -370,7 +404,7 @@ class CliProcessTest(unittest.TestCase):
         self.assertFalse(source_dir.exists())
         self.assertEqual(renamed_db.stat().st_ino, source_identity.st_ino)
         self.assertEqual(renamed_db.read_bytes(), source_db_bytes)
-        self.assertEqual((renamed_dir / "key.bin").read_bytes(), source_key_bytes)
+        self.assertFalse((renamed_dir / "key.bin").exists())
 
         before_delete = self._tree_snapshot(data)
         for confirmation in (b"", b"n"):
@@ -480,6 +514,49 @@ class CliProcessTest(unittest.TestCase):
         destination = self.root / "destino-日本-😀.txt"
         self.invoke("remote", "get", "demo", "--", filename, str(destination))
         self.assertEqual(destination.read_bytes(), contents)
+
+    def test_key_storage_modes_and_manual_key_command(self):
+        local, remote = self.root / "local", self.root / "remote"
+        local.mkdir()
+        (local / "item.txt").write_text("payload", encoding="utf-8")
+        self.invoke("config", input=f"n\ndemo\n{local}\n{remote}\nq\n".encode())
+        self.invoke("sync", "demo")
+
+        config = self.root / "kasumi" / "config.toml"
+        key_file = self.root / "kasumi" / "profiles" / "demo" / "key.bin"
+
+        switched_file = self.invoke("config", input=b"s\ndemo\nfile\nq\n")
+        self.assertIn(b"kasumi key demo", switched_file)
+        self.assertEqual(
+            tomllib.loads(config.read_text(encoding="utf-8"))["profiles"]["demo"]["key_storage"],
+            "file",
+        )
+
+        missing = self.invoke("status", "demo", expected=1)
+        self.assertIn(b"kasumi key", missing)
+
+        rekey = self.invoke("key", "demo")
+        self.assertIn(b"Key saved for profile 'demo'", rekey)
+        self.assertTrue(key_file.is_file())
+        self.invoke("status", "demo")
+
+        switched_memory = self.invoke("config", input=b"s\ndemo\nmemory\nq\n")
+        self.assertIn(b"set to 'memory'", switched_memory)
+        self.assertEqual(
+            tomllib.loads(config.read_text(encoding="utf-8"))["profiles"]["demo"]["key_storage"],
+            "memory",
+        )
+        self.assertFalse(key_file.exists())
+
+        (local / "item2.txt").write_text("payload-2", encoding="utf-8")
+        self.invoke("sync", "demo")
+        self.assertFalse(key_file.exists())
+
+        without_passwords = self.environment.copy()
+        without_passwords.pop("KASUMI_PASSWORD")
+        without_passwords.pop("KASUMI_PASSWORD2")
+        eof_sync = self.invoke_raw("sync", "demo", input=b"", environment=without_passwords)
+        self.assertEqual(eof_sync.returncode, 130)
 
 
 if __name__ == "__main__":

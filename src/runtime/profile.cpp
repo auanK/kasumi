@@ -47,6 +47,31 @@ bool is_valid_profile_name(std::string_view name) {
     });
 }
 
+std::string_view to_string(KeyStorage storage) noexcept {
+    switch (storage) {
+        case KeyStorage::Vault:
+            return "vault";
+        case KeyStorage::File:
+            return "file";
+        case KeyStorage::Memory:
+            return "memory";
+    }
+    return "vault";
+}
+
+std::optional<KeyStorage> parse_key_storage(std::string_view value) noexcept {
+    if (value == "vault") {
+        return KeyStorage::Vault;
+    }
+    if (value == "file") {
+        return KeyStorage::File;
+    }
+    if (value == "memory") {
+        return KeyStorage::Memory;
+    }
+    return std::nullopt;
+}
+
 std::expected<ProfileData, Error>
 load_profile(const std::filesystem::path& config_path,
              std::string_view profile_name) {
@@ -148,7 +173,7 @@ load_profiles(const std::filesystem::path& config_path) {
         for (const auto& [field, _] : *prof) {
             if (field != "local_dir" && field != "remote_dir" &&
                 field != "min_history_depth" &&
-                field != "min_history_age_hours") {
+                field != "min_history_age_hours" && field != "key_storage") {
                 return fail(ErrorCode::ProfileInvalid,
                             "unsupported profile field: " +
                                 std::string{field.str()});
@@ -173,6 +198,25 @@ load_profiles(const std::filesystem::path& config_path) {
         }
         pd.min_history_depth = *min_depth;
         pd.min_history_age_hours = *min_age;
+        if (const auto key_storage_field = (*prof)["key_storage"]) {
+            const auto storage_value = key_storage_field.value<std::string>();
+            if (!storage_value) {
+                return fail(
+                    ErrorCode::ProfileInvalid,
+                    "invalid key_storage value (expected 'vault', 'file', or "
+                    "'memory')");
+            }
+            const auto parsed = parse_key_storage(*storage_value);
+            if (!parsed) {
+                return fail(
+                    ErrorCode::ProfileInvalid,
+                    "invalid key_storage value (expected 'vault', 'file', or "
+                    "'memory')");
+            }
+            pd.key_storage = *parsed;
+        } else {
+            pd.key_storage = KeyStorage::File;
+        }
         result.push_back(std::move(pd));
     }
     return result;
@@ -198,6 +242,7 @@ save_profiles(const std::filesystem::path& config_path,
         prof_data.insert("remote_dir", prof.remote_dir);
         prof_data.insert("min_history_depth", prof.min_history_depth);
         prof_data.insert("min_history_age_hours", prof.min_history_age_hours);
+        prof_data.insert("key_storage", to_string(prof.key_storage));
         profiles_table.insert(prof.name, prof_data);
     }
     config.insert("profiles", profiles_table);

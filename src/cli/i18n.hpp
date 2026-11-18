@@ -45,6 +45,7 @@ enum class Key {
     HelpConfig,
     HelpList,
     HelpShow,
+    HelpKey,
     HelpUpdate,
     HelpRemoteHeads,
     HelpRemoteTree,
@@ -419,6 +420,14 @@ enum class Key {
     WizardProfileCloned,
     WizardInvalidOption,
     WizardConfigReadFailed,
+    WizardPromptProfileToKey,
+    WizardProfileKeyUpdated,
+    WizardKeyStorageMemoryNoPersist,
+    WizardPromptProfileToStorage,
+    WizardPromptKeyStorage,
+    WizardInvalidKeyStorage,
+    WizardProfileKeyStorageUpdated,
+    WizardProfileKeyStorageUpdatedNeedKey,
 };
 
 Language current_language() noexcept;

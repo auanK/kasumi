@@ -75,7 +75,8 @@ struct RemoteHeadsCliEnv {
             const kasumi::application::Profile profile{
                 .name = "demo",
                 .local_dir = local,
-                .remote_dir = storage_dir.string()};
+                .remote_dir = storage_dir.string(),
+                .key_storage = kasumi::application::KeyStorage::File};
             const auto created = kasumi::application::create_profile(
                 environment,
                 profile,

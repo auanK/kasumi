@@ -45,6 +45,18 @@ write_new(const std::filesystem::path& path,
           const KeyBytes& clear_key,
           platform::private_storage::FileIdentity& identity);
 
+// Reads and unmasks the key from the OS credential vault.
+std::expected<KeyBytes, runtime::Error>
+read_vault(const std::filesystem::path& key_path);
+
+// Masks and stores the key in the OS credential vault.
+std::expected<void, runtime::Error>
+write_vault(const std::filesystem::path& key_path, const KeyBytes& clear_key);
+
+// Removes the key from the OS credential vault (no-op if absent).
+std::expected<void, runtime::Error>
+delete_vault(const std::filesystem::path& key_path);
+
 // Derives the key from password and reproducible password salt.
 std::expected<KeyBytes, runtime::Error> derive(std::string_view password,
                                                std::string_view salt_password);

@@ -69,6 +69,7 @@ resolve(const std::filesystem::path& app_data_dir,
         .storage_location = profile->remote_dir,
         .min_history_depth = profile->min_history_depth,
         .min_history_age_hours = profile->min_history_age_hours,
+        .key_storage = profile->key_storage,
     };
 }
 

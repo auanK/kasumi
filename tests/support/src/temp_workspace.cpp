@@ -73,7 +73,10 @@ TempWorkspace make_temp_workspace(std::string_view label) {
 #define NOMINMAX
 #endif
 #define WIN32_LEAN_AND_MEAN
+// clang-format off
 #include <windows.h>
+#include <wincred.h>
+// clang-format on
 
 void clean_windows_tree(const std::filesystem::path& root) noexcept {
     std::error_code ec;
@@ -93,6 +96,23 @@ void clean_windows_tree(const std::filesystem::path& root) noexcept {
                 DeleteFileW(path.c_str());
             }
             continue;
+        }
+        if (attrs != INVALID_FILE_ATTRIBUTES &&
+            (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+            path.parent_path().filename() == L"profiles") {
+            std::error_code abs_ec;
+            const auto key_abs =
+                std::filesystem::absolute(path / "key.bin", abs_ec);
+            if (!abs_ec) {
+                std::wstring target =
+                    L"kasumi:" + key_abs.lexically_normal().generic_wstring();
+                for (auto& ch : target) {
+                    if (ch >= L'A' && ch <= L'Z') {
+                        ch = static_cast<wchar_t>(ch - L'A' + L'a');
+                    }
+                }
+                CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0);
+            }
         }
         if (attrs != INVALID_FILE_ATTRIBUTES &&
             (attrs & FILE_ATTRIBUTE_READONLY) != 0) {
