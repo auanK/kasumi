@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.15.1]
+
+### Changed
+
+- Keep default Sync terminal output concise by erasing transient non-transfer progress lines, aggregating transfer waves into one live Applying line, hiding empty staging metrics and directory-only install counts, and moving the wire summary and per-stage progress history behind `--full`.
+- Report average, minimum, and maximum transfer speeds below completed byte-transfer lines (`sync`, `fsck`, `remote`, and `update`).
+
+### Fixed
+
+- Re-prompt directly on `>` after an invalid menu option in `kasumi config` instead of reprinting the full profile list and menu.
+
 ## [0.15.0]
 
 ### Added

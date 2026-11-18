@@ -1,14 +1,14 @@
-# Kasumi v0.15.0
+# Kasumi v0.15.1
 
-Kasumi now reports live progress in interactive terminals and measured transfer totals at the end of sync.
+Cleaner interactive terminal progress, transfer speed summaries, and streamlined profile wizard prompts.
 
 ## Highlights
 
-- `status` and `sync --dry-run` show local discovery, cache hits, and hashing alongside remote observation. `sync` and `resolve-missing` also show staging, transfers, verification, installation, and retries.
-- Sync summaries show encrypted bytes and physical objects uploaded and downloaded, alongside the bytes saved through local chunk reuse and deduplication. Transfer rates and estimated time remaining appear when enough data is available.
-- `fsck`, `gc`, remote inspection, and update downloads report progress during long operations. Redirected output keeps the familiar line-by-line format.
-- rclone copies stay batched. Ctrl+C stops the active rclone job, and no-op sync keeps its existing content-probe behavior.
+- Default `sync` keeps only one aggregated transfer line under `[3/5] Applying changes...` (no repeated per-batch lines or empty staging metrics), erases transient scan progress on completion, and shows `Speed: avg | min | max` right below finished transfers.
+- `--full` restores per-stage progress lines across all stages and prints the physical `Wire upload | wire download | locally reused` summary at the end of Sync.
+- `fsck`, `gc`, `status`, `remote`, and `update` keep real-time progress during long operations, with average/min/max speeds reported after completed byte transfers.
+- Entering an invalid menu choice in `kasumi config` re-prompts directly on `>` instead of reprinting the entire profile table.
 
 ## Compatibility
 
-- `v0.15.0` uses the same Protocol v3 vault format, flat commit layout, transaction journal v10, and profile configuration as `v0.14.2`. Follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi).
+- `v0.15.1` uses the same Protocol v3 vault format, flat commit layout, transaction journal v10, and profile configuration as `v0.15.0`. Follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi).
