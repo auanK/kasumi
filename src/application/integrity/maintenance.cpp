@@ -22,7 +22,6 @@
 #include <algorithm>
 #include <atomic>
 #include <blake3.h>
-#include <condition_variable>
 #include <deque>
 #include <exception>
 #include <filesystem>
@@ -32,6 +31,7 @@
 #include <mutex>
 #include <optional>
 #include <ranges>
+#include <semaphore>
 #include <string_view>
 #include <system_error>
 #include <thread>
@@ -284,6 +284,20 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
           std::size_t audit_concurrency,
           FsckProgressCallback on_progress,
           const testing::FsckWorkerEventCallback& on_worker_event) {
+    transport::TransferMetrics metrics;
+    struct RestoreMetrics {
+        transport::Transport& storage;
+        transport::TransferMetrics* previous;
+        ~RestoreMetrics() {
+            storage.metrics = previous;
+        }
+    } restore{storage, storage.metrics};
+    if (on_progress) {
+        storage.metrics = &metrics;
+    }
+    std::atomic<std::uint64_t> files_reassembled{0};
+    std::uint64_t last_wire_bytes = 0;
+    std::size_t physical_objects = 0;
     std::size_t completed_objects = 0;
     std::optional<std::size_t> progress_total_objects;
     std::optional<std::uint64_t> completed_plaintext_bytes =
@@ -294,12 +308,28 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
             return;
         }
         try {
+            last_wire_bytes =
+                metrics.download.bytes.load(std::memory_order_relaxed);
+            const auto total = metrics.download.known_total_bytes.load(
+                std::memory_order_relaxed);
+            const auto known_objects =
+                metrics.download.known_total_objects.load(
+                    std::memory_order_relaxed);
             on_progress(application::FsckProgress{
                 .stage = stage,
                 .completed_objects = completed_objects,
                 .total_objects = progress_total_objects,
                 .completed_plaintext_bytes = completed_plaintext_bytes,
                 .total_plaintext_bytes = total_plaintext_bytes,
+                .wire_download_bytes = last_wire_bytes,
+                .total_wire_bytes = total >= last_wire_bytes && total > 0 &&
+                                            known_objects >= physical_objects
+                                        ? std::optional<std::uint64_t>{total}
+                                        : std::nullopt,
+                .physical_objects_downloaded =
+                    metrics.download.objects.load(std::memory_order_relaxed),
+                .files_reassembled =
+                    files_reassembled.load(std::memory_order_relaxed),
             });
         } catch (...) {
             // Progress is observational and must not alter the audit result.
@@ -480,9 +510,16 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                 request_window_stop();
             };
 
-            std::condition_variable progress_cv;
-            std::vector<std::uint64_t> completed_sizes;
-            bool workers_done = false;
+            physical_objects = physical_units.size();
+            struct CompletedObject {
+                std::uint64_t size = 0;
+                std::atomic<bool> ready{false};
+            };
+            std::counting_semaphore<> progress_signal{0};
+            std::vector<CompletedObject> completed(on_progress ? total_objects
+                                                               : 0);
+            std::atomic<std::size_t> next_completion{0};
+            std::atomic<bool> workers_done{false};
 
             const auto run_workers = [&] {
                 application::parallel_for_indexed(
@@ -530,22 +567,33 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                                                     std::move(audited.error()));
                                 return;
                             }
-                            {
-                                std::lock_guard lock(state_mutex);
-                                const auto& reference =
-                                    inventory->referenced_objects[index];
-                                if (*audited != AuditState::Healthy) {
-                                    unrecoverable.insert(
-                                        unrecoverable.end(),
-                                        reference.referenced_paths.begin(),
-                                        reference.referenced_paths.end());
-                                }
-                                if (!on_progress) {
-                                    return;
-                                }
-                                completed_sizes.push_back(reference.size);
+                            if (platform::cancellation::requested()) {
+                                request_window_stop();
+                                return;
                             }
-                            progress_cv.notify_one();
+                            if (ref_chunks[index] &&
+                                *audited == AuditState::Healthy) {
+                                files_reassembled.fetch_add(
+                                    1, std::memory_order_relaxed);
+                            }
+                            const auto& reference =
+                                inventory->referenced_objects[index];
+                            if (*audited != AuditState::Healthy) {
+                                std::lock_guard lock(state_mutex);
+                                unrecoverable.insert(
+                                    unrecoverable.end(),
+                                    reference.referenced_paths.begin(),
+                                    reference.referenced_paths.end());
+                            }
+                            if (on_progress) {
+                                auto& completion =
+                                    completed[next_completion.fetch_add(
+                                        1, std::memory_order_relaxed)];
+                                completion.size = reference.size;
+                                completion.ready.store(
+                                    true, std::memory_order_release);
+                                progress_signal.release();
+                            }
                         } catch (const std::exception& exception) {
                             record_hard_failure(
                                 index,
@@ -563,30 +611,19 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
             if (on_progress) {
                 std::jthread driver([&] {
                     run_workers();
-                    {
-                        std::lock_guard lock(state_mutex);
-                        workers_done = true;
-                    }
-                    progress_cv.notify_one();
+                    workers_done.store(true, std::memory_order_release);
+                    progress_signal.release();
                 });
                 try {
                     std::size_t cursor = 0;
+                    const auto ready = [&] {
+                        return cursor < completed.size() &&
+                               completed[cursor].ready.load(
+                                   std::memory_order_acquire);
+                    };
                     for (;;) {
-                        std::vector<std::uint64_t> batch;
-                        bool done = false;
-                        {
-                            std::unique_lock lock(state_mutex);
-                            progress_cv.wait(lock, [&] {
-                                return cursor < completed_sizes.size() ||
-                                       workers_done;
-                            });
-                            done = workers_done &&
-                                   cursor == completed_sizes.size();
-                            while (cursor < completed_sizes.size()) {
-                                batch.push_back(completed_sizes[cursor++]);
-                            }
-                        }
-                        for (const std::uint64_t size : batch) {
+                        while (ready()) {
+                            const auto size = completed[cursor++].size;
                             ++completed_objects;
                             if (completed_plaintext_bytes) {
                                 if (size >
@@ -600,8 +637,18 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                             report_progress(
                                 application::FsckStage::AuditingContent);
                         }
-                        if (done) {
+                        if (workers_done.load(std::memory_order_acquire)) {
+                            if (ready()) {
+                                continue;
+                            }
                             break;
+                        }
+                        if (!progress_signal.try_acquire_for(
+                                std::chrono::milliseconds(200)) &&
+                            metrics.download.bytes.load(
+                                std::memory_order_relaxed) != last_wire_bytes) {
+                            report_progress(
+                                application::FsckStage::AuditingContent);
                         }
                     }
                 } catch (...) {

@@ -4,6 +4,7 @@
 #include "application/execute.hpp"
 #include "application/inspection/result.hpp"
 #include "application/result.hpp"
+#include "platform/terminal.hpp"
 
 #include <chrono>
 #include <cstddef>
@@ -27,6 +28,36 @@ struct GarbageCollectProgressDisplayState {
     std::optional<application::GarbageCollectStage> last_stage;
     std::optional<std::size_t> last_candidate_count;
 };
+
+class ProgressDisplay {
+public:
+    explicit ProgressDisplay(
+        platform::Terminal terminal = platform::stdout_terminal())
+        : terminal_(terminal) {
+    }
+    ~ProgressDisplay();
+    void
+    update(const application::ExecutionProgress& progress,
+           application::Operation operation = application::Operation::Sync);
+    void show(const application::ActivityProgress& progress,
+              std::string_view extra = {});
+    void finish(bool keep = false) noexcept;
+
+private:
+    platform::Terminal terminal_;
+    FsckProgressDisplayState fsck_;
+    GarbageCollectProgressDisplayState gc_;
+    std::optional<application::Activity> activity_;
+    std::uint64_t stage_id_ = 0;
+    std::size_t rendered_width_ = 0;
+    std::uint64_t last_value_ = 0;
+    double rate_ = 0;
+    bool was_complete_ = false;
+    std::chrono::steady_clock::time_point started_{};
+    std::chrono::steady_clock::time_point last_render_{};
+};
+
+std::string format_eta(std::uint64_t seconds);
 
 // Formats a byte count into a human-readable representation.
 std::string format_size(std::uint64_t bytes);

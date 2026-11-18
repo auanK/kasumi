@@ -1246,13 +1246,21 @@ TEST(SyncRemoteAvailabilityTest, MissingMicroPackIsRepairedAndPassesFsck) {
         receiver.write(name, contents);
     }
     publisher.write("copy.txt", "packed member 0");
-    ASSERT_TRUE(publisher.sync().has_value());
+    const auto initial = publisher.sync();
+    ASSERT_TRUE(initial) << initial.error().detail;
     const auto before = kasumi::state_storage::load_state(publisher.database());
     ASSERT_TRUE(before && *before);
     const auto& members = (*before)->storage_manifest.packed_blobs;
     ASSERT_EQ(members.size(), 17U);
     const auto pack_hash = members.front().pack_hash;
     const auto pack_id = kasumi::crypto::pack_identifier(publisher.key(), pack_hash);
+    const auto* initial_summary =
+        std::get_if<kasumi::application::SyncCompleted>(&initial->data);
+    ASSERT_NE(initial_summary, nullptr);
+    const auto encoded_size =
+        std::filesystem::file_size(publisher.remote_path(pack_id));
+    EXPECT_EQ(initial_summary->physical_objects_uploaded, 1U);
+    EXPECT_EQ(initial_summary->wire_upload_bytes, encoded_size);
     ASSERT_TRUE(std::filesystem::remove(publisher.remote_path(pack_id)));
 
     const auto result = receiver.sync();
@@ -1263,6 +1271,8 @@ TEST(SyncRemoteAvailabilityTest, MissingMicroPackIsRepairedAndPassesFsck) {
     EXPECT_FALSE(completed->published);
     EXPECT_FALSE(completed->partial);
     EXPECT_EQ(receiver.content_puts(), 1U);
+    EXPECT_EQ(completed->physical_objects_uploaded, 1U);
+    EXPECT_EQ(completed->wire_upload_bytes, encoded_size);
     EXPECT_EQ(receiver.read("copy.txt"), "packed member 0");
     EXPECT_TRUE(std::filesystem::is_regular_file(publisher.remote_path(pack_id)));
     for (const auto& member : members) {

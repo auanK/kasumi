@@ -284,3 +284,7 @@ Prefer `kasumi remote health <profile>`, `kasumi remote writers <profile>`,
 `kasumi remote orphans <profile>`, and `kasumi fsck <profile>` to understand the
 state before maintenance. Do not remove remote protocol objects through the
 storage backend.
+
+## Removal progress
+
+GC reports confirmed removals and total candidates after every removal batch. Interactive output smooths the rate and estimates remaining time from confirmed removals. Progress observers do not participate in candidate selection or deletion.

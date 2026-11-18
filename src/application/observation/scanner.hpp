@@ -16,6 +16,10 @@
 #include <string_view>
 #include <vector>
 
+namespace kasumi::application {
+class ProgressMeter;
+}
+
 namespace kasumi::application::observation::scanner {
 
 // Failure categories during local scanning.
@@ -61,7 +65,8 @@ std::expected<ScanResult, ScanError>
 scan_result(const std::filesystem::path& local_root,
             std::span<const state_storage::FileCacheRow> previous_cache = {},
             ScanPolicy policy = ScanPolicy::FullHash,
-            MetadataQuery metadata_query = cache::read_file_metadata);
+            MetadataQuery metadata_query = cache::read_file_metadata,
+            ProgressMeter* progress = nullptr);
 
 // Scans using the ignore rules selected by the current reconciliation.
 std::expected<ScanResult, ScanError>
@@ -69,7 +74,8 @@ scan_result(const std::filesystem::path& local_root,
             std::span<const state_storage::FileCacheRow> previous_cache,
             ScanPolicy policy,
             MetadataQuery metadata_query,
-            const kasumi::ignore::IgnoreList& ignore_list);
+            const kasumi::ignore::IgnoreList& ignore_list,
+            ProgressMeter* progress = nullptr);
 
 std::expected<std::vector<reconciliation::DisposableIgnoredContent>, ScanError>
 hash_disposable_candidates(

@@ -1,11 +1,13 @@
 #include "../detail.hpp"
 #include "detail.hpp"
+#include "platform/cancellation.hpp"
 #include "platform/durability.hpp"
 #include "platform/path.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <new>
 #include <system_error>
@@ -135,7 +137,8 @@ Result ensure_parent_directory(const std::filesystem::path& path) {
 }
 
 Result copy_file_overwrite(const std::filesystem::path& source,
-                           const std::filesystem::path& destination) {
+                           const std::filesystem::path& destination,
+                           const TransportProgressCallback& callback) {
     std::error_code error;
     if (platform::private_storage::is_reparse_or_symlink(source)) {
         return reparse_rejected_error("source cannot be a symlink or reparse point");
@@ -173,6 +176,60 @@ Result copy_file_overwrite(const std::filesystem::path& source,
         }
     } guard{staging};
 
+    TransferProgress progress{.total_objects = 1};
+    if (callback) {
+        namespace ps = platform::private_storage;
+        guard.active = false;
+        auto output = ps::create_private_file(staging);
+        if (!output) {
+            return std::unexpected(
+                detail::make_error(ErrorCode::Io, output.error().message, 0));
+        }
+        guard.active = true;
+        const auto size = std::filesystem::file_size(source, error);
+        if (!error) {
+            progress.total_bytes = size;
+        }
+        const auto started = std::chrono::steady_clock::now();
+        report_transfer(callback, progress);
+        std::vector<std::uint8_t> buffer(256U * 1024U);
+        const auto copied = ps::stream_regular_file(
+            source,
+            buffer,
+            [&](auto slab) {
+                if (platform::cancellation::requested() ||
+                    !ps::write_private_file(
+                        *output, slab.data(), slab.size())) {
+                    return false;
+                }
+                progress.bytes_transferred += slab.size();
+                const auto elapsed =
+                    std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - started)
+                        .count();
+                if (elapsed > 0.0) {
+                    progress.bytes_per_second =
+                        static_cast<double>(progress.bytes_transferred) /
+                        elapsed;
+                }
+                report_transfer(callback, progress);
+                return true;
+            },
+            progress.total_bytes);
+        ps::close_private_file(*output);
+        if (!copied) {
+            if (platform::cancellation::requested()) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::Cancelled, "local transfer cancelled", 0));
+            }
+            if (copied.error().system_error) {
+                return std::unexpected(make_error(copied.error().system_error));
+            }
+            return std::unexpected(
+                detail::make_error(ErrorCode::Io, copied.error().detail, 0));
+        }
+        progress.total_bytes = progress.bytes_transferred;
+    } else {
 #if defined(_WIN32)
     if (!CopyFileW(source.c_str(), staging.c_str(), TRUE)) {
         const auto win_err = GetLastError();
@@ -187,6 +244,7 @@ Result copy_file_overwrite(const std::filesystem::path& source,
         return std::unexpected(make_error(error));
     }
 #endif
+    }
     if (const auto synced = platform::durability::sync_file(staging); !synced) {
         return std::unexpected(
             detail::make_error(ErrorCode::Io, synced.error(), 0));
@@ -204,6 +262,8 @@ Result copy_file_overwrite(const std::filesystem::path& source,
         return std::unexpected(
             detail::make_error(ErrorCode::Io, synced_dir.error(), 0));
     }
+    progress.objects_completed = 1;
+    report_transfer(callback, progress);
     return {};
 }
 
@@ -269,9 +329,10 @@ Result local_initialize(void* context) {
     return error ? std::unexpected(make_error(error)) : Result{};
 }
 
-Result local_put(void* context,
-                 const std::filesystem::path& source,
-                 std::string_view identifier) {
+Result local_put_progress(void* context,
+                          const std::filesystem::path& source,
+                          std::string_view identifier,
+                          const TransportProgressCallback& callback) {
     auto destination = resolve_ready_path(context, identifier);
     if (!destination) {
         return std::unexpected(destination.error());
@@ -290,12 +351,13 @@ Result local_put(void* context,
     if (auto parent = ensure_parent_directory(*destination); !parent) {
         return parent;
     }
-    return copy_file_overwrite(source, *destination);
+    return copy_file_overwrite(source, *destination, callback);
 }
 
-Result local_get(void* context,
-                 std::string_view identifier,
-                 const std::filesystem::path& destination) {
+Result local_get_progress(void* context,
+                          std::string_view identifier,
+                          const std::filesystem::path& destination,
+                          const TransportProgressCallback& callback) {
     auto source = resolve_ready_path(context, identifier);
     if (!source) {
         return std::unexpected(source.error());
@@ -303,7 +365,19 @@ Result local_get(void* context,
     if (auto parent = ensure_parent_directory(destination); !parent) {
         return parent;
     }
-    return copy_file_overwrite(*source, destination);
+    return copy_file_overwrite(*source, destination, callback);
+}
+
+Result local_put(void* context,
+                 const std::filesystem::path& source,
+                 std::string_view identifier) {
+    return local_put_progress(context, source, identifier, {});
+}
+
+Result local_get(void* context,
+                 std::string_view identifier,
+                 const std::filesystem::path& destination) {
+    return local_get_progress(context, identifier, destination, {});
 }
 
 PresenceResult local_presence(void* context, std::string_view identifier) {
@@ -424,6 +498,8 @@ StorageOperations make_storage_operations() noexcept {
         .list = local_list,
         .list_prefix = local_list_prefix,
         .remove = local_remove,
+        .put_with_progress = local_put_progress,
+        .get_with_progress = local_get_progress,
     };
 }
 

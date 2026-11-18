@@ -49,11 +49,13 @@ void write_profile(const TempWorkspace& workspace,
 
 auto inspect_request(const TempWorkspace& workspace,
                      InspectionRequest request,
-                     Credentials credentials) {
+                     Credentials credentials,
+                     kasumi::application::ProgressCallback progress = {}) {
     return kasumi::application::inspect(
         {std::move(request),
          std::move(credentials),
-         ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")}});
+         ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")},
+         std::move(progress)});
 }
 
 auto inspect(const TempWorkspace& workspace, InspectionRequest request) {
@@ -1571,11 +1573,23 @@ TEST(ApplicationInspectionTest,
               kasumi::application::RemoteContentState::Orphan);
     EXPECT_TRUE(listed_orphan->logical_hash.empty());
 
+    bool audited_progress = false;
     const auto audit = inspect_request(
         workspace,
         InspectionRequest{.operation = InspectionOperation::RemoteContentsAudit,
                           .profile_name = "demo"},
-        Credentials{MasterKeyHex{test_key_hex()}});
+        Credentials{MasterKeyHex{test_key_hex()}},
+        [&](const kasumi::application::ExecutionProgress& event) {
+            if (const auto* activity =
+                    std::get_if<kasumi::application::ActivityProgress>(
+                        &event)) {
+                audited_progress |=
+                    activity->activity ==
+                        kasumi::application::Activity::Auditing &&
+                    activity->bytes > 0;
+            }
+        });
+    EXPECT_TRUE(audited_progress);
     const auto audited =
         require_report<kasumi::application::RemoteContentsReport>(audit);
     ASSERT_TRUE(audited.has_value());
@@ -1672,6 +1686,7 @@ TEST(ApplicationInspectionTest,
     const auto config_before = kasumi::test::read_binary(config);
     const auto remote_before = kasumi::test::snapshot_tree(remote_root);
 
+    bool download_progress = false;
     const auto result = kasumi::application::inspect(
         {InspectionRequest{.operation = InspectionOperation::RemoteGet,
                            .profile_name = "demo",
@@ -1679,7 +1694,18 @@ TEST(ApplicationInspectionTest,
                            .destination_path =
                                kasumi::platform::path::to_utf8(destination)},
          Credentials{MasterKeyHex{test_key_hex()}},
-         ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")}});
+         ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")},
+         [&](const kasumi::application::ExecutionProgress& event) {
+             if (const auto* activity =
+                     std::get_if<kasumi::application::ActivityProgress>(
+                         &event)) {
+                 download_progress |=
+                     activity->activity ==
+                         kasumi::application::Activity::Downloading &&
+                     activity->bytes > 0;
+             }
+         }});
+    EXPECT_TRUE(download_progress);
 
     const auto report =
         require_report<kasumi::application::RemoteFileReport>(result);

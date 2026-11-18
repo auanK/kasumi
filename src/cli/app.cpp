@@ -167,11 +167,17 @@ int run(int argc, char* argv[]) {
             return finish(
                 present_cancellation(application::Operation::Preview));
         }
+        ProgressDisplay display;
         auto result = application::inspect({
             .request = request,
             .credentials = std::move(creds),
             .environment = environment,
+            .on_progress =
+                [&](const auto& progress) {
+                    display.update(progress);
+                },
         });
+        display.finish();
         application::wipe_credentials(creds);
 
         if (platform::cancellation::requested()) {
@@ -197,15 +203,15 @@ int run(int argc, char* argv[]) {
     }
 
     application::ProgressCallback on_progress{};
-    FsckProgressDisplayState fsck_display_state;
-    GarbageCollectProgressDisplayState gc_display_state;
-    constexpr std::array<std::pair<application::Operation, i18n::Key>, 5>
+    ProgressDisplay display;
+    constexpr std::array<std::pair<application::Operation, i18n::Key>, 6>
         starting_keys{{
             {application::Operation::Sync, i18n::Key::SyncStarting},
             {application::Operation::Preview, i18n::Key::PreviewStarting},
             {application::Operation::Status, i18n::Key::StatusStarting},
             {application::Operation::Fsck, i18n::Key::FsckStarting},
             {application::Operation::GarbageCollect, i18n::Key::GcStarting},
+            {application::Operation::ResolveMissing, i18n::Key::SyncStarting},
         }};
     for (const auto& [op, key] : starting_keys) {
         if (op != request.operation) {
@@ -213,26 +219,8 @@ int run(int argc, char* argv[]) {
         }
         std::println("{}", i18n::format(key, request.profile_name));
         on_progress = [operation = request.operation,
-                       &fsck_display_state,
-                       &gc_display_state](
-                          const application::ExecutionProgress& progress) {
-            std::visit(
-                [&](const auto& event) {
-                    using T = std::decay_t<decltype(event)>;
-                    if constexpr (std::is_same_v<T,
-                                                 application::SyncProgress>) {
-                        present(event, operation);
-                    } else if constexpr (std::is_same_v<
-                                             T,
-                                             application::FsckProgress>) {
-                        present(event, fsck_display_state);
-                    } else if constexpr (
-                        std::is_same_v<T,
-                                       application::GarbageCollectProgress>) {
-                        present(event, gc_display_state);
-                    }
-                },
-                progress);
+                       &display](const auto& progress) {
+            display.update(progress, operation);
         };
         break;
     }
@@ -247,6 +235,7 @@ int run(int argc, char* argv[]) {
                                         .credentials = std::move(creds),
                                         .environment = environment,
                                         .on_progress = std::move(on_progress)});
+    display.finish();
     application::wipe_credentials(creds);
 
     if (platform::cancellation::requested()) {

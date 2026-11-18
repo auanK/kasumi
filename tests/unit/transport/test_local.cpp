@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -47,6 +48,41 @@ TEST(LocalTransportTest, StoresListsAndRemovesObjects) {
         transport, kasumi::test::workspace_root(workspace));
     ASSERT_TRUE(result.passed);
     EXPECT_TRUE(result.diagnostics.empty());
+}
+
+TEST(LocalTransportTest, ReportsBytesDuringSingleAndBatchCopies) {
+    auto workspace = kasumi::test::make_temp_workspace("local-copy-progress");
+    const auto root = kasumi::test::workspace_root(workspace);
+    auto storage =
+        kasumi::transport::open_transport((root / "remote").string());
+    ASSERT_TRUE(storage);
+    ASSERT_TRUE(kasumi::transport::initialize(*storage));
+    constexpr std::size_t size = 640U * 1024U;
+    kasumi::test::write_text(root / "large", std::string(size, 'x'));
+    std::vector<kasumi::transport::TransferProgress> progress;
+    ASSERT_TRUE(kasumi::transport::put_with_progress(
+        *storage, root / "large", "large", [&](const auto& event) {
+            progress.push_back(event);
+            throw std::runtime_error("observer failure");
+        }));
+    ASSERT_GT(progress.size(), 2U);
+    EXPECT_GT(progress[1].bytes_transferred, 0U);
+    EXPECT_LT(progress[1].bytes_transferred, size);
+    EXPECT_EQ(progress.back().bytes_transferred, size);
+    EXPECT_EQ(progress.back().objects_completed, 1U);
+
+    progress.clear();
+    ASSERT_TRUE(std::filesystem::create_directory(root / "download"));
+    ASSERT_TRUE(
+        kasumi::transport::get_batch(*storage,
+                                     {.destination_root = root / "download",
+                                      .identifiers = {"large"},
+                                      .on_progress = [&](const auto& event) {
+                                          progress.push_back(event);
+                                      }}));
+    ASSERT_GT(progress.size(), 2U);
+    EXPECT_EQ(progress.back().total_bytes, size);
+    EXPECT_EQ(progress.back().objects_completed, 1U);
 }
 
 TEST(LocalTransportTest, ListsOnlyDirectFilesUnderValidatedPrefix) {

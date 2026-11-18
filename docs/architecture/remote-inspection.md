@@ -21,3 +21,7 @@ These are point-in-time diagnostics, **not** a consistent remote snapshot agains
 | Which physical markers/objects, orphan candidates, writers, or health reasons exist? | [Maintenance Inspection](remote-maintenance-inspection.md): `markers`, `objects`, `orphans`, `writers`, `health` |
 
 The [Remote Layout](remote-layout.md) defines keyed object names and Commit ID versus Ciphertext ID; [History and Concurrency](history-and-concurrency.md) explains logical heads and effective-tree resolution. For operations that **change** remote state, see [Synchronization](synchronization.md) and [Garbage Collection](garbage-collection.md). GC performs direct deletion only after one authenticated observation and validation of the complete global deletion plan.
+
+## Inspection progress
+
+Inspection emits stage notifications while listing storage and authenticating history. Remote get and content audit additionally report encoded payload download bytes and object counts. These events observe existing work and are independent of validation and installation.

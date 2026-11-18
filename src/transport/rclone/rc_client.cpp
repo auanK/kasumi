@@ -63,7 +63,8 @@ post_rc_impl(State& state,
              std::size_t response_limit,
              std::chrono::milliseconds read_timeout,
              int attempt,
-             int attempts);
+             int attempts,
+             bool honour_cancellation = true);
 
 Error with_request_context(const State& state,
                            Error error,
@@ -265,7 +266,8 @@ post_rc_impl(State& state,
              std::size_t response_limit,
              std::chrono::milliseconds read_timeout,
              int attempt,
-             int attempts) {
+             int attempts,
+             bool honour_cancellation) {
     if (path_suffix.empty() || path_suffix.front() == '/' ||
         path_suffix.find("..") != std::string_view::npos ||
         path_suffix.find_first_of("?#") != std::string_view::npos) {
@@ -286,7 +288,7 @@ post_rc_impl(State& state,
         .attempts = attempts,
         .report_status = state.report_status,
     };
-    {
+    if (honour_cancellation) {
         std::lock_guard lock(runtime.watcher_mutex);
         runtime.active_requests.push_back(&in_flight);
     }
@@ -299,7 +301,7 @@ post_rc_impl(State& state,
             std::lock_guard lock(runtime.watcher_mutex);
             std::erase(runtime.active_requests, entry);
         }
-    } request_guard{runtime, &in_flight};
+    } request_guard{runtime, honour_cancellation ? &in_flight : nullptr};
 
     const auto trace = platform::perf_trace::begin();
     const auto response =
@@ -308,7 +310,7 @@ post_rc_impl(State& state,
         platform::perf_trace::finish(
             std::string{"rc/"} + std::string{path_suffix}, trace);
     }
-    if (platform::cancellation::requested()) {
+    if (honour_cancellation && platform::cancellation::requested()) {
         return std::unexpected(
             make_error(ErrorCode::Cancelled, "operation cancelled by user"));
     }
@@ -412,10 +414,17 @@ post_rc(State& state,
         std::string_view endpoint,
         std::string_view request_body,
         std::size_t response_limit,
-        std::chrono::milliseconds read_timeout) {
+        std::chrono::milliseconds read_timeout,
+        bool honour_cancellation) {
     const auto started = std::chrono::steady_clock::now();
-    auto result = post_rc_impl(
-        state, endpoint, request_body, response_limit, read_timeout, 1, 1);
+    auto result = post_rc_impl(state,
+                               endpoint,
+                               request_body,
+                               response_limit,
+                               read_timeout,
+                               1,
+                               1,
+                               honour_cancellation);
     if (!result) {
         return std::unexpected(with_request_context(
             state, std::move(result.error()), endpoint, started, 1, 1));

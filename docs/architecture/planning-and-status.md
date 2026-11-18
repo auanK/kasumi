@@ -31,3 +31,7 @@ separate optimization: [all observed branches must link to it](history-and-concu
 or loading retries without that anchor before resolution.
 
 Invalid profile/key/transport, an inaccessible or invalid local tree, malformed accepted state, missing remote history for a persisted base, authentication/continuity failure, or reconciliation error is returned at preparation, observing, or calculating stage rather than repaired by the planner. The report is a **point-in-time observation**, not a reservation: local or remote state can change before a later Sync, which reobserves and may choose a different plan. `status` is a direct status query; `sync --dry-run` previews the actions that a Sync would currently plan. They share computation, not a guarantee of identical future effects. See [Synchronization](synchronization.md) for the executing path.
+
+## Live observation
+
+Status and dry-run report discovered files, reused fingerprints, files hashed, bytes read for hashing, and whether remote history observation is pending. Scanner workers record counters while the CLI samples progress. The final plan report still comes from reconciliation.

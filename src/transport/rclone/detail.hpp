@@ -78,7 +78,8 @@ post_rc(State& state,
         std::string_view endpoint,
         std::string_view request_body,
         std::size_t response_limit,
-        std::chrono::milliseconds read_timeout);
+        std::chrono::milliseconds read_timeout,
+        bool honour_cancellation = true);
 
 // Retries only transient failures of an idempotent read, without exceeding the
 // specified total deadline.

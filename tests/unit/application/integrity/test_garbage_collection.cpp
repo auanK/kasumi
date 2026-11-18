@@ -2803,6 +2803,30 @@ TEST(
     EXPECT_EQ(fixture.state->remove_batch_count, 2U);
 }
 
+TEST(GarbageCollectionTest, ReportsAcknowledgedRemovalProgress) {
+    FakeBatchFixture fixture("gc-removal-progress");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    for (int i = 0; i < 12; ++i) {
+        const auto payload = "orphan-" + std::to_string(i);
+        fixture.put_content(payload, payload);
+    }
+    std::vector<GarbageCollectProgress> removals;
+    const auto collected =
+        fixture.collect([&](const GarbageCollectProgress& progress) {
+            if (progress.stage == GarbageCollectStage::Applying) {
+                removals.push_back(progress);
+            }
+        });
+    ASSERT_TRUE(collected) << collected.error().detail;
+    ASSERT_GE(removals.size(), 3U);
+    EXPECT_EQ(removals.front().removed_objects, 0U);
+    EXPECT_EQ(removals.back().candidate_count, 12U);
+    EXPECT_EQ(removals.back().removed_objects, 12U);
+    EXPECT_GT(removals.back().removal_elapsed,
+              removals.front().removal_elapsed);
+}
+
 // 11. Cancelamento antes do lote e entre dois lotes.
 TEST(GarbageCollectionTest, BatchCancellationCheckedBeforeAndBetweenBatches) {
     ResetCancellation reset_guard;

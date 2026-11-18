@@ -15,6 +15,7 @@
 #include <cctype>
 #include <charconv>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -23,6 +24,7 @@
 #include <fstream>
 #include <memory>
 #include <monocypher.h>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <print>
 #include <reproc++/run.hpp>
@@ -32,6 +34,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 #if defined(_WIN32)
@@ -58,6 +61,17 @@
 
 namespace kasumi::cli::update {
 namespace {
+
+void show_download(ProgressDisplay& display,
+                   std::uint64_t bytes,
+                   std::optional<std::uint64_t> total) noexcept {
+    try {
+        display.show({.activity = application::Activity::Updating,
+                      .bytes = bytes,
+                      .total_bytes = total});
+    } catch (...) {
+    }
+}
 
 using Json = nlohmann::json;
 constexpr std::string_view GITHUB_REPOSITORY = "auanK/kasumi";
@@ -910,6 +924,23 @@ winhttp_location(std::string_view url,
         return std::unexpected("GitHub returned HTTP " +
                                std::to_string(status));
     }
+    const auto terminal = platform::stdout_terminal();
+    ProgressDisplay display(terminal);
+    std::optional<std::uint64_t> expected_bytes;
+    DWORD content_length = 0;
+    DWORD length_size = sizeof(content_length);
+    if (WinHttpQueryHeaders(request.value,
+                            WINHTTP_QUERY_CONTENT_LENGTH |
+                                WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX,
+                            &content_length,
+                            &length_size,
+                            WINHTTP_NO_HEADER_INDEX)) {
+        expected_bytes = content_length;
+    }
+    if (terminal.interactive) {
+        show_download(display, 0, expected_bytes);
+    }
     std::ofstream output(destination, std::ios::binary | std::ios::trunc);
     if (!output) {
         return std::unexpected("could not create download file");
@@ -917,6 +948,9 @@ winhttp_location(std::string_view url,
     std::array<char, 16384> buffer{};
     std::size_t total = 0;
     for (;;) {
+        if (platform::cancellation::requested()) {
+            return std::unexpected("HTTPS download was interrupted");
+        }
         DWORD available = 0;
         if (!WinHttpQueryDataAvailable(request.value, &available)) {
             return std::unexpected("could not read HTTPS response");
@@ -941,6 +975,13 @@ winhttp_location(std::string_view url,
             return std::unexpected("could not write download file");
         }
         total += read;
+        if (terminal.interactive) {
+            show_download(display, total, expected_bytes);
+        }
+    }
+    if (terminal.interactive) {
+        show_download(display, total, total);
+        display.finish(true);
     }
     output.close();
     if (!output) {
@@ -1000,7 +1041,84 @@ download_url(std::string url,
                               "--write-out",
                               "%{http_code}\n%{redirect_url}",
                               current_url});
+            const auto terminal = platform::stdout_terminal();
+            ProgressDisplay display(terminal);
+            auto headers = destination;
+            headers += ".headers";
+            std::mutex sampler_mutex;
+            std::condition_variable_any wake;
+            const auto sample = [&](bool done) {
+                std::error_code error;
+                const auto disk_size =
+                    std::filesystem::file_size(destination, error);
+                const auto bytes = error ? 0 : disk_size;
+                std::optional<std::uint64_t> total;
+                if (done) {
+                    total = bytes;
+                } else if (auto header =
+                               read_limited_file(headers, 16U * 1024U)) {
+                    constexpr std::string_view prefix = "\ncontent-length:";
+                    std::ranges::transform(
+                        *header, header->begin(), [](unsigned char c) {
+                            return static_cast<char>(std::tolower(c));
+                        });
+                    if (const auto index = header->rfind(prefix);
+                        index != std::string::npos) {
+                        const auto start = header->find_first_not_of(
+                            " \t", index + prefix.size());
+                        if (start != std::string::npos) {
+                            std::uint64_t length = 0;
+                            const auto parsed =
+                                std::from_chars(header->data() + start,
+                                                header->data() + header->size(),
+                                                length);
+                            if (parsed.ec == std::errc{} &&
+                                length <= maximum_bytes) {
+                                total = length;
+                            }
+                        }
+                    }
+                }
+                show_download(display, bytes, total);
+            };
+            std::jthread sampler;
+            if (terminal.interactive) {
+                std::filesystem::remove(headers, ignored);
+                arguments.insert(
+                    arguments.end() - 1,
+                    {"--dump-header", platform::path::to_utf8(headers)});
+                show_download(display, 0, std::nullopt);
+                try {
+                    sampler = std::jthread([&](std::stop_token stop) {
+                        std::unique_lock lock(sampler_mutex);
+                        while (!stop.stop_requested()) {
+                            wake.wait_for(
+                                lock, stop, std::chrono::milliseconds(200), [] {
+                                    return false;
+                                });
+                            if (!stop.stop_requested()) {
+                                try {
+                                    sample(false);
+                                } catch (...) {
+                                }
+                            }
+                        }
+                    });
+                } catch (...) {
+                }
+            }
             auto response = run_capture(arguments);
+            sampler = {};
+            if (terminal.interactive) {
+                std::filesystem::remove(headers, ignored);
+                if (response && response->exit_code == 0) {
+                    try {
+                        sample(true);
+                    } catch (...) {
+                    }
+                }
+                display.finish(response && response->exit_code == 0);
+            }
             if (!response || response->exit_code != 0) {
                 std::filesystem::remove(destination, ignored);
                 return std::unexpected(response

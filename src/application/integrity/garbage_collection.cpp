@@ -179,7 +179,8 @@ struct BarrierCleanup {
 void notify(const GarbageCollectProgressCallback& on_progress,
             GarbageCollectStage stage,
             std::optional<std::size_t> candidate_count,
-            std::size_t removed_objects) noexcept {
+            std::size_t removed_objects,
+            std::chrono::nanoseconds elapsed = {}) noexcept {
     if (!on_progress) {
         return;
     }
@@ -188,6 +189,7 @@ void notify(const GarbageCollectProgressCallback& on_progress,
             .stage = stage,
             .candidate_count = candidate_count,
             .removed_objects = removed_objects,
+            .removal_elapsed = elapsed,
         });
     } catch (...) {
         // Progress is observational and must not alter the operation.
@@ -569,6 +571,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
         }
 
         failure_diagnostic.stage = GarbageCollectStage::Applying;
+        const auto removal_started = std::chrono::steady_clock::now();
         notify(on_progress, GarbageCollectStage::Applying, candidate_count, 0);
         auto apply = [&]() -> std::expected<std::size_t, Error> {
             auto verified = require_barrier_ownership(cleanup.registration);
@@ -599,7 +602,8 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                 notify(on_progress,
                        GarbageCollectStage::Applying,
                        candidate_count,
-                       acknowledged_removals);
+                       acknowledged_removals,
+                       std::chrono::steady_clock::now() - removal_started);
             };
 
             while (chunk_start < total_candidates) {

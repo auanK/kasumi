@@ -5,6 +5,7 @@
 #include "cli/style.hpp"
 #include "crypto/secure_memory.hpp"
 #include "platform/cancellation.hpp"
+#include "platform/terminal.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -308,7 +309,11 @@ application::PasswordPair read_password_pair(const SecretPrompt& prompt) {
                 return accepted;
             }
             wipe(first);
-            std::cout << style::red << mismatch << style::reset << '\n';
+            if (platform::stdout_terminal().ansi) {
+                std::cout << style::red << mismatch << style::reset << '\n';
+            } else {
+                std::cout << mismatch << '\n';
+            }
         }
         return accepted;
     };

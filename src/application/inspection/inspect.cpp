@@ -8,6 +8,7 @@
 #include "application/history_storage/reachability.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
+#include "application/progress.hpp"
 #include "core/node.hpp"
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
@@ -51,6 +52,7 @@ struct InspectionContext {
     transport::Transport storage{};
     std::optional<platform::Workspace> workspace;
     observation::history::ObservationHints hints;
+    ProgressMeter* progress = nullptr;
 };
 
 bool requires_complete_history(InspectionOperation operation) noexcept {
@@ -550,6 +552,10 @@ download_remote_file(const InspectionRequest& request,
         return std::unexpected(destination.error());
     }
 
+    const auto* chunk_layout =
+        history::find_chunked_file(observed.storage_manifest, row->hash);
+    context.progress->phase(Activity::Downloading,
+                            chunk_layout ? chunk_layout->chunks.size() : 1);
     const auto logical_hash = hash_hex(row->hash);
     const auto plaintext = context.workspace->root / "remote-content.plain";
     std::string content_id;
@@ -570,6 +576,7 @@ download_remote_file(const InspectionRequest& request,
                         not_found ? "remote file content not found"
                                   : "failed to download remote content");
         }
+        context.progress->phase(Activity::Verifying, 1);
         auto verified = crypto::pack::decrypt_and_verify_pack(
             encrypted, context.key, packed->pack_hash, &extract_dir);
         if (!verified) {
@@ -583,11 +590,14 @@ download_remote_file(const InspectionRequest& request,
                         InspectionErrorCode::RemoteContentInvalid,
                         "extracted member failed cryptographic authentication");
         }
+        ProgressMeter::add(context.progress->work);
+        context.progress->phase(Activity::Installing, 1);
         if (auto installed =
                 install_remote_file(extracted, *destination, operation);
             !installed) {
             return std::unexpected(installed.error());
         }
+        ProgressMeter::add(context.progress->work);
         return RemoteFileReport{.path = row->path,
                                 .destination_path =
                                     platform::path::to_utf8(*destination),
@@ -657,6 +667,7 @@ download_remote_file(const InspectionRequest& request,
             }
         }
         platform::private_storage::close_private_file(*private_out);
+        context.progress->phase(Activity::Verifying, 1);
         if (!crypto::content::verify_file(plaintext, logical_hash, row->size)) {
             return fail(operation,
                         InspectionErrorCode::RemoteContentInvalid,
@@ -677,6 +688,7 @@ download_remote_file(const InspectionRequest& request,
                         not_found ? "remote file content not found"
                                   : "failed to download remote content");
         }
+        context.progress->phase(Activity::Verifying, 1);
         if (!crypto::decrypt_file(encrypted, plaintext, context.key) ||
             !crypto::content::verify_file(plaintext, logical_hash, row->size)) {
             return fail(operation,
@@ -684,11 +696,14 @@ download_remote_file(const InspectionRequest& request,
                         "remote content failed cryptographic authentication");
         }
     }
+    ProgressMeter::add(context.progress->work);
+    context.progress->phase(Activity::Installing, 1);
     if (auto installed =
             install_remote_file(plaintext, *destination, operation);
         !installed) {
         return std::unexpected(installed.error());
     }
+    ProgressMeter::add(context.progress->work);
     return RemoteFileReport{.path = row->path,
                             .destination_path =
                                 platform::path::to_utf8(*destination),
@@ -772,6 +787,7 @@ inspect_contents(const observation::history::StorageView& observed,
                  InspectionContext& context,
                  InspectionOperation operation,
                  bool audit) {
+    context.progress->phase(Activity::Listing);
     std::map<std::string, RemoteContentInfo> inventory;
     std::map<std::string, std::set<std::string, std::less<>>> paths;
     std::unordered_set<std::string> pack_ids;
@@ -864,6 +880,10 @@ inspect_contents(const observation::history::StorageView& observed,
         content.physically_present = true;
     }
 
+    if (audit) {
+        context.progress->phase(Activity::Auditing,
+                                observed.content_object_identifiers.size());
+    }
     std::size_t audit_index = 0;
     for (auto& [unused, content] : inventory) {
         if (const auto found = paths.find(content.content_id); found != paths.end()) {
@@ -957,6 +977,7 @@ list_remote_identifiers(transport::Transport& storage,
 
 std::expected<std::vector<std::string>, InspectionError>
 physical_objects(InspectionContext& context, InspectionOperation operation) {
+    context.progress->phase(Activity::Listing);
     auto listed = list_remote_identifiers(context.storage, true, "objects");
     if (!listed) {
         return obs_fail(operation, listed.error());
@@ -1289,6 +1310,7 @@ std::expected<RemoteHealthReport, InspectionError>
 make_health_report(InspectionContext& context,
                    InspectionOperation operation,
                    const std::vector<std::string>& identifiers) {
+    context.progress->phase(Activity::Authenticating);
     auto inventories = load_physical_inventories(
         context.storage,
         context.key,
@@ -1549,6 +1571,11 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
                     "failed to open remote storage");
     }
     context.storage = std::move(*opened);
+    ProgressMeter meter(input.on_progress,
+                        context.storage,
+                        static_cast<bool>(input.on_progress));
+    context.progress = &meter;
+    meter.phase(Activity::Listing);
 
     auto workspace = platform::create_workspace("remote-inspection");
     if (!workspace) {
@@ -1568,6 +1595,7 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     const bool audit_content_objects =
         operation == Op::RemoteSummary || operation == Op::RemoteContents ||
         operation == Op::RemoteContentsAudit || operation == Op::RemoteContent;
+    meter.phase(Activity::Authenticating);
     auto observed = observation::history::observe(
         context.storage,
         context.key,
@@ -1580,6 +1608,8 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
         return obs_fail(operation, "failed to observe remote history");
     }
 
+    meter.work.store(observed->reachable_commits.size(),
+                     std::memory_order_relaxed);
     if (operation == Op::RemoteContents ||
         operation == Op::RemoteContentsAudit ||
         operation == Op::RemoteContent) {
