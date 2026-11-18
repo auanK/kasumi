@@ -462,16 +462,71 @@ Result initialize(Transport& transport) {
     return call_required(transport, transport.storage.initialize);
 }
 
-Result put(Transport& transport,
-           const std::filesystem::path& source,
-           std::string_view identifier) {
-    return call_required(transport, transport.storage.put, source, identifier);
+void report_transfer(const TransportProgressCallback& callback,
+                     const TransferProgress& progress) noexcept {
+    if (callback) {
+        try {
+            callback(progress);
+        } catch (...) {
+        }
+    }
+}
+
+namespace {
+
+bool payload_id(std::string_view id) noexcept {
+    return id.size() == 64 && std::ranges::all_of(id, [](char c) {
+               return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+           });
+}
+
+auto transfer_reporter(TransferCounters* counters,
+                       const TransportProgressCallback& callback,
+                       bool& observed) {
+    return [=, &callback, &observed, previous = TransferProgress{}](
+               const TransferProgress& progress) mutable noexcept {
+        observed = true;
+        const auto accumulate = [](auto& counter, auto& prior, auto current) {
+            if (current > prior) {
+                counter.fetch_add(current - prior, std::memory_order_relaxed);
+                prior = current;
+            }
+        };
+        if (counters != nullptr) {
+            accumulate(counters->bytes,
+                       previous.bytes_transferred,
+                       progress.bytes_transferred);
+            accumulate(counters->objects,
+                       previous.objects_completed,
+                       progress.objects_completed);
+            auto total_bytes = previous.total_bytes.value_or(0);
+            auto total_objects = previous.total_objects.value_or(0);
+            accumulate(counters->known_total_bytes,
+                       total_bytes,
+                       progress.total_bytes.value_or(0));
+            accumulate(counters->known_total_objects,
+                       total_objects,
+                       progress.total_objects.value_or(0));
+            previous.total_bytes = total_bytes;
+            previous.total_objects = total_objects;
+        }
+        report_transfer(callback, progress);
+    };
+}
+
+std::uint64_t
+transferred_file_size(const std::filesystem::path& path) noexcept {
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    return error ? 0 : size;
 }
 
 template <typename Batch, typename BatchFn, typename SingleFn>
 Result run_transfer_batch(Transport& transport,
                           const Batch& batch,
                           BatchFn batch_fn,
+                          const std::filesystem::path& local_root,
+                          TransferCounters* counters,
                           SingleFn single_fn) {
     if (auto v = validate_batch(batch); !v) {
         return v;
@@ -483,42 +538,206 @@ Result run_transfer_batch(Transport& transport,
     if (state == nullptr) {
         return std::unexpected(invalid_transport_error());
     }
-    if (batch_fn != nullptr) {
-        return batch_fn(state, batch);
+    if (!std::ranges::all_of(batch.identifiers, payload_id)) {
+        counters = nullptr;
     }
-    for (const auto& identifier : batch.identifiers) {
-        if (auto res = single_fn(identifier); !res) {
-            return res;
+    if (!batch.on_progress && counters == nullptr) {
+        if (batch_fn != nullptr) {
+            return batch_fn(state, batch);
         }
+        for (const auto& identifier : batch.identifiers) {
+            if (auto result = single_fn(identifier, {}); !result) {
+                return result;
+            }
+        }
+        return {};
     }
+
+    bool observed = false;
+    auto report = transfer_reporter(counters, batch.on_progress, observed);
+    if (batch_fn != nullptr) {
+        auto request = batch;
+        request.on_progress = report;
+        auto result = batch_fn(state, request);
+        if (result && !observed) {
+            std::uint64_t bytes = 0;
+            for (const auto& id : batch.identifiers) {
+                bytes += transferred_file_size(local_root /
+                                               platform::path::from_utf8(id));
+            }
+            report_transfer(request.on_progress,
+                            {.bytes_transferred = bytes,
+                             .total_bytes = bytes,
+                             .objects_completed = batch.identifiers.size(),
+                             .total_objects = batch.identifiers.size()});
+        }
+        return result;
+    }
+
+    std::uint64_t bytes = 0;
+    std::size_t objects = 0;
+    TransferProgress latest;
+    for (const auto& identifier : batch.identifiers) {
+        auto result =
+            single_fn(identifier, [&](const TransferProgress& progress) {
+                latest = progress;
+                auto combined = progress;
+                combined.bytes_transferred += bytes;
+                combined.total_bytes = std::nullopt;
+                combined.objects_completed += objects;
+                combined.total_objects = batch.identifiers.size();
+                report(combined);
+            });
+        if (!result) {
+            return result;
+        }
+        bytes += latest.bytes_transferred;
+        ++objects;
+    }
+    report({.bytes_transferred = bytes,
+            .total_bytes = bytes,
+            .objects_completed = objects,
+            .total_objects = objects});
     return {};
+}
+
+template <typename Run>
+Result report_single_transfer(const std::filesystem::path& local_path,
+                              TransferCounters* counters,
+                              const TransportProgressCallback& callback,
+                              Run run) {
+    if (counters == nullptr && !callback) {
+        return run(TransportProgressCallback{});
+    }
+    bool observed = false;
+    TransportProgressCallback report =
+        transfer_reporter(counters, callback, observed);
+    auto result = run(report);
+    if (result && !observed) {
+        const auto bytes = transferred_file_size(local_path);
+        report_transfer(report,
+                        {.bytes_transferred = bytes,
+                         .total_bytes = bytes,
+                         .objects_completed = 1,
+                         .total_objects = 1});
+    }
+    return result;
+}
+
+} // namespace
+
+Result put_with_progress(Transport& transport,
+                         const std::filesystem::path& source,
+                         std::string_view identifier,
+                         const TransportProgressCallback& callback) {
+    return report_single_transfer(
+        source,
+        transport.metrics && payload_id(identifier) ? &transport.metrics->upload
+                                                    : nullptr,
+        callback,
+        [&](const TransportProgressCallback& progress) {
+            if (progress && transport.storage.put_with_progress) {
+                return call_required(transport,
+                                     transport.storage.put_with_progress,
+                                     source,
+                                     identifier,
+                                     progress);
+            }
+            return call_required(
+                transport, transport.storage.put, source, identifier);
+        });
+}
+
+Result put(Transport& transport,
+           const std::filesystem::path& source,
+           std::string_view identifier) {
+    return put_with_progress(transport, source, identifier, {});
 }
 
 Result put_batch(Transport& transport, const PutBatch& batch) {
     return run_transfer_batch(
-        transport, batch, transport.storage.put_batch, [&](const auto& id) {
-            return put(transport,
-                       batch.source_root / platform::path::from_utf8(id),
-                       id);
+        transport,
+        batch,
+        transport.storage.put_batch,
+        batch.source_root,
+        transport.metrics ? &transport.metrics->upload : nullptr,
+        [&](const auto& id, const TransportProgressCallback& callback) {
+            const auto source =
+                batch.source_root / platform::path::from_utf8(id);
+            return report_single_transfer(
+                source, nullptr, callback, [&](const auto& progress) {
+                    if (progress && transport.storage.put_with_progress) {
+                        return call_required(
+                            transport,
+                            transport.storage.put_with_progress,
+                            source,
+                            id,
+                            progress);
+                    }
+                    return call_required(
+                        transport, transport.storage.put, source, id);
+                });
+        });
+}
+
+Result get_with_progress(Transport& transport,
+                         std::string_view identifier,
+                         const std::filesystem::path& destination,
+                         const TransportProgressCallback& callback) {
+    return report_single_transfer(
+        destination,
+        transport.metrics && payload_id(identifier)
+            ? &transport.metrics->download
+            : nullptr,
+        callback,
+        [&](const TransportProgressCallback& progress) {
+            if (progress && transport.storage.get_with_progress) {
+                return call_required(transport,
+                                     transport.storage.get_with_progress,
+                                     identifier,
+                                     destination,
+                                     progress);
+            }
+            return call_required(
+                transport, transport.storage.get, identifier, destination);
         });
 }
 
 Result get(Transport& transport,
            std::string_view identifier,
            const std::filesystem::path& destination) {
-    return call_required(
-        transport, transport.storage.get, identifier, destination);
+    return get_with_progress(transport, identifier, destination, {});
 }
 
 Result get_batch(Transport& transport, const GetBatch& batch) {
+    auto* counters = transport.metrics && batch.source_prefix.empty()
+                         ? &transport.metrics->download
+                         : nullptr;
     return run_transfer_batch(
-        transport, batch, transport.storage.get_batch, [&](const auto& id) {
+        transport,
+        batch,
+        transport.storage.get_batch,
+        batch.destination_root,
+        counters,
+        [&](const auto& id, const TransportProgressCallback& callback) {
             const auto source = batch.source_prefix.empty()
                                     ? id
                                     : batch.source_prefix + "/" + id;
-            return get(transport,
-                       source,
-                       batch.destination_root / platform::path::from_utf8(id));
+            const auto destination =
+                batch.destination_root / platform::path::from_utf8(id);
+            return report_single_transfer(
+                destination, nullptr, callback, [&](const auto& progress) {
+                    if (progress && transport.storage.get_with_progress) {
+                        return call_required(
+                            transport,
+                            transport.storage.get_with_progress,
+                            source,
+                            destination,
+                            progress);
+                    }
+                    return call_required(
+                        transport, transport.storage.get, source, destination);
+                });
         });
 }
 

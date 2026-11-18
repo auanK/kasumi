@@ -862,6 +862,110 @@ TEST(RcloneStorageTest, MalformedPhysicalHashResponseIsProtocolFailure) {
     }
 }
 
+TEST(RcloneStorageTest, AsyncCopyReportsProgressAndStopsCancelledJobs) {
+    for (const auto* outcome : {"success", "failure", "missing", "cancel"}) {
+        SCOPED_TRACE(outcome);
+        const std::string_view mode = outcome;
+        RcServerState remote;
+        std::string group;
+        std::atomic_int polls = 0;
+        std::atomic_int stops = 0;
+        const auto start = [&](const httplib::Request& input,
+                               httplib::Response& response) {
+            const auto body = nlohmann::json::parse(input.body);
+            EXPECT_EQ(body.at("_async"), true);
+            group = body.at("_group").get<std::string>();
+            EXPECT_FALSE(group.empty());
+            response.set_content(R"({"jobid":7})", "application/json");
+        };
+        remote.server.Post("/rc/sync/copy", start);
+        remote.server.Post("/rc/operations/copyfile", start);
+        remote.server.Post(
+            "/rc/job/status", [&](const auto& input, auto& response) {
+                EXPECT_EQ(nlohmann::json::parse(input.body).at("jobid"), 7);
+                const auto poll = ++polls;
+                if (mode == "success" && poll > 1) {
+                    response.set_content(
+                        R"({"finished":true,"success":true,"error":""})",
+                        "application/json");
+                } else if (mode == "failure" || mode == "missing") {
+                    response.set_content(
+                        nlohmann::json{{"finished", true},
+                                       {"success", false},
+                                       {"error",
+                                        mode == "missing"
+                                            ? "object not found"
+                                            : "private backend detail"}}
+                            .dump(),
+                        "application/json");
+                } else {
+                    response.set_content(R"({"finished":false})",
+                                         "application/json");
+                }
+            });
+        remote.server.Post(
+            "/rc/core/stats", [&](const auto& input, auto& response) {
+                EXPECT_EQ(nlohmann::json::parse(input.body).at("group"), group);
+                response.set_content(
+                    nlohmann::json{{"bytes", polls > 1 ? 128 : 64},
+                                   {"totalBytes", 128},
+                                   {"speed", 32},
+                                   {"eta", 2},
+                                   {"transfers", polls > 1 ? 1 : 0},
+                                   {"totalTransfers", 1}}
+                        .dump(),
+                    "application/json");
+            });
+        remote.server.Post(
+            "/rc/job/stop", [&](const auto& input, auto& response) {
+                EXPECT_EQ(nlohmann::json::parse(input.body).at("jobid"), 7);
+                ++stops;
+                response.set_content("{}", "application/json");
+            });
+        auto& state = start_configured_state(remote);
+        auto workspace =
+            kasumi::test::make_temp_workspace("async-copy-progress");
+        const auto root = kasumi::test::workspace_root(workspace);
+        auto storage = make_preflight_transport(state);
+        std::vector<kasumi::transport::TransferProgress> events;
+        const auto progress = [&](const auto& event) {
+            events.push_back(event);
+            if (mode == "cancel") {
+                kasumi::platform::cancellation::request();
+            }
+        };
+        kasumi::platform::cancellation::reset();
+        const auto result =
+            mode == "missing"
+                ? kasumi::transport::get_with_progress(
+                      storage, "object", root / "object", progress)
+                : kasumi::transport::get_batch(storage,
+                                               {.destination_root = root,
+                                                .identifiers = {"object"},
+                                                .on_progress = progress});
+        kasumi::platform::cancellation::reset();
+        stop_rc_server(remote);
+        if (mode == "success") {
+            ASSERT_TRUE(result) << result.error().message;
+            ASSERT_EQ(events.size(), 2U);
+            EXPECT_EQ(events.front().bytes_transferred, 64U);
+            EXPECT_EQ(events.front().eta_seconds, 2U);
+            EXPECT_EQ(events.back().bytes_transferred, 128U);
+            EXPECT_EQ(events.back().objects_completed, 1U);
+        } else {
+            using E = kasumi::transport::ErrorCode;
+            ASSERT_FALSE(result);
+            EXPECT_EQ(result.error().code,
+                      mode == "cancel"    ? E::Cancelled
+                      : mode == "missing" ? E::ObjectNotFound
+                                          : E::ProtocolFailure);
+            EXPECT_EQ(result.error().message.find("private backend detail"),
+                      std::string::npos);
+        }
+        EXPECT_EQ(stops, mode == "cancel" ? 1 : 0);
+    }
+}
+
 TEST(RcloneStorageTest, DownloadsExactBatchWithOneSequentialCopy) {
     RcServerState remote;
     std::string request;

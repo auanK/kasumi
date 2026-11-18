@@ -3,15 +3,46 @@
 
 #include "transport/types.hpp"
 
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace kasumi::transport {
+
+struct TransferProgress {
+    std::uint64_t bytes_transferred = 0;
+    std::optional<std::uint64_t> total_bytes = std::nullopt;
+    std::size_t objects_completed = 0;
+    std::optional<std::size_t> total_objects = std::nullopt;
+    std::optional<double> bytes_per_second = std::nullopt;
+    std::optional<std::uint64_t> eta_seconds = std::nullopt;
+};
+
+using TransportProgressCallback = std::function<void(const TransferProgress&)>;
+
+// Reports a snapshot without letting an observer affect transport results.
+void report_transfer(const TransportProgressCallback& callback,
+                     const TransferProgress& progress) noexcept;
+
+struct TransferCounters {
+    std::atomic<std::uint64_t> bytes{0};
+    std::atomic<std::uint64_t> objects{0};
+    std::atomic<std::uint64_t> known_total_bytes{0};
+    std::atomic<std::uint64_t> known_total_objects{0};
+};
+
+struct TransferMetrics {
+    TransferCounters upload;
+    TransferCounters download;
+};
 
 // Function signature for implementation initialization.
 using InitializeFunction = Result (*)(void* context);
@@ -33,6 +64,7 @@ struct GetBatch {
     std::filesystem::path destination_root;
     std::vector<std::string> identifiers;
     std::size_t max_parallel_transfers = 0;
+    TransportProgressCallback on_progress{};
 };
 
 // Function signature for downloading a batch of objects.
@@ -43,6 +75,7 @@ struct PutBatch {
     std::filesystem::path source_root;
     std::vector<std::string> identifiers;
     std::size_t max_parallel_transfers = 0;
+    TransportProgressCallback on_progress{};
 };
 
 // Function signature for uploading a batch of objects.
@@ -150,6 +183,14 @@ struct StorageOperations {
     RemoveFunction remove = nullptr;
     RemoveBatchFunction remove_batch = nullptr;
     std::size_t physical_hash_batch_min_objects = 0;
+    Result (*put_with_progress)(void*,
+                                const std::filesystem::path&,
+                                std::string_view,
+                                const TransportProgressCallback&) = nullptr;
+    Result (*get_with_progress)(void*,
+                                std::string_view,
+                                const std::filesystem::path&,
+                                const TransportProgressCallback&) = nullptr;
 };
 
 // Function signature for releasing implementation state.
@@ -163,6 +204,8 @@ using TransportStateHandle =
 struct Transport {
     TransportStateHandle state{nullptr, nullptr};
     StorageOperations storage;
+    // Set before sharing the handle with workers. Only payload IDs are counted.
+    TransferMetrics* metrics = nullptr;
 };
 
 // Validates only the storage location syntax.
@@ -184,6 +227,11 @@ Result put(Transport& transport,
            const std::filesystem::path& source,
            std::string_view identifier);
 
+Result put_with_progress(Transport& transport,
+                         const std::filesystem::path& source,
+                         std::string_view identifier,
+                         const TransportProgressCallback& callback);
+
 // Uploads a batch of local files. Falls back to individual put() calls if
 // unsupported natively by backend.
 Result put_batch(Transport& transport, const PutBatch& batch);
@@ -192,6 +240,11 @@ Result put_batch(Transport& transport, const PutBatch& batch);
 Result get(Transport& transport,
            std::string_view identifier,
            const std::filesystem::path& destination);
+
+Result get_with_progress(Transport& transport,
+                         std::string_view identifier,
+                         const std::filesystem::path& destination,
+                         const TransportProgressCallback& callback);
 
 // Downloads a batch of objects. Falls back to individual get() calls if
 // unsupported natively by backend.

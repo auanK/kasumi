@@ -1,18 +1,23 @@
 #include "../detail.hpp"
 #include "detail.hpp"
+#include "platform/cancellation.hpp"
 #include "platform/path.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -143,13 +148,19 @@ request_json(State& state,
              const nlohmann::json& request,
              std::size_t response_limit,
              std::chrono::milliseconds read_timeout,
-             bool retry_transient_reads = false) {
+             bool retry_transient_reads = false,
+             bool honour_cancellation = true) {
     const auto body = request.dump();
     const auto response =
         retry_transient_reads
             ? post_rc_read_only(
                   state, endpoint, body, response_limit, read_timeout)
-            : post_rc(state, endpoint, body, response_limit, read_timeout);
+            : post_rc(state,
+                      endpoint,
+                      body,
+                      response_limit,
+                      read_timeout,
+                      honour_cancellation);
     if (!response) {
         return std::unexpected(response.error());
     }
@@ -348,13 +359,210 @@ split_local_path(const std::filesystem::path& path,
     };
 }
 
+std::optional<std::uint64_t> nonnegative_integer(const nlohmann::json& object,
+                                                 std::string_view key) {
+    const auto it = object.find(key);
+    if (it == object.end()) {
+        return std::nullopt;
+    }
+    if (it->is_number_unsigned()) {
+        return it->get<std::uint64_t>();
+    }
+    if (it->is_number_integer()) {
+        const auto value = it->get<std::int64_t>();
+        if (value >= 0) {
+            return static_cast<std::uint64_t>(value);
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<double> transfer_speed(const nlohmann::json& object) {
+    const auto it = object.find("speed");
+    if (it != object.end() && it->is_number()) {
+        const auto value = it->get<double>();
+        if (std::isfinite(value) && value >= 0.0) {
+            return value;
+        }
+    }
+    return std::nullopt;
+}
+
+Result validate_finished_job(const nlohmann::json& result) {
+    const auto success = result.find("success");
+    const auto error = result.find("error");
+    if (success == result.end() || !success->is_boolean() ||
+        (error != result.end() && !error->is_string())) {
+        return std::unexpected(make_error(ErrorCode::ProtocolFailure,
+                                          "invalid job/status result"));
+    }
+    if (!success->get<bool>() ||
+        (error != result.end() &&
+         !error->get_ref<const std::string&>().empty())) {
+        const bool missing =
+            error != result.end() &&
+            ascii_lower(error->get<std::string>()).find("not found") !=
+                std::string::npos;
+        return std::unexpected(make_error(ErrorCode::ProtocolFailure,
+                                          "rclone transfer job failed",
+                                          missing ? 404 : 0));
+    }
+    return {};
+}
+
+Result run_copy(State& state,
+                std::string_view endpoint,
+                nlohmann::json payload,
+                const TransportProgressCallback& callback,
+                bool read_only = false) {
+    if (!callback) {
+        const auto copied = request_json(state,
+                                         endpoint,
+                                         payload,
+                                         maximum_response_size,
+                                         transfer_timeout,
+                                         read_only);
+        return copied ? Result{} : std::unexpected(copied.error());
+    }
+
+    if (platform::cancellation::requested()) {
+        return std::unexpected(
+            make_error(ErrorCode::Cancelled, "transfer cancelled"));
+    }
+    static std::atomic<std::uint64_t> sequence{0};
+    const auto group =
+        "kasumi-xfer-" +
+        std::to_string(sequence.fetch_add(1, std::memory_order_relaxed));
+    payload["_async"] = true;
+    payload["_group"] = group;
+    using namespace std::chrono_literals;
+    const auto submitted = request_json(
+        state, endpoint, payload, maximum_response_size, 5s, false, false);
+    if (!submitted) {
+        return std::unexpected(submitted.error());
+    }
+    if (submitted->is_object() && !submitted->contains("jobid")) {
+        // A synchronous RC response is already the completion of this copy.
+        if (submitted->contains("success")) {
+            return validate_finished_job(*submitted);
+        }
+        if (submitted->empty()) {
+            return {};
+        }
+    }
+    const auto job_id = nonnegative_integer(*submitted, "jobid");
+    if (!job_id) {
+        return std::unexpected(
+            make_error(ErrorCode::ProtocolFailure, "invalid async job id"));
+    }
+
+    const nlohmann::json job{{"jobid", *job_id}};
+    struct StopJob {
+        State& state;
+        const nlohmann::json& job;
+        bool active = true;
+        ~StopJob() {
+            if (active) {
+                try {
+                    (void)post_rc(state,
+                                  "job/stop",
+                                  job.dump(),
+                                  maximum_response_size,
+                                  std::chrono::seconds{2},
+                                  false);
+                } catch (...) {
+                }
+            }
+        }
+    } stop{state, job};
+
+    TransferProgress latest;
+    const auto deadline = std::chrono::steady_clock::now() + transfer_timeout;
+    for (;;) {
+        if (platform::cancellation::requested()) {
+            return std::unexpected(
+                make_error(ErrorCode::Cancelled, "transfer cancelled"));
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return std::unexpected(
+                make_error(ErrorCode::Timeout, "transfer job timed out"));
+        }
+        const auto status =
+            request_json(state, "job/status", job, maximum_response_size, 5s);
+        if (!status) {
+            return std::unexpected(status.error());
+        }
+        const auto finished = status->find("finished");
+        if (finished == status->end() || !finished->is_boolean()) {
+            return std::unexpected(make_error(ErrorCode::ProtocolFailure,
+                                              "invalid job/status response"));
+        }
+        const bool done = finished->get<bool>();
+        if (done) {
+            stop.active = false;
+            if (auto valid = validate_finished_job(*status); !valid) {
+                return valid;
+            }
+        }
+        const auto stats = request_json(state,
+                                        "core/stats",
+                                        {{"group", group}, {"short", true}},
+                                        maximum_response_size,
+                                        2s);
+        bool sampled = false;
+        if (stats) {
+            if (const auto bytes = nonnegative_integer(*stats, "bytes")) {
+                sampled = true;
+                latest.bytes_transferred =
+                    std::max(latest.bytes_transferred, *bytes);
+                latest.total_bytes = nonnegative_integer(*stats, "totalBytes");
+                const auto objects =
+                    nonnegative_integer(*stats, "transfers").value_or(0);
+                const auto total =
+                    nonnegative_integer(*stats, "totalTransfers");
+                constexpr auto limit =
+                    (std::numeric_limits<std::size_t>::max)();
+                if (objects <= limit) {
+                    latest.objects_completed =
+                        std::max(latest.objects_completed,
+                                 static_cast<std::size_t>(objects));
+                }
+                if (total && *total <= limit) {
+                    latest.total_objects = static_cast<std::size_t>(*total);
+                }
+                latest.bytes_per_second = transfer_speed(*stats);
+                latest.eta_seconds = nonnegative_integer(*stats, "eta");
+                if (done) {
+                    latest.total_bytes = latest.bytes_transferred;
+                    latest.total_objects = latest.objects_completed;
+                    latest.eta_seconds = 0;
+                }
+                report_transfer(callback, latest);
+            }
+        }
+        if (done) {
+            if (!sampled && (latest.total_bytes || latest.bytes_transferred)) {
+                latest.total_bytes.reset();
+                latest.eta_seconds = 0;
+                report_transfer(callback, latest);
+            }
+            return {};
+        }
+        for (int tick = 0; tick < 10 && !platform::cancellation::requested();
+             ++tick) {
+            std::this_thread::sleep_for(25ms);
+        }
+    }
+}
+
 Result copyfile_object(State& state,
                        std::string_view src_fs,
                        std::string_view src_remote,
                        std::string_view dst_fs,
                        std::string_view dst_remote,
                        bool no_check_destination,
-                       std::string_view not_found_message = {}) {
+                       std::string_view not_found_message,
+                       const TransportProgressCallback& callback) {
     nlohmann::json payload{{"srcFs", std::string{src_fs}},
                            {"srcRemote", std::string{src_remote}},
                            {"dstFs", std::string{dst_fs}},
@@ -362,11 +570,8 @@ Result copyfile_object(State& state,
     if (no_check_destination) {
         payload["_config"] = {{"NoCheckDest", true}};
     }
-    const auto copied = request_json(state,
-                                     "operations/copyfile",
-                                     payload,
-                                     maximum_response_size,
-                                     transfer_timeout);
+    const auto copied =
+        run_copy(state, "operations/copyfile", std::move(payload), callback);
     if (!copied) {
         if (!not_found_message.empty() && not_found(copied.error())) {
             return std::unexpected(make_error(ErrorCode::ObjectNotFound,
@@ -397,9 +602,10 @@ Result rclone_initialize(void* context) {
     return {};
 }
 
-Result rclone_put(void* context,
-                  const std::filesystem::path& source,
-                  std::string_view identifier) {
+Result rclone_put_progress(void* context,
+                           const std::filesystem::path& source,
+                           std::string_view identifier,
+                           const TransportProgressCallback& callback) {
     auto state = require_ready(context, identifier);
     if (!state) {
         return std::unexpected(state.error());
@@ -419,7 +625,9 @@ Result rclone_put(void* context,
                            local->name,
                            rooted_remote_fs(**state),
                            identifier,
-                           true);
+                           true,
+                           {},
+                           callback);
 }
 
 Result sync_copy_batch(State& state,
@@ -428,7 +636,8 @@ Result sync_copy_batch(State& state,
                        std::span<const std::string> identifiers,
                        std::size_t max_parallel_transfers,
                        nlohmann::json base_config,
-                       bool read_only) {
+                       bool read_only,
+                       const TransportProgressCallback& callback) {
     nlohmann::json include_rules = nlohmann::json::array();
     for (const auto& identifier : identifiers) {
         // Reject rclone filter glob/brace metacharacters so an identifier
@@ -451,16 +660,8 @@ Result sync_copy_batch(State& state,
     if (!base_config.empty()) {
         payload["_config"] = std::move(base_config);
     }
-    const auto copied = request_json(state,
-                                     "sync/copy",
-                                     payload,
-                                     maximum_response_size,
-                                     transfer_timeout,
-                                     read_only);
-    if (!copied) {
-        return std::unexpected(copied.error());
-    }
-    return {};
+    return run_copy(
+        state, "sync/copy", std::move(payload), callback, read_only);
 }
 
 Result rclone_put_batch(void* context, const PutBatch& batch) {
@@ -483,12 +684,14 @@ Result rclone_put_batch(void* context, const PutBatch& batch) {
                            {{"NoTraverse", true},
                             {"NoUpdateModTime", true},
                             {"NoCheckDest", true}},
-                           false);
+                           false,
+                           batch.on_progress);
 }
 
-Result rclone_get(void* context,
-                  std::string_view identifier,
-                  const std::filesystem::path& destination) {
+Result rclone_get_progress(void* context,
+                           std::string_view identifier,
+                           const std::filesystem::path& destination,
+                           const TransportProgressCallback& callback) {
     auto state = require_ready(context, identifier);
     if (!state) {
         return std::unexpected(state.error());
@@ -521,7 +724,8 @@ Result rclone_get(void* context,
                                             local->parent,
                                             local->name,
                                             false,
-                                            "remote object does not exist");
+                                            "remote object does not exist",
+                                            callback);
         !copied) {
         return copied;
     }
@@ -566,7 +770,20 @@ Result rclone_get_batch(void* context, const GetBatch& batch) {
         batch.identifiers,
         batch.max_parallel_transfers,
         nlohmann::json::object(),
-        true);
+        true,
+        batch.on_progress);
+}
+
+Result rclone_put(void* context,
+                  const std::filesystem::path& source,
+                  std::string_view identifier) {
+    return rclone_put_progress(context, source, identifier, {});
+}
+
+Result rclone_get(void* context,
+                  std::string_view identifier,
+                  const std::filesystem::path& destination) {
+    return rclone_get_progress(context, identifier, destination, {});
 }
 
 ListingResult parse_list_response_json(const nlohmann::json& response,
@@ -1412,6 +1629,8 @@ StorageOperations make_storage_operations() noexcept {
         .remove = rclone_remove,
         .remove_batch = rclone_remove_batch,
         .physical_hash_batch_min_objects = 6,
+        .put_with_progress = rclone_put_progress,
+        .get_with_progress = rclone_get_progress,
     };
 }
 
