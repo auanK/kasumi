@@ -43,7 +43,7 @@
     "auditing": "Auditando conteúdo remoto",
     "updating": "Baixando atualização",
     "removing": "Removendo objetos elegíveis",
-    "object": "{} objeto",
+    "object": "1 objeto",
     "objects": "{} objetos",
     "fraction": "{}/{}",
     "percent": "{}%",

@@ -43,7 +43,7 @@
     "auditing": "Auditing remote content",
     "updating": "Downloading update",
     "removing": "Removing eligible objects",
-    "object": "{} object",
+    "object": "1 object",
     "objects": "{} objects",
     "fraction": "{}/{}",
     "percent": "{}%",

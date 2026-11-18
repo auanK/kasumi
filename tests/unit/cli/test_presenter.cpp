@@ -115,6 +115,25 @@ TEST(CliPresenterTest, RedirectedProgressContainsOnlyPlainStageLines) {
     EXPECT_EQ(output, "Downloading\n[ERROR] failure\n");
 }
 
+TEST(CliPresenterTest, LocalizesSingularAndPluralWireObjectCounts) {
+    const auto completed =
+        response(SyncCompleted{.wire_upload_bytes = 512,
+                               .wire_download_bytes = 256,
+                               .physical_objects_uploaded = 1,
+                               .physical_objects_downloaded = 2},
+                 Operation::Sync);
+    {
+        const ScopedLanguage english{Language::English};
+        const auto output = present_out(completed);
+        EXPECT_NE(output.find("(1 object)"), std::string::npos);
+        EXPECT_NE(output.find("(2 objects)"), std::string::npos);
+    }
+    const ScopedLanguage portuguese{Language::Portuguese};
+    const auto output = present_out(completed);
+    EXPECT_NE(output.find("(1 objeto)"), std::string::npos);
+    EXPECT_NE(output.find("(2 objetos)"), std::string::npos);
+}
+
 TEST(CliPresenterTest, PresentsSuccessfulResponseVariants) {
     const ScopedLanguage lang{Language::Portuguese};
     const auto sync_output =
