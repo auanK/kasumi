@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.16.0]
+
+### Changed
+
+- Select FastCDC chunk sizes by file size, with chunks up to 32 MiB, and plan chunk layouts for independent files in parallel.
+- Stage FastCDC transfers in windows of up to 64 chunks and 256 MiB of plaintext. Reuse verified local and staged slices across download windows and files, and hash the assembled file as it is written.
+- Reuse chunks from interrupted uploads after authenticating their contents, including on the first upload of a new file.
+- Stream chunk encryption in 1 MiB frames and skip Zstandard temporarily after consecutive frames yield negligible savings.
+
+### Fixed
+
+- Resolve Windows extended-length paths before applying permissions to quarantined workspace files.
+
+### Upgrade Notes
+
+- Existing Protocol v3 vaults open directly with `v0.16.0`. Upgrade every client sharing a vault before publishing with `v0.16.0`. Clients on `v0.15.1` and earlier reject manifests containing FastCDC chunks larger than 4 MiB.
+
 ## [0.15.1]
 
 ### Changed

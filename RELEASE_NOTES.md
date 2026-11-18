@@ -1,14 +1,14 @@
-# Kasumi v0.15.1
+# Kasumi v0.16.0
 
-Cleaner interactive terminal progress, transfer speed summaries, and streamlined profile wizard prompts.
+Faster large-file planning, bounded FastCDC transfers, and verified upload resumption.
 
 ## Highlights
 
-- Default `sync` keeps only one aggregated transfer line under `[3/5] Applying changes...` (no repeated per-batch lines or empty staging metrics), erases transient scan progress on completion, and shows `Speed: avg | min | max` right below finished transfers.
-- `--full` restores per-stage progress lines across all stages and prints the physical `Wire upload | wire download | locally reused` summary at the end of Sync.
-- `fsck`, `gc`, `status`, `remote`, and `update` keep real-time progress during long operations, with average/min/max speeds reported after completed byte transfers.
-- Entering an invalid menu choice in `kasumi config` re-prompts directly on `>` instead of reprinting the entire profile table.
+- FastCDC adapts to file size, with chunks up to 32 MiB. Kasumi computes the layouts for independent files in parallel and streams chunk encryption with an adaptive compression bypass.
+- Sync uploads and downloads FastCDC chunks in windows of at most 64 chunks and 256 MiB of plaintext. Downloads reuse verified slices and check the whole-file BLAKE3 before installation.
+- After an interrupted first upload, sync verifies and reuses chunks already stored on the remote. It uploads missing or unverified chunks.
+- Windows workspace cleanup handles extended-length paths when protecting quarantine directories.
 
 ## Compatibility
 
-- `v0.15.1` uses the same Protocol v3 vault format, flat commit layout, transaction journal v10, and profile configuration as `v0.15.0`. Follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi).
+- Existing Protocol v3 vaults open directly with `v0.16.0`, using the same flat commit layout, transaction journal v10, and profile configuration. Upgrade every client sharing a vault before publishing with `v0.16.0`. Clients on `v0.15.1` and earlier reject manifests containing FastCDC chunks larger than 4 MiB. Follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi).
