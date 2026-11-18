@@ -69,13 +69,27 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
                                                     context.key,
                                                     std::move(*collected),
                                                     std::move(*reconciled),
-                                                    &session);
+                                                    &session,
+                                                    {},
+                                                    false,
+                                                    false,
+                                                    false,
+                                                    nullptr,
+                                                    true);
     if (!stable) {
         return std::unexpected(
             make_error(context,
                        ErrorCode::SynchronizationFailure,
                        sync::coordinator::describe(stable.error())));
     }
+    struct StagedHandoffGuard {
+        std::optional<sync::coordinator::StagedExecutionHandoff>& staged;
+        std::span<const std::uint8_t, crypto::KEY_SIZE> key;
+        ~StagedHandoffGuard() noexcept {
+            static_cast<void>(
+                sync::coordinator::discard_staged_handoff(staged, key));
+        }
+    } staged_guard{stable->staged, context.key};
 
     std::unordered_set<std::string> eligible_paths;
     for (const auto& auth_row : authority) {
@@ -159,12 +173,14 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
         writer = std::move(*registered);
     }
 
-    auto synchronized = sync::coordinator::execute(context.runtime,
-                                                   context.storage,
-                                                   context.key,
-                                                   stable->input,
-                                                   stable->result,
-                                                   &session);
+    auto synchronized = sync::coordinator::execute(
+        context.runtime,
+        context.storage,
+        context.key,
+        stable->input,
+        stable->result,
+        &session,
+        stable->staged ? &*stable->staged : nullptr);
 
     if (history_storage::maintenance_protocol::registration_active(writer)) {
         auto released =

@@ -112,6 +112,18 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             SyncCompleted summary;
             std::optional<sync::coordinator::reobservation::StableExecution>
                 stable;
+            struct StagedHandoffGuard {
+                std::optional<
+                    sync::coordinator::reobservation::StableExecution>& stable;
+                std::span<const std::uint8_t, crypto::KEY_SIZE> key;
+                ~StagedHandoffGuard() noexcept {
+                    if (stable) {
+                        static_cast<void>(
+                            sync::coordinator::discard_staged_handoff(
+                                stable->staged, key));
+                    }
+                }
+            } staged_guard{stable, context.key};
             bool allow_unreferenced_content_reuse = false;
 
             const auto finish_summary = [&] {
@@ -274,6 +286,17 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     }
                 }
 
+                if (stable) {
+                    if (auto discarded =
+                            sync::coordinator::discard_staged_handoff(
+                                stable->staged, context.key);
+                        !discarded) {
+                        return fail_app(context,
+                                        ErrorCode::SynchronizationFailure,
+                                        discarded.error().detail,
+                                        SyncStage::Calculating);
+                    }
+                }
                 auto stabilized = sync::coordinator::reobservation::stabilize(
                     context.runtime,
                     context.storage,
@@ -285,7 +308,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     initial_pass,
                     allow_unreferenced_content_reuse,
                     context.trust_existing_content,
-                    &context.initial_content_identifiers);
+                    &context.initial_content_identifiers,
+                    true);
                 if (!stabilized) {
                     return fail_app(
                         context,
@@ -324,12 +348,14 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     });
                     break;
                 }
-                synchronized = sync::coordinator::execute(context.runtime,
-                                                          context.storage,
-                                                          context.key,
-                                                          stable->input,
-                                                          stable->result,
-                                                          &observation_session);
+                synchronized = sync::coordinator::execute(
+                    context.runtime,
+                    context.storage,
+                    context.key,
+                    stable->input,
+                    stable->result,
+                    &observation_session,
+                    stable->staged ? &*stable->staged : nullptr);
                 if (synchronized ||
                     synchronized.error().code !=
                         sync::coordinator::ErrorCode::RemoteContentMissing) {

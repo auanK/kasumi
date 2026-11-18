@@ -3,7 +3,9 @@
 
 #include "application/observation/state.hpp"
 #include "core/reconciliation/types.hpp"
+#include "core/transaction/types.hpp"
 #include "crypto/file_crypto.hpp"
+#include "platform/workspace.hpp"
 #include "runtime/resolver.hpp"
 #include "transport/transport.hpp"
 
@@ -13,6 +15,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace kasumi::application::sync::coordinator {
 
@@ -53,6 +56,18 @@ struct Error {
     std::optional<std::size_t> operation_index;
 };
 
+// Staging workspace and backup progress carried from stabilize into execute.
+struct StagedExecutionHandoff {
+    std::string operation_id;
+    std::vector<transaction::OperationProgress> progress;
+    std::optional<platform::Workspace> workspace;
+};
+
+// Removes an unused staged execution workspace if still present.
+std::expected<void, Error>
+discard_staged_handoff(std::optional<StagedExecutionHandoff>& staged,
+                       std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+
 // Formats a coordinator failure.
 std::string describe(const Error& error);
 
@@ -63,7 +78,8 @@ execute(const runtime::RuntimeData& runtime_data,
         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
         const reconciliation::Input& observed_input,
         const reconciliation::Result& reconciliation_result,
-        observation::LocalObservationSession* session = nullptr);
+        observation::LocalObservationSession* session = nullptr,
+        StagedExecutionHandoff* staged_handoff = nullptr);
 
 // Recovers an interrupted transaction, if any.
 std::expected<RecoveryResult, Error>

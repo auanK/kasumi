@@ -1385,6 +1385,7 @@ struct ContentWorkItem {
     std::size_t index = 0;
     transaction::OperationProgress progress;
     std::optional<mutation::DestinationPrecondition> destination;
+    mutation::DownloadCacheMode cache_mode = mutation::DownloadCacheMode::None;
 };
 
 struct ContentWindowState {
@@ -1426,7 +1427,7 @@ void run_content_worker(std::stop_token stop,
                 key,
                 workspace,
                 task.progress,
-                mutation::DownloadCacheMode::None,
+                task.cache_mode,
                 task.destination ? &*task.destination : nullptr);
             if (!applied) {
                 result.error = applied.error();
@@ -1467,6 +1468,7 @@ run_content_window(
     const platform::Workspace& workspace,
     std::span<const std::optional<mutation::DestinationPrecondition>>
         destinations,
+    std::span<const mutation::DownloadCacheMode> cache_modes,
     journal::Session* session = nullptr) {
     const auto worker_count = std::min(parallelism, indices.size());
     ContentWindowState state;
@@ -1497,9 +1499,13 @@ run_content_window(
     const auto admit = [&](std::size_t slot) {
         {
             std::lock_guard lock(state.mutex);
-            const auto index = indices[next++];
+            const auto pos = next++;
+            const auto index = indices[pos];
+            const auto mode = pos < cache_modes.size()
+                                  ? cache_modes[pos]
+                                  : mutation::DownloadCacheMode::None;
             state.tasks[slot] = ContentWorkItem{
-                index, record.progress[index], destinations[index]};
+                index, record.progress[index], destinations[index], mode};
             ++outstanding;
         }
         state.changed.notify_all();
@@ -1510,9 +1516,10 @@ run_content_window(
 
     std::optional<std::pair<std::size_t, mutation::MutationError>> failure;
     std::optional<Error> checkpoint_failure;
+    std::vector<std::pair<std::size_t, ContentWorkResult>> batch;
+    batch.reserve(worker_count);
     while (outstanding != 0) {
-        std::size_t slot = 0;
-        ContentWorkResult result;
+        batch.clear();
         {
             std::unique_lock lock(state.mutex);
             state.changed.wait(lock, [&] {
@@ -1521,30 +1528,29 @@ run_content_window(
                                                return item.has_value();
                                            });
             });
-            auto completed =
-                std::ranges::find_if(state.completions, [](const auto& item) {
-                    return item && item->error.has_value();
-                });
-            if (completed == state.completions.end()) {
-                completed = std::ranges::find_if(state.completions,
-                                                 [](const auto& item) {
-                                                     return item.has_value();
-                                                 });
+            for (std::size_t slot = 0; slot < worker_count; ++slot) {
+                if (state.completions[slot].has_value()) {
+                    batch.emplace_back(slot, std::move(*state.completions[slot]));
+                    state.completions[slot].reset();
+                }
             }
-            slot =
-                static_cast<std::size_t>(completed - state.completions.begin());
-            result = std::move(**completed);
-            completed->reset();
         }
-        --outstanding;
+        outstanding -= batch.size();
 
-        if (result.error) {
-            if (!failure) {
-                failure = std::pair{result.index, std::move(*result.error)};
+        bool any_applied = false;
+        for (auto& [slot, result] : batch) {
+            static_cast<void>(slot);
+            if (result.error) {
+                if (!failure || result.index < failure->first) {
+                    failure = std::pair{result.index, std::move(*result.error)};
+                }
+            } else {
+                record.progress[result.index].state =
+                    transaction::OperationState::Applied;
+                any_applied = true;
             }
-        } else {
-            record.progress[result.index].state =
-                transaction::OperationState::Applied;
+        }
+        if (any_applied) {
             auto saved = detail::save_record(
                 paths, record, key, journal::SaveMode::Advance, session);
             if (!saved && !checkpoint_failure) {
@@ -1552,8 +1558,13 @@ run_content_window(
             }
         }
 
-        if (!failure && !checkpoint_failure && next < indices.size()) {
-            admit(slot);
+        if (!failure && !checkpoint_failure) {
+            for (const auto& [slot, result] : batch) {
+                static_cast<void>(result);
+                if (next < indices.size()) {
+                    admit(slot);
+                }
+            }
         }
     }
 
@@ -1789,12 +1800,36 @@ std::string describe(const Error& error) {
 }
 
 std::expected<void, Error>
+discard_staged_handoff(std::optional<StagedExecutionHandoff>& staged,
+                       std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+    if (!staged) {
+        return {};
+    }
+    auto workspace = std::move(staged->workspace);
+    staged.reset();
+    return detail::remove_transaction_workspace(workspace, key);
+}
+
+std::expected<void, Error>
 execute(const runtime::RuntimeData& runtime_data,
         transport::Transport& storage,
         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
         const reconciliation::Input& observed_input,
         const reconciliation::Result& reconciliation_result,
-        observation::LocalObservationSession* session) {
+        observation::LocalObservationSession* session,
+        StagedExecutionHandoff* staged_handoff) {
+    struct StagedHandoffGuard {
+        StagedExecutionHandoff* handoff = nullptr;
+        std::span<const std::uint8_t, crypto::KEY_SIZE> key;
+        ~StagedHandoffGuard() noexcept {
+            if (handoff != nullptr && handoff->workspace.has_value()) {
+                static_cast<void>(detail::remove_transaction_workspace(
+                    handoff->workspace, key));
+                handoff->workspace.reset();
+            }
+        }
+    } handoff_guard{staged_handoff, key};
+
     if (runtime_data.local_dir.empty() || runtime_data.database_path.empty() ||
         !transport::valid(storage) ||
         !reconciliation::has_safe_paths(reconciliation_result.plan)) {
@@ -1856,6 +1891,8 @@ execute(const runtime::RuntimeData& runtime_data,
                                       : std::string{};
 
     std::optional<transaction::Record> record_storage;
+    std::optional<platform::Workspace> handoff_workspace;
+    std::vector<transaction::OperationProgress> handoff_progress;
     if (*existing) {
         if ((*existing)->publication_required ==
                 reconciliation_result.requires_publication &&
@@ -1888,6 +1925,16 @@ execute(const runtime::RuntimeData& runtime_data,
         record_storage->observed_pending_paths =
             std::move(observed_pending_paths);
         record_storage->pending_paths = std::move(pending_paths);
+        if (staged_handoff != nullptr &&
+            staged_handoff->workspace.has_value() &&
+            staged_handoff->progress.size() ==
+                record_storage->plan.operations.size()) {
+            record_storage->operation_id =
+                std::move(staged_handoff->operation_id);
+            handoff_workspace = std::move(staged_handoff->workspace);
+            staged_handoff->workspace.reset();
+            handoff_progress = std::move(staged_handoff->progress);
+        }
     }
     auto& record = record_storage;
     const auto save_active_record = [&](journal::SaveMode mode =
@@ -1904,10 +1951,18 @@ execute(const runtime::RuntimeData& runtime_data,
         observed_input, reconciliation_result, record->plan);
     auto saved = save_active_record();
     if (!saved) {
+        if (handoff_workspace.has_value()) {
+            static_cast<void>(
+                detail::remove_transaction_workspace(handoff_workspace, key));
+        }
         return std::unexpected(saved.error());
     }
-    auto workspace = detail::create_transaction_workspace(
-        *profile, record->operation_id, key);
+    std::expected<platform::Workspace, Error> workspace =
+        handoff_workspace.has_value()
+            ? std::expected<platform::Workspace, Error>{std::move(
+                  *handoff_workspace)}
+            : detail::create_transaction_workspace(
+                  *profile, record->operation_id, key);
     if (!workspace) {
         return std::unexpected(workspace.error());
     }
@@ -1932,14 +1987,19 @@ execute(const runtime::RuntimeData& runtime_data,
                                            std::move(original));
     };
 
+    const bool use_handoff_progress =
+        handoff_progress.size() == record->plan.operations.size();
     for (std::size_t index = 0; index < record->plan.operations.size();
          ++index) {
+        const auto& current_progress =
+            use_handoff_progress ? handoff_progress[index]
+                                 : record->progress[index];
         auto prepared =
             mutation::prepare_operation(record->plan.operations[index],
                                         index,
                                         runtime_data.local_dir,
                                         *workspace,
-                                        record->progress[index],
+                                        current_progress,
                                         record->plan.operations);
         if (!prepared) {
             return detail::fail_after_rollback(
@@ -2183,47 +2243,62 @@ execute(const runtime::RuntimeData& runtime_data,
         if (auto prepared = prepare_destination(first); !prepared)
             return std::unexpected(prepared.error());
         if (first_operation.action == Action::Download) {
-            const auto content_key = first_operation.hash + ':' +
-                                     std::to_string(first_operation.size);
-            if (download_counts[content_key] == 1) {
-                std::size_t end = position;
-                while (end < apply_order.size()) {
-                    const auto& operation =
-                        record->plan.operations[apply_order[end]];
-                    if (operation.action != Action::Download ||
-                        download_counts[operation.hash + ':' +
-                                        std::to_string(operation.size)] != 1) {
-                        break;
-                    }
-                    ++end;
+            std::unordered_set<std::string> window_keys;
+            std::vector<mutation::DownloadCacheMode> window_modes;
+            std::vector<std::string> populated_in_window;
+            std::size_t end = position;
+            while (end < apply_order.size()) {
+                const auto& operation =
+                    record->plan.operations[apply_order[end]];
+                if (operation.action != Action::Download) {
+                    break;
                 }
-                if (end != position + 1) {
-                    for (std::size_t i = position + 1; i < end; ++i)
-                        if (auto prepared = prepare_destination(apply_order[i]);
-                            !prepared)
-                            return std::unexpected(prepared.error());
-                    auto failure = run_content_window(
-                        std::span<const std::size_t>{apply_order}.subspan(
-                            position, end - position),
-                        parallelism,
-                        *record,
-                        *paths,
-                        runtime_data.local_dir,
-                        storage,
-                        key,
-                        *workspace,
-                        destinations,
-                        &journal_session);
-                    if (!failure) {
-                        return std::unexpected(failure.error());
-                    }
-                    if (*failure) {
-                        return fail_mutation((*failure)->first,
-                                             (*failure)->second);
-                    }
-                    position = end;
-                    continue;
+                auto content_key =
+                    operation.hash + ':' + std::to_string(operation.size);
+                if (populated_downloads.contains(content_key) ||
+                    window_keys.contains(content_key)) {
+                    break;
                 }
+                const bool multi = download_counts[content_key] > 1;
+                window_modes.push_back(
+                    multi ? mutation::DownloadCacheMode::Populate
+                          : mutation::DownloadCacheMode::None);
+                window_keys.insert(content_key);
+                if (multi) {
+                    populated_in_window.push_back(std::move(content_key));
+                }
+                ++end;
+            }
+            if (end > position + 1) {
+                for (std::size_t i = position + 1; i < end; ++i)
+                    if (auto prepared = prepare_destination(apply_order[i]);
+                        !prepared)
+                        return std::unexpected(prepared.error());
+                auto failure = run_content_window(
+                    std::span<const std::size_t>{apply_order}.subspan(
+                        position, end - position),
+                    parallelism,
+                    *record,
+                    *paths,
+                    runtime_data.local_dir,
+                    storage,
+                    key,
+                    *workspace,
+                    destinations,
+                    window_modes,
+                    &journal_session);
+                if (!failure) {
+                    return std::unexpected(failure.error());
+                }
+                if (*failure) {
+                    return fail_mutation((*failure)->first,
+                                         (*failure)->second);
+                }
+                for (auto& content_key : populated_in_window) {
+                    populated_downloads.insert(std::move(content_key));
+                }
+                position = end;
+                continue;
             }
         }
         if (record->plan.operations[first].action != Action::Upload) {

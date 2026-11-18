@@ -59,6 +59,7 @@ struct CryptoSession {
     std::array<std::uint8_t, NONCE_SIZE> chunk_nonce{};
     std::array<std::uint8_t, MAC_SIZE> header_mac{};
     std::array<std::uint8_t, MAC_SIZE> mac{};
+    std::vector<char> read_buffer;
     std::vector<std::uint8_t> buffer_a;
     std::vector<std::uint8_t> buffer_b;
     platform::private_storage::PrivateOutputFile file;
@@ -99,8 +100,15 @@ std::nullopt_t fail_crypto(std::string* error_detail, std::string_view msg) {
 
 std::optional<std::pair<std::ifstream, std::uint64_t>>
 open_input_sized(const std::filesystem::path& input_path,
+                 std::vector<char>& stream_buffer,
                  std::string* error_detail) {
-    std::ifstream input(input_path, std::ios::binary | std::ios::ate);
+    constexpr std::size_t io_buffer_size = 256U * 1024U;
+    stream_buffer.resize(io_buffer_size);
+    std::ifstream input;
+    input.rdbuf()->pubsetbuf(
+        stream_buffer.data(),
+        static_cast<std::streamsize>(stream_buffer.size()));
+    input.open(input_path, std::ios::binary | std::ios::ate);
     if (!input) {
         return fail_crypto(error_detail, "opening plaintext input failed");
     }
@@ -343,7 +351,8 @@ encrypt_file_with_hashes(const std::filesystem::path& input_path,
             CryptoSession session;
 
             try {
-                auto opened = open_input_sized(input_path, error_detail);
+                auto opened = open_input_sized(
+                    input_path, session.read_buffer, error_detail);
                 if (!opened) {
                     return std::nullopt;
                 }
@@ -496,7 +505,8 @@ bool decrypt_file(const std::filesystem::path& input_path,
         CryptoSession session;
 
         try {
-            auto opened = open_input_sized(input_path, nullptr);
+            auto opened =
+                open_input_sized(input_path, session.read_buffer, nullptr);
             if (!opened) {
                 return false;
             }

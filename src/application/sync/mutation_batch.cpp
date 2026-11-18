@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <system_error>
+#include <thread>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace kasumi::application::sync::mutation {
@@ -110,6 +112,18 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
         }
     } batch_guard{batch, commit_batch};
 
+    struct UniqueUploadPlan {
+        std::size_t primary_index = 0;
+        std::string identifier;
+        std::uint64_t expected_size = 0;
+        std::vector<std::size_t> duplicate_indices;
+    };
+
+    std::vector<UniqueUploadPlan> plans;
+    plans.reserve(operation_indices.size());
+    std::unordered_map<std::string_view, std::size_t> plan_by_hash;
+    plan_by_hash.reserve(operation_indices.size());
+
     for (const auto index : operation_indices) {
         const auto& operation = record.plan.operations[index];
         const auto plaintext_hash = hash_from_hex(operation.hash);
@@ -120,55 +134,106 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
                            {},
                            index));
         }
-        const auto identifier =
-            crypto::content_identifier(key, *plaintext_hash);
-
-        auto it = std::ranges::find_if(batch.objects, [&](const auto& obj) {
-            return obj.plaintext_hash == operation.hash;
-        });
-
-        if (it != batch.objects.end()) {
-            if (it->plaintext_size != operation.size) {
+        const auto existing = plan_by_hash.find(operation.hash);
+        if (existing != plan_by_hash.end()) {
+            auto& target_plan = plans[existing->second];
+            if (target_plan.expected_size != operation.size) {
                 return std::unexpected(
                     make_error(MutationErrorCode::IntegrityMismatch,
                                "duplicate operations have different sizes",
                                {},
                                index));
             }
+            target_plan.duplicate_indices.push_back(index);
+        } else {
+            plan_by_hash.emplace(operation.hash, plans.size());
+            plans.push_back(UniqueUploadPlan{
+                .primary_index = index,
+                .identifier = crypto::content_identifier(key, *plaintext_hash),
+                .expected_size = operation.size,
+                .duplicate_indices = {},
+            });
+        }
+    }
 
-            auto source = resolve_local_path(local_root, operation.path, index);
+    const auto execute_plan =
+        [&](const UniqueUploadPlan& plan)
+        -> std::expected<StagedUploadObject, MutationError> {
+        const auto& primary_op = record.plan.operations[plan.primary_index];
+        const auto destination = batch.root / plan.identifier;
+        auto staged = stage_upload_to_path(primary_op,
+                                           plan.primary_index,
+                                           local_root,
+                                           destination,
+                                           plan.identifier,
+                                           key);
+        if (!staged) {
+            return std::unexpected(staged.error());
+        }
+        for (const auto dup_index : plan.duplicate_indices) {
+            const auto& dup_op = record.plan.operations[dup_index];
+            auto source =
+                resolve_local_path(local_root, dup_op.path, dup_index);
             if (!source) {
                 return std::unexpected(source.error());
             }
-
             if (auto ok = detail::require_regular_file(
                     *source,
                     MutationErrorCode::IntegrityMismatch,
                     "duplicate source is not a regular file",
-                    index);
+                    dup_index);
                 !ok) {
                 return std::unexpected(ok.error());
             }
-
             auto verified = crypto::content::verify_file(
-                *source, operation.hash, operation.size);
+                *source, dup_op.hash, dup_op.size);
             if (!verified) {
                 return std::unexpected(
                     make_error(MutationErrorCode::IntegrityMismatch,
                                "content changed: " + verified.error(),
                                *source,
-                               index));
+                               dup_index));
             }
+            staged->operation_indices.push_back(dup_index);
+        }
+        return staged;
+    };
 
-            it->operation_indices.push_back(index);
-        } else {
-            const auto destination = batch.root / identifier;
-            auto staged = stage_upload_to_path(
-                operation, index, local_root, destination, identifier, key);
-            if (!staged) {
-                return std::unexpected(staged.error());
+    if (plans.size() == 1) {
+        auto staged = execute_plan(plans.front());
+        if (!staged) {
+            return std::unexpected(staged.error());
+        }
+        batch.objects.push_back(std::move(*staged));
+    } else {
+        std::vector<std::expected<StagedUploadObject, MutationError>> outcomes;
+        outcomes.reserve(plans.size());
+        for (std::size_t i = 0; i < plans.size(); ++i) {
+            outcomes.emplace_back(std::unexpected(MutationError{}));
+        }
+        const auto hw = std::thread::hardware_concurrency();
+        const auto workers =
+            std::clamp<std::size_t>(hw == 0 ? 4 : hw, 2, 8);
+        application::parallel_for_indexed(
+            plans.size(), workers, [&](std::size_t slot) {
+                outcomes[slot] = execute_plan(plans[slot]);
+            });
+
+        std::optional<MutationError> deterministic_error;
+        for (const auto& outcome : outcomes) {
+            if (!outcome &&
+                (!deterministic_error ||
+                 outcome.error().operation_index <
+                     deterministic_error->operation_index)) {
+                deterministic_error = outcome.error();
             }
-            batch.objects.push_back(std::move(*staged));
+        }
+        if (deterministic_error) {
+            return std::unexpected(*deterministic_error);
+        }
+        batch.objects.reserve(outcomes.size());
+        for (auto& outcome : outcomes) {
+            batch.objects.push_back(std::move(*outcome));
         }
     }
 

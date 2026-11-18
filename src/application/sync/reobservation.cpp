@@ -380,7 +380,9 @@ stage_attempt(const runtime::RuntimeData& runtime_data,
               const reconciliation::Result& result,
               const std::filesystem::path& profile,
               std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-              std::optional<platform::Workspace>& workspace) {
+              std::optional<platform::Workspace>& workspace,
+              std::string& out_operation_id,
+              std::vector<transaction::OperationProgress>& out_progress) {
     auto record = journal::create_record(
         input.local_generation,
         input.storage.generation,
@@ -415,6 +417,8 @@ stage_attempt(const runtime::RuntimeData& runtime_data,
         }
         record->progress[index] = *prepared;
     }
+    out_operation_id = std::move(record->operation_id);
+    out_progress = std::move(record->progress);
     return {};
 }
 
@@ -604,7 +608,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
           bool content_availability_is_current,
           bool allow_unreferenced_content_reuse,
           bool trust_existing_content,
-          const std::unordered_set<std::string>* initial_content_identifiers) {
+          const std::unordered_set<std::string>* initial_content_identifiers,
+          bool retain_staged_workspace) {
     const auto no_work = [](const reconciliation::Result& candidate) {
         return !candidate.requires_publication &&
                !candidate.requires_local_mutation &&
@@ -699,6 +704,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
         }
 
         std::optional<platform::Workspace> workspace;
+        std::string staged_operation_id;
+        std::vector<transaction::OperationProgress> staged_progress;
         const auto fail_with_cleanup =
             [&](Error err) -> std::expected<StableExecution, Error> {
             if (auto removed =
@@ -709,8 +716,14 @@ stabilize(const runtime::RuntimeData& runtime_data,
             return std::unexpected(std::move(err));
         };
         if (!result.plan.operations.empty()) {
-            auto staged = stage_attempt(
-                runtime_data, input, result, *profile, key, workspace);
+            auto staged = stage_attempt(runtime_data,
+                                        input,
+                                        result,
+                                        *profile,
+                                        key,
+                                        workspace,
+                                        staged_operation_id,
+                                        staged_progress);
             if (!staged) {
                 return fail_with_cleanup(staged.error());
             }
@@ -770,13 +783,27 @@ stabilize(const runtime::RuntimeData& runtime_data,
         if (!refreshed) {
             return fail_with_cleanup(refreshed.error());
         }
+        if (same_observation(input, *observed)) {
+            if (retain_staged_workspace && workspace.has_value()) {
+                return StableExecution{
+                    .input = std::move(*observed),
+                    .result = std::move(*refreshed),
+                    .staged = StagedExecutionHandoff{
+                        .operation_id = std::move(staged_operation_id),
+                        .progress = std::move(staged_progress),
+                        .workspace = std::move(workspace)}};
+            }
+            if (auto removed =
+                    detail::remove_transaction_workspace(workspace, key);
+                !removed) {
+                return std::unexpected(removed.error());
+            }
+            return StableExecution{.input = std::move(*observed),
+                                   .result = std::move(*refreshed)};
+        }
         if (auto removed = detail::remove_transaction_workspace(workspace, key);
             !removed) {
             return std::unexpected(removed.error());
-        }
-        if (same_observation(input, *observed)) {
-            return StableExecution{.input = std::move(*observed),
-                                   .result = std::move(*refreshed)};
         }
 
         if (attempt + 1 == maximum_observation_attempts) {
