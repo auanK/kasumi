@@ -15,11 +15,13 @@
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/history_storage.hpp"
 #include "kasumi/test/temp_workspace.hpp"
+#include "platform/metadata.hpp"
 #include "platform/path.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -1083,9 +1085,12 @@ TEST(SyncRemoteAvailabilityTest, CorruptLocalRepairSourceIsRejected) {
     SyncHarness harness("gc-r3-corrupt-repair-source");
     ASSERT_TRUE(harness.valid());
     harness.write("alpha.txt", "alpha contents");
+    const auto source_path = harness.local() / "alpha.txt";
+    ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(
+        source_path,
+        std::filesystem::file_time_type::clock::now() - std::chrono::seconds{1}));
     const auto first = harness.sync();
     ASSERT_TRUE(first.has_value()) << first.error().detail;
-    const auto source_path = harness.local() / "alpha.txt";
     const auto metadata_before =
         kasumi::application::observation::cache::read_file_metadata(
             source_path, "alpha.txt");
