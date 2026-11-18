@@ -92,6 +92,7 @@ struct ContentWindowProbe {
     bool fail_commit_put = false;
     std::size_t content_put_batch_count = 0;
     std::size_t content_put_batch_objects = 0;
+    std::optional<std::size_t> fail_put_batch_ordinal;
     std::optional<std::size_t> fail_put_batch_after_objects;
     std::string corrupt_physical_hash_identifier;
     std::vector<std::string> bulk_mismatched;
@@ -287,14 +288,17 @@ recording_put_batch(void* context, const kasumi::transport::PutBatch& batch) {
     auto* probe = state->probe;
     record_event(*state,
                  "put_batch:" + std::to_string(batch.identifiers.size()));
+    std::optional<std::size_t> limit;
     if (probe != nullptr) {
         std::lock_guard lock(probe->mutex);
+        if (!probe->fail_put_batch_ordinal ||
+            *probe->fail_put_batch_ordinal == probe->content_put_batch_count) {
+            limit = probe->fail_put_batch_after_objects;
+        }
         ++probe->content_put_batch_count;
         probe->content_put_batch_objects += batch.identifiers.size();
     }
 
-    const auto limit = probe == nullptr ? std::optional<std::size_t>{}
-                                        : probe->fail_put_batch_after_objects;
     const auto count = limit.has_value()
                            ? std::min(*limit, batch.identifiers.size())
                            : batch.identifiers.size();
@@ -1534,11 +1538,11 @@ TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
     }
 }
 
-TEST(SyncContentBatchTest, FastCdcMultiWindowUploadStagesAndCleansUpAllWindows) {
+TEST(SyncContentBatchTest,
+     FastCdcMultiWindowUploadResumesAndRepairsCorruptChunk) {
     auto fixture = make_fixture("fastcdc-multi-window");
     ContentWindowProbe probe;
     attach_probe(*fixture, probe);
-    const auto first_profile = fixture->profile;
     const auto first_local = fixture->local;
     const auto second_profile = fixture->workspace->root / "second-profile";
     const auto second_local = fixture->workspace->root / "second-local";
@@ -1562,6 +1566,66 @@ TEST(SyncContentBatchTest, FastCdcMultiWindowUploadStagesAndCleansUpAllWindows) 
     kasumi::test::write_binary(first_local / "a.bin", data_a);
     kasumi::test::write_binary(first_local / "b.bin", data_b);
 
+    namespace application = kasumi::application;
+    const auto run_sync = [&]() {
+        application::detail::OperationContext context{
+            .operation = application::Operation::Sync,
+            .runtime = runtime_data(*fixture),
+            .summary = {},
+            .key = fixture->key,
+            .writer_identifier = {},
+            .storage = std::move(fixture->storage),
+            .initial_content_identifiers = {},
+        };
+        const auto result = application::detail::run_sync(context);
+        fixture->storage = std::move(context.storage);
+        return result;
+    };
+
+    ASSERT_TRUE(kasumi::state_storage::initialize(
+        runtime_data(*fixture).database_path));
+    probe.fail_put_batch_ordinal = 1;
+    probe.fail_put_batch_after_objects = 1;
+    const auto interrupted = run_sync();
+    ASSERT_FALSE(interrupted);
+    ASSERT_EQ(probe.content_put_batch_count, 2U);
+    EXPECT_EQ(history_put_events(*fixture, "heads"), 0U);
+
+    auto uploaded = kasumi::transport::list(fixture->base);
+    ASSERT_TRUE(uploaded) << uploaded.error().message;
+    std::erase_if(*uploaded, [](std::string_view id) {
+        return !kasumi::hash_from_hex(id);
+    });
+    ASSERT_GT(uploaded->size(), 1U);
+    kasumi::test::write_text(fixture->storage_path / uploaded->front(),
+                             "damaged");
+
+    kasumi::HashSet all_chunks{0, kasumi::hash_key};
+    for (const auto filename : {"a.bin", "b.bin"}) {
+        const auto chunks =
+            kasumi::crypto::pack::chunk_file_fastcdc(first_local / filename);
+        ASSERT_TRUE(chunks) << chunks.error();
+        for (const auto& chunk : chunks->chunks) {
+            all_chunks.insert(chunk.hash);
+        }
+    }
+    ASSERT_LT(uploaded->size(), all_chunks.size());
+    probe.fail_put_batch_after_objects.reset();
+    probe.bulk_missing.clear();
+    probe.content_put_batch_objects = 0;
+    const auto completed = run_sync();
+    ASSERT_TRUE(completed) << completed.error().detail;
+    EXPECT_EQ(probe.content_put_batch_objects,
+              all_chunks.size() - uploaded->size() + 1);
+    const auto* summary =
+        std::get_if<application::SyncCompleted>(&completed->data);
+    ASSERT_NE(summary, nullptr);
+    EXPECT_EQ(summary->physical_objects_uploaded,
+              probe.content_put_batch_objects);
+    EXPECT_GT(summary->local_delta_reused_bytes, 0U);
+
+    fixture->profile = second_profile;
+    fixture->local = second_local;
     const auto sync_once = [&]() -> ::testing::AssertionResult {
         kasumi::application::observation::LocalObservationSession session;
         probe.profile = fixture->profile;
@@ -1594,11 +1658,6 @@ TEST(SyncContentBatchTest, FastCdcMultiWindowUploadStagesAndCleansUpAllWindows) 
         return ::testing::AssertionSuccess();
     };
 
-    ASSERT_TRUE(sync_once());
-    EXPECT_GE(probe.content_put_batch_count, 2U);
-
-    fixture->profile = second_profile;
-    fixture->local = second_local;
     ASSERT_TRUE(sync_once());
     EXPECT_EQ(kasumi::test::read_binary(second_local / "a.bin"), data_a);
     EXPECT_EQ(kasumi::test::read_binary(second_local / "b.bin"), data_b);

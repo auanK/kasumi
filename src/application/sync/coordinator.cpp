@@ -1,6 +1,7 @@
 #include "application/sync/coordinator.hpp"
 
 #include "application/concurrency.hpp"
+#include "application/history_storage/content_reachability.hpp"
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/scanner.hpp"
@@ -2182,9 +2183,7 @@ std::expected<void, detail::UploadBatchError> execute_chunked_upload_batch(
                 continue;
             }
             auto id = crypto::content_identifier(key, chunk.hash);
-            if (known_live_chunks.contains(chunk.hash)) {
-                candidate_present_ids.push_back(id);
-            }
+            candidate_present_ids.push_back(id);
             unique_chunks.push_back(PendingChunkWork{
                 .chunk_hash = chunk.hash,
                 .chunk_id = std::move(id),
@@ -2241,6 +2240,45 @@ std::expected<void, detail::UploadBatchError> execute_chunked_upload_batch(
         }
     }
 
+    {
+        std::vector<const PendingChunkWork*> orphan_candidates;
+        for (const auto& chunk : unique_chunks) {
+            if (present_chunk_ids.contains(chunk.chunk_id) &&
+                !known_live_chunks.contains(chunk.chunk_hash)) {
+                orphan_candidates.push_back(&chunk);
+            }
+        }
+        if (!orphan_candidates.empty()) {
+            if (meter)
+                meter->phase(Activity::Verifying, orphan_candidates.size());
+            std::vector<std::uint8_t> verified(orphan_candidates.size());
+            application::parallel_for_indexed(
+                orphan_candidates.size(), parallelism, [&](std::size_t i) {
+                    const auto& chunk = *orphan_candidates[i];
+                    const auto audit =
+                        history_storage::audit_content_object(storage,
+                                                              key,
+                                                              chunk.chunk_id,
+                                                              chunk.chunk_hex,
+                                                              chunk.size,
+                                                              workspace.root,
+                                                              i);
+                    if (audit &&
+                        audit->state ==
+                            history_storage::ContentObjectState::Present) {
+                        verified[i] = 1;
+                    }
+                    if (meter)
+                        ProgressMeter::add(meter->work);
+                });
+            for (std::size_t i = 0; i < orphan_candidates.size(); ++i) {
+                if (!verified[i]) {
+                    present_chunk_ids.erase(orphan_candidates[i]->chunk_id);
+                }
+            }
+        }
+    }
+
     std::vector<PendingChunkWork> to_upload;
     to_upload.reserve(unique_chunks.size());
     for (auto& chunk : unique_chunks) {
@@ -2258,9 +2296,19 @@ std::expected<void, detail::UploadBatchError> execute_chunked_upload_batch(
          !pending.empty();) {
         const auto window = next_chunk_window(pending);
         pending = pending.subspan(window.size());
+        const auto first_op = window.front().operation_index;
+        if (platform::cancellation::requested()) {
+            return std::unexpected(detail::UploadBatchError{
+                .transport_after_unknown_transfer = false,
+                .mutation = mutation::detail::make_error(
+                    mutation::MutationErrorCode::TransportFailure,
+                    "FastCDC upload cancelled",
+                    local_root,
+                    first_op),
+            });
+        }
         if (meter)
             meter->phase(Activity::Staging, window.size());
-        const auto first_op = window.front().operation_index;
         auto staging = platform::create_workspace("chunk-upload-batch");
         if (!staging) {
             return std::unexpected(detail::UploadBatchError{
