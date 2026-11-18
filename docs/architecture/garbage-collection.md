@@ -67,7 +67,10 @@ The protected set includes:
   variants are preserved);
 - at least one valid variant for every reachable, unmarked Commit, including
   unmarked parents and Epoch-anchored Commits;
-- every reachable Content object;
+- every reachable physical Content and Pack object resolved through reachable Commits and their `StorageManifest` entries:
+  - loose Content IDs referenced by any reachable Commit Snapshot;
+  - `KPAK\x01` Pack IDs in `StorageManifest.packed_blobs` for which **at least one** packed member `logical_hash` remains referenced by a reachable Commit (a Pack ID becomes an eligible orphan only when zero members of that pack are referenced by any reachable Commit);
+  - individual FastCDC chunk Content IDs in `StorageManifest.chunked_files` referenced by any reachable chunked file (unreferenced old chunks from modified large files become eligible orphans while shared unchanged chunks remain protected);
 - valid Epoch objects and retained orphan Epoch objects;
 - all protocol/control objects by construction.
 

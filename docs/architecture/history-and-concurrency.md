@@ -10,6 +10,7 @@ A `Commit` contains:
 * `parents`: Sorted, unique canonical commit IDs.
 * `height`: Maximum height of parents + 1.
 * `created_at`: Unix creation timestamp included in the authenticated commit payload.
+* `storage_manifest`: Canonical `StorageManifest` mapping packed logical file hashes to `KPAK\x01` Pack IDs/offsets (`packed_blobs`) and FastCDC-chunked logical file hashes to ordered chunk lists (`chunked_files`), serialized as part of `KCOM` v3. Every manifest entry is validated against the commit's live Snapshot file rows (`size` consistency, canonical sorting, disjointness between packed and chunked entries, and slice bounds). When resolving multiple concurrent heads, `resolve` deterministically merges and filters the heads' `StorageManifest` entries against the resolved Snapshot (`filter_and_merge_storage_manifests`).
 
 The genesis commit, `C0`, has zero parents and height 0. Subsequent commits reference their ancestor publication(s).
 

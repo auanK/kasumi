@@ -104,19 +104,24 @@ Select **New (`n`)** and supply:
 1. **Profile name:** `work` (letters, digits, `_`, or `-`).
 2. **Local directory:** an absolute path, such as `/home/user/documents` or `D:/Documents`.
 3. **Remote directory:** the shared destination chosen above.
-4. **Password:** a master passphrase of at least 12 characters.
-5. **Password Salt:** a separate passphrase of at least 16 characters.
+4. **Key storage mode:** `vault` (default, storing the derived key in the OS credential vault), `file` (`profiles/<profile>/key.bin`), or `memory` (deriving the key in RAM on every command without saving it).
+5. **Password:** a master passphrase of at least 12 characters.
+6. **Password Salt:** a separate passphrase of at least 16 characters.
 
 The Password and Password Salt are distinct inputs to Argon2id, which derives
 the vault's 32-byte master key. The salt is user-provided and reproducible; Kasumi
 does not generate it randomly or store it on the remote. **Record both inputs
 securely and use exactly the same pair on the next machine.**
 
-The derived key is kept in the private profile's `key.bin` using reversible XOR
-masking and filesystem access controls, not password encryption at rest. Use
-disk encryption for sensitive devices and back up your profile. If all copies
-of the key and the credentials needed to derive it are lost, the encrypted vault
-cannot be recovered. See [Security](security.md) and [Backups](best-practices.md#backups).
+In `vault` mode (the default for new profiles), the derived key is stored in the
+OS credential vault (Windows Credential Manager on Windows; Freedesktop Secret
+Service / GNOME Keyring or KDE KWallet on Linux). In `file` mode, it is kept in
+the private profile's `key.bin` using reversible XOR masking and filesystem access
+controls, not password encryption at rest. In `memory` mode, the key is never
+saved and must be entered on each operation. Use disk encryption for sensitive
+devices and back up your profile. If all copies of the key and the credentials
+needed to derive it are lost, the encrypted vault cannot be recovered. See
+[Security](security.md) and [Backups](best-practices.md#backups).
 
 ## 4. Preview and Synchronize Machine A
 

@@ -50,16 +50,16 @@ to retention and garbage collection; it does not replace an independent backup.
 Keep versioned copies outside the synchronized folder and encrypted vault.
 
 Back up synchronized files and the complete Kasumi data directory, including
-`config.toml`, profile `key.bin`, accepted SQLite state, and any recovery workspace.
+`config.toml`, any profile `key.bin` (for `file`-mode profiles), accepted SQLite state, and any recovery workspace.
 Take the private-state backup with Kasumi stopped so database files and WAL
 sidecars are copied consistently. Preserve both Password and Password Salt
-securely, and test restoration to a separate location. Do not delete accepted
+securely (especially when using `vault` or `memory` key storage, where `key.bin` is not present in the profile folder), and test restoration to a separate location. Do not delete accepted
 state or transaction evidence merely to make a failing synchronization proceed.
 
 ## Garbage Collection
 
 `kasumi gc <profile>` reclaims storage by directly deleting eligible orphan
-Content and redundant CommitVariants while preserving required history and
+Content (loose objects, `KPAK\x01` Micro-Packs with no reachable members, and unreferenced FastCDC chunks) and redundant CommitVariants while preserving required history and
 Epochs. Deletions are permanent; keep independent backups.
 
 * **Reserve a Maintenance Window**: Stop Sync on every client and run only one

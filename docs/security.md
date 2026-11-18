@@ -9,19 +9,22 @@ The threat model distinguishes three threat scenarios:
 ### Threat A: Untrusted Remote Storage & Network Eavesdropping
 * **Threat Profile**: The remote storage provider (cloud bucket, SFTP host, NAS share), an untrusted third party, or a network eavesdropper inspects or tampers with stored objects.
 * **Mitigations & Observable Data**:
-  * File content payloads, commit payloads, and Epoch records are encrypted and authenticated client-side using **XChaCha20-Poly1305** before remote storage.
+  * File content payloads (loose objects, FastCDC chunks, and `KPAK\x01` Micro-Packs), commit payloads, and Epoch records are compressed in memory (where applicable) and encrypted and authenticated client-side using **XChaCha20-Poly1305** before remote storage.
   * The local transaction journal is also encrypted and authenticated, but resides exclusively on local client storage and is not uploaded to remote storage.
-  * Domain-separated keyed BLAKE2b derivations generate Content, Commit, Epoch, and namespace identifiers. Canonical file paths, directory structure, and file modification timestamps are contained within encrypted Commit payloads when represented in remote history and are not used directly as remote object identifiers. The local transaction journal may also contain synchronization paths and logical hashes inside its encrypted record.
-  * Protected payloads that fail AEAD authentication or identifier/structural validation are rejected.
+  * Domain-separated keyed BLAKE2b derivations generate Content, Pack, Commit, Epoch, and namespace identifiers. Canonical file paths, directory structure, file modification timestamps, and `StorageManifest` pack/chunk mappings are contained within encrypted Commit payloads when represented in remote history and are not used directly as remote object identifiers. The local transaction journal may also contain synchronization paths and logical hashes inside its encrypted record.
+  * Protected payloads that fail AEAD authentication, purpose-binding checks, or identifier/structural validation are rejected.
   * History continuity checks compare the observed remote history with locally persisted state when such state exists.
-  * **Observable Metadata**: Remote storage providers cannot read authenticated plaintext file contents or the encrypted Commit tree without the key. They can observe the key-derived namespace structure, opaque identifiers, Commit ID/Ciphertext ID pairs in object names, clear Epoch sequence numbers, physical HEAD-marker presence, writer/barrier/probe objects, object count and size distributions, deduplication within a vault, and access/operation timing. See [Remote Layout](architecture/remote-layout.md).
+  * **Observable Metadata**: Remote storage providers cannot read authenticated plaintext file contents or the encrypted Commit tree without the key. They can observe the key-derived namespace structure, opaque identifiers, `<commit-id>_<ciphertext-id>` object names, clear Epoch sequence numbers, physical HEAD-marker presence, writer/barrier/probe objects, compressed/packed/chunked object count and size distributions, deduplication within a vault, and access/operation timing. Because Protocol v3 compresses chunks with Zstandard before encryption when compression saves more than 32 bytes, encrypted object sizes reflect compressed chunk lengths rather than raw plaintext lengths. See [Remote Layout](architecture/remote-layout.md).
 
 ### Threat B: Stolen or Offline Physical Disk
 * **Threat Profile**: A physical device is lost or stolen, and an adversary gains offline read access to the local storage drive.
 * **Mitigations & Limitations**:
-  * The local master key is persisted in `profiles/<profile>/key.bin` using a **reversible XOR mask**, not cryptographic encryption.
-  * An attacker with offline read access to the filesystem can extract `key.bin` and invert the mask with the compiled constant, obtaining the master key without needing to guess or break the Argon2id password.
-  * **Recommendation**: For protection of local profile data against offline disk access, use OS-level Full-Disk Encryption (FDE):
+  * Local master-key persistence depends on the profile's configured `key_storage` mode (`vault`, `file`, or `memory`):
+    * In `file` mode, the local master key is persisted in `profiles/<profile>/key.bin` using a **reversible XOR mask**, not cryptographic encryption. An attacker with offline read access to the filesystem can extract `key.bin` and invert the mask with the compiled constant, obtaining the master key without needing to guess or break the Argon2id password.
+    * In `vault` mode (the default for new profiles), the master key is stored in the operating system credential vault (Windows Credential Manager on Windows; Freedesktop Secret Service / GNOME Keyring or KDE KWallet on Linux) rather than `key.bin`, and its offline protection depends on the OS keyring/DPAPI encryption and login password.
+    * In `memory` mode, the master key is never persisted to disk or to an OS vault and is derived in RAM on every command.
+  * Even when `vault` or `memory` mode is used for the master key, synchronized working-tree files and `db.sqlite` metadata reside on the local disk in plaintext.
+  * **Recommendation**: For protection of local profile data and working files against offline disk access, use OS-level Full-Disk Encryption (FDE):
     * **Windows**: BitLocker
     * **Linux**: LUKS (`dm-crypt`)
   * Kasumi does not configure or manage OS full-disk encryption.
@@ -30,17 +33,17 @@ The threat model distinguishes three threat scenarios:
 * **Threat Profile**: Malware or an unauthorized process executes within the security context of the authenticated local user account.
 * **Mitigations & Limitations**:
   * Operating system filesystem permissions (explicit DACLs on Windows, mode `0600`/`0700` on POSIX) restrict access to the owner user account (and `SYSTEM` on Windows), preventing access from other unprivileged user accounts on the same system.
-  * Filesystem permissions are an access control mechanism, **not** cryptographic encryption at rest. If the local user account itself is compromised, processes running as that user inherit full access to `key.bin` and local profile state.
+  * Filesystem permissions and unlocked OS user vaults are access control mechanisms, **not** isolation against the same OS user account. If the local user account itself is compromised, processes running as that user inherit access to unlocked OS credential vault entries, `key.bin`, and local profile state.
   * The authenticated local OS user account, the operating system, the Kasumi binary, and cryptographic libraries constitute the Trusted Computing Base (TCB). Kasumi does not defend against execution within an untrusted or compromised local host.
 
 ## Key Derivation & Local Persistence
 
 > [!WARNING]
-> The Password and Password Salt are used exclusively during profile creation to derive the master key.
-> The persisted file `key.bin` uses a reversible XOR mask and OS filesystem permissions; it is **not** password-encrypted at rest.
+> In `file` mode, the persisted file `key.bin` uses a reversible XOR mask and OS filesystem permissions; it is **not** password-encrypted at rest.
 > An attacker who can read `key.bin` can recover the master key directly without breaking Argon2id.
+> Use `key_storage = "vault"` (the default for new profiles) to store the key in the OS credential vault, or `key_storage = "memory"` to require Password and Password Salt on every command without persisting the key.
 
-The profile creation wizard derives a 32-byte symmetric master key:
+The profile creation wizard (`kasumi config`), key rotation/entry (`kasumi key <profile>`), and `memory`-mode runtime operations derive a 32-byte symmetric master key:
 
 ```text
 Password + Password Salt
@@ -51,68 +54,76 @@ Password + Password Salt
 ```
 
 * **Password**: Minimum 12 characters.
-* **Password Salt**: Minimum 16 characters. A reproducible, user-provided passphrase that serves as the cryptographic salt for Argon2id key derivation (not an automatically generated or stored random salt). Machines that derive the same vault master key from Password and Password Salt must use the same two inputs. A machine may instead be provisioned with the same 32-byte master key directly.
+* **Password Salt**: Minimum 16 characters. A reproducible, user-provided passphrase that serves as the cryptographic salt for Argon2id key derivation (not an automatically generated or stored random salt). Machines that derive the same vault master key from Password and Password Salt must use the same two inputs. A machine may instead be provisioned with the same 32-byte master key directly (`KASUMI_MASTER_KEY`).
 * **Argon2id Parameters**: 64 MiB memory (65,536 1-KiB blocks), 3 passes, 1 lane. The Argon2 work area is wiped before release; ephemeral password, salt, and master-key temporary buffers in memory are wiped at defined cleanup points using `crypto_wipe`.
-* **Derivation Scope**: Argon2id is used to derive the 32-byte master key from Password and Password Salt inputs during profile creation through that path. Once `key.bin` is generated, routine operations (`kasumi sync`, `kasumi status`, etc.) load the master key directly from `key.bin` and do not require or verify the password.
+* **Derivation Scope**: In `vault` and `file` modes, Argon2id derives the 32-byte master key when creating a profile or running `kasumi key <profile>`, and routine operations (`kasumi sync`, `kasumi status`, etc.) load the persisted 32-byte key from the OS vault or `key.bin`. In `memory` mode, no key is persisted and every operation that requires the profile key derives it in memory from interactive prompts or `KASUMI_PASSWORD` + `KASUMI_PASSWORD2` (or loads `KASUMI_MASTER_KEY`).
 
-### Local Key Storage & Masking
+### Local Key Storage Modes (`vault`, `file`, `memory`)
 
-The profile-management API can create a profile from a directly supplied master key; the CLI `kasumi config` wizard derives it from Password and Password Salt. On creation, the 32-byte key is written to:
+Each profile in `config.toml` requires `key_storage = "vault" | "file" | "memory"` (newly created profiles default to `"vault"` in the wizard):
 
-```text
-profiles/<profile>/key.bin
-```
-
-* **Storage Representation**: The key bytes are obscured using a fixed, reversible byte-wise XOR mask with the `KASUMI_EDGE_SYNC_V1_MASK` constant. Applying the same operation reverses the representation. This is **not cryptographic encryption**.
-* **Access Control at Rest**: Operating system file permissions restrict read and write access:
+* **`vault` (Default for new profiles)**: Persists the 32-byte master key in the OS credential vault under target `kasumi/<profile>`:
+  * **Windows**: Windows Credential Manager (`CredWriteW` / `CredReadW` / `CredDeleteW` with `CRED_TYPE_GENERIC` and `CRED_PERSIST_LOCAL_MACHINE`).
+  * **Linux**: Dynamically loads system shared libraries on demand via `dlopen` (verifying root ownership and non-writable permissions before loading) to communicate with the active desktop vault over D-Bus without hard binary dependencies on headless servers—using `libsecret-1.so.0` (Freedesktop Secret Service / GNOME Keyring) or `libdbus-1.so.3` (KDE KWallet `org.kde.kwalletd6` / `org.kde.kwalletd5`).
+* **`file`**: Persists the 32-byte master key in `profiles/<profile>/key.bin`, obscured using a fixed, reversible byte-wise XOR mask with the `KASUMI_EDGE_SYNC_V1_MASK` constant. Applying the same operation reverses the representation; this is **not cryptographic encryption**.
+* **`memory`**: Never writes the master key to `key.bin` or the OS vault. Every command requiring the key prompts on `/dev/tty` or `CONIN$` (or reads `KASUMI_PASSWORD` and `KASUMI_PASSWORD2`, or `KASUMI_MASTER_KEY` in `--non-interactive` mode). Switching a profile's `key_storage` mode automatically deletes the key from the previously configured storage backend.
+* **Access Control at Rest**: Operating system file permissions restrict read and write access to local profile directories and files:
   * **Windows**: Explicit, protected DACLs (`D:P(A;FA;;;SY)(A;FA;;;<user-sid>)`) disable inheritance and restrict access to the owner user and `SYSTEM`. Symlinks and reparse points are rejected.
   * **POSIX**: Mode `0600` for files and `0700` for private directories (`O_NOFOLLOW` and `lstat` checks reject symlinks).
-* **Sensitive File Writes**: Private-file writes such as `key.bin` and the transaction journal use temporary same-directory files, filesystem flushing (`FlushFileBuffers` / `fsync`), and atomic replacement/rename (`MoveFileExW` on Windows, POSIX rename). SQLite `StoredState` instead uses database transactions; see [Local Persistent State](architecture/local-state.md).
+* **Sensitive File Writes**: Private-file writes such as `key.bin`, temporary reassembled plaintext files, and the transaction journal use private handles, filesystem flushing (`FlushFileBuffers` / `fsync`), and atomic replacement/rename (`MoveFileExW` on Windows, POSIX rename). SQLite `StoredState` instead uses database transactions; see [Local Persistent State](architecture/local-state.md).
 
 ### Domain-Separated Subkeys
 
 Keyed BLAKE2b derives distinct 32-byte subkeys across isolated domains:
 
-* `Content`: file content payload encryption
+* `Content`: loose file content and FastCDC chunk payload encryption
 * `History`: commit DAG encryption
 * `Epoch`: Epoch lifecycle envelope encryption
 * `Journal`: local transaction journal encryption
-* `RemoteIdentifier`: keyed identifier derivation
+* `RemoteIdentifier`: keyed identifier derivation (`Content`, `Commit`, `Epoch`, `Namespace`, `Pack`)
+* `Pack`: `KPAK\x01` Micro-Pack container payload encryption
 
-Content, Commit, Epoch, and namespace identifiers also use disjoint cryptographic domain tags. Derived namespace components are truncated to eight hex characters (the version component to four), so namespace derivation is not a confidentiality guarantee for protocol structure. Ephemeral subkey buffers in memory are wiped at defined cleanup points using `crypto_wipe`; Kasumi does not claim to prevent all copies or swap exposure of secrets.
+Content, Pack, Commit, Epoch, and namespace identifiers also use disjoint cryptographic domain tags. Derived namespace components are truncated to eight hex characters (the version component to four), so namespace derivation is not a confidentiality guarantee for protocol structure. Ephemeral subkey buffers in memory are wiped at defined cleanup points using `crypto_wipe`; Kasumi does not claim to prevent all copies or swap exposure of secrets.
 
 ## Encryption Standards
 
-File contents and commit payloads use **XChaCha20-Poly1305** authenticated encryption (AEAD) via Monocypher. Each file receives an independent, random 24-byte nonce and is encrypted in chunks of up to 4 MiB (`CHUNK_SIZE`). The file header authenticates protocol magic, format version, nonce, and total size. Each chunk authenticates the header, its chunk index, and chunk length with a 16-byte Poly1305 tag.
+File contents, FastCDC chunks, `KPAK\x01` Micro-Packs, and commit payloads use **Protocol v3 (`KASUMI\x03\x00`, `FILE_HEADER_SIZE = 57`)** with **XChaCha20-Poly1305** authenticated encryption (AEAD) via Monocypher and per-chunk **Zstandard (`zstd` level 1)** compression:
+
+* **Authenticated Header (`57 bytes`)**: Contains the 8-byte magic `KASUMI\x03\x00`, a random 24-byte file nonce, the 8-byte little-endian uncompressed total plaintext size, a 1-byte `FilePurpose` tag (`Content = 0`, `History = 1`, `Pack = 2`), and a 16-byte Poly1305 header authentication tag. Binding `FilePurpose` into the header's associated data prevents cross-domain substitution between loose/chunk Content blobs, Commit objects, and `KPAK\x01` Micro-Packs even if an attacker renames objects in remote storage.
+* **In-Memory Chunk Compression & AEAD (`CHUNK_SIZE = 1 MiB`)**: Plaintext streams are processed in chunks of up to `1 MiB` (`1,048,576` bytes). Before encryption, each chunk is compressed in RAM with Zstandard (`zstd` level 1). If compression reduces the chunk size by more than 32 bytes, the compressed payload is used (`flags = 1`); otherwise the raw uncompressed bytes are used (`flags = 0`). Each encrypted chunk prepends a 5-byte cleartext prefix (`CHUNK_PREFIX_SIZE = 5`: 1-byte `flags` + 4-byte little-endian `wire_len`), followed by `wire_len` encrypted bytes and a 16-byte Poly1305 authentication tag whose associated data binds the 57-byte file header, the 64-bit chunk index, the 1-byte compression flag, and the 32-bit wire length. Decompressed chunk lengths are verified against the expected plaintext slice size (bounded by `1 MiB` per chunk and the declared file total size) before release.
+* **Micro-Pack Container Format (`KPAK\x01`)**: The plaintext inside a `FilePurpose::Pack` stream starts with `KPAK\x01` (5 bytes), a 4-byte entry count (`<= 4096`), a directory table of `(32-byte logical_hash, 4-byte offset, 4-byte size)` entries sorted canonically by `logical_hash`, and contiguous concatenated file payloads. During extraction, every requested member's bounds are checked against the pack buffer and its extracted bytes are re-hashed with BLAKE3 and verified against `logical_hash`.
 
 Epoch records use an authenticated XChaCha20-Poly1305 envelope under the Epoch subkey, with the AEAD nonce derived from the Epoch identifier.
 
 The local transaction journal uses the same AEAD scheme with the Journal subkey, a random nonce, and verified format headers. The transaction journal is local and is not stored on remote storage.
 
-An authentication failure causes the protected object or journal record to be rejected, and it is not accepted as synchronization state.
+An authentication failure, `FilePurpose` mismatch, decompression failure, or post-decryption BLAKE3 hash mismatch causes the protected object or journal record to be rejected, and it is not accepted as synchronization state.
 
 ## Cryptographic Identifiers
 
 | Identifier | Derivation | Purpose |
 |---|---|---|
-| Logical Hash | Plaintext BLAKE3 | `NodeRow` identity, change detection, deduplication |
-| Content ID | Keyed BLAKE2b of logical hash | Opaque remote storage object name |
-| Commit ID | Keyed BLAKE2b of canonical commit | Parent references, commit object path, and HEAD-marker binding |
-| Epoch ID | Keyed BLAKE2b of canonical Epoch | Lifecycle chain sequencing and Epoch object path |
+| Logical Hash | Plaintext BLAKE3 | `NodeRow` identity, FastCDC chunk logical identity, change detection, deduplication |
+| Content ID | Keyed BLAKE2b of logical hash (`IdentifierPurpose::Content`) | Opaque remote storage object name for loose files and individual FastCDC chunks |
+| Pack Hash | Plaintext BLAKE3 over `"KASUMI_PACK_V1"`, member count, and sorted `(logical_hash, size)` descriptors | Deterministic content-addressed identity of a `KPAK\x01` Micro-Pack |
+| Pack ID | Keyed BLAKE2b of Pack Hash (`IdentifierPurpose::Pack`) | Opaque remote storage object name for a `KPAK\x01` Micro-Pack |
+| Commit ID | Keyed BLAKE2b of canonical commit (`IdentifierPurpose::Commit`) | Parent references, `<commit-id>_<ciphertext-id>` object path, and HEAD-marker binding |
+| Epoch ID | Keyed BLAKE2b of canonical Epoch (`IdentifierPurpose::Epoch`) | Lifecycle chain sequencing and Epoch object path |
 | Ciphertext ID | BLAKE3 of encrypted Commit payload | Physical Commit variant tracking |
 | Physical Hash | SHA-256 of stored bytes | Remote transport and transfer integrity verification |
-| Namespace component | Truncated keyed BLAKE2b derivation | Remote protocol path components |
+| Namespace component | Truncated keyed BLAKE2b derivation (`IdentifierPurpose::Namespace`) | Remote protocol path components |
 
-Under different master keys, the keyed Content, Commit, and Epoch identifier derivations produce different identifiers for the same logical input. Plaintext BLAKE3 logical hashes are not used directly as remote content object identifiers. They may appear in encrypted commit or transaction journal records and in protected local database state.
+Under different master keys, the keyed Content, Pack, Commit, and Epoch identifier derivations produce different identifiers for the same logical input. Plaintext BLAKE3 logical hashes and Pack Hashes are not used directly as remote object identifiers. They may appear in encrypted commit or transaction journal records and in protected local database state.
 
 ## History DAG Integrity
 
-A canonical commit contains the Snapshot tree, parent commit IDs, tree height, and creation timestamp. The commit ID authenticates this canonical serialized representation under the vault key, and the commit payload is encrypted and authenticated under the History domain.
+A canonical commit (`KCOM` v3) contains the Snapshot tree, parent commit IDs, tree height, creation timestamp, and canonical `StorageManifest`. The commit ID authenticates this entire canonical serialized representation (including the `StorageManifest`) under the vault key, and the commit payload is encrypted and authenticated under the History domain (`FilePurpose::History`).
 
 Before accepting any commit into the local history DAG, Kasumi verifies:
-* AEAD authentication tag validity;
+* AEAD authentication tag validity and `FilePurpose::History` binding;
 * Keyed commit ID integrity;
 * Snapshot canonical structure, ordering, hierarchy, and path constraints;
+* `StorageManifest` canonical ordering, uniqueness, size bounds (`packed_blobs` entries `<= 16 MiB`; `chunked_files` slices `<= 4 MiB` each and summing exactly to `file_size`), disjointness between packed and chunked logical hashes, and consistency with the commit's live Snapshot file rows;
 * Parent existence, height consistency (`height = max(parent height) + 1`), and absence of cycles;
 * Timestamp non-regression along parent edges.
 

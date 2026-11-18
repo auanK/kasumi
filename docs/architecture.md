@@ -35,7 +35,8 @@ CLI/profile → local observation + authenticated remote history + StoredState
 
 | Request | Local effects | Remote effects |
 |---|---|---|
-| `config` list/create/edit/rename/delete | Reads or changes `config.toml` and private profile paths; delete preserves the synchronized directory | None |
+| `config` list/create/edit/rename/delete, `key` | Reads or changes `config.toml`, private profile paths, and persisted keys in the OS vault or `key.bin`; delete preserves the synchronized directory | None |
+| `list`, `show` | Reads `config.toml` and local/SQLite inspection diagnostics without contacting remote storage or displaying credentials | None |
 | Preview (`sync --dry-run`), Status | Reads local/SQLite state; profile lock and permission normalization are possible | Observation only; no recovery or publication |
 | Sync | May change synchronized files, file-hash cache, transaction journal, and accepted `StoredState` | May upload content and publish/prune history; registers a writer for active work |
 | Fsck | Workspace; preceding recovery can change local state | Audit reads only, **except** effects of preceding transaction recovery |

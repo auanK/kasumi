@@ -67,7 +67,7 @@ min_history_age_hours = 6
 key_storage = "vault"
 ```
 
-New profiles default to `key_storage = "vault"`, a minimum retention depth of 5 commits, and a minimum retention age of 6 hours. Legacy profiles in `config.toml` that omit `key_storage` default to `file` so existing `key.bin` setups continue working unchanged. Manual editing of `config.toml` allows adjusting `key_storage` (`vault`, `file`, or `memory`) and retention values using positive integers; runtime operations limit depth to 4096. Unknown fields and missing required profile values are rejected rather than migrated. The local profile policy is used when planning or publishing retention state. Published authenticated Epochs carry the retention policy and anchors used by the remote history and maintenance protocol.
+New profiles default to `key_storage = "vault"`, a minimum retention depth of 5 commits, and a minimum retention age of 6 hours. Every profile in `config.toml` must specify `local_dir`, `remote_dir`, `min_history_depth`, `min_history_age_hours`, and `key_storage` (`vault`, `file`, or `memory`). Manual editing of `config.toml` allows adjusting `key_storage` (`vault`, `file`, or `memory`) and retention values using positive integers; runtime operations limit depth to 4096. Unknown fields and missing required profile values are rejected rather than migrated. The local profile policy is used when planning or publishing retention state. Published authenticated Epochs carry the retention policy and anchors used by the remote history and maintenance protocol.
 
 ## Core Commands
 
@@ -239,13 +239,13 @@ To switch to **Portuguese**:
 | Variable | Description |
 |---|---|
 | `KASUMI_LANG` | Sets CLI language (`en`, `pt-BR`, `pt`) |
-| `KASUMI_MASTER_KEY` | Provides a 64-hex-digit master key to application/inspection operations. It does not replace the wizard's Password/Password Salt creation prompts. For an existing profile with `key.bin`, the supplied key must match the persisted key |
-| `KASUMI_PASSWORD` | Provides the Password to the profile creation credential flow (minimum 12 characters) |
-| `KASUMI_PASSWORD2` | Provides the Password Salt to the profile creation credential flow (minimum 16 characters) |
+| `KASUMI_MASTER_KEY` | Provides a 64-hex-digit master key to application/inspection operations. It does not replace the wizard's Password/Password Salt creation prompts. When the profile has a persisted key (`vault` or `file` mode), the supplied key must match the persisted key |
+| `KASUMI_PASSWORD` | Provides the Password to the profile creation, `kasumi key`, or `memory`-mode credential flow (minimum 12 characters) |
+| `KASUMI_PASSWORD2` | Provides the Password Salt to the profile creation, `kasumi key`, or `memory`-mode credential flow (minimum 16 characters) |
 | `KASUMI_CONTENT_CONCURRENCY` | Sets content-transfer concurrency. Default: 8. Positive values above 16 are capped at 16; invalid or zero values use the default |
 
 > [!NOTE]
-> Once a profile is created, the derived 32-byte master key is persisted locally in `profiles/<profile>/key.bin` using a reversible XOR mask and operating system filesystem permissions. For existing profiles, routine operations use the persisted `key.bin` when no explicit `KASUMI_MASTER_KEY` credential is supplied. `KASUMI_PASSWORD` and `KASUMI_PASSWORD2` are used by the profile-creation credential flow and are not re-verified during routine synchronization operations. For details on the security boundaries and key storage, see [Security Specification](security.md).
+> Master-key persistence depends on the profile's required `key_storage` setting in `config.toml` (`vault`, `file`, or `memory`; new profiles default to `vault`). In `vault` mode, the derived 32-byte master key is stored in the OS credential vault (`kasumi/<profile>`); in `file` mode, it is persisted in `profiles/<profile>/key.bin` using a reversible XOR mask and OS filesystem permissions; in `memory` mode, the key is never persisted and must be supplied via prompt, `KASUMI_PASSWORD` + `KASUMI_PASSWORD2`, or `KASUMI_MASTER_KEY` on every operation. For `vault` and `file` profiles, routine operations load the persisted key without re-verifying `KASUMI_PASSWORD` and `KASUMI_PASSWORD2`. For details on security boundaries and key storage, see [Security Specification](security.md).
 
 ## Exit Codes
 

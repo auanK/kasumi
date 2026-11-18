@@ -5,13 +5,14 @@ the remote-identifier subkey and namespace-specific domain tags. Truncated
 lowercase hexadecimal components identify history, commits, heads, epochs, GC,
 barrier, writers, and probes. History-family components are eight hexadecimal
 characters; the version component is four hexadecimal characters. The remote
-root also contains 64-hex-character keyed Content IDs. The following is
+root also contains 64-hex-character keyed Content IDs (for loose files and individual FastCDC chunks) and keyed Pack IDs (for `KPAK\x01` Micro-Packs). The following is
 structural notation, not literal path names:
 
 ```text
 <remote root>/
   <content-id>
-  <history-ns>/<commits-ns>/<commit-id>/<ciphertext-id>
+  <pack-id>
+  <history-ns>/<commits-ns>/<commit-id>_<ciphertext-id>
   <history-ns>/<heads-ns>/<commit-id>-<ciphertext-id>
   <history-ns>/<epochs-ns>/<version-ns>/<20-digit-sequence>-<epoch-id>
   <history-ns>/<gc-ns>/<version-ns>/<barrier-id>
@@ -19,16 +20,31 @@ structural notation, not literal path names:
   <history-ns>/<gc-ns>/<version-ns>/<probes-ns>/<token>
 ```
 
-Commit variants, physical markers, Epoch objects, writer/probe objects, and
-ordinary Content IDs are extensionless. The active layout is key-derived.
+Commit variants, physical markers, Epoch objects, writer/probe objects, Pack IDs, and
+ordinary Content IDs are extensionless. Commits are published at the flat path `<history-ns>/<commits-ns>/<commit-id>_<ciphertext-id>` so that all commit variants in the namespace can be discovered with a single directory listing. The active layout is key-derived.
 Former fixed `history/...` paths are not parsed, migrated, or deleted.
 Unrecognized objects, including legacy quarantine state, are left untouched.
 For compatibility and backup requirements, see
 [Upgrading Kasumi](../best-practices.md#upgrading-kasumi).
 
+## Physical Storage Layout: Loose Objects, Micro-Packs (`KPAK\x01`), and FastCDC Chunks
+
+Logical file rows in a `Snapshot` are always identified by their whole-file plaintext BLAKE3 `logical_hash` and `size`. How a logical file is stored physically at the remote root is determined by the commit's canonical `StorageManifest`:
+
+1. **Micro-Packed Small Files (`<= 256 KiB`, `KPAK\x01`)**:
+   * Uploaded files up to `256 KiB` (`PACK_ELIGIBLE_MAX_SIZE`, excluding `.kasumiignore`) are grouped deterministically into `KPAK\x01` Micro-Packs up to `4 MiB` (`PACK_TARGET_MAX_SIZE`, max `4096` files per pack).
+   * Each pack has a deterministic **Pack Hash** (`BLAKE3` over `"KASUMI_PACK_V1"`, member count, and sorted `(logical_hash, size)` pairs) and is stored at the remote root under its 64-hex-character **Pack ID** (`crypto::pack_identifier`, keyed BLAKE2b under `IdentifierPurpose::Pack`), compressed and encrypted with Protocol v3 under `KeyPurpose::Pack` (`FilePurpose::Pack`).
+   * The commit's `StorageManifest.packed_blobs` records `(logical_hash, pack_id, offset, size)` for each packed logical file (bounded to `<= 16 MiB` per entry).
+2. **FastCDC Chunked Large Files (`> 8 MiB`)**:
+   * Uploaded files larger than `8 MiB` (`FASTCDC_FILE_THRESHOLD`) are split into content-defined chunks (`256 KiB` minimum, `1 MiB` average, `4 MiB` maximum) using a normalized 64-bit Gear rolling hash.
+   * Each unique chunk is hashed with BLAKE3 (`chunk_hash`) and stored at the remote root under its 64-hex-character **Content ID** (`crypto::remote_identifier(chunk_hash)`, `IdentifierPurpose::Content`), compressed and encrypted with Protocol v3 under `KeyPurpose::Content` (`FilePurpose::Content`).
+   * The commit's `StorageManifest.chunked_files` records `(logical_hash, file_size, chunks[])` where each `ChunkSlice` specifies `(chunk_hash, size)` (`size <= 4 MiB`, summing to `file_size`).
+3. **Loose Content Objects**:
+   * Files absent from `StorageManifest` (such as medium files between `256 KiB` and `8 MiB`, `.kasumiignore`, or files published by older commits) are stored directly at `<remote root>/<content-id>` where `<content-id>` is derived from the whole-file `logical_hash`.
+
 ## Identities and Visibility
 
-A **Commit ID** is a keyed identifier of canonical Commit bytes: the complete Snapshot, sorted parents, height, and timestamp. A **Ciphertext ID** is BLAKE3 of one encrypted Commit payload. Random encryption nonces permit several physical ciphertext variants for one logical Commit ID. `HeadReference` binds both IDs. A physical HEAD marker names that reference and records publication; a **logical head** is a marked Commit that is not an ancestor of another marked Commit. Old ancestral markers can coexist until pruning. Content IDs derive from plaintext logical BLAKE3 hashes under the vault key, enabling deduplication inside a vault without exposing the raw logical hash as the object name. See [History and Concurrency](history-and-concurrency.md) and [Security](../security.md).
+A **Commit ID** is a keyed identifier of canonical Commit bytes (`KCOM` v3): the complete Snapshot, sorted parents, height, timestamp, and canonical `StorageManifest`. A **Ciphertext ID** is BLAKE3 of one encrypted Commit payload. Random encryption nonces permit several physical ciphertext variants for one logical Commit ID. `HeadReference` binds both IDs. A physical HEAD marker names that reference and records publication; a **logical head** is a marked Commit that is not an ancestor of another marked Commit. Old ancestral markers can coexist until pruning. Content IDs and Pack IDs derive from plaintext logical BLAKE3 hashes and Pack Hashes under the vault key, enabling deduplication inside a vault without exposing raw hashes as object names. See [History and Concurrency](history-and-concurrency.md) and [Security](../security.md).
 
 Remote storage still sees object count, byte sizes, access timing, deduplication, opaque IDs, Commit/Ciphertext relationships, and the clear decimal Epoch sequence in its object name. Derived namespace components hide literal protocol labels from a storage listing but are short and do not hide the structural pattern. Commit payloads contain encrypted paths, metadata, parents, and trees. Provider metadata and transport behavior remain outside Kasumi's encrypted payload boundary.
 
