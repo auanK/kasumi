@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.14.2]
+
+### Fixed
+
+- Restore the exact Pack ID when a required probe finds a missing Micro-Pack and verified local sources can reproduce it. A sync that already publishes a commit can replace an incomplete pack mapping when the remaining sources are available.
+- Verify the BLAKE3 and size of each FastCDC file in `fsck` by streaming its authenticated chunks in manifest order.
+- Assemble FastCDC downloads directly from verified local slices and remove downloaded plaintext chunks after their last use.
+- Apply the reachability limit to distinct physical object IDs and avoid accumulating repeated reference details during GC and remote inspection.
+- End the rclone child process immediately after it acknowledges `core/quit` and the RC pool closes.
+
+### Upgrade Notes
+
+- `v0.14.2` uses the same Protocol v3 remote layout, transaction journal v10, and profile configuration schema as `v0.14.1`.
+
 ## [0.14.1]
 
 ### Fixed

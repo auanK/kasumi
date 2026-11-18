@@ -1,14 +1,15 @@
-# Kasumi v0.14.1
+# Kasumi v0.14.2
 
-Patch release for the interactive profile wizard and compiler diagnostics.
+Patch release for Micro-Pack repair, FastCDC integrity and staging, garbage collection, and rclone shutdown.
 
 ## Highlights
 
-- New profiles ask where to store the key before asking for the password and salt. Press Enter for the operating system credential vault, or choose `file` or `memory`.
-- The empty profile menu offers New and Quit. Type `:back` at profile, path, or key storage prompts to return to the menu.
-- GCC and Clang build fixes cover platform code and GCC's LTO handling of Zstandard's assembler flags.
+- A required presence check that finds an absent Micro-Pack can trigger reconstruction of its original Pack ID from verified local files. A sync that already publishes a commit can replace the mapping when all required local sources are available.
+- `fsck` verifies the whole-file BLAKE3 and size for FastCDC files using the committed chunk order.
+- FastCDC downloads stream verified local slices directly into the staged file and remove downloaded chunks after their last use.
+- GC counts distinct physical object IDs against its reachability limit, and remote content inspection deduplicates logical paths.
+- After rclone acknowledges `core/quit`, Kasumi closes the RC pool and terminates its child process immediately.
 
 ## Compatibility
 
-- Scripts that create profiles through `kasumi config` must pass a storage mode or an empty line after the remote destination.
-- `v0.14.1` uses the same Protocol v3 vault format, transaction journal format, and profile configuration as `v0.14.0`. Follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi).
+- `v0.14.2` uses the same Protocol v3 vault format, flat commit layout, transaction journal v10, and profile configuration as `v0.14.1`. Follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi).
