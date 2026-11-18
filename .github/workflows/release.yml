@@ -29,7 +29,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build gcc-14 g++-14 git
+          sudo apt-get install -y cmake ninja-build gcc-14 g++-14 git \
+            gnome-keyring libsecret-1-0 dbus-x11
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 --slave /usr/bin/g++ g++ /usr/bin/g++-14
           sudo update-alternatives --set gcc /usr/bin/gcc-14
 
@@ -40,12 +41,35 @@ jobs:
 
       - name: Release Gate - Critical Tests
         run: |
-          ctest --test-dir build -L release-critical --output-on-failure --no-tests=error
+          python3 scripts/run_with_linux_vault.py --backend gnome -- \
+            ctest --test-dir build -L release-critical --output-on-failure --no-tests=error
 
       - name: Release Gate - Smoke Test (Binary)
         run: |
           ./build/kasumi --version
           ./build/kasumi --help
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          mkdir -p "$tmp/local" "$tmp/storage"
+          printf 'x' > "$tmp/local/item.txt"
+          vault_err="$(printf "n\nsmoke\n%s\n%s\nq\n" "$tmp/local" "$tmp/storage" | \
+            env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR="$tmp/no-bus" XDG_CONFIG_HOME="$tmp/cfg" \
+            KASUMI_LANG=en KASUMI_PASSWORD="smoke-password-123" KASUMI_PASSWORD2="smoke-salt-456" \
+            ./build/kasumi config 2>&1)"
+          printf '%s' "$vault_err" | grep -qi "no active D-Bus session bus"
+          test ! -e "$tmp/cfg/kasumi/config.toml"
+          printf "n\nsmoke\n%s\n%s\nq\n" "$tmp/local" "$tmp/storage" | \
+            python3 scripts/run_with_linux_vault.py --backend gnome -- \
+            env XDG_CONFIG_HOME="$tmp/cfg" KASUMI_LANG=en KASUMI_PASSWORD="smoke-password-123" KASUMI_PASSWORD2="smoke-salt-456" \
+            ./build/kasumi config >/dev/null
+          sed -i -E "s/(key_storage[[:space:]]*=[[:space:]]*)['\"]vault['\"]/\1'file'/" "$tmp/cfg/kasumi/config.toml"
+          env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR="$tmp/no-bus" XDG_CONFIG_HOME="$tmp/cfg" \
+            KASUMI_LANG=en KASUMI_PASSWORD="smoke-password-123" KASUMI_PASSWORD2="smoke-salt-456" \
+            ./build/kasumi key smoke >/dev/null
+          env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR="$tmp/no-bus" XDG_CONFIG_HOME="$tmp/cfg" \
+            KASUMI_LANG=en ./build/kasumi sync smoke >/dev/null
+          env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR="$tmp/no-bus" XDG_CONFIG_HOME="$tmp/cfg" \
+            KASUMI_LANG=en ./build/kasumi list | grep -q "smoke"
 
       - name: Package
         run: |

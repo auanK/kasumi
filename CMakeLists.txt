@@ -517,6 +517,8 @@ target_link_libraries(kasumi_runtime
 )
 if(WIN32)
     target_link_libraries(kasumi_runtime PRIVATE advapi32)
+elseif(UNIX AND NOT APPLE)
+    target_link_libraries(kasumi_runtime PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
 find_package(Python3 COMPONENTS Interpreter QUIET)

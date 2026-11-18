@@ -109,7 +109,7 @@ TEST(VaultTest, RejectsWeakPasswordInputs) {
     EXPECT_FALSE(kasumi::runtime::vault::derive("password-long", "short"));
 }
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
 TEST(VaultTest, OsVaultRoundTripsOverwritesAndDeletes) {
     auto workspace = kasumi::test::make_temp_workspace("vault-os-win");
     const auto key_path =

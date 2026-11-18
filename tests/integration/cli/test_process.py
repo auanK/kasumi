@@ -5,6 +5,7 @@ import ctypes
 import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -24,29 +25,43 @@ class CliProcessTest(unittest.TestCase):
         self.root = Path(self.directory.name).resolve()
         self.assertEqual(self.root.parent, binary.parent)
         self.addCleanup(self.directory.cleanup)
-        self.addCleanup(self._cleanup_windows_vault)
+        self.addCleanup(self._cleanup_os_vault)
         self.environment = {
             name: value for name, value in os.environ.items()
-            if not name.upper().startswith(("KASUMI_", "RCLONE_"))
+            if name == "KASUMI_LINUX_VAULT_BACKEND"
+            or not name.upper().startswith(("KASUMI_", "RCLONE_"))
         }
         self.environment.update(
             APPDATA=str(self.root), XDG_CONFIG_HOME=str(self.root), KASUMI_LANG="en",
             KASUMI_PASSWORD="process-test-password", KASUMI_PASSWORD2="process-test-salt",
         )
 
-    def _cleanup_windows_vault(self):
-        if sys.platform != "win32":
-            return
-        cred_delete = ctypes.windll.advapi32.CredDeleteW
-        cred_delete.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
-        cred_delete.restype = ctypes.c_int
+    def _cleanup_os_vault(self):
         profiles_dir = self.root / "kasumi" / "profiles"
         if not profiles_dir.is_dir():
             return
-        for entry in profiles_dir.iterdir():
-            if entry.is_dir():
-                target = "kasumi:" + (entry / "key.bin").resolve().as_posix().lower()
-                cred_delete(target, 1, 0)
+        if sys.platform == "win32":
+            cred_delete = ctypes.windll.advapi32.CredDeleteW
+            cred_delete.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
+            cred_delete.restype = ctypes.c_int
+            for entry in profiles_dir.iterdir():
+                if entry.is_dir():
+                    target = "kasumi:" + (entry / "key.bin").resolve().as_posix().lower()
+                    cred_delete(target, 1, 0)
+        elif (
+            os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+            and os.environ.get("KASUMI_LINUX_VAULT_BACKEND") != "kwallet"
+            and shutil.which("secret-tool")
+        ):
+            for entry in profiles_dir.iterdir():
+                if entry.is_dir():
+                    target = "kasumi:" + (entry / "key.bin").resolve().as_posix()
+                    subprocess.run(
+                        ["secret-tool", "clear", "target", target],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
 
     def invoke(self, *arguments, input=None, expected=0, environment=None):
         result = self.invoke_raw(

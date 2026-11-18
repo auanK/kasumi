@@ -3441,7 +3441,7 @@ TEST(ApplicationProfileTest,
                                          "profile-main.lock"));
 }
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
 TEST(ApplicationProfileTest, DefaultVaultStorageLifecycleDoesNotWriteKeyFile) {
     auto workspace = kasumi::test::make_temp_workspace("app-profile-vault-os");
     const ExecutionEnvironment environment{
