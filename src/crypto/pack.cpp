@@ -24,8 +24,6 @@ inline constexpr std::array<std::uint8_t, 4> kpak_magic{'K', 'P', 'A', 'K'};
 inline constexpr std::uint8_t kpak_version = 1;
 inline constexpr std::size_t kpak_header_size = 9;
 inline constexpr std::size_t kpak_entry_size = HASH_SIZE + 8;
-inline constexpr std::uint64_t fastcdc_mask_s = 0xFFFFF80000000000ULL;
-inline constexpr std::uint64_t fastcdc_mask_l = 0xFFFFE00000000000ULL;
 
 const std::array<std::uint64_t, 256>& fastcdc_gear_table() noexcept {
     static const auto table = []() {
@@ -442,8 +440,30 @@ decrypt_and_verify_pack(const std::filesystem::path& encrypted_path,
 
 std::expected<FastCdcResult, std::string>
 chunk_file_fastcdc(const std::filesystem::path& path) {
+    std::error_code ec;
+    const auto status = std::filesystem::symlink_status(path, ec);
+    if (ec || std::filesystem::is_symlink(status) ||
+        platform::private_storage::is_reparse_or_symlink(path) ||
+        !std::filesystem::is_regular_file(status)) {
+        return std::unexpected(
+            "path is missing, redirected, or not a regular file");
+    }
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec) {
+        return std::unexpected("failed to inspect file size: " + ec.message());
+    }
+    return chunk_file_fastcdc(path, fastcdc_profile_for_size(size));
+}
+
+std::expected<FastCdcResult, std::string>
+chunk_file_fastcdc(const std::filesystem::path& path, FastCdcProfile profile) {
     if (path.empty()) {
         return std::unexpected("input path is empty");
+    }
+    if (profile.min_chunk == 0 || profile.min_chunk > profile.avg_chunk ||
+        profile.avg_chunk > profile.max_chunk ||
+        profile.max_chunk > FASTCDC_MAX_CHUNK) {
+        return std::unexpected("invalid FastCDC chunk profile");
     }
     std::error_code ec;
     const auto status = std::filesystem::symlink_status(path, ec);
@@ -498,18 +518,18 @@ chunk_file_fastcdc(const std::filesystem::path& path) {
 
             std::size_t pos = 0;
             while (pos < slab.size()) {
-                const std::uint32_t to_max = FASTCDC_MAX_CHUNK - chunk_len;
+                const std::uint32_t to_max = profile.max_chunk - chunk_len;
                 const std::size_t avail =
                     std::min<std::size_t>(slab.size() - pos, to_max);
-                if (chunk_len < FASTCDC_MIN_CHUNK) {
+                if (chunk_len < profile.min_chunk) {
                     const std::size_t skip = std::min<std::size_t>(
                         avail,
-                        static_cast<std::size_t>(FASTCDC_MIN_CHUNK - chunk_len));
+                        static_cast<std::size_t>(profile.min_chunk - chunk_len));
                     blake3_hasher_update(
                         &chunk_hasher, slab.data() + pos, skip);
                     chunk_len += static_cast<std::uint32_t>(skip);
                     pos += skip;
-                    if (chunk_len < FASTCDC_MIN_CHUNK) {
+                    if (chunk_len < profile.min_chunk) {
                         continue;
                     }
                 }
@@ -518,19 +538,19 @@ chunk_file_fastcdc(const std::filesystem::path& path) {
                 const std::size_t scan_end =
                     start_pos +
                     std::min<std::size_t>(slab.size() - pos,
-                                          FASTCDC_MAX_CHUNK - chunk_len);
+                                          profile.max_chunk - chunk_len);
                 std::size_t cur = start_pos;
                 const std::size_t normal_end =
-                    chunk_len < FASTCDC_AVG_CHUNK
+                    chunk_len < profile.avg_chunk
                         ? std::min(scan_end,
                                    start_pos + static_cast<std::size_t>(
-                                                   FASTCDC_AVG_CHUNK - chunk_len))
+                                                   profile.avg_chunk - chunk_len))
                         : start_pos;
 
                 bool cut = false;
                 for (; cur < normal_end; ++cur) {
                     fp = (fp << 1) + gear[slab[cur]];
-                    if ((fp & fastcdc_mask_s) == 0ULL) {
+                    if ((fp & profile.mask_s) == 0ULL) {
                         ++cur;
                         cut = true;
                         break;
@@ -539,7 +559,7 @@ chunk_file_fastcdc(const std::filesystem::path& path) {
                 if (!cut) {
                     for (; cur < scan_end; ++cur) {
                         fp = (fp << 1) + gear[slab[cur]];
-                        if ((fp & fastcdc_mask_l) == 0ULL) {
+                        if ((fp & profile.mask_l) == 0ULL) {
                             ++cur;
                             cut = true;
                             break;
@@ -553,7 +573,7 @@ chunk_file_fastcdc(const std::filesystem::path& path) {
                     chunk_len += static_cast<std::uint32_t>(consumed);
                     pos = cur;
                 }
-                if (cut || chunk_len == FASTCDC_MAX_CHUNK) {
+                if (cut || chunk_len == profile.max_chunk) {
                     flush_chunk();
                 }
             }
@@ -597,12 +617,6 @@ encrypt_file_slice_with_hashes(const std::filesystem::path& input_path,
         !std::filesystem::is_regular_file(status)) {
         return fail("slice input is missing, redirected, or not a regular file");
     }
-    const auto file_size = std::filesystem::file_size(input_path, ec);
-    if (ec || offset > file_size || length > file_size - offset ||
-        offset > static_cast<std::uint64_t>(
-                     std::numeric_limits<std::streamoff>::max())) {
-        return fail("slice range is outside file bounds");
-    }
 
     const auto pre_identity =
         platform::private_storage::query_file_identity(input_path);
@@ -610,50 +624,26 @@ encrypt_file_slice_with_hashes(const std::filesystem::path& input_path,
         return fail("failed to query slice input file identity");
     }
 
-    std::vector<std::uint8_t> buffer(length);
-    secure_memory::WipeGuard buffer_guard{buffer};
-
-    std::ifstream input(input_path, std::ios::binary);
-    if (!input) {
-        return fail("failed to open input file for slice encryption");
+    auto result = encrypt_file_slice(input_path,
+                                     offset,
+                                     length,
+                                     expected_slice_hash,
+                                     output_path,
+                                     master_key,
+                                     FilePurpose::Content,
+                                     error_detail);
+    if (!result) {
+        return std::nullopt;
     }
-    input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
-    if (!input) {
-        return fail("failed to seek to slice offset");
-    }
-    input.read(reinterpret_cast<char*>(buffer.data()),
-               static_cast<std::streamsize>(length));
-    if (input.gcount() != static_cast<std::streamsize>(length) || input.bad()) {
-        return fail("failed to read complete slice from input file");
-    }
-    input.close();
 
     const auto post_identity =
         platform::private_storage::query_file_identity(input_path);
     if (!post_identity.valid || !(post_identity == pre_identity) ||
         platform::private_storage::is_reparse_or_symlink(input_path)) {
+        std::filesystem::remove(output_path, ec);
         return fail("slice input file identity changed during read");
     }
-
-    if (hash_span(buffer) != expected_slice_hash) {
-        return fail("slice content changed on disk before encryption");
-    }
-
-    auto cipher = encrypt_bytes(buffer, master_key, FilePurpose::Content);
-    if (!cipher) {
-        return fail("failed to encrypt slice");
-    }
-
-    auto sha256 = write_ciphertext_atomically(output_path, *cipher);
-    if (!sha256) {
-        return fail(sha256.error());
-    }
-
-    return EncryptionResult{
-        .plaintext_hash = expected_slice_hash,
-        .plaintext_size = length,
-        .ciphertext_sha256 = std::move(*sha256),
-    };
+    return result;
 }
 
 } // namespace kasumi::crypto::pack

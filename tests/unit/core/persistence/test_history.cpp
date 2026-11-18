@@ -2328,4 +2328,57 @@ TEST(HistoryTest, StructuralUntrustedExtraParentlessNonZeroCommitRejected) {
     EXPECT_EQ(result.error().code, ErrorCode::HeightMismatch);
 }
 
+TEST(HistoryTest,
+     StorageManifestAccepts32MiBSlicesRejectsOversizedAndKeepsV3Compatibility) {
+    const auto fill_hash = [](std::uint8_t byte) {
+        kasumi::Hash digest{};
+        digest.fill(std::byte{byte});
+        return digest;
+    };
+    auto tree = make_tree({
+        kasumi::NodeRow{
+            .path = "legacy.bin",
+            .hash = fill_hash(11),
+            .size = 4U * 1024U * 1024U,
+            .mtime = 1,
+            .is_directory = false,
+        },
+        kasumi::NodeRow{
+            .path = "iso.bin",
+            .hash = fill_hash(22),
+            .size = 32U * 1024U * 1024U,
+            .mtime = 1,
+            .is_directory = false,
+        },
+    });
+
+    StorageManifest manifest;
+    manifest.chunked_files.push_back(ChunkedFileEntry{
+        .file_hash = fill_hash(11),
+        .file_size = 4U * 1024U * 1024U,
+        .chunks = {{.hash = fill_hash(12), .size = 4U * 1024U * 1024U}},
+    });
+    manifest.chunked_files.push_back(ChunkedFileEntry{
+        .file_hash = fill_hash(22),
+        .file_size = 32U * 1024U * 1024U,
+        .chunks = {{.hash = fill_hash(23), .size = 32U * 1024U * 1024U}},
+    });
+    std::ranges::sort(manifest.chunked_files, {}, &ChunkedFileEntry::file_hash);
+
+    const auto commit = make_bootstrap(tree, 0, 0, manifest);
+    ASSERT_TRUE(commit.has_value()) << commit.error().detail;
+    const auto bytes = serialize(*commit);
+    ASSERT_TRUE(bytes.has_value()) << bytes.error().detail;
+    const auto decoded = deserialize(*bytes);
+    ASSERT_TRUE(decoded.has_value()) << decoded.error().detail;
+    EXPECT_EQ(decoded->storage.chunked_files.size(), 2U);
+
+    StorageManifest oversized_manifest = manifest;
+    oversized_manifest.chunked_files.front().file_size += 1U;
+    oversized_manifest.chunked_files.front().chunks.front().size =
+        maximum_chunk_slice_size + 1U;
+    tree.rows.back().size += 1U;
+    EXPECT_FALSE(valid_storage_manifest(oversized_manifest, tree));
+}
+
 } // namespace

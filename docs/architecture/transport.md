@@ -19,7 +19,8 @@ temporary files are removed after the request, including failed responses.
 
 Rclone uploads use `NoCheckDest` to avoid the copy layer's redundant destination
 lookup. Provider PUT semantics still apply, and Kasumi's physical verification
-after upload is unchanged. Downloads retain their existing copy options.
+after upload is unchanged. Each FastCDC download window supplies the content
+concurrency as rclone's transfer limit. The copy deadline applies per window.
 
 ## Control Read Batches
 

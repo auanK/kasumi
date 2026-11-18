@@ -365,12 +365,26 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
                       : std::string{}));
     }
 
+#ifdef _WIN32
+    const auto native_quarantine = extended_path(quarantine, error);
+    if (error) {
+        return fail_restoring("could not resolve quarantined workspace: " +
+                              error.message());
+    }
+    // shortcut: same-user writers can race inside quarantine; use
+    // handle-relative recursive deletion if that threat is in scope.
+    auto secured = private_storage::protect_tree(native_quarantine);
+    if (!secured) {
+        return fail_restoring(secured.error());
+    }
+#else
     // shortcut: same-user writers can race inside quarantine; use
     // handle-relative recursive deletion if that threat is in scope.
     auto secured = private_storage::protect_tree(quarantine);
     if (!secured) {
         return fail_restoring(secured.error());
     }
+#endif
 
 #ifdef KASUMI_WORKSPACE_FAULT_TESTS
     if (workspace_fault_test::interrupt_cleanup(quarantine)) {
@@ -379,11 +393,6 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
 #endif
 
 #ifdef _WIN32
-    const auto native_quarantine = extended_path(quarantine, error);
-    if (error) {
-        return fail_restoring("could not resolve quarantined workspace: " +
-                              error.message());
-    }
     const auto attributes = GetFileAttributesW(native_quarantine.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES) {
         return fail_restoring("could not inspect workspace '" +

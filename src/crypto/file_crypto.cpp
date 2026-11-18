@@ -84,6 +84,7 @@ struct CryptoSession {
     std::vector<std::uint8_t> buffer_comp;
     platform::private_storage::PrivateOutputFile file;
     bool published{false};
+    unsigned incompressible_streak{0};
 
     ~CryptoSession() noexcept {
         crypto_wipe(base_nonce.data(), base_nonce.size());
@@ -256,12 +257,15 @@ bool reserve_temp_output(const std::filesystem::path& target_path,
 bool close_and_publish_temp(std::ifstream& input,
                             CryptoSession& session,
                             const std::filesystem::path& target_path,
+                            bool check_eof,
                             std::string* error_detail) {
-    char trailing = 0;
-    input.read(&trailing, 1);
-    if (input.gcount() != 0 || input.bad()) {
-        fail_crypto(error_detail, "checking plaintext end failed");
-        return false;
+    if (check_eof) {
+        char trailing = 0;
+        input.read(&trailing, 1);
+        if (input.gcount() != 0 || input.bad()) {
+            fail_crypto(error_detail, "checking plaintext end failed");
+            return false;
+        }
     }
     input.clear();
     input.close();
@@ -349,7 +353,13 @@ bool encrypt_v3_chunk(CryptoSession& session,
     const std::uint8_t* payload_ptr = plain_chunk.data();
     std::size_t payload_len = plain_chunk.size();
     std::uint8_t flags = 0;
-    if (!plain_chunk.empty() && !session.buffer_comp.empty()) {
+    constexpr std::size_t incompressible_probe_interval = 16U;
+    constexpr unsigned incompressible_skip_streak = 2U;
+    const bool try_compress =
+        !plain_chunk.empty() && !session.buffer_comp.empty() &&
+        (session.incompressible_streak < incompressible_skip_streak ||
+         (chunk_index % incompressible_probe_interval) == 0U);
+    if (try_compress) {
         const auto compressed_size = ZSTD_compress(session.buffer_comp.data(),
                                                    session.buffer_comp.size(),
                                                    plain_chunk.data(),
@@ -361,6 +371,9 @@ bool encrypt_v3_chunk(CryptoSession& session,
             payload_ptr = session.buffer_comp.data();
             payload_len = compressed_size;
             flags = 1;
+            session.incompressible_streak = 0;
+        } else if (plain_chunk.size() >= 64U * 1024U) {
+            ++session.incompressible_streak;
         }
     }
     if (payload_len > std::numeric_limits<std::uint32_t>::max()) {
@@ -648,12 +661,17 @@ decrypt_bytes(std::span<const std::uint8_t> ciphertext,
         });
 }
 
+namespace {
+
 std::optional<EncryptionResult>
-encrypt_file_with_hashes(const std::filesystem::path& input_path,
-                         const std::filesystem::path& output_path,
-                         std::span<const std::uint8_t, KEY_SIZE> master_key,
-                         FilePurpose purpose,
-                         std::string* error_detail) {
+encrypt_file_range(const std::filesystem::path& input_path,
+                   std::uint64_t offset,
+                   std::optional<std::uint64_t> slice_length,
+                   const Hash* expected_slice_hash,
+                   const std::filesystem::path& output_path,
+                   std::span<const std::uint8_t, KEY_SIZE> master_key,
+                   FilePurpose purpose,
+                   std::string* error_detail) {
     return with_derived_key(
         master_key,
         purpose,
@@ -672,7 +690,25 @@ encrypt_file_with_hashes(const std::filesystem::path& input_path,
                 if (!opened) {
                     return std::nullopt;
                 }
-                auto& [input, plaintext_size] = *opened;
+                auto& [input, file_size] = *opened;
+                std::uint64_t plaintext_size = file_size;
+                if (slice_length) {
+                    if (offset > file_size ||
+                        *slice_length > file_size - offset ||
+                        offset > static_cast<std::uint64_t>(
+                                     std::numeric_limits<std::streamoff>::max())) {
+                        return fail_crypto(
+                            error_detail, "slice range is outside file bounds");
+                    }
+                    input.seekg(static_cast<std::streamoff>(offset),
+                                std::ios::beg);
+                    if (!input) {
+                        return fail_crypto(
+                            error_detail,
+                            "failed to seek to slice offset");
+                    }
+                    plaintext_size = *slice_length;
+                }
 
                 auto random_result =
                     platform::random::fill_bytes(session.base_nonce);
@@ -781,8 +817,18 @@ encrypt_file_with_hashes(const std::filesystem::path& input_path,
                                            result.plaintext_hash.data()),
                                        result.plaintext_hash.size());
 
-                if (!close_and_publish_temp(
-                        input, session, target_path, error_detail)) {
+                if (expected_slice_hash != nullptr &&
+                    result.plaintext_hash != *expected_slice_hash) {
+                    return fail_crypto(
+                        error_detail,
+                        "slice content changed on disk before encryption");
+                }
+
+                if (!close_and_publish_temp(input,
+                                            session,
+                                            target_path,
+                                            !slice_length.has_value(),
+                                            error_detail)) {
                     return std::nullopt;
                 }
                 return result;
@@ -797,6 +843,43 @@ encrypt_file_with_hashes(const std::filesystem::path& input_path,
                     "encryption operation failed with an unknown error");
             }
         });
+}
+
+} // namespace
+
+std::optional<EncryptionResult>
+encrypt_file_with_hashes(const std::filesystem::path& input_path,
+                         const std::filesystem::path& output_path,
+                         std::span<const std::uint8_t, KEY_SIZE> master_key,
+                         FilePurpose purpose,
+                         std::string* error_detail) {
+    return encrypt_file_range(input_path,
+                              0,
+                              std::nullopt,
+                              nullptr,
+                              output_path,
+                              master_key,
+                              purpose,
+                              error_detail);
+}
+
+std::optional<EncryptionResult>
+encrypt_file_slice(const std::filesystem::path& input_path,
+                   std::uint64_t offset,
+                   std::uint64_t length,
+                   const Hash& expected_slice_hash,
+                   const std::filesystem::path& output_path,
+                   std::span<const std::uint8_t, KEY_SIZE> master_key,
+                   FilePurpose purpose,
+                   std::string* error_detail) {
+    return encrypt_file_range(input_path,
+                              offset,
+                              length,
+                              &expected_slice_hash,
+                              output_path,
+                              master_key,
+                              purpose,
+                              error_detail);
 }
 
 bool encrypt_file(const std::filesystem::path& input_path,
@@ -872,7 +955,8 @@ bool decrypt_file(const std::filesystem::path& input_path,
             if (!ok) {
                 return false;
             }
-            return close_and_publish_temp(input, session, target_path, nullptr);
+            return close_and_publish_temp(
+                input, session, target_path, true, nullptr);
         } catch (...) {
             return false;
         }

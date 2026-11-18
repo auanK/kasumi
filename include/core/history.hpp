@@ -99,7 +99,7 @@ inline constexpr std::size_t maximum_chunks_per_file = 65536;
 inline constexpr std::uint64_t maximum_packed_blob_size =
     16ULL * 1024ULL * 1024ULL;
 inline constexpr std::uint32_t maximum_chunk_slice_size =
-    4U * 1024U * 1024U;
+    32U * 1024U * 1024U;
 
 // Versioned state with its position in the history DAG.
 struct Commit {
