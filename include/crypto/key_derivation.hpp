@@ -18,6 +18,7 @@ enum class KeyPurpose {
     Epoch,
     Journal,
     RemoteIdentifier,
+    Pack,
 };
 
 enum class IdentifierPurpose {
@@ -25,6 +26,7 @@ enum class IdentifierPurpose {
     Commit,
     Epoch,
     Namespace,
+    Pack,
 };
 
 using Key = std::array<std::uint8_t, KEY_SIZE>;
@@ -39,6 +41,10 @@ Hash derive_identifier(std::span<const std::uint8_t, KEY_SIZE> master_key,
 std::string
 content_identifier(std::span<const std::uint8_t, KEY_SIZE> master_key,
                    const Hash& plaintext_hash);
+
+std::string
+pack_identifier(std::span<const std::uint8_t, KEY_SIZE> master_key,
+                const Hash& pack_hash);
 
 std::string
 commit_identifier(std::span<const std::uint8_t, KEY_SIZE> master_key,

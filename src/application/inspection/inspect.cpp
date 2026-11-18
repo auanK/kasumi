@@ -12,6 +12,7 @@
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
 #include "crypto/key_derivation.hpp"
+#include "crypto/pack.hpp"
 #include "crypto/secure_memory.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
@@ -550,24 +551,120 @@ download_remote_file(const InspectionRequest& request,
     }
 
     const auto logical_hash = hash_hex(row->hash);
-    const auto content_id = crypto::content_identifier(context.key, row->hash);
-    const auto encrypted = context.workspace->root / "remote-content.enc";
     const auto plaintext = context.workspace->root / "remote-content.plain";
-    auto downloaded = transport::get(context.storage, content_id, encrypted);
-    if (!downloaded) {
-        const bool not_found =
-            downloaded.error().code == transport::ErrorCode::ObjectNotFound;
-        return fail(operation,
-                    not_found ? InspectionErrorCode::RemoteContentNotFound
-                              : InspectionErrorCode::RemoteObservationFailure,
-                    not_found ? "remote file content not found"
-                              : "failed to download remote content");
-    }
-    if (!crypto::decrypt_file(encrypted, plaintext, context.key) ||
-        !crypto::content::verify_file(plaintext, logical_hash, row->size)) {
-        return fail(operation,
-                    InspectionErrorCode::RemoteContentInvalid,
-                    "remote content failed cryptographic authentication");
+    std::string content_id;
+
+    if (const auto* packed = history::find_packed_blob(
+            observed.storage_manifest, row->hash)) {
+        content_id = crypto::pack_identifier(context.key, packed->pack_hash);
+        const auto encrypted = context.workspace->root / "remote-pack.enc";
+        const auto extract_dir = context.workspace->root / "pack-extract";
+        auto downloaded = transport::get(context.storage, content_id, encrypted);
+        if (!downloaded) {
+            const bool not_found =
+                downloaded.error().code == transport::ErrorCode::ObjectNotFound;
+            return fail(operation,
+                        not_found
+                            ? InspectionErrorCode::RemoteContentNotFound
+                            : InspectionErrorCode::RemoteObservationFailure,
+                        not_found ? "remote file content not found"
+                                  : "failed to download remote content");
+        }
+        auto verified = crypto::pack::decrypt_and_verify_pack(
+            encrypted, context.key, packed->pack_hash, &extract_dir);
+        if (!verified) {
+            return fail(operation,
+                        InspectionErrorCode::RemoteContentInvalid,
+                        "remote pack failed cryptographic authentication");
+        }
+        const auto extracted = extract_dir / (logical_hash + ".plain");
+        if (!crypto::content::verify_file(extracted, logical_hash, row->size)) {
+            return fail(operation,
+                        InspectionErrorCode::RemoteContentInvalid,
+                        "extracted member failed cryptographic authentication");
+        }
+        if (auto installed =
+                install_remote_file(extracted, *destination, operation);
+            !installed) {
+            return std::unexpected(installed.error());
+        }
+        return RemoteFileReport{.path = row->path,
+                                .destination_path =
+                                    platform::path::to_utf8(*destination),
+                                .logical_hash = logical_hash,
+                                .content_id = content_id,
+                                .size = row->size};
+    } else if (const auto* chunked = history::find_chunked_file(
+                   observed.storage_manifest, row->hash)) {
+        content_id = crypto::content_identifier(context.key, row->hash);
+        const auto enc = context.workspace->root / "remote-chunk.enc";
+        const auto chunk_plain = context.workspace->root / "remote-chunk.plain";
+        std::ofstream out(plaintext, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            return dest_fail(operation, "failed to open temporary download file");
+        }
+        std::vector<std::uint8_t> copy_buf(256U * 1024U);
+        for (const auto& chunk : chunked->chunks) {
+            const auto cid =
+                crypto::content_identifier(context.key, chunk.hash);
+            const auto chex = hash_hex(chunk.hash);
+            auto downloaded = transport::get(context.storage, cid, enc);
+            if (!downloaded) {
+                const bool not_found = downloaded.error().code ==
+                                       transport::ErrorCode::ObjectNotFound;
+                return fail(operation,
+                            not_found
+                                ? InspectionErrorCode::RemoteContentNotFound
+                                : InspectionErrorCode::RemoteObservationFailure,
+                            not_found ? "remote file chunk not found"
+                                      : "failed to download remote chunk");
+            }
+            if (!crypto::decrypt_file(enc, chunk_plain, context.key) ||
+                !crypto::content::verify_file(chunk_plain, chex, chunk.size)) {
+                return fail(operation,
+                            InspectionErrorCode::RemoteContentInvalid,
+                            "remote chunk failed cryptographic authentication");
+            }
+            auto streamed = platform::private_storage::stream_regular_file(
+                chunk_plain,
+                copy_buf,
+                [&](std::span<const std::uint8_t> slab) {
+                    out.write(reinterpret_cast<const char*>(slab.data()),
+                              static_cast<std::streamsize>(slab.size()));
+                },
+                chunk.size);
+            if (!streamed || out.bad()) {
+                return dest_fail(operation, "failed to assemble remote chunks");
+            }
+        }
+        out.close();
+        if (out.fail() ||
+            !crypto::content::verify_file(plaintext, logical_hash, row->size)) {
+            return fail(operation,
+                        InspectionErrorCode::RemoteContentInvalid,
+                        "assembled remote content failed verification");
+        }
+    } else {
+        content_id = crypto::content_identifier(context.key, row->hash);
+        const auto encrypted = context.workspace->root / "remote-content.enc";
+        auto downloaded =
+            transport::get(context.storage, content_id, encrypted);
+        if (!downloaded) {
+            const bool not_found =
+                downloaded.error().code == transport::ErrorCode::ObjectNotFound;
+            return fail(operation,
+                        not_found
+                            ? InspectionErrorCode::RemoteContentNotFound
+                            : InspectionErrorCode::RemoteObservationFailure,
+                        not_found ? "remote file content not found"
+                                  : "failed to download remote content");
+        }
+        if (!crypto::decrypt_file(encrypted, plaintext, context.key) ||
+            !crypto::content::verify_file(plaintext, logical_hash, row->size)) {
+            return fail(operation,
+                        InspectionErrorCode::RemoteContentInvalid,
+                        "remote content failed cryptographic authentication");
+        }
     }
     if (auto installed =
             install_remote_file(plaintext, *destination, operation);
@@ -658,34 +755,82 @@ inspect_contents(const observation::history::StorageView& observed,
                  InspectionOperation operation,
                  bool audit) {
     std::map<std::string, RemoteContentInfo> inventory;
-    const auto add_rows = [&](const Snapshot& tree, bool current) {
-        for (const auto& row : tree.rows) {
-            if (row.is_directory) {
-                continue;
-            }
-            const auto logical_hash = hash_hex(row.hash);
-            const auto content_id =
-                crypto::content_identifier(context.key, row.hash);
+    std::unordered_set<std::string> pack_ids;
+    const auto add_rows = [&](const Snapshot& tree,
+                              const history::StorageManifest& manifest,
+                              bool current) {
+        const auto record_entry = [&](const std::string& content_id,
+                                      const std::string& logical_hash,
+                                      std::uint64_t size,
+                                      std::string_view logical_path,
+                                      bool is_pack) {
             auto& content = inventory[content_id];
             if (content.content_id.empty()) {
                 content.content_id = content_id;
                 content.logical_hash = logical_hash;
-                content.size = row.size;
+                content.size = size;
                 content.referenced = true;
-            } else if (content.logical_hash != logical_hash ||
-                       content.size != row.size) {
+                if (is_pack) {
+                    pack_ids.insert(content_id);
+                }
+            } else if (!is_pack && (content.logical_hash != logical_hash ||
+                                    content.size != size ||
+                                    pack_ids.contains(content_id))) {
+                return false;
+            } else if (is_pack && (content.logical_hash != logical_hash ||
+                                   !pack_ids.contains(content_id))) {
                 return false;
             }
             content.current_tree = content.current_tree || current;
-            content.paths.push_back(row.path.empty() ? "/" : row.path);
+            content.paths.push_back(logical_path.empty() ? "/"
+                                                         : std::string{logical_path});
+            return true;
+        };
+
+        for (const auto& row : tree.rows) {
+            if (row.is_directory) {
+                continue;
+            }
+            if (const auto* packed =
+                    history::find_packed_blob(manifest, row.hash)) {
+                if (!record_entry(
+                        crypto::pack_identifier(context.key, packed->pack_hash),
+                        hash_hex(packed->pack_hash),
+                        row.size,
+                        row.path,
+                        true)) {
+                    return false;
+                }
+            } else if (const auto* chunked =
+                           history::find_chunked_file(manifest, row.hash)) {
+                for (const auto& chunk : chunked->chunks) {
+                    if (!record_entry(
+                            crypto::content_identifier(context.key, chunk.hash),
+                            hash_hex(chunk.hash),
+                            chunk.size,
+                            row.path,
+                            false)) {
+                        return false;
+                    }
+                }
+            } else {
+                if (!record_entry(
+                        crypto::content_identifier(context.key, row.hash),
+                        hash_hex(row.hash),
+                        row.size,
+                        row.path,
+                        false)) {
+                    return false;
+                }
+            }
         }
         return true;
     };
-    if (!add_rows(observed.effective_tree, true)) {
+    if (!add_rows(observed.effective_tree, observed.storage_manifest, true)) {
         return obs_fail(operation, "logical content inventory is inconsistent");
     }
     for (const auto& commit : observed.reachable_commits) {
-        if (!add_rows(commit.commit.tree, false)) {
+        if (!add_rows(commit.commit.tree, commit.commit.storage, false)) {
             return obs_fail(operation,
                             "history has inconsistent content metadata");
         }
@@ -709,6 +854,8 @@ inspect_contents(const observation::history::StorageView& observed,
             continue;
         }
 
+        const bool expect_pack =
+            content.referenced && pack_ids.contains(content.content_id);
         auto audited = history_storage::audit_content_object(
             context.storage,
             context.key,
@@ -716,10 +863,12 @@ inspect_contents(const observation::history::StorageView& observed,
             content.referenced
                 ? std::optional<std::string_view>{content.logical_hash}
                 : std::nullopt,
-            content.referenced ? std::optional<std::uint64_t>{content.size}
-                               : std::nullopt,
+            content.referenced && !expect_pack
+                ? std::optional<std::uint64_t>{content.size}
+                : std::nullopt,
             context.workspace->root,
-            audit_index++);
+            audit_index++,
+            expect_pack);
         if (!audited) {
             return obs_fail(operation,
                             "failed to download object during audit");

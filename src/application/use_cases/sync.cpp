@@ -355,7 +355,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     stable->input,
                     stable->result,
                     &observation_session,
-                    stable->staged ? &*stable->staged : nullptr);
+                    stable->staged ? &*stable->staged : nullptr,
+                    true);
                 if (synchronized ||
                     synchronized.error().code !=
                         sync::coordinator::ErrorCode::RemoteContentMissing) {

@@ -33,7 +33,8 @@ inline constexpr std::uint64_t maximum_ciphertext_chunk_count =
 inline constexpr std::uintmax_t maximum_commit_ciphertext_size =
     static_cast<std::uintmax_t>(history::maximum_commit_plaintext_size) +
     crypto::FILE_HEADER_SIZE +
-    maximum_ciphertext_chunk_count * crypto::MAC_SIZE;
+    maximum_ciphertext_chunk_count *
+        (crypto::CHUNK_PREFIX_SIZE + crypto::MAC_SIZE);
 
 // Variants grouped by commit identifier.
 using ObjectMap = std::map<std::string, std::vector<HeadReference>>;
@@ -44,6 +45,7 @@ struct HistoryInventory {
     std::vector<std::string> identifiers;
     ObjectMap commit_variants;
     ObjectMap marker_variants;
+    bool all_commits_listed = false;
 
     bool contains(std::string_view identifier) const noexcept {
         return std::ranges::binary_search(identifiers, identifier);

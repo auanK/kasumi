@@ -63,7 +63,8 @@ prepare_commit(Snapshot tree,
                std::uint64_t observed_height,
                std::span<const std::string> logical_heads,
                std::int64_t created_at,
-               std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+               std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+               history::StorageManifest storage) {
     if (created_at <= 0) {
         return std::unexpected(
             Error{ErrorCode::InvalidInput, "invalid commit timestamp"});
@@ -77,7 +78,8 @@ prepare_commit(Snapshot tree,
             return std::unexpected(Error{ErrorCode::InvalidInput,
                                          "invalid bootstrap history state"});
         }
-        commit = history::make_bootstrap(std::move(tree), 0, created_at);
+        commit = history::make_bootstrap(
+            std::move(tree), 0, created_at, std::move(storage));
     } else {
         if (logical_heads.empty() || !std::ranges::is_sorted(logical_heads) ||
             std::ranges::adjacent_find(logical_heads) != logical_heads.end() ||
@@ -95,7 +97,8 @@ prepare_commit(Snapshot tree,
                                  std::vector<std::string>{logical_heads.begin(),
                                                           logical_heads.end()},
                                  std::move(tree),
-                                 created_at);
+                                 created_at,
+                                 std::move(storage));
     }
     if (!commit) {
         return std::unexpected(

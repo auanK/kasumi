@@ -27,9 +27,11 @@ make_observation_hints(state_storage::StoredState state,
     if (use_frontier) {
         hints.frontier.emplace();
         hints.frontier->anchors.push_back(
-            history_storage::KnownHistoryAnchor{.commit_id = state.commit_id,
-                                                .height = state.height,
-                                                .tree = std::move(state.tree)});
+            history_storage::KnownHistoryAnchor{
+                .commit_id = state.commit_id,
+                .height = state.height,
+                .tree = std::move(state.tree),
+                .storage = std::move(state.storage_manifest)});
         if (!state.epoch_id.empty()) {
             hints.frontier->accepted_epoch = history_storage::epoch::Reference{
                 .sequence = state.epoch_sequence,
@@ -270,23 +272,48 @@ ObserveResult observe(transport::Transport& storage,
             return result;
         }
         if (audit_content_objects_requested) {
+            std::vector<std::string> phys_ids;
             for (const auto& loaded_commit : loaded->commits) {
                 for (const auto& row : loaded_commit.commit.tree.rows) {
                     if (row.is_directory) {
                         continue;
                     }
-                    const auto identifier =
-                        crypto::content_identifier(key, row.hash);
-                    if (referenced_content_identifiers.size() >=
-                            maximum_audited_content_object_count &&
-                        !referenced_content_identifiers.contains(identifier)) {
-                        return std::unexpected(Error{
-                            .code = ErrorCode::LimitExceeded,
-                            .detail = "too many referenced content identifiers",
-                        });
+                    phys_ids.clear();
+                    if (const auto* packed = kasumi::history::find_packed_blob(
+                            loaded_commit.commit.storage, row.hash)) {
+                        phys_ids.push_back(
+                            crypto::pack_identifier(key, packed->pack_hash));
+                    } else if (const auto* chunked =
+                                   kasumi::history::find_chunked_file(
+                                       loaded_commit.commit.storage,
+                                       row.hash)) {
+                        phys_ids.reserve(chunked->chunks.size());
+                        for (const auto& chunk : chunked->chunks) {
+                            phys_ids.push_back(
+                                crypto::content_identifier(key, chunk.hash));
+                        }
+                    } else {
+                        phys_ids.push_back(
+                            crypto::content_identifier(key, row.hash));
                     }
-                    referenced_content_identifiers.insert(identifier);
-                    if (remote_content_identifiers.contains(identifier)) {
+                    bool all_present = true;
+                    for (const auto& identifier : phys_ids) {
+                        if (referenced_content_identifiers.size() >=
+                                maximum_audited_content_object_count &&
+                            !referenced_content_identifiers.contains(
+                                identifier)) {
+                            return std::unexpected(Error{
+                                .code = ErrorCode::LimitExceeded,
+                                .detail =
+                                    "too many referenced content identifiers",
+                            });
+                        }
+                        referenced_content_identifiers.insert(identifier);
+                        if (!remote_content_identifiers.contains(identifier)) {
+                            all_present = false;
+                        }
+                    }
+                    if (all_present) {
                         result.content_identifiers.insert(hash_hex(row.hash));
                     }
                 }
@@ -328,6 +355,7 @@ ObserveResult observe(transport::Transport& storage,
             result.reachable_commit_ids.push_back(commit.id);
         }
         result.effective_tree = std::move(resolved->tree);
+        result.storage_manifest = std::move(resolved->storage);
         result.observed_height = resolved->height;
         result.marked_heads = std::move(loaded->marked_heads);
         result.marked_head_identifiers =

@@ -196,6 +196,7 @@ reconciliation::StorageState to_storage_state(history::StorageView& observed) {
         .marked_head_identifiers = std::move(observed.marked_head_identifiers),
         .logical_heads = std::move(observed.logical_heads),
         .ancestral_marked_heads = std::move(observed.ancestral_marked_heads),
+        .storage_manifest = std::move(observed.storage_manifest),
         .generation = observed.observed_height,
         .history_present = observed.history_present,
         .history_has_conflicts = observed.has_conflicts,
@@ -368,7 +369,8 @@ collect_reconciliation_input(
                 .commit_id = input.base_commit_id,
                 .ciphertext_id = input.base_ciphertext_id,
                 .epoch_id = (*persisted)->epoch_id,
-                .epoch_sequence = (*persisted)->epoch_sequence},
+                .epoch_sequence = (*persisted)->epoch_sequence,
+                .storage_manifest = (*persisted)->storage_manifest},
             history_storage::derive_remote_layout(key));
     }
     const auto& derived_trusted_markers = hints.trusted_marker_identifiers;

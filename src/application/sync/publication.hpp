@@ -51,7 +51,8 @@ prepare_commit(Snapshot tree,
                std::uint64_t observed_height,
                std::span<const std::string> logical_heads,
                std::int64_t created_at,
-               std::span<const std::uint8_t, crypto::KEY_SIZE> key);
+               std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+               history::StorageManifest storage = {});
 
 // Publishes only the encrypted commit object.
 PublishObjectResult

@@ -11,46 +11,98 @@
 #include <algorithm>
 #include <array>
 #include <blake3.h>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <monocypher.h>
 #include <system_error>
 #include <vector>
+#include <zstd.h>
 
 namespace kasumi::crypto {
-
 namespace {
 
-inline constexpr std::array<std::uint8_t, 8> format_magic{
+inline constexpr std::array<std::uint8_t, FILE_MAGIC_SIZE> format_magic_v2{
     'K', 'A', 'S', 'U', 'M', 'I', 2, 0};
-inline constexpr std::size_t header_ad_size =
-    format_magic.size() + NONCE_SIZE + sizeof(std::uint64_t);
-inline constexpr std::size_t chunk_ad_size =
-    header_ad_size + 2 * sizeof(std::uint64_t);
+inline constexpr std::array<std::uint8_t, FILE_MAGIC_SIZE> format_magic_v3{
+    'K', 'A', 'S', 'U', 'M', 'I', 3, 0};
+inline constexpr std::size_t header_ad_size_v2 =
+    FILE_MAGIC_SIZE + NONCE_SIZE + sizeof(std::uint64_t);
+inline constexpr std::size_t chunk_ad_size_v2 =
+    header_ad_size_v2 + 2 * sizeof(std::uint64_t);
+inline constexpr std::size_t header_ad_size_v3 =
+    FILE_MAGIC_SIZE + 1 + NONCE_SIZE + sizeof(std::uint64_t);
+inline constexpr std::size_t chunk_ad_size_v3 =
+    header_ad_size_v3 + 2 * sizeof(std::uint64_t) + CHUNK_PREFIX_SIZE;
 
-std::array<std::uint8_t, header_ad_size>
-make_header_ad(const std::uint8_t* base_nonce,
-               std::uint64_t plaintext_size) noexcept {
-    std::array<std::uint8_t, header_ad_size> result{};
-    std::copy(format_magic.begin(), format_magic.end(), result.begin());
+KeyPurpose key_purpose_for(FilePurpose purpose) noexcept {
+    switch (purpose) {
+        case FilePurpose::Content:
+            return KeyPurpose::Content;
+        case FilePurpose::History:
+            return KeyPurpose::History;
+        case FilePurpose::Pack:
+            return KeyPurpose::Pack;
+    }
+    return KeyPurpose::Content;
+}
+
+std::optional<std::uint64_t>
+encoded_file_size_v2(std::uint64_t plaintext_size) noexcept {
+    constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();
+    const auto chunks = plaintext_size / LEGACY_CHUNK_SIZE +
+                        (plaintext_size % LEGACY_CHUNK_SIZE != 0 ? 1 : 0);
+    if (plaintext_size > maximum - LEGACY_FILE_HEADER_SIZE) {
+        return std::nullopt;
+    }
+    const auto base = LEGACY_FILE_HEADER_SIZE + plaintext_size;
+    if (chunks > (maximum - base) / MAC_SIZE) {
+        return std::nullopt;
+    }
+    return base + chunks * MAC_SIZE;
+}
+
+std::array<std::uint8_t, header_ad_size_v3>
+make_header_ad_v3(FilePurpose purpose,
+                  const std::uint8_t* base_nonce,
+                  std::uint64_t plaintext_size) noexcept {
+    std::array<std::uint8_t, header_ad_size_v3> result{};
+    std::copy(format_magic_v3.begin(), format_magic_v3.end(), result.begin());
+    result[FILE_MAGIC_SIZE] = static_cast<std::uint8_t>(purpose);
     std::copy_n(base_nonce,
                 NONCE_SIZE,
                 result.begin() +
-                    static_cast<std::ptrdiff_t>(format_magic.size()));
+                    static_cast<std::ptrdiff_t>(FILE_MAGIC_SIZE + 1));
     wire::encode_le<std::uint64_t>(
-        plaintext_size, result.data() + format_magic.size() + NONCE_SIZE);
+        plaintext_size, result.data() + FILE_MAGIC_SIZE + 1 + NONCE_SIZE);
     return result;
 }
 
-std::array<std::uint8_t, chunk_ad_size>
-make_chunk_ad(const std::array<std::uint8_t, header_ad_size>& header,
-              std::uint64_t chunk_index,
-              std::uint64_t chunk_size) noexcept {
-    std::array<std::uint8_t, chunk_ad_size> result{};
+std::array<std::uint8_t, chunk_ad_size_v2>
+make_chunk_ad_v2(std::span<const std::uint8_t, header_ad_size_v2> header,
+                 std::uint64_t chunk_index,
+                 std::uint64_t chunk_size) noexcept {
+    std::array<std::uint8_t, chunk_ad_size_v2> result{};
     std::copy(header.begin(), header.end(), result.begin());
     wire::encode_le<std::uint64_t>(chunk_index, result.data() + header.size());
     wire::encode_le<std::uint64_t>(
         chunk_size, result.data() + header.size() + sizeof(chunk_index));
+    return result;
+}
+
+std::array<std::uint8_t, chunk_ad_size_v3>
+make_chunk_ad_v3(std::span<const std::uint8_t, header_ad_size_v3> header,
+                 std::uint64_t chunk_index,
+                 std::uint64_t plain_size,
+                 std::span<const std::uint8_t, CHUNK_PREFIX_SIZE> prefix) noexcept {
+    std::array<std::uint8_t, chunk_ad_size_v3> result{};
+    std::copy(header.begin(), header.end(), result.begin());
+    auto* ptr = result.data() + header.size();
+    wire::encode_le<std::uint64_t>(chunk_index, ptr);
+    ptr += sizeof(chunk_index);
+    wire::encode_le<std::uint64_t>(plain_size, ptr);
+    ptr += sizeof(plain_size);
+    std::copy(prefix.begin(), prefix.end(), ptr);
     return result;
 }
 
@@ -62,6 +114,7 @@ struct CryptoSession {
     std::vector<char> read_buffer;
     std::vector<std::uint8_t> buffer_a;
     std::vector<std::uint8_t> buffer_b;
+    std::vector<std::uint8_t> buffer_comp;
     platform::private_storage::PrivateOutputFile file;
     bool published{false};
 
@@ -70,10 +123,13 @@ struct CryptoSession {
         crypto_wipe(chunk_nonce.data(), chunk_nonce.size());
         crypto_wipe(header_mac.data(), header_mac.size());
         crypto_wipe(mac.data(), mac.size());
-        for (auto* buf : {&buffer_a, &buffer_b}) {
+        for (auto* buf : {&buffer_a, &buffer_b, &buffer_comp}) {
             if (!buf->empty()) {
                 crypto_wipe(buf->data(), buf->size());
             }
+        }
+        if (!read_buffer.empty()) {
+            crypto_wipe(read_buffer.data(), read_buffer.size());
         }
         if (!published && !file.published && !file.path.empty()) {
             static_cast<void>(
@@ -83,11 +139,15 @@ struct CryptoSession {
         }
     }
 
-    void resize_buffers(std::uint64_t total_size) {
+    void resize_v3_encrypt_buffers(std::uint64_t total_size) {
         const auto size = static_cast<std::size_t>(
             std::min<std::uint64_t>(CHUNK_SIZE, total_size));
         buffer_a.resize(size);
-        buffer_b.resize(size);
+        if (size > 0) {
+            const auto bound = ZSTD_compressBound(size);
+            buffer_b.resize(bound);
+            buffer_comp.resize(bound);
+        }
     }
 };
 
@@ -263,10 +323,7 @@ template <typename Fn>
 auto with_derived_key(std::span<const std::uint8_t, KEY_SIZE> master_key,
                       FilePurpose purpose,
                       Fn&& fn) {
-    auto key =
-        derive_key(master_key,
-                   purpose == FilePurpose::Content ? KeyPurpose::Content
-                                                   : KeyPurpose::History);
+    auto key = derive_key(master_key, key_purpose_for(purpose));
     secure_memory::WipeGuard key_guard{key};
     return fn(key);
 }
@@ -284,7 +341,7 @@ void derive_chunk_nonce(const std::uint8_t* base_nonce,
 
 bool header_mac_op(std::uint8_t* mac,
                    const std::uint8_t* base_nonce,
-                   std::span<const std::uint8_t, header_ad_size> header,
+                   std::span<const std::uint8_t> header,
                    const std::uint8_t* key,
                    bool lock) noexcept {
     std::array<std::uint8_t, NONCE_SIZE> header_nonce{};
@@ -315,6 +372,256 @@ bool header_mac_op(std::uint8_t* mac,
     return ok;
 }
 
+bool encrypt_v3_chunk(CryptoSession& session,
+                      const Key& key,
+                      std::span<const std::uint8_t, header_ad_size_v3> header,
+                      std::uint64_t chunk_index,
+                      std::span<const std::uint8_t> plain_chunk,
+                      std::array<std::uint8_t, CHUNK_PREFIX_SIZE>& prefix,
+                      std::uint32_t& wire_len) {
+    const std::uint8_t* payload_ptr = plain_chunk.data();
+    std::size_t payload_len = plain_chunk.size();
+    std::uint8_t flags = 0;
+    if (!plain_chunk.empty() && !session.buffer_comp.empty()) {
+        const auto compressed_size = ZSTD_compress(session.buffer_comp.data(),
+                                                   session.buffer_comp.size(),
+                                                   plain_chunk.data(),
+                                                   plain_chunk.size(),
+                                                   1);
+        if (!ZSTD_isError(compressed_size) &&
+            compressed_size + 32U < plain_chunk.size() &&
+            compressed_size <= std::numeric_limits<std::uint32_t>::max()) {
+            payload_ptr = session.buffer_comp.data();
+            payload_len = compressed_size;
+            flags = 1;
+        }
+    }
+    if (payload_len > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+    wire_len = static_cast<std::uint32_t>(payload_len);
+    prefix[0] = flags;
+    wire::encode_le<std::uint32_t>(wire_len, prefix.data() + 1);
+
+    derive_chunk_nonce(
+        session.base_nonce.data(), chunk_index, session.chunk_nonce.data());
+    const auto chunk_ad = make_chunk_ad_v3(
+        header, chunk_index, plain_chunk.size(), prefix);
+    if (session.buffer_b.size() < wire_len) {
+        session.buffer_b.resize(wire_len);
+    }
+    crypto_aead_lock(session.buffer_b.data(),
+                     session.mac.data(),
+                     key.data(),
+                     session.chunk_nonce.data(),
+                     chunk_ad.data(),
+                     chunk_ad.size(),
+                     payload_ptr,
+                     wire_len);
+    return true;
+}
+
+template <typename ReadFn, typename WriteFn, typename AtEofFn>
+bool decode_v2_stream(CryptoSession& session,
+                      const Key& key,
+                      std::uint64_t input_size,
+                      ReadFn&& read_exact,
+                      WriteFn&& write_exact,
+                      AtEofFn&& at_eof) {
+    std::array<std::uint8_t, header_ad_size_v2> header{};
+    std::copy(format_magic_v2.begin(), format_magic_v2.end(), header.begin());
+    if (!read_exact(header.data() + FILE_MAGIC_SIZE,
+                    header_ad_size_v2 - FILE_MAGIC_SIZE)) {
+        return false;
+    }
+
+    std::copy_n(
+        header.data() + FILE_MAGIC_SIZE, NONCE_SIZE, session.base_nonce.data());
+    const auto expected_size =
+        wire::decode_le<std::uint64_t>(header.data() + FILE_MAGIC_SIZE + NONCE_SIZE);
+
+    if (!read_exact(session.header_mac.data(), session.header_mac.size())) {
+        return false;
+    }
+    if (encoded_file_size_v2(expected_size) != input_size ||
+        !header_mac_op(session.header_mac.data(),
+                       session.base_nonce.data(),
+                       header,
+                       key.data(),
+                       false)) {
+        return false;
+    }
+
+    const auto buf_size = static_cast<std::size_t>(
+        std::min<std::uint64_t>(LEGACY_CHUNK_SIZE, expected_size));
+    session.buffer_a.resize(buf_size);
+    session.buffer_b.resize(buf_size);
+
+    std::uint64_t chunk_index = 0;
+    std::uint64_t total_decrypted = 0;
+    while (total_decrypted < expected_size) {
+        const auto chunk_size = static_cast<std::size_t>(
+            std::min<std::uint64_t>(LEGACY_CHUNK_SIZE,
+                                    expected_size - total_decrypted));
+        if (!read_exact(session.mac.data(), session.mac.size()) ||
+            !read_exact(session.buffer_a.data(), chunk_size)) {
+            return false;
+        }
+        derive_chunk_nonce(
+            session.base_nonce.data(), chunk_index, session.chunk_nonce.data());
+        const auto chunk_ad = make_chunk_ad_v2(header, chunk_index, chunk_size);
+        if (crypto_aead_unlock(session.buffer_b.data(),
+                               session.mac.data(),
+                               key.data(),
+                               session.chunk_nonce.data(),
+                               chunk_ad.data(),
+                               chunk_ad.size(),
+                               session.buffer_a.data(),
+                               chunk_size) != 0) {
+            return false;
+        }
+        if (!write_exact(session.buffer_b.data(), chunk_size)) {
+            return false;
+        }
+        total_decrypted += chunk_size;
+        ++chunk_index;
+    }
+    return at_eof();
+}
+
+template <typename ReadFn, typename WriteFn, typename AtEofFn>
+bool decode_v3_stream(CryptoSession& session,
+                      const Key& key,
+                      FilePurpose purpose,
+                      std::uint64_t input_size,
+                      ReadFn&& read_exact,
+                      WriteFn&& write_exact,
+                      AtEofFn&& at_eof) {
+    std::array<std::uint8_t, header_ad_size_v3> header{};
+    std::copy(format_magic_v3.begin(), format_magic_v3.end(), header.begin());
+    if (!read_exact(header.data() + FILE_MAGIC_SIZE,
+                    header_ad_size_v3 - FILE_MAGIC_SIZE)) {
+        return false;
+    }
+    if (header[FILE_MAGIC_SIZE] != static_cast<std::uint8_t>(purpose)) {
+        return false;
+    }
+    std::copy_n(header.data() + FILE_MAGIC_SIZE + 1,
+                NONCE_SIZE,
+                session.base_nonce.data());
+    const auto expected_size = wire::decode_le<std::uint64_t>(
+        header.data() + FILE_MAGIC_SIZE + 1 + NONCE_SIZE);
+    if (!read_exact(session.header_mac.data(), session.header_mac.size())) {
+        return false;
+    }
+
+    const auto max_wire_size = encoded_file_size(expected_size);
+    if (!max_wire_size || input_size < FILE_HEADER_SIZE ||
+        input_size > *max_wire_size ||
+        !header_mac_op(session.header_mac.data(),
+                       session.base_nonce.data(),
+                       header,
+                       key.data(),
+                       false)) {
+        return false;
+    }
+
+    std::uint64_t remaining_wire = input_size - FILE_HEADER_SIZE;
+    std::uint64_t chunk_index = 0;
+    std::uint64_t total_decrypted = 0;
+    while (total_decrypted < expected_size) {
+        const auto expected_plain_len = static_cast<std::size_t>(
+            std::min<std::uint64_t>(CHUNK_SIZE,
+                                    expected_size - total_decrypted));
+        if (remaining_wire < CHUNK_PREFIX_SIZE + MAC_SIZE) {
+            return false;
+        }
+        std::array<std::uint8_t, CHUNK_PREFIX_SIZE> prefix{};
+        if (!read_exact(prefix.data(), prefix.size()) ||
+            !read_exact(session.mac.data(), session.mac.size())) {
+            return false;
+        }
+        remaining_wire -= CHUNK_PREFIX_SIZE + MAC_SIZE;
+
+        const std::uint8_t flags = prefix[0];
+        const std::uint32_t wire_len =
+            wire::decode_le<std::uint32_t>(prefix.data() + 1);
+        if (flags > 1U || wire_len == 0U || wire_len > remaining_wire) {
+            return false;
+        }
+        const std::size_t max_chunk_wire =
+            flags == 1U ? ZSTD_compressBound(expected_plain_len)
+                        : expected_plain_len;
+        if ((flags == 0U && wire_len != expected_plain_len) ||
+            wire_len > max_chunk_wire) {
+            return false;
+        }
+
+        if (session.buffer_a.size() < wire_len) {
+            session.buffer_a.resize(wire_len);
+        }
+        if (!read_exact(session.buffer_a.data(), wire_len)) {
+            return false;
+        }
+        remaining_wire -= wire_len;
+
+        derive_chunk_nonce(
+            session.base_nonce.data(), chunk_index, session.chunk_nonce.data());
+        const auto chunk_ad = make_chunk_ad_v3(
+            header, chunk_index, expected_plain_len, prefix);
+
+        if (flags == 1U) {
+            if (session.buffer_comp.size() < wire_len) {
+                session.buffer_comp.resize(wire_len);
+            }
+            if (crypto_aead_unlock(session.buffer_comp.data(),
+                                   session.mac.data(),
+                                   key.data(),
+                                   session.chunk_nonce.data(),
+                                   chunk_ad.data(),
+                                   chunk_ad.size(),
+                                   session.buffer_a.data(),
+                                   wire_len) != 0) {
+                return false;
+            }
+            if (session.buffer_b.size() < expected_plain_len) {
+                session.buffer_b.resize(expected_plain_len);
+            }
+            const auto decompressed =
+                ZSTD_decompress(session.buffer_b.data(),
+                                expected_plain_len,
+                                session.buffer_comp.data(),
+                                wire_len);
+            if (ZSTD_isError(decompressed) ||
+                decompressed != expected_plain_len) {
+                return false;
+            }
+        } else {
+            if (session.buffer_b.size() < expected_plain_len) {
+                session.buffer_b.resize(expected_plain_len);
+            }
+            if (crypto_aead_unlock(session.buffer_b.data(),
+                                   session.mac.data(),
+                                   key.data(),
+                                   session.chunk_nonce.data(),
+                                   chunk_ad.data(),
+                                   chunk_ad.size(),
+                                   session.buffer_a.data(),
+                                   wire_len) != 0) {
+                return false;
+            }
+        }
+
+        if (!write_exact(session.buffer_b.data(), expected_plain_len)) {
+            return false;
+        }
+        total_decrypted += expected_plain_len;
+        ++chunk_index;
+    }
+
+    return remaining_wire == 0U && at_eof();
+}
+
 } // namespace
 
 std::optional<std::uint64_t>
@@ -326,10 +633,129 @@ encoded_file_size(std::uint64_t plaintext_size) noexcept {
         return std::nullopt;
     }
     const auto base = FILE_HEADER_SIZE + plaintext_size;
-    if (chunks > (maximum - base) / MAC_SIZE) {
+    constexpr std::uint64_t per_chunk_overhead = CHUNK_PREFIX_SIZE + MAC_SIZE;
+    if (chunks > (maximum - base) / per_chunk_overhead) {
         return std::nullopt;
     }
-    return base + chunks * MAC_SIZE;
+    return base + chunks * per_chunk_overhead;
+}
+
+std::optional<std::vector<std::uint8_t>>
+encrypt_bytes(std::span<const std::uint8_t> plaintext,
+              std::span<const std::uint8_t, KEY_SIZE> master_key,
+              FilePurpose purpose) {
+    return with_derived_key(
+        master_key,
+        purpose,
+        [&](const Key& key) -> std::optional<std::vector<std::uint8_t>> {
+            CryptoSession session;
+            if (!platform::random::fill_bytes(session.base_nonce)) {
+                return std::nullopt;
+            }
+            const auto header =
+                make_header_ad_v3(purpose, session.base_nonce.data(), plaintext.size());
+            header_mac_op(session.header_mac.data(),
+                          session.base_nonce.data(),
+                          header,
+                          key.data(),
+                          true);
+            session.resize_v3_encrypt_buffers(plaintext.size());
+
+            std::vector<std::uint8_t> output;
+            output.reserve(FILE_HEADER_SIZE + plaintext.size());
+            output.insert(output.end(), header.begin(), header.end());
+            output.insert(output.end(),
+                          session.header_mac.begin(),
+                          session.header_mac.end());
+
+            std::size_t offset = 0;
+            std::uint64_t chunk_index = 0;
+            while (offset < plaintext.size()) {
+                const auto chunk_size =
+                    std::min<std::size_t>(CHUNK_SIZE, plaintext.size() - offset);
+                std::array<std::uint8_t, CHUNK_PREFIX_SIZE> prefix{};
+                std::uint32_t wire_len = 0;
+                if (!encrypt_v3_chunk(session,
+                                      key,
+                                      header,
+                                      chunk_index,
+                                      plaintext.subspan(offset, chunk_size),
+                                      prefix,
+                                      wire_len)) {
+                    return std::nullopt;
+                }
+                output.insert(output.end(), prefix.begin(), prefix.end());
+                output.insert(
+                    output.end(), session.mac.begin(), session.mac.end());
+                output.insert(
+                    output.end(),
+                    session.buffer_b.data(),
+                    session.buffer_b.data() + wire_len);
+                offset += chunk_size;
+                ++chunk_index;
+            }
+            return output;
+        });
+}
+
+std::optional<std::vector<std::uint8_t>>
+decrypt_bytes(std::span<const std::uint8_t> ciphertext,
+              std::span<const std::uint8_t, KEY_SIZE> master_key,
+              FilePurpose purpose) {
+    if (ciphertext.size() < FILE_MAGIC_SIZE) {
+        return std::nullopt;
+    }
+    return with_derived_key(
+        master_key,
+        purpose,
+        [&](const Key& key) -> std::optional<std::vector<std::uint8_t>> {
+            CryptoSession session;
+            std::array<std::uint8_t, FILE_MAGIC_SIZE> magic{};
+            std::copy_n(ciphertext.data(), magic.size(), magic.begin());
+            std::size_t cursor = magic.size();
+            const auto read_exact = [&](std::uint8_t* dst, std::size_t count) {
+                if (count > ciphertext.size() - cursor) {
+                    return false;
+                }
+                if (count > 0) {
+                    std::memcpy(dst, ciphertext.data() + cursor, count);
+                    cursor += count;
+                }
+                return true;
+            };
+            std::vector<std::uint8_t> plaintext;
+            const auto write_exact = [&](const std::uint8_t* src,
+                                         std::size_t count) {
+                plaintext.insert(plaintext.end(), src, src + count);
+                return true;
+            };
+            const auto at_eof = [&]() { return cursor == ciphertext.size(); };
+
+            bool ok = false;
+            if (magic == format_magic_v3) {
+                ok = decode_v3_stream(session,
+                                      key,
+                                      purpose,
+                                      ciphertext.size(),
+                                      read_exact,
+                                      write_exact,
+                                      at_eof);
+            } else if (magic == format_magic_v2 && purpose != FilePurpose::Pack) {
+                ok = decode_v2_stream(session,
+                                      key,
+                                      ciphertext.size(),
+                                      read_exact,
+                                      write_exact,
+                                      at_eof);
+            }
+            if (!ok) {
+                if (!plaintext.empty()) {
+                    crypto_wipe(plaintext.data(), plaintext.size());
+                }
+                return std::nullopt;
+            }
+            return plaintext;
+        });
 }
 
 std::optional<EncryptionResult>
@@ -366,15 +792,15 @@ encrypt_file_with_hashes(const std::filesystem::path& input_path,
                                            random_result.error());
                 }
 
-                const auto header =
-                    make_header_ad(session.base_nonce.data(), plaintext_size);
+                const auto header = make_header_ad_v3(
+                    purpose, session.base_nonce.data(), plaintext_size);
                 header_mac_op(session.header_mac.data(),
                               session.base_nonce.data(),
                               header,
                               key.data(),
                               true);
 
-                session.resize_buffers(plaintext_size);
+                session.resize_v3_encrypt_buffers(plaintext_size);
                 if (!reserve_temp_output(
                         target_path, session.file, error_detail)) {
                     return std::nullopt;
@@ -425,22 +851,23 @@ encrypt_file_with_hashes(const std::filesystem::path& input_path,
                     blake3_hasher_update(
                         &plaintext_hash, session.buffer_a.data(), chunk_size);
 
-                    derive_chunk_nonce(session.base_nonce.data(),
-                                       chunk_index,
-                                       session.chunk_nonce.data());
-                    const auto chunk_ad =
-                        make_chunk_ad(header, chunk_index, chunk_size);
-                    crypto_aead_lock(session.buffer_b.data(),
-                                     session.mac.data(),
-                                     key.data(),
-                                     session.chunk_nonce.data(),
-                                     chunk_ad.data(),
-                                     chunk_ad.size(),
-                                     session.buffer_a.data(),
-                                     chunk_size);
+                    std::array<std::uint8_t, CHUNK_PREFIX_SIZE> prefix{};
+                    std::uint32_t wire_len = 0;
+                    if (!encrypt_v3_chunk(
+                            session,
+                            key,
+                            header,
+                            chunk_index,
+                            {session.buffer_a.data(), chunk_size},
+                            prefix,
+                            wire_len)) {
+                        return fail_crypto(error_detail,
+                                           "encrypting chunk failed");
+                    }
 
-                    if (!write(session.mac.data(), session.mac.size()) ||
-                        !write(session.buffer_b.data(), chunk_size)) {
+                    if (!write(prefix.data(), prefix.size()) ||
+                        !write(session.mac.data(), session.mac.size()) ||
+                        !write(session.buffer_b.data(), wire_len)) {
                         return fail_crypto(error_detail,
                                            "writing encrypted chunk failed");
                     }
@@ -512,87 +939,58 @@ bool decrypt_file(const std::filesystem::path& input_path,
             }
             auto& [input, input_size] = *opened;
 
-            std::array<std::uint8_t, header_ad_size> header{};
-            input.read(reinterpret_cast<char*>(header.data()),
-                       static_cast<std::streamsize>(header.size()));
-            if (input.gcount() != static_cast<std::streamsize>(header.size()) ||
-                !std::equal(
-                    format_magic.begin(), format_magic.end(), header.begin())) {
+            std::array<std::uint8_t, FILE_MAGIC_SIZE> magic{};
+            input.read(reinterpret_cast<char*>(magic.data()),
+                       static_cast<std::streamsize>(magic.size()));
+            if (input.gcount() != static_cast<std::streamsize>(magic.size())) {
                 return false;
             }
 
-            std::copy_n(header.data() + format_magic.size(),
-                        session.base_nonce.size(),
-                        session.base_nonce.data());
-            const auto expected_size = wire::decode_le<std::uint64_t>(
-                header.data() + format_magic.size() + NONCE_SIZE);
-
-            input.read(reinterpret_cast<char*>(session.header_mac.data()),
-                       static_cast<std::streamsize>(session.header_mac.size()));
-            if (input.gcount() !=
-                    static_cast<std::streamsize>(session.header_mac.size()) ||
-                encoded_file_size(expected_size) != input_size ||
-                !header_mac_op(session.header_mac.data(),
-                               session.base_nonce.data(),
-                               header,
-                               key.data(),
-                               false)) {
-                return false;
-            }
-
-            session.resize_buffers(expected_size);
             if (!reserve_temp_output(target_path, session.file, nullptr)) {
                 return false;
             }
 
-            std::uint64_t chunk_index = 0;
-            std::uint64_t total_decrypted = 0;
-
-            while (total_decrypted < expected_size) {
-                const auto chunk_size =
-                    static_cast<std::size_t>(std::min<std::uint64_t>(
-                        CHUNK_SIZE, expected_size - total_decrypted));
-
-                input.read(reinterpret_cast<char*>(session.mac.data()),
-                           static_cast<std::streamsize>(session.mac.size()));
-                if (input.gcount() !=
-                    static_cast<std::streamsize>(session.mac.size())) {
-                    return false;
+            const auto read_exact = [&](std::uint8_t* dst, std::size_t count) {
+                if (count == 0) {
+                    return true;
                 }
+                input.read(reinterpret_cast<char*>(dst),
+                           static_cast<std::streamsize>(count));
+                return input.gcount() == static_cast<std::streamsize>(count) &&
+                       !input.bad();
+            };
+            const auto write_exact = [&](const std::uint8_t* src,
+                                         std::size_t count) {
+                return count == 0 ||
+                       platform::private_storage::write_private_file(
+                           session.file, src, count);
+            };
+            const auto at_eof = [&]() {
+                char trailing = 0;
+                input.read(&trailing, 1);
+                return input.gcount() == 0 && !input.bad();
+            };
 
-                input.read(reinterpret_cast<char*>(session.buffer_a.data()),
-                           static_cast<std::streamsize>(chunk_size));
-                if (input.gcount() !=
-                    static_cast<std::streamsize>(chunk_size)) {
-                    return false;
-                }
-
-                derive_chunk_nonce(session.base_nonce.data(),
-                                   chunk_index,
-                                   session.chunk_nonce.data());
-                const auto chunk_ad =
-                    make_chunk_ad(header, chunk_index, chunk_size);
-
-                if (crypto_aead_unlock(session.buffer_b.data(),
-                                       session.mac.data(),
-                                       key.data(),
-                                       session.chunk_nonce.data(),
-                                       chunk_ad.data(),
-                                       chunk_ad.size(),
-                                       session.buffer_a.data(),
-                                       chunk_size) != 0) {
-                    return false;
-                }
-
-                if (!platform::private_storage::write_private_file(
-                        session.file, session.buffer_b.data(), chunk_size)) {
-                    return false;
-                }
-
-                total_decrypted += chunk_size;
-                ++chunk_index;
+            bool ok = false;
+            if (magic == format_magic_v3) {
+                ok = decode_v3_stream(session,
+                                      key,
+                                      purpose,
+                                      input_size,
+                                      read_exact,
+                                      write_exact,
+                                      at_eof);
+            } else if (magic == format_magic_v2 && purpose != FilePurpose::Pack) {
+                ok = decode_v2_stream(session,
+                                      key,
+                                      input_size,
+                                      read_exact,
+                                      write_exact,
+                                      at_eof);
             }
-
+            if (!ok) {
+                return false;
+            }
             return close_and_publish_temp(input, session, target_path, nullptr);
         } catch (...) {
             return false;

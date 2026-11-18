@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(kasumi VERSION 0.12.0 LANGUAGES C CXX)
+project(kasumi VERSION 0.14.0 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 23)
@@ -347,6 +347,24 @@ fetchcontent_declare(
 )
 fetchcontent_makeavailable(blake3)
 
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "" FORCE)
+set(ZSTD_MULTITHREAD_SUPPORT OFF CACHE BOOL "" FORCE)
+fetchcontent_declare(
+    zstd
+    GIT_REPOSITORY https://github.com/facebook/zstd.git
+    GIT_TAG f8745da6ff1ad1e7bab384bd1f9d742439278e99
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR build/cmake
+    EXCLUDE_FROM_ALL
+    SYSTEM
+)
+fetchcontent_makeavailable(zstd)
+
 fetchcontent_declare(
     sqlite_amalgamation
     URL https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip
@@ -462,6 +480,7 @@ add_library(kasumi_crypto STATIC
     src/crypto/content.cpp
     src/crypto/file_crypto.cpp
     src/crypto/key_derivation.cpp
+    src/crypto/pack.cpp
     src/crypto/physical_hash.cpp
     src/crypto/secure_memory.cpp
 )
@@ -470,6 +489,8 @@ target_include_directories(
     kasumi_crypto
     PUBLIC
     include
+    PRIVATE
+    ${zstd_SOURCE_DIR}/lib
 )
 
 target_link_libraries(
@@ -479,6 +500,7 @@ target_link_libraries(
     PRIVATE
     kasumi_platform
     blake3
+    libzstd_static
     monocypher
     kasumi_warnings
     kasumi_release_optimizations

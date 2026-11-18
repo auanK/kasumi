@@ -79,7 +79,8 @@ execute(const runtime::RuntimeData& runtime_data,
         const reconciliation::Input& observed_input,
         const reconciliation::Result& reconciliation_result,
         observation::LocalObservationSession* session = nullptr,
-        StagedExecutionHandoff* staged_handoff = nullptr);
+        StagedExecutionHandoff* staged_handoff = nullptr,
+        bool enable_micro_packs = false);
 
 // Recovers an interrupted transaction, if any.
 std::expected<RecoveryResult, Error>

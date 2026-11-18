@@ -10,6 +10,8 @@
 #include "application/observation/state.hpp"
 #include "core/maintenance.hpp"
 #include "crypto/content.hpp"
+#include "crypto/key_derivation.hpp"
+#include "crypto/pack.hpp"
 #include "platform/cancellation.hpp"
 #include "platform/clock.hpp"
 #include "platform/path.hpp"
@@ -18,6 +20,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <iostream>
@@ -29,6 +32,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -102,37 +106,42 @@ std::string path_detail(const std::vector<std::filesystem::path>& paths) {
            ')';
 }
 
+struct PhysicalAuditUnit {
+    std::string remote_id;
+    std::string plaintext_hash_hex;
+    std::optional<std::uint64_t> expected_size;
+    bool is_pack = false;
+    std::once_flag once;
+    std::expected<AuditState, Error> outcome{AuditState::Healthy};
+};
+
 std::expected<AuditState, Error>
-audit_object(transport::Transport& storage,
-             KeySpan key,
-             const kasumi::maintenance::ObjectReference& reference,
-             const platform::Workspace& workspace,
-             std::size_t index) {
-    const auto plaintext_hash = hash_from_hex(reference.identifier);
-    if (!plaintext_hash) {
-        return std::unexpected(make_error(ErrorCode::IntegrityFailure,
-                                          "invalid content identifier"));
-    }
-    const auto remote_identifier =
-        crypto::content_identifier(key, *plaintext_hash);
-    auto audited = history_storage::audit_content_object(storage,
-                                                         key,
-                                                         remote_identifier,
-                                                         reference.identifier,
-                                                         reference.size,
-                                                         workspace.root,
-                                                         index);
+audit_physical_unit(transport::Transport& storage,
+                    KeySpan key,
+                    const PhysicalAuditUnit& unit,
+                    std::string_view logical_identifier,
+                    const platform::Workspace& workspace,
+                    std::size_t sequence) {
+    auto audited = history_storage::audit_content_object(
+        storage,
+        key,
+        unit.remote_id,
+        unit.plaintext_hash_hex,
+        unit.expected_size,
+        workspace.root,
+        sequence,
+        unit.is_pack);
     if (!audited) {
         const auto code =
             audited.error().code == history_storage::ErrorCode::TransportFailure
                 ? ErrorCode::TransportFailure
                 : ErrorCode::WorkspaceFailure;
-        return std::unexpected(
-            make_error(code,
-                       audited.error().detail,
-                       code == ErrorCode::TransportFailure
-                           ? std::optional<std::string>{reference.identifier}
-                           : std::nullopt));
+        return std::unexpected(make_error(
+            code,
+            audited.error().detail,
+            code == ErrorCode::TransportFailure
+                ? std::optional<std::string>{std::string{logical_identifier}}
+                : std::nullopt));
     }
     if (audited->state == history_storage::ContentObjectState::Missing) {
         return AuditState::Missing;
@@ -141,6 +150,34 @@ audit_object(transport::Transport& storage,
         return AuditState::Corrupt;
     }
     return AuditState::Healthy;
+}
+
+std::expected<AuditState, Error>
+audit_object(transport::Transport& storage,
+             KeySpan key,
+             const kasumi::maintenance::ObjectReference& reference,
+             std::span<PhysicalAuditUnit* const> units,
+             std::span<const std::size_t> unit_sequences,
+             const platform::Workspace& workspace) {
+    AuditState combined = AuditState::Healthy;
+    for (std::size_t i = 0; i < units.size(); ++i) {
+        PhysicalAuditUnit* unit = units[i];
+        const std::size_t seq = unit_sequences[i];
+        std::call_once(unit->once, [&]() {
+            unit->outcome = audit_physical_unit(
+                storage, key, *unit, reference.identifier, workspace, seq);
+        });
+        if (!unit->outcome) {
+            return std::unexpected(unit->outcome.error());
+        }
+        if (*unit->outcome == AuditState::Corrupt) {
+            return AuditState::Corrupt;
+        }
+        if (*unit->outcome == AuditState::Missing) {
+            combined = AuditState::Missing;
+        }
+    }
+    return combined;
 }
 
 } // namespace
@@ -291,6 +328,56 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                 return fsck_result;
             }
 
+            std::deque<PhysicalAuditUnit> physical_units;
+            std::unordered_map<std::string, std::size_t> unit_index_by_id;
+            std::vector<std::vector<std::size_t>> ref_unit_indices(total_objects);
+
+            for (std::size_t i = 0; i < total_objects; ++i) {
+                const auto& ref = inventory->referenced_objects[i];
+                const auto logical_hash = hash_from_hex(ref.identifier);
+                if (!logical_hash) {
+                    return std::unexpected(
+                        make_error(ErrorCode::IntegrityFailure,
+                                   "invalid content identifier"));
+                }
+                const auto add_unit = [&](std::string remote_id,
+                                          std::string plaintext_hex,
+                                          std::optional<std::uint64_t> exp_size,
+                                          bool is_pack) {
+                    auto [it, inserted] = unit_index_by_id.try_emplace(
+                        remote_id, physical_units.size());
+                    if (inserted) {
+                        auto& added = physical_units.emplace_back();
+                        added.remote_id = std::move(remote_id);
+                        added.plaintext_hash_hex = std::move(plaintext_hex);
+                        added.expected_size = exp_size;
+                        added.is_pack = is_pack;
+                    }
+                    ref_unit_indices[i].push_back(it->second);
+                };
+                if (const auto* packed = history::find_packed_blob(
+                        storage_state.storage_manifest, *logical_hash)) {
+                    add_unit(crypto::pack_identifier(key, packed->pack_hash),
+                             hash_hex(packed->pack_hash),
+                             std::nullopt,
+                             true);
+                } else if (const auto* chunked = history::find_chunked_file(
+                               storage_state.storage_manifest,
+                               *logical_hash)) {
+                    for (const auto& chunk : chunked->chunks) {
+                        add_unit(crypto::content_identifier(key, chunk.hash),
+                                 hash_hex(chunk.hash),
+                                 chunk.size,
+                                 false);
+                    }
+                } else {
+                    add_unit(crypto::content_identifier(key, *logical_hash),
+                             ref.identifier,
+                             ref.size,
+                             false);
+                }
+            }
+
             std::mutex state_mutex;
             std::atomic<bool> stop_requested{false};
             std::atomic<bool> stop_event_notified{false};
@@ -351,12 +438,19 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                                     std::memory_order_acquire)) {
                                 return;
                             }
+                            const auto& unit_idxs = ref_unit_indices[index];
+                            std::vector<PhysicalAuditUnit*> unit_ptrs;
+                            unit_ptrs.reserve(unit_idxs.size());
+                            for (const auto u : unit_idxs) {
+                                unit_ptrs.push_back(&physical_units[u]);
+                            }
                             auto audited = audit_object(
                                 storage,
                                 key,
                                 inventory->referenced_objects[index],
-                                *workspace,
-                                index);
+                                unit_ptrs,
+                                unit_idxs,
+                                *workspace);
                             if (!audited) {
                                 record_hard_failure(index,
                                                     std::move(audited.error()));

@@ -62,6 +62,8 @@ struct StorageView {
     std::vector<std::string> marked_heads;
     // Physical identifiers of observed markers.
     std::vector<std::string> marked_head_identifiers;
+    // Resolved physical packing/chunking layout aligned with effective_tree.
+    kasumi::history::StorageManifest storage_manifest;
     // Remaining heads after topology validation.
     std::vector<std::string> logical_heads;
     // Markers pointing to ancestral commits.

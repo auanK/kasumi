@@ -69,13 +69,13 @@ std::optional<HeadReference> parse_marker_object(const RemoteLayout& layout,
 
 std::string commit_object(const RemoteLayout& layout,
                           const HeadReference& reference) {
-    return layout.commits_prefix + reference.commit_id + "/" +
+    return layout.commits_prefix + reference.commit_id + "_" +
            reference.ciphertext_id;
 }
 
 std::optional<HeadReference> parse_commit_object(const RemoteLayout& layout,
                                                  std::string_view identifier) {
-    return parse_head_reference(identifier, layout.commits_prefix, '/');
+    return parse_head_reference(identifier, layout.commits_prefix, '_');
 }
 
 std::string epoch_object(const RemoteLayout& layout,

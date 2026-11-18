@@ -293,7 +293,9 @@ MutationResult verify_upload_batch_individually(
                 object.plaintext_size,
                 workspace,
                 object.operation_indices.front(),
-                object.ciphertext_sha256);
+                object.ciphertext_sha256,
+                object.is_pack,
+                index);
             if (!result) {
                 errors[index] = std::move(result.error());
             }

@@ -71,7 +71,8 @@ audit_content_object(transport::Transport& storage,
                      std::optional<std::string_view> expected_plaintext_hash,
                      std::optional<std::uint64_t> expected_size,
                      const std::filesystem::path& workspace,
-                     std::size_t sequence);
+                     std::size_t sequence,
+                     bool expect_pack = false);
 
 // Audits referenced and orphan objects without removing them.
 ContentReachabilityResult inventory_content_reachability(

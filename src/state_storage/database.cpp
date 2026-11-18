@@ -572,6 +572,34 @@ std::optional<std::uint64_t> parse_canonical_u64(std::string_view value) {
                : std::nullopt;
 }
 
+std::string encode_lowercase_hex(std::span<const std::uint8_t> bytes) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string out;
+    out.resize(bytes.size() * 2);
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+        out[2 * i] = digits[(bytes[i] >> 4) & 0x0fU];
+        out[2 * i + 1] = digits[bytes[i] & 0x0fU];
+    }
+    return out;
+}
+
+std::optional<std::vector<std::uint8_t>>
+decode_lowercase_hex(std::string_view text) {
+    if (text.size() % 2 != 0 || !kasumi::is_lowercase_hex(text)) {
+        return std::nullopt;
+    }
+    const auto nibble = [](char ch) noexcept -> std::uint8_t {
+        return ch >= 'a' ? static_cast<std::uint8_t>(ch - 'a' + 10)
+                         : static_cast<std::uint8_t>(ch - '0');
+    };
+    std::vector<std::uint8_t> out(text.size() / 2);
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        out[i] = static_cast<std::uint8_t>((nibble(text[2 * i]) << 4) |
+                                           nibble(text[2 * i + 1]));
+    }
+    return out;
+}
+
 bool valid_optional_id(std::string_view id) {
     return id.empty() || history::valid_commit_id(id);
 }
@@ -691,6 +719,7 @@ load_state(const std::filesystem::path& database_path) {
         std::string ciphertext_id;
         std::string epoch_id;
         std::string epoch_sequence;
+        std::string storage_manifest_hex;
         std::size_t metadata_count = 0;
         const std::pair<std::string_view, std::string*> fields[]{
             {"generation", &generation},
@@ -698,6 +727,7 @@ load_state(const std::filesystem::path& database_path) {
             {"ciphertext_id", &ciphertext_id},
             {"epoch_id", &epoch_id},
             {"epoch_sequence", &epoch_sequence},
+            {"storage_manifest", &storage_manifest_hex},
         };
         while (step_stmt(metadata)) {
             if (sqlite::is_null(metadata, 0) || sqlite::is_null(metadata, 1)) {
@@ -766,6 +796,19 @@ load_state(const std::filesystem::path& database_path) {
         if (!valid_snapshot(*tree, false)) {
             return std::unexpected("state.db state is invalid");
         }
+        history::StorageManifest manifest;
+        if (!storage_manifest_hex.empty()) {
+            auto decoded = decode_lowercase_hex(storage_manifest_hex);
+            if (!decoded) {
+                return std::unexpected("state.db storage_manifest is invalid");
+            }
+            auto parsed =
+                history::deserialize_storage_manifest(*decoded, *tree);
+            if (!parsed || parsed->empty()) {
+                return std::unexpected("state.db storage_manifest is invalid");
+            }
+            manifest = std::move(*parsed);
+        }
         require(sqlite::commit(*transaction));
         return StoredState{.tree = std::move(*tree),
                            .height = *height,
@@ -773,7 +816,8 @@ load_state(const std::filesystem::path& database_path) {
                            .ciphertext_id = std::move(ciphertext_id),
                            .epoch_id = std::move(epoch_id),
                            .epoch_sequence = parsed_epoch_sequence,
-                           .pending_materializations = std::move(pending)};
+                           .pending_materializations = std::move(pending),
+                           .storage_manifest = std::move(manifest)};
     } catch (const std::exception& exception) {
         return std::unexpected(std::string{"could not load state.db: "} +
                                exception.what());
@@ -783,6 +827,7 @@ load_state(const std::filesystem::path& database_path) {
 bool save_state(const std::filesystem::path& database_path,
                 const StoredState& state) {
     if (!valid_snapshot(state.tree, false) ||
+        !history::valid_storage_manifest(state.storage_manifest, state.tree) ||
         !valid_pending_materializations(state.tree,
                                         state.pending_materializations) ||
         !valid_state_metadata(state.height,
@@ -791,6 +836,15 @@ bool save_state(const std::filesystem::path& database_path,
                               state.epoch_id,
                               state.epoch_sequence)) {
         return false;
+    }
+    std::string encoded_manifest_hex;
+    if (!state.storage_manifest.empty()) {
+        auto encoded_manifest =
+            history::serialize_storage_manifest(state.storage_manifest);
+        if (!encoded_manifest) {
+            return false;
+        }
+        encoded_manifest_hex = encode_lowercase_hex(*encoded_manifest);
     }
     try {
         auto opened = detail::open_state_database_readwrite(database_path);
@@ -824,6 +878,9 @@ bool save_state(const std::filesystem::path& database_path,
             exec_stmt(upsert_meta,
                       "epoch_sequence",
                       std::to_string(state.epoch_sequence));
+        }
+        if (!encoded_manifest_hex.empty()) {
+            exec_stmt(upsert_meta, "storage_manifest", encoded_manifest_hex);
         }
         require(sqlite::commit(*transaction));
         return protect_wal_sidecars(database_path);

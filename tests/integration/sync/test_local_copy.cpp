@@ -2360,7 +2360,8 @@ void run_controlled_copy_reproduction(std::size_t count,
               kasumi::test::snapshot_tree(receiver.local));
     EXPECT_EQ(receiver.counters.content_gets, 0U);
     EXPECT_EQ(receiver.counters.content_puts, 0U);
-    EXPECT_EQ(receiver.counters.content_presences, 2U * count);
+    const std::size_t expected_objects = count >= 16U ? 1U : count;
+    EXPECT_EQ(receiver.counters.content_presences, 2U * expected_objects);
     EXPECT_EQ(receiver.counters.content_copies, 0U);
 }
 

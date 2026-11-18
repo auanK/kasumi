@@ -148,7 +148,9 @@ std::expected<void, MutationError> verify_uploaded_content_object(
     std::uint64_t expected_size,
     const platform::Workspace& workspace,
     std::size_t operation_index,
-    std::string_view local_physical_hash);
+    std::string_view local_physical_hash,
+    bool is_pack = false,
+    std::optional<std::size_t> scratch_slot = std::nullopt);
 
 struct PreparedUploadCiphertext {
     std::uint64_t plaintext_size = 0;
