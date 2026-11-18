@@ -6,6 +6,7 @@
 #include "application/sync/mutation.hpp"
 #include "application/sync/mutation_batch.hpp"
 #include "application/sync/mutation_fault_test.hpp"
+#include "application/sync/publication.hpp"
 #include "application/sync/reobservation.hpp"
 #include "application/use_cases/context.hpp"
 #include "core/hasher.hpp"
@@ -57,6 +58,8 @@ struct ContentWindowProbe {
     std::size_t content_put_started = 0;
     std::size_t content_put_finished = 0;
     std::size_t content_get_count = 0;
+    std::vector<std::size_t> content_get_batches;
+    std::vector<std::size_t> content_get_parallelism;
     std::size_t active = 0;
     std::size_t peak_active = 0;
     // Test-only count of physical hash calls for content objects. It does not
@@ -485,6 +488,10 @@ kasumi::transport::PresenceResult recording_presence(void* context,
 
 kasumi::transport::Result
 recording_get_batch(void* context, const kasumi::transport::GetBatch& batch) {
+    if (auto* probe = recording_state(context)->probe) {
+        probe->content_get_batches.push_back(batch.identifiers.size());
+        probe->content_get_parallelism.push_back(batch.max_parallel_transfers);
+    }
     for (const auto& id : batch.identifiers) {
         if (auto fetched =
                 recording_get(context, id, batch.destination_root / id);
@@ -1595,6 +1602,110 @@ TEST(SyncContentBatchTest, FastCdcMultiWindowUploadStagesAndCleansUpAllWindows) 
     ASSERT_TRUE(sync_once());
     EXPECT_EQ(kasumi::test::read_binary(second_local / "a.bin"), data_a);
     EXPECT_EQ(kasumi::test::read_binary(second_local / "b.bin"), data_b);
+}
+
+TEST(SyncContentBatchTest,
+     FastCdcDownloadBoundsScratchAndSharesVerifiedSlices) {
+    auto concurrency = kasumi::test::scoped_environment_variable(
+        "KASUMI_CONTENT_CONCURRENCY", "4");
+    auto fixture = make_fixture("fastcdc-download-windows");
+    ContentWindowProbe probe;
+    attach_probe(*fixture, probe);
+    fixture->storage.storage.get_batch = recording_get_batch;
+
+    constexpr std::size_t chunk_size = 128 * 1024U;
+    constexpr std::size_t unique_chunks = 68;
+    kasumi::history::ChunkedFileEntry first;
+    std::string first_contents;
+    const auto plaintext = fixture->workspace->root / "chunk.source";
+    const auto encrypted = fixture->workspace->root / "chunk.enc";
+    for (std::size_t i = 0; i < unique_chunks; ++i) {
+        const std::string chunk(chunk_size, static_cast<char>(i));
+        const auto hash = kasumi::hasher::hash_string(chunk);
+        first.chunks.push_back({.hash = hash, .size = chunk_size});
+        first_contents += chunk;
+        kasumi::test::write_text(plaintext, chunk);
+        ASSERT_TRUE(
+            kasumi::crypto::encrypt_file(plaintext, encrypted, fixture->key));
+        ASSERT_TRUE(kasumi::transport::put(
+            fixture->base,
+            encrypted,
+            kasumi::crypto::content_identifier(fixture->key, hash)));
+        ASSERT_TRUE(std::filesystem::remove(encrypted));
+    }
+    first.chunks.push_back(first.chunks.front());
+    first_contents.append(chunk_size, '\0');
+    first.file_hash = kasumi::hasher::hash_string(first_contents);
+    first.file_size = first_contents.size();
+
+    const auto second_contents =
+        first_contents.substr(chunk_size, 2 * chunk_size);
+    kasumi::history::ChunkedFileEntry second{
+        .file_hash = kasumi::hasher::hash_string(second_contents),
+        .file_size = second_contents.size(),
+        .chunks = {first.chunks[1], first.chunks[2]},
+    };
+    kasumi::Snapshot tree{
+        .rows = {
+            {.path = "", .is_directory = true},
+            {.path = "a.bin", .hash = first.file_hash, .size = first.file_size},
+            {.path = "b.bin",
+             .hash = second.file_hash,
+             .size = second.file_size}}};
+    kasumi::finalize_snapshot(tree);
+    kasumi::history::StorageManifest manifest{
+        .packed_blobs = {},
+        .chunked_files = {std::move(first), std::move(second)}};
+    std::ranges::sort(manifest.chunked_files,
+                      {},
+                      &kasumi::history::ChunkedFileEntry::file_hash);
+    const auto prepared = sync::publication::prepare_commit(
+        std::move(tree), false, 0, {}, 1, fixture->key, std::move(manifest));
+    ASSERT_TRUE(prepared) << prepared.error().detail;
+    ASSERT_TRUE(sync::publication::publish_commit(
+        fixture->base, fixture->key, *prepared, fixture->workspace->root));
+
+    auto input = kasumi::application::observation::collect_reconciliation_input(
+        runtime_data(*fixture), fixture->storage, fixture->key, false);
+    ASSERT_TRUE(input) << input.error().detail;
+    auto result = kasumi::reconciliation::reconcile(*input);
+    ASSERT_TRUE(result) << result.error().detail;
+    std::size_t download_windows = 0;
+    namespace fault = kasumi::application::sync::mutation_fault_test;
+    fault::set_hook([&](std::string_view point, const auto& path) {
+        if (point == "fastcdc_chunks_ready") {
+            ++download_windows;
+            EXPECT_TRUE(
+                std::filesystem::is_empty(path.parent_path() / "chunk-dl"));
+            const auto chunks = std::ranges::count_if(
+                std::filesystem::directory_iterator(path),
+                [](const auto& entry) {
+                    return entry.path().extension() == ".chunk";
+                });
+            EXPECT_LE(chunks, 64);
+        } else if (point == "fastcdc_file_ready") {
+            for (const auto& entry :
+                 std::filesystem::directory_iterator(path.parent_path())) {
+                EXPECT_NE(entry.path().extension(), ".chunk");
+            }
+        }
+    });
+    const auto downloaded = execute_with(*fixture, *input, *result);
+    fault::clear_hook();
+    ASSERT_TRUE(downloaded) << downloaded.error().detail;
+    EXPECT_EQ(kasumi::test::read_text(fixture->local / "a.bin"),
+              first_contents);
+    EXPECT_EQ(kasumi::test::read_text(fixture->local / "b.bin"),
+              second_contents);
+    EXPECT_EQ(probe.content_get_count, unique_chunks);
+    EXPECT_GE(download_windows, 3U);
+    ASSERT_GE(probe.content_get_batches.size(), 2U);
+    for (const auto n : probe.content_get_batches) {
+        EXPECT_LE(n, 64U);
+    }
+    for (const auto transfers : probe.content_get_parallelism) {
+        EXPECT_EQ(transfers, 4U);
+    }
 }
 
 } // namespace
