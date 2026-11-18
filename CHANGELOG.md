@@ -17,6 +17,10 @@
 - Hardened transport, platform vault (`dlopen` root/permission checks and D-Bus reply validation), SQLite statement lifecycles, manifest deserialization bounds, and TOCTOU `FileIdentity` checks across FastCDC slice reads and private temporary reassembly files.
 - Removed legacy format compatibility paths (`KASUMI\x02\x00` stream decoding, `KCOM` v2 commits, transaction journal format 9, and `config.toml` profiles omitting `key_storage`).
 
+### Fixed
+
+- Fixed timestamp conversion on Windows builds using libc++ so sync can restore file and directory modification times.
+
 ### Upgrade Notes
 
 - `0.14.0` uses Protocol v3 remote objects (`KASUMI\x03\x00`), `KPAK\x01` Micro-Packs, `KCOM` v3 commits, flat remote commit paths (`<commit-id>_<ciphertext-id>`), transaction journal format 10, and explicit `key_storage` entries in `config.toml`, without backward-compatibility fallbacks for earlier pre-1.0 formats. Use the same release on all clients and follow [Upgrading Kasumi](docs/best-practices.md#upgrading-kasumi).
