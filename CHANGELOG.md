@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.15.0]
+
+### Added
+
+- Show live, single-line terminal progress for synchronization, planning, integrity checks, garbage collection, remote inspection, and update downloads. Redirected output keeps readable stage lines.
+- Report physical content bytes and object counts for uploads and downloads alongside the logical sync totals. Include bytes reused through FastCDC seeds and deduplication.
+- Report scanner discovery, cache hits and hashing, plus staging, transfer, verification, installation, and reobservation phases during sync.
+
+### Changed
+
+- Measure transfers using rclone job statistics and streamed local copies. Cancel active rclone jobs on Ctrl+C and preserve batched copies and the no-op sync fast path.
+
+### Upgrade Notes
+
+- `v0.15.0` uses the same Protocol v3 vault format, flat commit layout, transaction journal v10, and profile configuration as `v0.14.2`.
+
 ## [0.14.2]
 
 ### Fixed
