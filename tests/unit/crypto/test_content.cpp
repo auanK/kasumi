@@ -1445,4 +1445,101 @@ TEST(CryptoPackTest, FastCdcReusesMajorityOfChunksAfterSmallMidFileEdit) {
     EXPECT_EQ(*plain_slice_hash, first_chunk.hash);
 }
 
+TEST(CryptoPackTest, ZstdCompressesRepetitiveAndBypassesIncompressibleStreams) {
+    auto workspace = kasumi::test::make_temp_workspace("crypto-zstd-bypass");
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{9, 8, 7, 6};
+
+    // 1. Repetitive data should shrink heavily with zstd and round-trip.
+    {
+        const auto plain = kasumi::test::workspace_path(workspace, "comp.bin");
+        const auto enc = kasumi::test::workspace_path(workspace, "comp.enc");
+        const auto dec = kasumi::test::workspace_path(workspace, "comp.dec");
+        std::vector<std::byte> zeros(6U * 1024U * 1024U, std::byte{0x41});
+        kasumi::test::write_binary(plain, zeros);
+        ASSERT_TRUE(kasumi::crypto::encrypt_file(plain, enc, key));
+        EXPECT_LT(std::filesystem::file_size(enc), zeros.size() / 4U);
+        ASSERT_TRUE(kasumi::crypto::decrypt_file(enc, dec, key));
+        EXPECT_EQ(kasumi::test::read_binary(dec), zeros);
+    }
+
+    // 2. High-entropy incompressible header (2 MiB) followed by 18 MiB of zeros:
+    //    bypass triggers after 2 incompressible chunks, then the periodic
+    //    chunk_index % 16 probe catches the compressible trailing region.
+    {
+        const auto plain = kasumi::test::workspace_path(workspace, "mixed.bin");
+        const auto enc = kasumi::test::workspace_path(workspace, "mixed.enc");
+        const auto dec = kasumi::test::workspace_path(workspace, "mixed.dec");
+        constexpr std::size_t total = 20U * 1024U * 1024U;
+        std::vector<std::byte> mixed(total, std::byte{0});
+        std::uint64_t x = 0x9e3779b97f4a7c15ULL;
+        for (std::size_t i = 0; i < 2U * 1024U * 1024U; i += 8U) {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            const auto v = x * 0x2545F4914F6CDD1DULL;
+            for (std::size_t b = 0; b < 8U; ++b) {
+                mixed[i + b] = static_cast<std::byte>((v >> (8U * b)) & 0xffU);
+            }
+        }
+        kasumi::test::write_binary(plain, mixed);
+        ASSERT_TRUE(kasumi::crypto::encrypt_file(plain, enc, key));
+        // Frames 16..19 (4 MiB) are compressed cleanly once the probe hits.
+        EXPECT_LT(std::filesystem::file_size(enc), 17U * 1024U * 1024U);
+        ASSERT_TRUE(kasumi::crypto::decrypt_file(enc, dec, key));
+        EXPECT_EQ(kasumi::crypto::content::hash_file(dec),
+                  kasumi::crypto::content::hash_file(plain));
+    }
+}
+
+TEST(CryptoPackTest, AdaptiveFastCdcSelectsTiersAndStreamsLargeSlices) {
+    using namespace kasumi::crypto::pack;
+    const auto t1 = fastcdc_profile_for_size(16ULL * 1024ULL * 1024ULL);
+    const auto t2 = fastcdc_profile_for_size(128ULL * 1024ULL * 1024ULL);
+    const auto t3 = fastcdc_profile_for_size(1024ULL * 1024ULL * 1024ULL);
+    EXPECT_EQ(t1.max_chunk, 4U * 1024U * 1024U);
+    EXPECT_EQ(t2.avg_chunk, 4U * 1024U * 1024U);
+    EXPECT_EQ(t2.max_chunk, 16U * 1024U * 1024U);
+    EXPECT_EQ(t3.avg_chunk, 16U * 1024U * 1024U);
+    EXPECT_EQ(t3.max_chunk, 32U * 1024U * 1024U);
+
+    auto workspace = kasumi::test::make_temp_workspace("crypto-adaptive-cdc");
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{5, 4, 3, 2};
+    constexpr std::size_t file_bytes = 68U * 1024U * 1024U; // Tier 2 (> 64 MiB)
+    std::vector<std::byte> data(file_bytes);
+    std::uint32_t rng = 0xabcdef01U;
+    for (std::size_t i = 0; i < file_bytes; i += 4U) {
+        rng = rng * 1664525U + 1013904223U;
+        data[i + 0] = static_cast<std::byte>(rng & 0xffU);
+        data[i + 1] = static_cast<std::byte>((rng >> 8U) & 0xffU);
+        data[i + 2] = static_cast<std::byte>((rng >> 16U) & 0xffU);
+        data[i + 3] = static_cast<std::byte>((rng >> 24U) & 0xffU);
+    }
+    const auto file_v1 = kasumi::test::workspace_path(workspace, "tier2.bin");
+    kasumi::test::write_binary(file_v1, data);
+
+    const auto cdc = chunk_file_fastcdc(file_v1);
+    ASSERT_TRUE(cdc.has_value()) << cdc.error();
+    EXPECT_EQ(cdc->file_size, file_bytes);
+    EXPECT_GE(cdc->chunks.size(), 5U);
+    EXPECT_LT(cdc->chunks.size(), 40U);
+    for (std::size_t i = 0; i + 1 < cdc->chunks.size(); ++i) {
+        EXPECT_GE(cdc->chunks[i].size, t2.min_chunk);
+        EXPECT_LE(cdc->chunks[i].size, t2.max_chunk);
+    }
+
+    const auto& first_chunk = cdc->chunks.front();
+    const auto slice_enc = kasumi::test::workspace_path(workspace, "slice.enc");
+    const auto slice_dec = kasumi::test::workspace_path(workspace, "slice.dec");
+    const auto encrypted = encrypt_file_slice_with_hashes(
+        file_v1,
+        first_chunk.offset,
+        first_chunk.size,
+        first_chunk.hash,
+        slice_enc,
+        key);
+    ASSERT_TRUE(encrypted.has_value());
+    ASSERT_TRUE(kasumi::crypto::decrypt_file(slice_enc, slice_dec, key));
+    EXPECT_EQ(kasumi::crypto::content::hash_file(slice_dec), first_chunk.hash);
+}
+
 } // namespace

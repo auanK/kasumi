@@ -1527,4 +1527,74 @@ TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
     }
 }
 
+TEST(SyncContentBatchTest, FastCdcMultiWindowUploadStagesAndCleansUpAllWindows) {
+    auto fixture = make_fixture("fastcdc-multi-window");
+    ContentWindowProbe probe;
+    attach_probe(*fixture, probe);
+    const auto first_profile = fixture->profile;
+    const auto first_local = fixture->local;
+    const auto second_profile = fixture->workspace->root / "second-profile";
+    const auto second_local = fixture->workspace->root / "second-local";
+    ASSERT_TRUE(std::filesystem::create_directory(second_profile));
+    ASSERT_TRUE(std::filesystem::create_directory(second_local));
+
+    // Two 45 MiB Tier-1 files (~90 chunks total) force > 1 upload window
+    // (window cap = 64 chunk items).
+    auto make_random = [](std::size_t bytes, std::uint32_t seed) {
+        std::vector<std::byte> buf(bytes);
+        for (std::size_t i = 0; i < bytes; i += 4U) {
+            seed = seed * 1664525U + 1013904223U;
+            for (std::size_t j = 0; j < 4U; ++j) {
+                buf[i + j] = static_cast<std::byte>((seed >> (8U * j)) & 0xffU);
+            }
+        }
+        return buf;
+    };
+    const auto data_a = make_random(45U * 1024U * 1024U, 0x11112222U);
+    const auto data_b = make_random(45U * 1024U * 1024U, 0x33334444U);
+    kasumi::test::write_binary(first_local / "a.bin", data_a);
+    kasumi::test::write_binary(first_local / "b.bin", data_b);
+
+    const auto sync_once = [&]() -> ::testing::AssertionResult {
+        kasumi::application::observation::LocalObservationSession session;
+        probe.profile = fixture->profile;
+        auto observed =
+            kasumi::application::observation::collect_reconciliation_input(
+                runtime_data(*fixture),
+                fixture->storage,
+                fixture->key,
+                false,
+                {},
+                &session);
+        if (!observed) {
+            return ::testing::AssertionFailure() << observed.error().detail;
+        }
+        auto planned = kasumi::reconciliation::reconcile(*observed);
+        if (!planned) {
+            return ::testing::AssertionFailure() << planned.error().detail;
+        }
+        const auto executed = sync::coordinator::execute(runtime_data(*fixture),
+                                                         fixture->storage,
+                                                         fixture->key,
+                                                         *observed,
+                                                         *planned,
+                                                         &session,
+                                                         nullptr,
+                                                         true);
+        if (!executed) {
+            return ::testing::AssertionFailure() << executed.error().detail;
+        }
+        return ::testing::AssertionSuccess();
+    };
+
+    ASSERT_TRUE(sync_once());
+    EXPECT_GE(probe.content_put_batch_count, 2U);
+
+    fixture->profile = second_profile;
+    fixture->local = second_local;
+    ASSERT_TRUE(sync_once());
+    EXPECT_EQ(kasumi::test::read_binary(second_local / "a.bin"), data_a);
+    EXPECT_EQ(kasumi::test::read_binary(second_local / "b.bin"), data_b);
+}
+
 } // namespace
