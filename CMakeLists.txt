@@ -365,6 +365,11 @@ fetchcontent_declare(
 )
 fetchcontent_makeavailable(zstd)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    # Preserve zstd's assembler hardening flags outside GCC's LTO flag merge.
+    set_property(TARGET libzstd_static PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+endif()
+
 fetchcontent_declare(
     sqlite_amalgamation
     URL https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip

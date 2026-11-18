@@ -104,6 +104,7 @@ std::string hex_digest(const std::array<std::uint32_t, 8>& state) {
     return output;
 }
 
+#if defined(_WIN32)
 std::string hex_bytes(std::span<const std::uint8_t> bytes) {
     static constexpr char digits[] = "0123456789abcdef";
     std::string output;
@@ -115,7 +116,6 @@ std::string hex_bytes(std::span<const std::uint8_t> bytes) {
     return output;
 }
 
-#if defined(_WIN32)
 struct BcryptHashGuard {
     BCRYPT_HASH_HANDLE handle = nullptr;
     ~BcryptHashGuard() noexcept {

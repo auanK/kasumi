@@ -31,7 +31,10 @@ namespace kasumi::platform::random {
 namespace {
 
 [[maybe_unused]] std::string system_error_text(const char* operation) {
-    return std::string{operation} + ": " + std::strerror(errno);
+    const int error = errno;
+    std::string message{operation};
+    message.append(": ").append(std::strerror(error));
+    return message;
 }
 
 } // namespace

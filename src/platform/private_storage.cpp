@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <format>
 #include <memory>
 #include <system_error>
 #include <utility>
@@ -370,8 +371,8 @@ protect_entry(const std::filesystem::path& path,
     }
     const bool is_dir = (*attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     if (is_dir != directory) {
-        return std::unexpected(std::string{mismatch_msg} + "'" +
-                               platform::path::to_utf8(path) + "'");
+        return std::unexpected(std::format("{}'{}'", mismatch_msg,
+                                           platform::path::to_utf8(path)));
     }
     return apply_acl(path, directory);
 #else
@@ -380,8 +381,8 @@ protect_entry(const std::filesystem::path& path,
         return std::unexpected(status.error());
     }
     if (directory ? !S_ISDIR(status->st_mode) : !S_ISREG(status->st_mode)) {
-        return std::unexpected(std::string{mismatch_msg} + "'" +
-                               platform::path::to_utf8(path) + "'");
+        return std::unexpected(std::format("{}'{}'", mismatch_msg,
+                                           platform::path::to_utf8(path)));
     }
     const uid_t expected_uid = ::geteuid();
     if (status->st_uid != expected_uid) {
