@@ -321,11 +321,8 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
             };
 
             std::condition_variable progress_cv;
-            std::condition_variable progress_ack_cv;
             std::vector<std::uint64_t> completed_sizes;
-            std::size_t acked_completions = 0;
             bool workers_done = false;
-            bool progress_aborted = false;
 
             const auto run_workers = [&] {
                 application::parallel_for_indexed(
@@ -365,7 +362,6 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                                                     std::move(audited.error()));
                                 return;
                             }
-                            std::size_t ticket = 0;
                             {
                                 std::lock_guard lock(state_mutex);
                                 const auto& reference =
@@ -380,14 +376,8 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                                     return;
                                 }
                                 completed_sizes.push_back(reference.size);
-                                ticket = completed_sizes.size();
                             }
                             progress_cv.notify_one();
-                            std::unique_lock lock(state_mutex);
-                            progress_ack_cv.wait(lock, [&] {
-                                return acked_completions >= ticket ||
-                                       progress_aborted;
-                            });
                         } catch (const std::exception& exception) {
                             record_hard_failure(
                                 index,
@@ -441,23 +431,13 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                             }
                             report_progress(
                                 application::FsckStage::AuditingContent);
-                            {
-                                std::lock_guard lock(state_mutex);
-                                ++acked_completions;
-                            }
-                            progress_ack_cv.notify_all();
                         }
                         if (done) {
                             break;
                         }
                     }
                 } catch (...) {
-                    {
-                        std::lock_guard lock(state_mutex);
-                        progress_aborted = true;
-                    }
                     request_window_stop();
-                    progress_ack_cv.notify_all();
                     throw;
                 }
             } else {

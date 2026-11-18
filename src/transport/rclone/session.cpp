@@ -735,6 +735,7 @@ void destroy_state(void* context) noexcept {
     wait_for_drain(*state);
     (void)request_core_quit_best_effort(*state);
     (void)stop_process(*state);
+    stop_rc_runtime(*state);
     clear_secrets(*state);
     delete state;
 }

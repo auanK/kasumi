@@ -10,6 +10,7 @@
 #include <expected>
 #include <functional>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <reproc++/reproc.hpp>
 #include <string>
@@ -19,6 +20,9 @@
 #include <vector>
 
 namespace kasumi::transport::rclone_detail {
+
+struct RcRuntime;
+void destroy_rc_runtime(RcRuntime* runtime) noexcept;
 
 // State of the rclone process and its RC connection.
 struct State {
@@ -38,7 +42,12 @@ struct State {
 #if defined(_WIN32)
     void* job_handle = nullptr;
 #endif
+    std::once_flag rc_runtime_once;
+    std::unique_ptr<RcRuntime, void (*)(RcRuntime*) noexcept> rc_runtime{
+        nullptr, destroy_rc_runtime};
 };
+
+void stop_rc_runtime(State& state) noexcept;
 
 using ChildEnvironment = std::vector<std::pair<std::string, std::string>>;
 
