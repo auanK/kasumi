@@ -77,6 +77,44 @@ TEST(CliPresenterTest, PresentsEmptyAndPopulatedPlansWithTrafficAndRename) {
     }
 }
 
+TEST(CliPresenterTest, FitsUtf8AndClosesInteractiveProgressBeforeErrors) {
+    const ScopedLanguage lang{Language::English};
+    EXPECT_EQ(kasumi::platform::fit_terminal_text("a界b", 3), "a界");
+    EXPECT_EQ(kasumi::cli::format_eta(135), "2m 15s");
+    EXPECT_EQ(kasumi::cli::format_eta(3840), "1h 04m");
+    const auto output = kasumi::test::capture_stdout([] {
+        kasumi::cli::ProgressDisplay display(
+            {.interactive = true, .ansi = true, .fixed_width = 18});
+        display.show({.activity = Activity::Downloading, .total_bytes = 100});
+        display.show({.activity = Activity::Downloading,
+                      .bytes = 100,
+                      .total_bytes = 100});
+        display.finish();
+        kasumi::cli::print_error_line("failure");
+    });
+    EXPECT_NE(output.find("\r\x1b[2KDownloading"), std::string::npos);
+    EXPECT_NE(output.find("\r\x1b[2K[ERROR] failure"), std::string::npos);
+    const auto first_redraw = output.find('\r');
+    ASSERT_NE(first_redraw, std::string::npos);
+    EXPECT_LE(first_redraw, 17U);
+}
+
+TEST(CliPresenterTest, RedirectedProgressContainsOnlyPlainStageLines) {
+    const ScopedLanguage lang{Language::English};
+    const auto output = kasumi::test::capture_stdout([] {
+        kasumi::cli::ProgressDisplay display(kasumi::platform::Terminal{});
+        display.show({.activity = Activity::Downloading, .total_bytes = 100});
+        display.show({.activity = Activity::Downloading,
+                      .bytes = 100,
+                      .total_bytes = 100});
+        display.finish();
+        kasumi::cli::print_error_line("failure");
+    });
+    EXPECT_EQ(output.find('\r'), std::string::npos);
+    EXPECT_EQ(output.find("\x1b["), std::string::npos);
+    EXPECT_EQ(output, "Downloading\n[ERROR] failure\n");
+}
+
 TEST(CliPresenterTest, PresentsSuccessfulResponseVariants) {
     const ScopedLanguage lang{Language::Portuguese};
     const auto sync_output =

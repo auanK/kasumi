@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
 #include <format>
 #include <print>
 #include <string>
@@ -65,10 +67,12 @@ std::string sanitize_terminal_text(std::string_view text) {
 void print_status_line(std::string_view color,
                        i18n::Key label,
                        std::string_view message) {
+    const bool use_color = platform::stdout_terminal().ansi;
     std::println("{}{}{} {}",
-                 color,
+                 use_color ? color : std::string_view{},
                  i18n::tr(label),
-                 style::reset,
+                 use_color ? std::string_view{style::reset}
+                           : std::string_view{},
                  sanitize_terminal_text(message));
 }
 
@@ -948,6 +952,227 @@ void present(const application::FsckProgress& progress,
     std::println("{}.", line);
 }
 
+std::string format_eta(std::uint64_t seconds) {
+    using K = i18n::Key;
+    if (seconds >= 3600) {
+        return i18n::format(
+            K::ProgressHours, seconds / 3600, (seconds / 60) % 60);
+    }
+    if (seconds >= 60) {
+        return i18n::format(K::ProgressMinutes, seconds / 60, seconds % 60);
+    }
+    return i18n::format(K::ProgressSeconds, seconds);
+}
+
+ProgressDisplay::~ProgressDisplay() {
+    finish();
+}
+
+void ProgressDisplay::finish(bool keep) noexcept {
+    if (rendered_width_ != 0) {
+        if (keep) {
+            std::fputc('\n', stdout);
+        } else if (terminal_.ansi) {
+            std::fputs("\r\x1b[2K", stdout);
+        } else {
+            std::fputc('\r', stdout);
+            const auto width = std::min(
+                rendered_width_, platform::terminal_width(terminal_) - 1);
+            for (std::size_t i = 0; i < width; ++i) {
+                std::fputc(' ', stdout);
+            }
+            std::fputc('\r', stdout);
+        }
+        rendered_width_ = 0;
+    }
+    std::fflush(stdout);
+}
+
+void ProgressDisplay::show(const application::ActivityProgress& event,
+                           std::string_view extra) {
+    using A = application::Activity;
+    using K = i18n::Key;
+    static constexpr std::array labels{
+        K::ProgressScanning,
+        K::ProgressStaging,
+        K::ProgressUploading,
+        K::ProgressDownloading,
+        K::ProgressVerifying,
+        K::ProgressInstalling,
+        K::ProgressReobserving,
+        K::ProgressListing,
+        K::ProgressAuthenticating,
+        K::ProgressAuditing,
+        K::ProgressUpdating,
+        K::ProgressRemoving,
+    };
+    const bool transition =
+        activity_ != event.activity || stage_id_ != event.stage_id;
+    const auto now = std::chrono::steady_clock::now();
+    const bool object_rate = event.activity == A::Removing;
+    const auto value = object_rate ? event.objects : event.bytes;
+    const auto total = object_rate ? event.total_objects : event.total_bytes;
+    const bool complete = total && *total > 0 && value >= *total;
+    if (transition) {
+        finish(true);
+        activity_ = event.activity;
+        stage_id_ = event.stage_id;
+        started_ = now;
+        last_render_ = now;
+        last_value_ = value;
+        rate_ = 0.0;
+        was_complete_ = false;
+    } else if (!terminal_.interactive ||
+               (now - last_render_ < std::chrono::milliseconds(200) &&
+                (!complete || was_complete_))) {
+        return;
+    }
+
+    const auto label = labels[static_cast<std::size_t>(event.activity)];
+    std::string line = event.activity == A::Reobserving
+                           ? i18n::format(label, event.attempt)
+                           : std::string{i18n::tr(label)};
+    if (!terminal_.interactive) {
+        if (event.activity != A::Scanning && event.activity != A::Removing) {
+            std::println("{}", line);
+            std::fflush(stdout);
+        }
+        return;
+    }
+
+    const auto add = [&](std::string_view text) {
+        line += " | ";
+        line += text;
+    };
+    const bool scanning =
+        event.activity == A::Scanning || event.activity == A::Reobserving;
+    if (scanning) {
+        add(i18n::format(K::ProgressScan,
+                         event.objects,
+                         event.total_objects.value_or(0),
+                         event.cache_hits,
+                         event.files_hashed));
+        add(i18n::format(K::ProgressRead, format_size(event.bytes)));
+        if (event.observing_remote) {
+            add(i18n::tr(K::ProgressRemotePending));
+        }
+    } else if (event.objects != 0 || event.total_objects) {
+        add(event.total_objects
+                ? i18n::format(
+                      K::ProgressFraction, event.objects, *event.total_objects)
+                : format_plural(
+                      event.objects, K::ProgressObject, K::ProgressObjects));
+    }
+    if (event.staged_bytes) {
+        add(i18n::format(K::ProgressStaged,
+                         format_size(event.bytes),
+                         format_size(*event.staged_bytes)));
+    } else if (!scanning && (event.bytes != 0 || event.total_bytes)) {
+        add(event.total_bytes ? i18n::format(K::ProgressFraction,
+                                             format_size(event.bytes),
+                                             format_size(*event.total_bytes))
+                              : format_size(event.bytes));
+    }
+    if (total && *total > 0 && !scanning) {
+        const auto percent = std::min(100.0,
+                                      100.0 * static_cast<double>(value) /
+                                          static_cast<double>(*total));
+        add(i18n::format(K::ProgressPercent, static_cast<unsigned>(percent)));
+    }
+    if (event.bytes_reused != 0) {
+        add(i18n::format(K::ProgressReused, format_size(event.bytes_reused)));
+    }
+    const auto dt = std::chrono::duration<double>(now - last_render_).count();
+    if (dt > 0 && value >= last_value_) {
+        const auto instantaneous =
+            static_cast<double>(value - last_value_) / dt;
+        rate_ += (instantaneous - rate_) * (1.0 - std::exp(-dt / 2.5));
+    }
+    if (rate_ > 0 && rate_ < 1e18 &&
+        now - started_ >= std::chrono::milliseconds(500)) {
+        add(object_rate
+                ? i18n::format(K::ProgressObjectsRate,
+                               std::format("{:.1f}", rate_))
+                : i18n::format(K::ProgressBytesRate,
+                               format_size(static_cast<std::uint64_t>(rate_))));
+        if (total && *total > value && !scanning) {
+            const auto eta =
+                std::ceil(static_cast<double>(*total - value) / rate_);
+            if (eta <= 86400.0 * 365.0) {
+                add(i18n::format(K::ProgressEta,
+                                 format_eta(static_cast<std::uint64_t>(eta))));
+            }
+        }
+    }
+    if (!extra.empty()) {
+        add(extra);
+    }
+
+    const auto width = platform::terminal_width(terminal_) - 1U;
+    finish();
+    std::print("{}", platform::fit_terminal_text(line, width));
+    rendered_width_ = width;
+    std::fflush(stdout);
+    last_render_ = now;
+    last_value_ = value;
+    was_complete_ = complete;
+}
+
+void ProgressDisplay::update(const application::ExecutionProgress& progress,
+                             application::Operation operation) {
+    std::visit(
+        [&](const auto& event) {
+            using T = std::decay_t<decltype(event)>;
+            using A = application::Activity;
+            if constexpr (std::is_same_v<T, application::ActivityProgress>) {
+                show(event);
+            } else if constexpr (std::is_same_v<T, application::SyncProgress>) {
+                finish(true);
+                activity_.reset();
+                present(event, operation);
+            } else if constexpr (std::is_same_v<T, application::FsckProgress>) {
+                if (fsck_.last_stage != event.stage) {
+                    finish(true);
+                    activity_.reset();
+                    if (terminal_.interactive) {
+                        auto stage = event;
+                        stage.total_objects.reset();
+                        present(stage, fsck_);
+                    }
+                }
+                if (!terminal_.interactive) {
+                    present(event, fsck_);
+                } else if (event.stage ==
+                               application::FsckStage::AuditingContent &&
+                           event.total_objects) {
+                    show({.activity = A::Auditing,
+                          .bytes = event.wire_download_bytes,
+                          .total_bytes = event.total_wire_bytes},
+                         i18n::format(i18n::Key::ProgressFsckCounts,
+                                      event.completed_objects,
+                                      *event.total_objects,
+                                      event.physical_objects_downloaded,
+                                      event.files_reassembled));
+                }
+            } else {
+                if (gc_.last_stage != event.stage) {
+                    finish(true);
+                    activity_.reset();
+                }
+                present(event, gc_);
+                if (terminal_.interactive &&
+                    event.stage == application::GarbageCollectStage::Applying &&
+                    event.candidate_count) {
+                    show({.activity = A::Removing,
+                          .objects = event.removed_objects,
+                          .total_objects = *event.candidate_count});
+                }
+            }
+        },
+        progress);
+    std::fflush(stdout);
+}
+
 int present(const application::Response& response, bool full) {
     const auto op = response.operation;
     return std::visit(
@@ -964,6 +1189,21 @@ int present(const application::Response& response, bool full) {
                     exit_code = 2;
                 } else {
                     print_ok_line(i18n::tr(i18n::Key::SyncCompleted));
+                }
+                if (data.physical_objects_uploaded ||
+                    data.physical_objects_downloaded ||
+                    data.local_delta_reused_bytes) {
+                    i18n::println(
+                        i18n::Key::ProgressWireSummary,
+                        format_size(data.wire_upload_bytes),
+                        format_plural(data.physical_objects_uploaded,
+                                      i18n::Key::ProgressObject,
+                                      i18n::Key::ProgressObjects),
+                        format_size(data.wire_download_bytes),
+                        format_plural(data.physical_objects_downloaded,
+                                      i18n::Key::ProgressObject,
+                                      i18n::Key::ProgressObjects),
+                        format_size(data.local_delta_reused_bytes));
                 }
                 if (data.trusted_content_reused > 0) {
                     std::println(

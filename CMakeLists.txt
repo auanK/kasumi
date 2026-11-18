@@ -442,6 +442,7 @@ add_library(kasumi_platform STATIC
     src/platform/private_storage.cpp
     src/platform/profile_lock.cpp
     src/platform/random.cpp
+    src/platform/terminal.cpp
     src/platform/workspace.cpp
 )
 
@@ -455,6 +456,7 @@ target_link_libraries(
     kasumi_platform
     PRIVATE
     monocypher
+    utf8proc
     kasumi_warnings
     kasumi_release_optimizations
     kasumi_hardening
