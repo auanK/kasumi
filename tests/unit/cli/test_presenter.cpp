@@ -5,8 +5,10 @@
 #include "platform/cancellation.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <gtest/gtest.h>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace {
@@ -124,14 +126,109 @@ TEST(CliPresenterTest, LocalizesSingularAndPluralWireObjectCounts) {
                  Operation::Sync);
     {
         const ScopedLanguage english{Language::English};
-        const auto output = present_out(completed);
-        EXPECT_NE(output.find("(1 object)"), std::string::npos);
-        EXPECT_NE(output.find("(2 objects)"), std::string::npos);
+        const auto concise_output = present_out(completed);
+        EXPECT_EQ(concise_output.find("Wire upload"), std::string::npos);
+        const auto full_output = present_out(completed, true);
+        EXPECT_NE(full_output.find("(1 object)"), std::string::npos);
+        EXPECT_NE(full_output.find("(2 objects)"), std::string::npos);
     }
     const ScopedLanguage portuguese{Language::Portuguese};
-    const auto output = present_out(completed);
-    EXPECT_NE(output.find("(1 objeto)"), std::string::npos);
-    EXPECT_NE(output.find("(2 objetos)"), std::string::npos);
+    const auto concise_output = present_out(completed);
+    EXPECT_EQ(concise_output.find("Envio real"), std::string::npos);
+    const auto full_output = present_out(completed, true);
+    EXPECT_NE(full_output.find("(1 objeto)"), std::string::npos);
+    EXPECT_NE(full_output.find("(2 objetos)"), std::string::npos);
+}
+
+TEST(CliPresenterTest, DefaultSyncProgressAggregatesApplyingAndHidesZeroStage) {
+    const ScopedLanguage lang{Language::English};
+    const auto output = kasumi::test::capture_stdout([] {
+        kasumi::cli::ProgressDisplay display(
+            {.interactive = true, .ansi = true, .fixed_width = 120}, false);
+        display.update(SyncProgress{.stage = SyncStage::Observing},
+                       Operation::Sync);
+        display.update(ActivityProgress{.activity = Activity::Scanning,
+                                        .total_objects = 10,
+                                        .stage_id = 1},
+                       Operation::Sync);
+        display.update(SyncProgress{.stage = SyncStage::Calculating},
+                       Operation::Sync);
+        display.update(SyncProgress{.stage = SyncStage::Applying},
+                       Operation::Sync);
+        display.update(ActivityProgress{.activity = Activity::Staging,
+                                        .staged_bytes = 0,
+                                        .stage_id = 2},
+                       Operation::Sync);
+        display.update(ActivityProgress{.activity = Activity::Uploading,
+                                        .bytes = 100,
+                                        .total_bytes = 100,
+                                        .objects = 2,
+                                        .total_objects = 2,
+                                        .stage_id = 3},
+                       Operation::Sync);
+        display.update(ActivityProgress{.activity = Activity::Verifying,
+                                        .objects = 2,
+                                        .total_objects = 2,
+                                        .stage_id = 4},
+                       Operation::Sync);
+        display.update(ActivityProgress{.activity = Activity::Uploading,
+                                        .bytes = 200,
+                                        .total_bytes = 200,
+                                        .objects = 3,
+                                        .total_objects = 3,
+                                        .stage_id = 5},
+                       Operation::Sync);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        display.update(SyncProgress{.stage = SyncStage::Publishing},
+                       Operation::Sync);
+        display.update(SyncProgress{.stage = SyncStage::Finalizing},
+                       Operation::Sync);
+    });
+    EXPECT_EQ(output.find("0 bytes → 0 bytes"), std::string::npos);
+    EXPECT_EQ(output.find("Scanning local files\n"), std::string::npos);
+    EXPECT_NE(output.find("\r\x1b[2K[2/5]"), std::string::npos);
+    EXPECT_NE(output.find("5/5 objects"), std::string::npos);
+    EXPECT_NE(output.find("300 bytes/300 bytes"), std::string::npos);
+    EXPECT_NE(output.find("Speed: avg "), std::string::npos);
+    EXPECT_NE(output.find(" | min "), std::string::npos);
+    EXPECT_NE(output.find(" | max "), std::string::npos);
+    EXPECT_EQ(output.find("2/2 objects\n"), std::string::npos);
+    EXPECT_EQ(output.find("Verifying | 2/2 objects\n"), std::string::npos);
+}
+
+TEST(CliPresenterTest, FullSyncProgressKeepsAllStagesAndPortugueseSpeed) {
+    const ScopedLanguage lang{Language::Portuguese};
+    const auto output = kasumi::test::capture_stdout([] {
+        kasumi::cli::ProgressDisplay display(
+            {.interactive = true, .ansi = true, .fixed_width = 120}, true);
+        display.update(SyncProgress{.stage = SyncStage::Observing},
+                       Operation::Sync);
+        display.update(ActivityProgress{.activity = Activity::Scanning,
+                                        .total_objects = 3,
+                                        .cache_hits = 2,
+                                        .files_hashed = 1,
+                                        .stage_id = 1},
+                       Operation::Sync);
+        display.update(SyncProgress{.stage = SyncStage::Calculating},
+                       Operation::Sync);
+        display.update(SyncProgress{.stage = SyncStage::Applying},
+                       Operation::Sync);
+        display.update(ActivityProgress{.activity = Activity::Uploading,
+                                        .bytes = 100,
+                                        .total_bytes = 100,
+                                        .objects = 2,
+                                        .total_objects = 2,
+                                        .stage_id = 2},
+                       Operation::Sync);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        display.update(SyncProgress{.stage = SyncStage::Publishing},
+                       Operation::Sync);
+    });
+    EXPECT_NE(output.find("Verificando arquivos locais"), std::string::npos);
+    EXPECT_NE(output.find("2/2 objetos"), std::string::npos);
+    EXPECT_NE(output.find("Velocidade: média "), std::string::npos);
+    EXPECT_NE(output.find(" | mínima "), std::string::npos);
+    EXPECT_NE(output.find(" | máxima "), std::string::npos);
 }
 
 TEST(CliPresenterTest, PresentsSuccessfulResponseVariants) {
@@ -1957,7 +2054,8 @@ TEST(CliPresenterTest, ResolveMissingSuccessIsLocalized) {
 }
 
 TEST(CliPresenterTest, SanitizesTerminalControlAndEscapeSequences) {
-    const std::string dirty = "bad\x1b[31mpath\x07\r\nnext\t\x7f\xc2\x9b" "ok";
+    const std::string dirty = "bad\x1b[31mpath\x07\r\nnext\t\x7f\xc2\x9b"
+                              "ok";
     const auto cleaned = kasumi::cli::sanitize_terminal_text(dirty);
     EXPECT_EQ(cleaned.find('\x1b'), std::string::npos);
     EXPECT_EQ(cleaned.find('\x07'), std::string::npos);

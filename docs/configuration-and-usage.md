@@ -90,9 +90,11 @@ Use `kasumi <command> --help` for the complete arguments, options and examples.
 | Update the executable | `kasumi update` |
 
 `--full` belongs only to Sync and Status, after the profile. It displays every
-plan and pending-path item; otherwise lists longer than ten items show the first
-and last five. Preview and Status do not execute the plan, recover transactions
-or persist file-hash cache changes. See [Preview and Status](architecture/planning-and-status.md).
+plan and pending-path item (otherwise lists longer than ten items show the first
+and last five), keeps per-stage live progress statistics across all stages, and
+prints the wire transfer summary at the end of Sync. Preview and Status do not
+execute the plan, recover transactions or persist file-hash cache changes. See
+[Preview and Status](architecture/planning-and-status.md).
 
 `sync --initial` requires no SQLite sidecars or unfinished transaction evidence.
 It can bootstrap empty remote history or enroll into an authenticated vault.
@@ -353,6 +355,6 @@ Kasumi does not normalize Unicode filename spelling.
 
 ## Progress and transfer metrics
 
-Interactive terminals update one progress line during each stage. The line can show scan counts, cache hits, bytes read, physical transfers, rate, and an ETA when the total is known. Redirected output uses plain stage lines and spaced audit milestones.
+Interactive terminals update one live progress line during long operations. By default, Sync keeps only the aggregated transfer progress line under the apply stage (followed by average, minimum, and maximum transfer speeds upon completion), while non-transfer stages erase their transient progress line when moving on; `--full` keeps per-stage lines across all stages and prints the final wire transfer summary. Redirected output uses plain stage lines and spaced audit milestones.
 
-Sync keeps its logical plan summary and reports the actual encoded payload bytes and physical object counts separately. The local reuse counter includes verified FastCDC slices and deduplicated uploads. These payload measurements exclude HTTP headers and protocol control objects.
+Sync keeps its logical plan summary and, with `--full`, reports the actual encoded payload bytes, physical object counts, and local reuse (verified FastCDC slices and deduplicated uploads) separately. These payload measurements exclude HTTP headers and protocol control objects.

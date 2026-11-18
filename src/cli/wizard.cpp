@@ -128,7 +128,8 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         }
         return !platform::cancellation::requested();
     };
-    const auto prompt_form_line = [&](std::string_view label, std::string& value) {
+    const auto prompt_form_line = [&](std::string_view label,
+                                      std::string& value) {
         return prompt_line(i18n::format(i18n::Key::WizardPromptWithBack, label),
                            value) &&
                value != ":back";
@@ -162,8 +163,8 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 return static_cast<char>(std::tolower(c));
             });
             for (const auto storage : {application::KeyStorage::Vault,
-                                        application::KeyStorage::File,
-                                        application::KeyStorage::Memory}) {
+                                       application::KeyStorage::File,
+                                       application::KeyStorage::Memory}) {
                 if (mode == application::to_string(storage)) {
                     return storage;
                 }
@@ -209,14 +210,35 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         std::string choice;
         const auto menu = profiles.empty() ? i18n::Key::WizardMenuEmpty
                                            : i18n::Key::WizardMenu;
-        if (!prompt_line(i18n::tr(menu), choice)) {
+        const auto valid_choice = [&](std::string_view value) {
+            if (value == "q" || value == "n") {
+                return true;
+            }
+            return !profiles.empty() &&
+                   (value == "c" || value == "d" || value == "e" ||
+                    value == "k" || value == "s" || value == "r");
+        };
+        std::string_view prompt_text = i18n::tr(menu);
+        bool cancelled = false;
+        while (true) {
+            if (!prompt_line(prompt_text, choice)) {
+                cancelled = true;
+                break;
+            }
+            if (choice.size() == 1) {
+                choice[0] = static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(choice[0])));
+            }
+            if (valid_choice(choice)) {
+                break;
+            }
+            print_error_line(i18n::tr(i18n::Key::WizardInvalidOption));
+            prompt_text = "\n> ";
+        }
+        if (cancelled) {
             break;
         }
         std::println();
-        if (choice.size() == 1) {
-            choice[0] = static_cast<char>(
-                std::tolower(static_cast<unsigned char>(choice[0])));
-        }
 
         const auto prompt_field = [&](std::string_view label,
                                       application::ProfileField field,

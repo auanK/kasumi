@@ -29,11 +29,34 @@ struct GarbageCollectProgressDisplayState {
     std::optional<std::size_t> last_candidate_count;
 };
 
+struct TransferMetricsState {
+    std::uint64_t base_objects = 0;
+    std::uint64_t base_total_objects = 0;
+    std::uint64_t base_bytes = 0;
+    std::uint64_t base_total_bytes = 0;
+    std::uint64_t last_objects = 0;
+    std::uint64_t last_total_objects = 0;
+    std::uint64_t last_bytes = 0;
+    std::uint64_t last_total_bytes = 0;
+    std::uint64_t last_stage_id = 0;
+    double rate = 0;
+    std::optional<double> min_rate;
+    std::optional<double> max_rate;
+    std::chrono::steady_clock::time_point started{};
+    std::chrono::steady_clock::time_point last_sample{};
+    std::uint64_t last_sample_bytes = 0;
+    bool active = false;
+    bool completed_reported = false;
+    std::optional<application::ActivityProgress> last_event;
+    std::string last_extra;
+};
+
 class ProgressDisplay {
 public:
     explicit ProgressDisplay(
-        platform::Terminal terminal = platform::stdout_terminal())
-        : terminal_(terminal) {
+        platform::Terminal terminal = platform::stdout_terminal(),
+        bool full = false)
+        : terminal_(terminal), full_(full) {
     }
     ~ProgressDisplay();
     void
@@ -44,15 +67,30 @@ public:
     void finish(bool keep = false) noexcept;
 
 private:
+    void clear_line() noexcept;
+    void render_event(const application::ActivityProgress& event,
+                      std::string_view extra,
+                      bool force_complete = false);
+    void flush_transfer(TransferMetricsState& state) noexcept;
+
     platform::Terminal terminal_;
+    bool full_ = false;
+    bool indented_ = false;
+    bool in_applying_ = false;
     FsckProgressDisplayState fsck_;
     GarbageCollectProgressDisplayState gc_;
+    TransferMetricsState upload_state_;
+    TransferMetricsState download_state_;
     std::optional<application::Activity> activity_;
     std::uint64_t stage_id_ = 0;
     std::size_t rendered_width_ = 0;
     std::uint64_t last_value_ = 0;
+    std::uint64_t last_objects_ = 0;
     double rate_ = 0;
     bool was_complete_ = false;
+    std::optional<application::ActivityProgress> last_event_;
+    std::string last_extra_;
+    bool rendered_last_ = true;
     std::chrono::steady_clock::time_point started_{};
     std::chrono::steady_clock::time_point last_render_{};
 };

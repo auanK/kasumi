@@ -46,9 +46,12 @@
     "object": "1 object",
     "objects": "{} objects",
     "fraction": "{}/{}",
+    "fraction_object": "{}/{} object",
+    "fraction_objects": "{}/{} objects",
     "percent": "{}%",
     "bytes_rate": "{}/s",
     "objects_rate": "{} objects/s",
+    "speed_summary": "Speed: avg {} | min {} | max {}",
     "eta": "ETA {}",
     "seconds": "{}s",
     "minutes": "{}m {:02}s",
@@ -414,8 +417,8 @@
     "mutation_uncertain": "Uncertain"
   },
   "command_help": {
-    "sync": "Usage: kasumi sync <profile> [--dry-run | --initial [--trust-existing-content] | --audit-inventory] [--full]\n\nSynchronize with remote storage. --dry-run simulates without altering data.\n--initial initializes a missing local database; --trust-existing-content requires --initial.\n--audit-inventory runs Sync then a structural audit; it cannot be combined with the other modes.\n--full displays all plan and pending items.\nExample: kasumi sync Programming --dry-run\n",
-    "status": "Usage: kasumi status <profile> [--full]\n\nShow pending local changes. --full displays all plan and pending items.\nExample: kasumi status Programming --full\n",
+    "sync": "Usage: kasumi sync <profile> [--dry-run | --initial [--trust-existing-content] | --audit-inventory] [--full]\n\nSynchronize with remote storage. --dry-run simulates without altering data.\n--initial initializes a missing local database; --trust-existing-content requires --initial.\n--audit-inventory runs Sync then a structural audit; it cannot be combined with the other modes.\n--full displays full stage statistics, transfer summaries, and all plan or pending items.\nExample: kasumi sync Programming --dry-run\n",
+    "status": "Usage: kasumi status <profile> [--full]\n\nShow pending local changes. --full displays full stage statistics and all plan or pending items.\nExample: kasumi status Programming --full\n",
     "fsck": "Usage: kasumi fsck <profile>\n\nAudit remote integrity and authenticated content.\nExample: kasumi fsck Programming\n",
     "gc": "Usage: kasumi gc <profile>\n\nAnalyze garbage collection candidates and remove safe objects.\nStop Sync on every client and serialize maintenance before running GC.\nSubcommands: remove-writer, remove-barrier (use each subcommand with --help).\nExample: kasumi gc Programming\n",
     "gc_remove-writer": "Usage: kasumi gc remove-writer <profile> <writer-id>\n\nRemove one exact writer marker listed by remote writers.\nVerify that its process is inactive and no Sync or maintenance is running.\nNo Sync or GC is performed.\nExample: kasumi remote writers Programming\n",
