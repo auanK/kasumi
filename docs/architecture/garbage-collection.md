@@ -74,6 +74,8 @@ The protected set includes:
 - valid Epoch objects and retained orphan Epoch objects;
 - all protocol/control objects by construction.
 
+The content reachability limit applies to one million distinct physical IDs. GC stores the type and expected size for each reachable ID, checks each occurrence for conflicting metadata, and discards per-commit reference details as it walks the authenticated history.
+
 Before the first DELETE the collector enforces:
 
 ```text
