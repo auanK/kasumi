@@ -733,9 +733,16 @@ void destroy_state(void* context) noexcept {
     }
     state->stop_drain.store(true);
     wait_for_drain(*state);
-    (void)request_core_quit_best_effort(*state);
-    (void)stop_process(*state);
+    const bool quit_acknowledged = request_core_quit_best_effort(*state);
     stop_rc_runtime(*state);
+    if (quit_acknowledged) {
+        try {
+            std::lock_guard process_lock(state->process_mutex);
+            (void)state->process.kill();
+        } catch (...) {
+        }
+    }
+    (void)stop_process(*state);
     clear_secrets(*state);
     delete state;
 }
