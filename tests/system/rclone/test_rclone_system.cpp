@@ -264,17 +264,17 @@ RcloneHarness make_rclone_harness() {
         return workspace.root / relative;
     };
 
-    for (const std::string_view path : {"cwd-trap",
-                                        "r",
-                                        "r/storage",
-                                        "rclone-cache",
-                                        "client-a/app-data",
-                                        "client-a/local",
-                                        "client-b/app-data",
-                                        "client-b/local",
-                                        "client-c/app-data",
-                                        "client-c/local"}) {
-        create_system_directory(workspace.root / path);
+    for (const std::string_view relative : {"cwd-trap",
+                                            "r",
+                                            "r/storage",
+                                            "rclone-cache",
+                                            "client-a/app-data",
+                                            "client-a/local",
+                                            "client-b/app-data",
+                                            "client-b/local",
+                                            "client-c/app-data",
+                                            "client-c/local"}) {
+        create_system_directory(workspace.root / relative);
     }
 
     auto current_directory = use_current_directory(path("cwd-trap"));
@@ -395,6 +395,40 @@ std::string put_content_blob(kasumi::transport::Transport& storage,
     EXPECT_TRUE(kasumi::transport::put(storage, encrypted, identifier));
     return identifier;
 }
+
+#if !defined(_WIN32)
+TEST(RcloneSystemTest, StartupRetriesAfterChildExitsAndOpensWorkingSession) {
+    auto harness = make_rclone_harness();
+    const auto shim = harness_path(harness, "rclone-retry");
+    const auto failed_attempt = harness_path(harness, "first-attempt");
+    auto executable = kasumi::test::scoped_environment_variable(
+        "TEST_RCLONE_RETRY_EXECUTABLE", KASUMI_SYSTEM_RCLONE_EXECUTABLE);
+    auto marker = kasumi::test::scoped_environment_variable(
+        "TEST_RCLONE_RETRY_MARKER",
+        kasumi::platform::path::to_utf8(failed_attempt));
+    kasumi::test::write_text(shim,
+                             "#!/bin/sh\n"
+                             "if [ ! -e \"$TEST_RCLONE_RETRY_MARKER\" ]; then\n"
+                             "    printf 'temporary startup failure\\n' > "
+                             "\"$TEST_RCLONE_RETRY_MARKER\" || exit 2\n"
+                             "    exit 1\n"
+                             "fi\n"
+                             "exec \"$TEST_RCLONE_RETRY_EXECUTABLE\" \"$@\"\n");
+    std::filesystem::permissions(shim,
+                                 std::filesystem::perms::owner_exec,
+                                 std::filesystem::perm_options::add);
+    auto storage = kasumi::transport::detail::open_rclone_backend({
+        .remote_name = std::string{remote_name},
+        .remote_root = std::string{remote_root},
+        .executable = shim,
+        .config_path = harness_path(harness, "rclone.conf"),
+    });
+    ASSERT_TRUE(storage) << kasumi::transport::describe(storage.error());
+    EXPECT_TRUE(std::filesystem::is_regular_file(failed_attempt));
+    ASSERT_TRUE(kasumi::transport::initialize(*storage));
+    EXPECT_TRUE(kasumi::transport::list(*storage));
+}
+#endif
 
 TEST(RcloneSystemTest, RealTransportSmokeUsesAnIsolatedRcProcess) {
     auto harness = make_rclone_harness();

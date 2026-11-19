@@ -1,4 +1,5 @@
 #include "core/hasher.hpp"
+#include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/path.hpp"
 #include "state_storage/database.hpp"
@@ -6,9 +7,11 @@
 
 #include <algorithm>
 #include <array>
+#include <barrier>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <gtest/gtest.h>
 #include <limits>
 #include <memory>
@@ -140,6 +143,42 @@ TEST(StateStorageDatabaseTest, InitializesFreshDatabaseIdempotently) {
     const auto loaded = kasumi::state_storage::load_state(database_path);
     ASSERT_TRUE(loaded.has_value());
     EXPECT_FALSE(*loaded);
+}
+
+TEST(StateStorageDatabaseTest,
+     ConcurrentInitializationPublishesOneValidDatabase) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-init-concurrent");
+    const auto path = kasumi::test::workspace_path(workspace, "state.db");
+    std::barrier start{3};
+    const auto initialize = [&] {
+        start.arrive_and_wait();
+        return kasumi::state_storage::initialize(path);
+    };
+    auto first = std::async(std::launch::async, initialize);
+    auto second = std::async(std::launch::async, initialize);
+    start.arrive_and_wait();
+
+    EXPECT_TRUE(first.get());
+    EXPECT_TRUE(second.get());
+    EXPECT_TRUE(kasumi::state_storage::validate(path));
+    EXPECT_EQ(query_text(path, "PRAGMA journal_mode"),
+              std::vector<std::string>{"wal"});
+}
+
+TEST(StateStorageDatabaseTest, FreshInitializationPreservesOrphanedSidecar) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-init-sidecar");
+    const auto path = kasumi::test::workspace_path(workspace, "state.db");
+    const auto sidecar =
+        kasumi::test::workspace_path(workspace, "state.db-wal");
+    kasumi::test::write_text(sidecar, "previous state");
+
+    EXPECT_FALSE(kasumi::state_storage::initialize(path));
+    EXPECT_FALSE(std::filesystem::exists(path));
+    EXPECT_EQ(kasumi::test::read_text(sidecar), "previous state");
+    ASSERT_TRUE(std::filesystem::remove(sidecar));
+    EXPECT_TRUE(kasumi::state_storage::initialize(path));
 }
 
 TEST(StateStorageDatabaseTest,
@@ -947,6 +986,47 @@ TEST(StateStorageDatabaseTest, InitializesWithWalJournalMode) {
     const auto journal_mode = query_text(database_path, "PRAGMA journal_mode");
     ASSERT_EQ(journal_mode.size(), 1U);
     EXPECT_EQ(journal_mode[0], "wal");
+}
+
+TEST(StateStorageDatabaseTest, SaveWaitsForContendingWriter) {
+    using namespace std::chrono_literals;
+    auto [workspace, path] = make_db("persistence-contending-writer");
+    auto writer = open_database(path, SQLITE_OPEN_READWRITE);
+    auto lock = kasumi::sqlite::begin(writer.get());
+    ASSERT_TRUE(lock) << lock.error();
+    const auto tree = make_snapshot("docs/file", "data", 4);
+    std::promise<void> started;
+    auto ready = started.get_future();
+    auto pending = std::async(std::launch::async, [&] {
+        started.set_value();
+        return kasumi::state_storage::save_state(
+            path,
+            {.tree = tree, .height = 1, .commit_id = std::string(64, 'a')});
+    });
+    ready.wait();
+    EXPECT_EQ(pending.wait_for(100ms), std::future_status::timeout);
+    ASSERT_TRUE(kasumi::sqlite::commit(*lock));
+    ASSERT_TRUE(pending.get());
+    const auto saved = kasumi::state_storage::load_state(path);
+    ASSERT_TRUE(saved && *saved);
+    EXPECT_EQ((*saved)->tree, tree);
+}
+
+TEST(StateStorageDatabaseTest, SaveRequiresWalAndInitializeRestoresIt) {
+    auto [workspace, path] = make_db("persistence-require-wal");
+    execute_sql(path, "PRAGMA journal_mode=DELETE");
+    const kasumi::state_storage::StoredState state{
+        .tree = make_snapshot("docs/file", "data", 4),
+        .height = 1,
+        .commit_id = std::string(64, 'a')};
+
+    EXPECT_FALSE(kasumi::state_storage::save_state(path, state));
+    EXPECT_EQ(query_text(path, "PRAGMA journal_mode"),
+              std::vector<std::string>{"delete"});
+    ASSERT_TRUE(kasumi::state_storage::initialize(path));
+    EXPECT_EQ(query_text(path, "PRAGMA journal_mode"),
+              std::vector<std::string>{"wal"});
+    EXPECT_TRUE(kasumi::state_storage::save_state(path, state));
 }
 
 TEST(StateStorageDatabaseTest, NewReadWriteConnectionAppliesSynchronousNormal) {

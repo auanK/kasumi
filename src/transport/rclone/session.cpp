@@ -449,11 +449,19 @@ void clear_secrets(State& state) noexcept {
     wipe_secret_string(state.base_url);
 }
 
-bool reset_failed_attempt(State& state) noexcept {
-    const bool stopped = stop_process(state);
+bool shutdown_state(State& state) noexcept {
+    state.stop_drain.store(true);
     wait_for_drain(state);
-    state.port = 0;
-    state.ready = false;
+    const bool quit_acknowledged = request_core_quit_best_effort(state);
+    stop_rc_runtime(state);
+    if (quit_acknowledged) {
+        try {
+            std::lock_guard process_lock(state.process_mutex);
+            (void)state.process.kill();
+        } catch (...) {
+        }
+    }
+    const bool stopped = stop_process(state);
     clear_secrets(state);
     return stopped;
 }
@@ -690,25 +698,29 @@ start_state(detail::RcloneConfiguration configuration) {
         return std::unexpected(executable.error());
     }
     configuration.executable = std::move(*executable);
-    std::unique_ptr<State> state;
-    try {
-        state = std::make_unique<State>();
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            make_error(ErrorCode::Io, "could not allocate RC session"));
-    }
-    state->configuration = std::move(configuration);
     Error last_error = make_error(ErrorCode::Unknown, "RC startup failed");
     for (int attempt = 0; attempt < 3; ++attempt) {
-        const auto result = prepare_attempt(*state);
-        if (result) {
-            return state.release();
+        bool cleaned = false;
+        const auto dispose = [&cleaned](State* state) noexcept {
+            cleaned = shutdown_state(*state);
+            delete state;
+        };
+        try {
+            // Each attempt owns a single-use reproc handle and its own RC pool.
+            std::unique_ptr<State, decltype(dispose)> state{new State, dispose};
+            state->configuration = configuration;
+            auto result = prepare_attempt(*state);
+            if (result) {
+                return state.release();
+            }
+            last_error = std::move(result.error());
+        } catch (const std::bad_alloc&) {
+            return std::unexpected(
+                make_error(ErrorCode::Io, "could not allocate RC session"));
         }
-        last_error = result.error();
         const bool missing_executable =
             definitely_missing_executable(last_error);
         const bool cancelled = last_error.code == ErrorCode::Cancelled;
-        const bool cleaned = reset_failed_attempt(*state);
         if (!cleaned || missing_executable || cancelled) {
             if (!cleaned) {
                 last_error =
@@ -719,10 +731,9 @@ start_state(detail::RcloneConfiguration configuration) {
             break;
         }
     }
-    last_error.message +=
-        " (rclone executable: " +
-        platform::path::to_utf8(state->configuration.executable) + ")";
-    destroy_state(state.release());
+    last_error.message += " (rclone executable: " +
+                          platform::path::to_utf8(configuration.executable) +
+                          ")";
     return std::unexpected(std::move(last_error));
 }
 
@@ -731,19 +742,7 @@ void destroy_state(void* context) noexcept {
     if (state == nullptr) {
         return;
     }
-    state->stop_drain.store(true);
-    wait_for_drain(*state);
-    const bool quit_acknowledged = request_core_quit_best_effort(*state);
-    stop_rc_runtime(*state);
-    if (quit_acknowledged) {
-        try {
-            std::lock_guard process_lock(state->process_mutex);
-            (void)state->process.kill();
-        } catch (...) {
-        }
-    }
-    (void)stop_process(*state);
-    clear_secrets(*state);
+    (void)shutdown_state(*state);
     delete state;
 }
 

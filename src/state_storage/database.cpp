@@ -1,8 +1,10 @@
 #include "state_storage/database.hpp"
 
 #include "core/history.hpp"
+#include "platform/durability.hpp"
 #include "platform/path.hpp"
 #include "platform/private_storage.hpp"
+#include "platform/random.hpp"
 #include "sqlite/sqlite.hpp"
 #include "state_storage/database_connection.hpp"
 
@@ -220,6 +222,19 @@ bool protect_wal_sidecars(const std::filesystem::path& database_path) {
         }
         if (ec || std::filesystem::is_symlink(status) ||
             !platform::private_storage::protect_file(sidecar)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool sidecars_absent(const std::filesystem::path& path) {
+    for (const auto& suffix : {"-wal", "-shm", "-journal"}) {
+        const auto sidecar =
+            platform::path::temporary_sibling_path(path, "", suffix);
+        std::error_code ec;
+        const auto status = std::filesystem::symlink_status(sidecar, ec);
+        if (!is_missing_status(status, ec)) {
             return false;
         }
     }
@@ -619,64 +634,76 @@ bool valid_state_metadata(std::uint64_t height,
 
 bool initialize(const std::filesystem::path& database_path) {
     try {
+        const auto path = std::filesystem::absolute(database_path);
         std::error_code status_error;
-        const auto db_status =
-            std::filesystem::symlink_status(database_path, status_error);
-        const bool database_existed =
-            !status_error &&
-            db_status.type() != std::filesystem::file_type::not_found;
-        if (database_existed) {
-            if (std::filesystem::is_symlink(db_status) ||
-                !validate(database_path)) {
+        auto status = std::filesystem::symlink_status(path, status_error);
+        if (is_missing_status(status, status_error) && sidecars_absent(path)) {
+            const auto id = platform::random::hex_id();
+            if (!id) {
                 return false;
             }
-        } else if (status_error &&
-                   status_error != std::errc::no_such_file_or_directory) {
-            return false;
-        } else {
-            // Create db.sqlite with restrictive permissions before SQLite
-            // opens it so no permissive umask window occurs.
+            const auto staging = platform::path::temporary_sibling_path(
+                path, ".", ".init-" + *id);
             auto created =
-                platform::private_storage::create_private_file(database_path);
+                platform::private_storage::create_private_file(staging);
             if (!created) {
                 return false;
             }
-            if (!platform::private_storage::flush_and_close_private_file(
-                    *created)) {
-                static_cast<void>(
-                    platform::private_storage::remove_private_file_if_owned(
-                        *created));
+            struct Cleanup {
+                platform::private_storage::PrivateOutputFile& file;
+                ~Cleanup() noexcept {
+                    static_cast<void>(
+                        platform::private_storage::remove_private_file_if_owned(
+                            file));
+                }
+            } cleanup{*created};
+            platform::private_storage::close_private_file(*created);
+            {
+                auto opened = sqlite::open(staging, SQLITE_OPEN_READWRITE);
+                if (!opened) {
+                    return false;
+                }
+                auto transaction = sqlite::begin(opened->get());
+                if (!transaction) {
+                    return false;
+                }
+                create_schema(opened->get());
+                require(
+                    sqlite::execute(opened->get(), "PRAGMA user_version = 1"));
+                if (!valid_schema(opened->get())) {
+                    return false;
+                }
+                require(sqlite::commit(*transaction));
+                require(detail::require_wal_mode(opened->get(), true));
+            }
+            // Publish only a complete database that can be moved on its own.
+            if (!sidecars_absent(staging) ||
+                !platform::durability::sync_file(staging)) {
                 return false;
             }
-        }
-        auto opened = detail::open_state_database_readwrite(database_path,
-                                                            !database_existed);
-        if (!opened ||
-            !platform::private_storage::protect_file(database_path)) {
-            return false;
-        }
-        auto transaction = sqlite::begin(opened->get());
-        if (!transaction) {
-            return false;
-        }
-        const auto version = read_schema_version(opened->get());
-        if (version == 0 &&
-            object_kind(opened->get(), "nodes") == ObjectKind::Missing &&
-            object_kind(opened->get(), "metadata") == ObjectKind::Missing) {
-            if (database_existed) {
+            const auto installed =
+                platform::durability::install_without_overwrite(staging, path);
+            if (installed) {
+                return platform::durability::sync_parent_directory(path)
+                    .has_value();
+            }
+            if (installed.error() != std::errc::file_exists) {
                 return false;
             }
-            create_schema(opened->get());
-            require(sqlite::execute(opened->get(), "PRAGMA user_version = 1"));
-        } else if (version != schema_version) {
+            status = std::filesystem::symlink_status(path, status_error);
+        } else if (is_missing_status(status, status_error)) {
+            // A concurrent initializer may have published while we checked
+            // sidecars.
+            status = std::filesystem::symlink_status(path, status_error);
+        }
+        if (status_error || !std::filesystem::is_regular_file(status) ||
+            platform::private_storage::is_reparse_or_symlink(path) ||
+            !validate(path) || !platform::private_storage::protect_file(path)) {
             return false;
         }
-        if (!has_expected_schema(opened->get())) {
-            return false;
-        }
-        require(sqlite::commit(*transaction));
-        require(sqlite::execute(opened->get(), "PRAGMA journal_mode=WAL"));
-        return protect_wal_sidecars(database_path);
+        auto opened = sqlite::open(path, SQLITE_OPEN_READWRITE);
+        return opened && detail::require_wal_mode(opened->get(), true) &&
+               protect_wal_sidecars(path);
     } catch (const std::exception&) {
         return false;
     }
