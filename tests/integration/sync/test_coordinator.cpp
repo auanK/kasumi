@@ -12699,13 +12699,27 @@ TEST(SyncCoordinatorTest, NonGenesisUploadSubBatchResumesSafely) {
     ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
     EXPECT_EQ(*recovered, RecoveryResult::ResumableTransaction);
 
+    const auto identifier = [&](std::size_t index) {
+        return kasumi::crypto::content_identifier(
+            key,
+            kasumi::hash_from_hex(plan->plan.operations[index].hash).value());
+    };
+    const auto missing = identifier(0);
+    const auto corrupt = identifier(1);
+    ASSERT_EQ(state->objects.erase(missing), 1U);
+    ASSERT_TRUE(state->objects.contains(corrupt));
+    const auto expected = state->objects.at(corrupt);
+    state->objects.at(corrupt) = {0};
+
     state->fail_content_put_at = 0;
     state->content_put_count = 0;
 
     const auto second_exec =
         coord::execute(runtime_data, storage, key, *observed, *plan);
     ASSERT_TRUE(second_exec.has_value()) << second_exec.error().detail;
-    EXPECT_EQ(state->content_put_count, 4U);
+    EXPECT_EQ(state->content_put_count, 6U);
+    EXPECT_TRUE(state->objects.contains(missing));
+    EXPECT_EQ(state->objects.at(corrupt).size(), expected.size());
     ASSERT_TRUE(
         recover_expect(runtime_data, storage, key, RecoveryResult::NoJournal));
 }

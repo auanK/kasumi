@@ -444,9 +444,12 @@ MutationResult cleanup_upload_batch(const StagedUploadBatch& batch) {
         return {};
     }
 
-    const std::size_t operation_index =
-        batch.objects.empty() ? 0
-                              : batch.objects.front().operation_indices.front();
+    const auto staged =
+        std::ranges::find_if(batch.objects, [](const auto& object) {
+            return !object.operation_indices.empty();
+        });
+    const auto operation_index =
+        staged == batch.objects.end() ? 0 : staged->operation_indices.front();
     std::error_code ec;
     if (!std::filesystem::exists(batch.root, ec)) {
         if (ec) {

@@ -21,6 +21,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace kasumi::application {
@@ -186,6 +187,38 @@ std::expected<void, UploadBatchError> transfer_and_verify_upload_batch(
     const platform::Workspace& workspace,
     std::size_t parallelism,
     ProgressMeter* meter = nullptr);
+
+// Authenticates an existing object against the expected plaintext identity.
+std::expected<bool, Error>
+verify_existing_content(transport::Transport& storage,
+                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                        std::string_view identifier,
+                        std::string_view plaintext_hash,
+                        std::optional<std::uint64_t> size,
+                        const platform::Workspace& workspace,
+                        std::size_t operation_index,
+                        bool is_pack = false);
+
+std::expected<void, Error>
+resume_manifest_repairs(const journal::Paths& paths,
+                        transaction::Record& record,
+                        const history::StorageManifest& manifest,
+                        const std::filesystem::path& local_root,
+                        transport::Transport& storage,
+                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                        const platform::Workspace& workspace);
+
+std::expected<std::unordered_map<std::string, std::filesystem::path>,
+              mutation::MutationError>
+prefetch_manifest_downloads(const history::StorageManifest& manifest,
+                            std::span<const std::size_t> apply_order,
+                            const transaction::Record& record,
+                            const std::filesystem::path& local_root,
+                            transport::Transport& storage,
+                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                            const platform::Workspace& workspace,
+                            std::size_t parallelism,
+                            ProgressMeter* meter = nullptr);
 
 // Initializes state.db (if needed) and persists the committed StoredState.
 std::expected<void, Error>

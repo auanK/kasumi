@@ -297,15 +297,22 @@ post_rc_impl(State& state,
     struct RequestGuard {
         RcRuntime& runtime;
         InFlightRequest* entry;
+        void unregister() noexcept {
+            if (entry != nullptr) {
+                std::lock_guard lock(runtime.watcher_mutex);
+                std::erase(runtime.active_requests, entry);
+                entry = nullptr;
+            }
+        }
         ~RequestGuard() noexcept {
-            std::lock_guard lock(runtime.watcher_mutex);
-            std::erase(runtime.active_requests, entry);
+            unregister();
         }
     } request_guard{runtime, honour_cancellation ? &in_flight : nullptr};
 
     const auto trace = platform::perf_trace::begin();
     const auto response =
         client->Post(path, std::string{request_body}, "application/json");
+    request_guard.unregister();
     if (trace.active) {
         platform::perf_trace::finish(
             std::string{"rc/"} + std::string{path_suffix}, trace);

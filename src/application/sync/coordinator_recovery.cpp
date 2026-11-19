@@ -254,19 +254,35 @@ roll_forward_local_only(const journal::Paths& paths,
     return cleanup_completed(paths, workspace, key);
 }
 
-bool has_pending_storage_repair(const transaction::Record& record) noexcept {
-    if (record.publication_required) {
-        return false;
+std::expected<history::StorageManifest, Error>
+load_repair_manifest(const transaction::Record& record,
+                     const runtime::RuntimeData& runtime_data,
+                     transport::Transport& storage,
+                     std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+    auto accepted = state_storage::load_state(runtime_data.database_path);
+    if (!accepted) {
+        return std::unexpected(
+            detail::make_error(ErrorCode::DatabaseFailure, accepted.error()));
     }
-    for (std::size_t index = 0; index < record.plan.operations.size();
-         ++index) {
-        if (record.plan.operations[index].action == Action::Upload &&
-            record.progress[index].state !=
-                transaction::OperationState::Applied) {
-            return true;
-        }
+    if (*accepted && (*accepted)->commit_id == record.observed_head_id &&
+        (*accepted)->height == record.storage_generation) {
+        return std::move((*accepted)->storage_manifest);
     }
-    return false;
+    auto pinned = publication::find_reachable_commit(
+        storage,
+        key,
+        runtime_data.database_path.parent_path(),
+        record.observed_head_id);
+    if (!pinned) {
+        return std::unexpected(detail::indeterminate_publication(
+            pinned.error(), "pinned repair commit"));
+    }
+    if (!*pinned || (*pinned)->commit.height != record.storage_generation) {
+        return std::unexpected(
+            detail::make_error(ErrorCode::RecoveryConflict,
+                               "pinned repair commit is unavailable"));
+    }
+    return std::move((*pinned)->commit.storage);
 }
 
 bool is_publication_transaction_resumable(
@@ -354,6 +370,7 @@ std::expected<void, Error> resume_pending_local_mutations(
     const journal::Paths& paths,
     transaction::Record& record,
     const std::optional<platform::Workspace>& workspace,
+    const history::StorageManifest& manifest,
     const runtime::RuntimeData& runtime_data,
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
@@ -407,6 +424,25 @@ std::expected<void, Error> resume_pending_local_mutations(
         replay_order.push_back(index);
     }
     detail::order_local_copies(record.plan.operations, replay_order);
+    std::unordered_map<std::string, std::filesystem::path> prefetched;
+    if (!replay_order.empty()) {
+        auto staged = detail::prefetch_manifest_downloads(
+            manifest,
+            replay_order,
+            record,
+            runtime_data.local_dir,
+            storage,
+            key,
+            *workspace,
+            application::content_concurrency());
+        if (!staged) {
+            return std::unexpected(
+                detail::make_error(ErrorCode::MutationFailure,
+                                   mutation::describe(staged.error()),
+                                   staged.error().operation_index));
+        }
+        prefetched = std::move(*staged);
+    }
     for (const auto index : replay_order) {
         const auto& operation = record.plan.operations[index];
         auto condition = mutation::detail::effective_destination(
@@ -416,16 +452,28 @@ std::expected<void, Error> resume_pending_local_mutations(
                 detail::make_error(ErrorCode::RecoveryConflict,
                                    mutation::describe(condition.error()),
                                    index));
-        auto applied =
-            mutation::apply_operation(operation,
-                                      index,
-                                      runtime_data.local_dir,
-                                      storage,
-                                      key,
-                                      *workspace,
-                                      record.progress[index],
-                                      mutation::DownloadCacheMode::None,
-                                      *condition ? &**condition : nullptr);
+        const auto staged = operation.action == Action::Download
+                                ? prefetched.find(operation.hash)
+                                : prefetched.end();
+        auto applied = staged != prefetched.end()
+                           ? mutation::apply_preverified_download(
+                                 operation,
+                                 index,
+                                 runtime_data.local_dir,
+                                 staged->second,
+                                 *workspace,
+                                 record.progress[index],
+                                 *condition ? &**condition : nullptr)
+                           : mutation::apply_operation(
+                                 operation,
+                                 index,
+                                 runtime_data.local_dir,
+                                 storage,
+                                 key,
+                                 *workspace,
+                                 record.progress[index],
+                                 mutation::DownloadCacheMode::None,
+                                 *condition ? &**condition : nullptr);
         if (!applied) {
             return std::unexpected(detail::make_error(
                 applied.error().code ==
@@ -447,7 +495,7 @@ std::expected<void, Error> resume_pending_local_mutations(
     return {};
 }
 
-std::expected<void, Error> resume_pending_storage_repairs(
+std::expected<history::StorageManifest, Error> resume_pending_storage_repairs(
     const journal::Paths& paths,
     transaction::Record& record,
     const std::optional<platform::Workspace>& workspace,
@@ -458,6 +506,20 @@ std::expected<void, Error> resume_pending_storage_repairs(
         return std::unexpected(
             detail::make_error(ErrorCode::RecoveryConflict,
                                "pending repair is missing recovery workspace"));
+    }
+    auto manifest = load_repair_manifest(record, runtime_data, storage, key);
+    if (!manifest) {
+        return std::unexpected(manifest.error());
+    }
+    if (auto repaired = detail::resume_manifest_repairs(paths,
+                                                        record,
+                                                        *manifest,
+                                                        runtime_data.local_dir,
+                                                        storage,
+                                                        key,
+                                                        *workspace);
+        !repaired) {
+        return std::unexpected(repaired.error());
     }
 
     std::vector<std::size_t> pending_uploads;
@@ -472,7 +534,7 @@ std::expected<void, Error> resume_pending_storage_repairs(
     }
 
     if (pending_uploads.empty()) {
-        return {};
+        return std::move(*manifest);
     }
 
     const auto parallelism = application::content_concurrency();
@@ -523,24 +585,33 @@ std::expected<void, Error> resume_pending_storage_repairs(
                 continue;
             }
 
-            mutation::StagedUploadBatch existing_batch{
-                .root = staged_batch->root,
-                .objects = {object},
-            };
-            auto verified = mutation::verify_upload_batch(
-                existing_batch, storage, key, *workspace, 1);
+            const auto index = object.operation_indices.front();
+            const auto verified =
+                detail::verify_existing_content(storage,
+                                                key,
+                                                object.identifier,
+                                                object.plaintext_hash,
+                                                object.plaintext_size,
+                                                *workspace,
+                                                index);
             if (!verified) {
-                // Retry a verified byte mismatch; read failures stay
-                // fail-closed.
-                if (verified.error().code ==
-                    mutation::MutationErrorCode::IntegrityMismatch) {
-                    missing_batch.objects.push_back(object);
-                    continue;
-                }
+                return std::unexpected(verified.error());
+            }
+            if (!*verified) {
+                missing_batch.objects.push_back(object);
+                continue;
+            }
+            std::error_code ec;
+            std::filesystem::remove(
+                staged_batch->root /
+                    platform::path::from_utf8(object.identifier),
+                ec);
+            if (ec) {
                 return std::unexpected(detail::make_error(
                     ErrorCode::MutationFailure,
-                    "failed to verify existing pending repair",
-                    verified.error().operation_index));
+                    "failed to clear staging for verified repair: " +
+                        ec.message(),
+                    index));
             }
         }
 
@@ -576,7 +647,7 @@ std::expected<void, Error> resume_pending_storage_repairs(
                                    cleaned.error().operation_index));
         }
     }
-    return {};
+    return std::move(*manifest);
 }
 
 std::expected<RecoveryResult, Error>
@@ -843,10 +914,16 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
 
     history_storage::maintenance_protocol::RegistrationState writer;
     const auto layout = history_storage::derive_remote_layout(key);
+    const bool has_repairs =
+        !(*record)->publication_required &&
+        (*record)->phase < transaction::Phase::DatabaseCommitted &&
+        std::ranges::any_of((*record)->plan.operations,
+                            [](const auto& operation) {
+                                return operation.action == Action::Upload;
+                            });
     const bool remote_write_required =
-        has_pending_storage_repair(**record) ||
-        ((*record)->publication_required &&
-         (*record)->phase > transaction::Phase::CommitPrepared);
+        has_repairs || ((*record)->publication_required &&
+                        (*record)->phase > transaction::Phase::CommitPrepared);
     if (remote_write_required) {
         auto registered =
             history_storage::maintenance_protocol::register_writer(
@@ -867,7 +944,7 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
                 }
             }
             if (!(*record)->publication_required) {
-                if (has_pending_storage_repair(**record)) {
+                if (has_repairs) {
                     auto resumed = resume_pending_storage_repairs(*paths,
                                                                   **record,
                                                                   *workspace,
@@ -896,15 +973,10 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
                         }
                         return std::unexpected(resumed.error());
                     }
-                }
-                const bool has_repairs = std::ranges::any_of(
-                    (*record)->plan.operations, [](const auto& operation) {
-                        return operation.action == Action::Upload;
-                    });
-                if (has_repairs) {
                     auto local = resume_pending_local_mutations(*paths,
                                                                 **record,
                                                                 *workspace,
+                                                                *resumed,
                                                                 runtime_data,
                                                                 storage,
                                                                 key);
