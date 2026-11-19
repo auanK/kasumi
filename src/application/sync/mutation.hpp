@@ -118,13 +118,13 @@ MutationResult apply_streamed_download(
     const DestinationPrecondition* destination,
     const DownloadCandidatePopulator& populate);
 
-// Installs a previously extracted/reassembled verified plaintext file into the
-// local destination with full transactional backup/atomic-install guarantees.
-MutationResult apply_preverified_download(
+// Writes already-authenticated plaintext bytes into the local staging
+// candidate and atomically installs and syncs the destination.
+MutationResult apply_preverified_bytes_download(
     const Operation& operation,
     std::size_t operation_index,
     const std::filesystem::path& local_root,
-    const std::filesystem::path& verified_plaintext_source,
+    std::span<const std::uint8_t> verified_plaintext,
     const platform::Workspace& workspace,
     const transaction::OperationProgress& progress,
     const DestinationPrecondition* destination = nullptr);

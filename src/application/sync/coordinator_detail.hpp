@@ -22,6 +22,7 @@
 #include <cstring>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -275,17 +276,27 @@ mutation::MutationResult apply_chunked_download(
     ChunkDownloadSession& session,
     ProgressMeter* meter = nullptr);
 
-std::expected<std::unordered_map<std::string, std::filesystem::path>,
-              mutation::MutationError>
-prefetch_manifest_downloads(const history::StorageManifest& manifest,
-                            std::span<const std::size_t> apply_order,
-                            const transaction::Record& record,
-                            const std::filesystem::path& local_root,
-                            transport::Transport& storage,
-                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                            const platform::Workspace& workspace,
-                            std::size_t parallelism,
-                            ProgressMeter* meter = nullptr);
+using CheckpointCallback = std::function<std::expected<void, Error>()>;
+using AppliedOpsCallback = std::function<void(std::span<const std::size_t>)>;
+
+// Fetches Micro-Packs in bounded windows (<= 64 packs, <= 256 MiB), decodes
+// and authenticates in memory, deletes .enc immediately, and installs members
+// directly into destination candidates with per-window checkpointing.
+std::expected<std::optional<mutation::MutationError>, Error>
+apply_packed_downloads(
+    const history::StorageManifest& manifest,
+    std::span<const std::size_t> op_indices,
+    transaction::Record& record,
+    const std::filesystem::path& local_root,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const platform::Workspace& workspace,
+    std::span<const std::optional<mutation::DestinationPrecondition>>
+        destinations,
+    std::size_t parallelism,
+    const CheckpointCallback& checkpoint = {},
+    const AppliedOpsCallback& on_applied = {},
+    ProgressMeter* meter = nullptr);
 
 // Initializes state.db (if needed) and persists the committed StoredState.
 std::expected<void, Error>

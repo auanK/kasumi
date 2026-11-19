@@ -428,28 +428,21 @@ std::expected<void, Error> resume_pending_local_mutations(
     }
     detail::order_local_copies(record.plan.operations, replay_order);
     detail::order_local_type_changes(type_changes, replay_order);
-    std::unordered_map<std::string, std::filesystem::path> prefetched;
-    if (!replay_order.empty()) {
-        auto staged = detail::prefetch_manifest_downloads(
-            manifest,
-            replay_order,
-            record,
-            runtime_data.local_dir,
-            storage,
-            key,
-            *workspace,
-            application::content_concurrency());
-        if (!staged) {
-            return std::unexpected(
-                detail::make_error(ErrorCode::MutationFailure,
-                                   mutation::describe(staged.error()),
-                                   staged.error().operation_index));
-        }
-        prefetched = std::move(*staged);
-    }
     detail::ChunkDownloadSession chunk_session;
     const auto parallelism = application::content_concurrency();
-    for (const auto index : replay_order) {
+    std::vector<std::optional<mutation::DestinationPrecondition>> destinations(
+        record.plan.operations.size());
+    const auto replay_failure = [](std::size_t op_index,
+                                   const mutation::MutationError& err) {
+        return detail::make_error(
+            err.code == mutation::MutationErrorCode::DestinationConflict
+                ? ErrorCode::RecoveryConflict
+                : ErrorCode::MutationFailure,
+            "failed to replay local mutation: " + err.detail,
+            op_index);
+    };
+    const auto prepare_replay_op =
+        [&](std::size_t index) -> std::expected<void, Error> {
         const auto& operation = record.plan.operations[index];
         if (type_changes[index] == detail::TypeChangeStep::Install &&
             record.progress[index].state ==
@@ -466,12 +459,13 @@ std::expected<void, Error> resume_pending_local_mutations(
         }
         auto condition = mutation::detail::effective_destination(
             record, index, dependencies);
-        if (!condition)
+        if (!condition) {
             return std::unexpected(
                 detail::make_error(ErrorCode::RecoveryConflict,
                                    mutation::describe(condition.error()),
                                    index));
-        const history::ChunkedFileEntry* chunked = nullptr;
+        }
+        destinations[index] = std::move(*condition);
         if (operation.action == Action::Download) {
             auto destination = mutation::detail::resolve_local_path(
                 runtime_data.local_dir, operation.path, index);
@@ -493,61 +487,145 @@ std::expected<void, Error> resume_pending_local_mutations(
                     cleaned.error().detail,
                     index));
             }
-            if (!manifest.empty()) {
-                if (const auto h = hash_from_hex(operation.hash)) {
-                    chunked = history::find_chunked_file(manifest, *h);
+        }
+        return {};
+    };
+    const auto mark_replayed =
+        [&](std::size_t index) -> std::expected<void, Error> {
+        record.progress[index].state = transaction::OperationState::Applied;
+        return detail::save_record(paths, record, key);
+    };
+
+    for (std::size_t position = 0; position < replay_order.size();) {
+        const auto index = replay_order[position];
+        const auto& operation = record.plan.operations[index];
+        if (operation.action == Action::Download) {
+            std::size_t end = position + 1;
+            while (end < replay_order.size() &&
+                   record.plan.operations[replay_order[end]].action ==
+                       Action::Download) {
+                ++end;
+            }
+            for (std::size_t i = position; i < end; ++i) {
+                if (auto prepared = prepare_replay_op(replay_order[i]);
+                    !prepared) {
+                    return prepared;
                 }
             }
+            std::vector<std::size_t> packed_indices;
+            std::vector<std::size_t> chunked_indices;
+            std::vector<std::size_t> loose_indices;
+            for (std::size_t i = position; i < end; ++i) {
+                const auto op_idx = replay_order[i];
+                if (manifest.empty()) {
+                    loose_indices.push_back(op_idx);
+                    continue;
+                }
+                const auto h =
+                    hash_from_hex(record.plan.operations[op_idx].hash);
+                if (h && history::find_packed_blob(manifest, *h) != nullptr) {
+                    packed_indices.push_back(op_idx);
+                } else if (h &&
+                           history::find_chunked_file(manifest, *h) !=
+                               nullptr) {
+                    chunked_indices.push_back(op_idx);
+                } else {
+                    loose_indices.push_back(op_idx);
+                }
+            }
+            if (!packed_indices.empty()) {
+                auto packed_result = detail::apply_packed_downloads(
+                    manifest,
+                    packed_indices,
+                    record,
+                    runtime_data.local_dir,
+                    storage,
+                    key,
+                    *workspace,
+                    destinations,
+                    parallelism,
+                    [&]() -> std::expected<void, Error> {
+                        return detail::save_record(paths, record, key);
+                    });
+                if (!packed_result) {
+                    return std::unexpected(packed_result.error());
+                }
+                if (*packed_result) {
+                    return std::unexpected(
+                        replay_failure((*packed_result)->operation_index,
+                                       **packed_result));
+                }
+            }
+            for (const auto op_idx : chunked_indices) {
+                const auto& op = record.plan.operations[op_idx];
+                const auto h = hash_from_hex(op.hash);
+                const auto* chunked =
+                    h ? history::find_chunked_file(manifest, *h) : nullptr;
+                if (!chunked) {
+                    continue;
+                }
+                auto applied = detail::apply_chunked_download(
+                    *chunked,
+                    op,
+                    op_idx,
+                    runtime_data.local_dir,
+                    storage,
+                    key,
+                    *workspace,
+                    parallelism,
+                    record.progress[op_idx],
+                    destinations[op_idx] ? &*destinations[op_idx] : nullptr,
+                    chunk_session);
+                if (!applied) {
+                    return std::unexpected(
+                        replay_failure(op_idx, applied.error()));
+                }
+                if (auto saved = mark_replayed(op_idx); !saved) {
+                    return std::unexpected(saved.error());
+                }
+            }
+            for (const auto op_idx : loose_indices) {
+                auto applied = mutation::apply_operation(
+                    record.plan.operations[op_idx],
+                    op_idx,
+                    runtime_data.local_dir,
+                    storage,
+                    key,
+                    *workspace,
+                    record.progress[op_idx],
+                    mutation::DownloadCacheMode::None,
+                    destinations[op_idx] ? &*destinations[op_idx] : nullptr);
+                if (!applied) {
+                    return std::unexpected(
+                        replay_failure(op_idx, applied.error()));
+                }
+                if (auto saved = mark_replayed(op_idx); !saved) {
+                    return std::unexpected(saved.error());
+                }
+            }
+            position = end;
+            continue;
         }
-        const auto staged = operation.action == Action::Download
-                                ? prefetched.find(operation.hash)
-                                : prefetched.end();
-        auto applied =
-            chunked != nullptr
-                ? detail::apply_chunked_download(
-                      *chunked,
-                      operation,
-                      index,
-                      runtime_data.local_dir,
-                      storage,
-                      key,
-                      *workspace,
-                      parallelism,
-                      record.progress[index],
-                      *condition ? &**condition : nullptr,
-                      chunk_session)
-            : staged != prefetched.end()
-                ? mutation::apply_preverified_download(
-                      operation,
-                      index,
-                      runtime_data.local_dir,
-                      staged->second,
-                      *workspace,
-                      record.progress[index],
-                      *condition ? &**condition : nullptr)
-                : mutation::apply_operation(
-                      operation,
-                      index,
-                      runtime_data.local_dir,
-                      storage,
-                      key,
-                      *workspace,
-                      record.progress[index],
-                      mutation::DownloadCacheMode::None,
-                      *condition ? &**condition : nullptr);
+        if (auto prepared = prepare_replay_op(index); !prepared) {
+            return prepared;
+        }
+        auto applied = mutation::apply_operation(
+            operation,
+            index,
+            runtime_data.local_dir,
+            storage,
+            key,
+            *workspace,
+            record.progress[index],
+            mutation::DownloadCacheMode::None,
+            destinations[index] ? &*destinations[index] : nullptr);
         if (!applied) {
-            return std::unexpected(detail::make_error(
-                applied.error().code ==
-                        mutation::MutationErrorCode::DestinationConflict
-                    ? ErrorCode::RecoveryConflict
-                    : ErrorCode::MutationFailure,
-                "failed to replay local mutation: " + applied.error().detail,
-                index));
+            return std::unexpected(replay_failure(index, applied.error()));
         }
-        record.progress[index].state = transaction::OperationState::Applied;
-        if (auto saved = detail::save_record(paths, record, key); !saved) {
+        if (auto saved = mark_replayed(index); !saved) {
             return std::unexpected(saved.error());
         }
+        ++position;
     }
     if (record.phase < transaction::Phase::LocalChangesApplied) {
         record.phase = transaction::Phase::LocalChangesApplied;

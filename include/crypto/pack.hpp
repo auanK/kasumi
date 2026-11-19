@@ -4,7 +4,9 @@
 #include "core/hasher.hpp"
 #include "crypto/file_crypto.hpp"
 #include "crypto/key_derivation.hpp"
+#include "crypto/secure_memory.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -12,6 +14,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace kasumi::crypto::pack {
@@ -117,6 +120,68 @@ std::expected<PackEncryptionResult, std::string>
 write_encrypted_pack(std::span<const PackMemberSource> members,
                      const std::filesystem::path& output_path,
                      std::span<const std::uint8_t, KEY_SIZE> master_key);
+
+// Authenticated KPAK v1 pack payload held in memory for direct installation.
+struct VerifiedPackSlice {
+    std::size_t offset = 0;
+    std::uint32_t size = 0;
+};
+
+struct VerifiedPack {
+    Hash pack_hash{};
+    std::vector<PackMemberDescriptor> members;
+    std::vector<std::uint8_t> plaintext;
+    std::vector<VerifiedPackSlice> slices;
+
+    VerifiedPack() = default;
+    VerifiedPack(const VerifiedPack&) = delete;
+    VerifiedPack& operator=(const VerifiedPack&) = delete;
+    VerifiedPack(VerifiedPack&&) noexcept = default;
+    VerifiedPack& operator=(VerifiedPack&& other) noexcept {
+        if (this != &other) {
+            wipe();
+            pack_hash = other.pack_hash;
+            members = std::move(other.members);
+            plaintext = std::move(other.plaintext);
+            slices = std::move(other.slices);
+        }
+        return *this;
+    }
+    ~VerifiedPack() noexcept {
+        wipe();
+    }
+
+    [[nodiscard]] std::optional<std::span<const std::uint8_t>>
+    member_bytes(const Hash& member_hash) const noexcept {
+        const auto it = std::ranges::lower_bound(
+            members, member_hash, {}, &PackMemberDescriptor::hash);
+        if (it == members.end() || it->hash != member_hash) {
+            return std::nullopt;
+        }
+        const auto index = static_cast<std::size_t>(it - members.begin());
+        if (index >= slices.size() ||
+            slices[index].offset > plaintext.size() ||
+            slices[index].size > plaintext.size() - slices[index].offset) {
+            return std::nullopt;
+        }
+        return std::span<const std::uint8_t>{
+            plaintext.data() + slices[index].offset, slices[index].size};
+    }
+
+private:
+    void wipe() noexcept {
+        if (!plaintext.empty()) {
+            secure_memory::wipe(plaintext.data(), plaintext.size());
+        }
+    }
+};
+
+// Decrypts and authenticates a KPAK v1 object in memory, verifying pack_hash
+// and every member's BLAKE3 digest.
+std::expected<VerifiedPack, std::string>
+load_verified_pack(const std::filesystem::path& encrypted_path,
+                   std::span<const std::uint8_t, KEY_SIZE> master_key,
+                   std::optional<Hash> expected_pack_hash);
 
 // Decrypts and authenticates a KPAK v1 object, verifying pack_hash and every
 // member's BLAKE3 digest; optionally writes <hash_hex>.plain to extract_dir.

@@ -3152,34 +3152,39 @@ mutation::MutationResult detail::apply_chunked_download(
     return {};
 }
 
-std::expected<std::unordered_map<std::string, std::filesystem::path>,
-              mutation::MutationError>
-detail::prefetch_manifest_downloads(
+std::expected<std::optional<mutation::MutationError>, Error>
+detail::apply_packed_downloads(
     const history::StorageManifest& manifest,
-    std::span<const std::size_t> apply_order,
-    const transaction::Record& record,
+    std::span<const std::size_t> op_indices,
+    transaction::Record& record,
     const std::filesystem::path& local_root,
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const platform::Workspace& workspace,
+    std::span<const std::optional<mutation::DestinationPrecondition>>
+        destinations,
     std::size_t parallelism,
+    const CheckpointCallback& checkpoint,
+    const AppliedOpsCallback& on_applied,
     ProgressMeter* meter) {
-    static_cast<void>(local_root);
-    std::unordered_map<std::string, std::filesystem::path> ready;
-    if (manifest.empty()) {
-        return ready;
+    if (manifest.empty() || op_indices.empty()) {
+        return std::optional<mutation::MutationError>{};
     }
 
     struct PackDownloadJob {
         Hash pack_hash{};
         std::string identifier;
         std::size_t first_op_index = 0;
+        std::uint64_t size = 0;
+        std::vector<std::size_t> op_indices;
     };
 
     std::vector<PackDownloadJob> pack_jobs;
-    HashSet seen_packs{0, hash_key};
+    std::unordered_map<Hash, std::size_t, decltype(&hash_key)>
+        pack_index_by_hash{0, hash_key};
+    HashSet seen_blobs{0, hash_key};
 
-    for (const auto op_idx : apply_order) {
+    for (const auto op_idx : op_indices) {
         if (record.progress[op_idx].state ==
             transaction::OperationState::Applied) {
             continue;
@@ -3192,135 +3197,205 @@ detail::prefetch_manifest_downloads(
         if (!h) {
             continue;
         }
-        if (const auto* packed = history::find_packed_blob(manifest, *h)) {
-            if (seen_packs.insert(packed->pack_hash).second) {
-                pack_jobs.push_back(PackDownloadJob{
-                    .pack_hash = packed->pack_hash,
-                    .identifier = crypto::pack_identifier(key, packed->pack_hash),
-                    .first_op_index = op_idx,
-                });
-            }
+        const auto* packed = history::find_packed_blob(manifest, *h);
+        if (!packed) {
+            continue;
+        }
+        auto [it, inserted] =
+            pack_index_by_hash.emplace(packed->pack_hash, pack_jobs.size());
+        if (inserted) {
+            pack_jobs.push_back(PackDownloadJob{
+                .pack_hash = packed->pack_hash,
+                .identifier = crypto::pack_identifier(key, packed->pack_hash),
+                .first_op_index = op_idx,
+            });
+        }
+        auto& job = pack_jobs[it->second];
+        job.first_op_index = std::min(job.first_op_index, op_idx);
+        job.op_indices.push_back(op_idx);
+        if (seen_blobs.insert(*h).second) {
+            job.size += packed->size;
         }
     }
 
     if (pack_jobs.empty()) {
-        return ready;
+        return std::optional<mutation::MutationError>{};
     }
 
     const auto dl_dir = workspace.root / "pack-dl";
-    const auto extract_dir = workspace.root / "pack-extract";
     if (auto ok = platform::private_storage::ensure_directory(dl_dir); !ok) {
-        return std::unexpected(mutation::detail::make_error(
-            mutation::MutationErrorCode::LocalIo,
-            ok.error(),
-            dl_dir,
-            pack_jobs.front().first_op_index));
-    }
-    if (auto ok = platform::private_storage::ensure_directory(extract_dir);
-        !ok) {
-        return std::unexpected(mutation::detail::make_error(
-            mutation::MutationErrorCode::LocalIo,
-            ok.error(),
-            extract_dir,
-            pack_jobs.front().first_op_index));
+        return std::optional<mutation::MutationError>{
+            mutation::detail::make_error(mutation::MutationErrorCode::LocalIo,
+                                         ok.error(),
+                                         dl_dir,
+                                         pack_jobs.front().first_op_index)};
     }
 
-    std::vector<std::string> ids;
-    ids.reserve(pack_jobs.size());
-    for (const auto& p : pack_jobs) {
-        ids.push_back(p.identifier);
-    }
-    if (meter)
-        meter->phase(Activity::Downloading, ids.size());
-    const bool batch_ok = batch_fetch_objects(storage, dl_dir, ids);
-    if (meter && batch_ok) {
-        meter->phase(Activity::Installing, pack_jobs.size());
-    }
+    const auto concurrency = std::max<std::size_t>(1, parallelism);
+    for (std::span<const PackDownloadJob> pending{pack_jobs};
+         !pending.empty();) {
+        const auto window = next_chunk_window(pending);
+        pending = pending.subspan(window.size());
+        if (platform::cancellation::requested()) {
+            const auto first_op = window.front().first_op_index;
+            return std::optional<mutation::MutationError>{
+                mutation::detail::make_error(
+                    mutation::MutationErrorCode::TransportFailure,
+                    "Micro-Pack download cancelled",
+                    record.plan.operations[first_op].path,
+                    first_op)};
+        }
 
-    std::vector<std::optional<mutation::MutationError>> errors(
-        pack_jobs.size());
-    application::parallel_for_indexed(
-        pack_jobs.size(),
-        std::min<std::size_t>(parallelism, pack_jobs.size()),
-        [&](std::size_t i) {
-            const auto& job = pack_jobs[i];
-            const auto enc_path = dl_dir / job.identifier;
-            std::error_code status_error;
-            const auto status =
-                std::filesystem::symlink_status(enc_path, status_error);
-            const bool absent =
-                status_error == std::errc::no_such_file_or_directory ||
-                (!status_error &&
-                 status.type() == std::filesystem::file_type::not_found);
-            if (absent) {
-                auto fetched =
-                    transport::get(storage, job.identifier, enc_path);
-                if (!fetched) {
+        std::vector<std::string> ids;
+        ids.reserve(window.size());
+        for (const auto& p : window) {
+            ids.push_back(p.identifier);
+        }
+        if (meter) {
+            meter->phase(Activity::Downloading, ids.size());
+        }
+        const bool batch_ok =
+            batch_fetch_objects(storage, dl_dir, ids, concurrency);
+        if (platform::cancellation::requested()) {
+            const auto first_op = window.front().first_op_index;
+            return std::optional<mutation::MutationError>{
+                mutation::detail::make_error(
+                    mutation::MutationErrorCode::TransportFailure,
+                    "Micro-Pack download cancelled",
+                    record.plan.operations[first_op].path,
+                    first_op)};
+        }
+        if (meter && batch_ok) {
+            meter->phase(Activity::Installing, window.size());
+        }
+
+        std::vector<std::optional<mutation::MutationError>> errors(
+            window.size());
+        std::vector<std::vector<std::size_t>> installed(window.size());
+        application::parallel_for_indexed(
+            window.size(),
+            std::min<std::size_t>(concurrency, window.size()),
+            [&](std::size_t i) {
+                const auto& job = window[i];
+                const auto enc_path = dl_dir / job.identifier;
+                std::error_code status_error;
+                const auto status =
+                    std::filesystem::symlink_status(enc_path, status_error);
+                const bool absent =
+                    status_error == std::errc::no_such_file_or_directory ||
+                    (!status_error &&
+                     status.type() == std::filesystem::file_type::not_found);
+                if (absent) {
+                    auto fetched =
+                        transport::get(storage, job.identifier, enc_path);
+                    if (!fetched) {
+                        errors[i] = mutation::detail::make_error(
+                            fetched.error().code ==
+                                    transport::ErrorCode::ObjectNotFound
+                                ? mutation::MutationErrorCode::
+                                      RemoteContentMissing
+                                : mutation::MutationErrorCode::TransportFailure,
+                            transport::describe(fetched.error()),
+                            record.plan.operations[job.first_op_index].path,
+                            job.first_op_index);
+                        return;
+                    }
+                } else if (status_error ||
+                           !std::filesystem::is_regular_file(status) ||
+                           platform::private_storage::is_reparse_or_symlink(
+                               enc_path)) {
                     errors[i] = mutation::detail::make_error(
-                        fetched.error().code ==
-                                transport::ErrorCode::ObjectNotFound
-                            ? mutation::MutationErrorCode::RemoteContentMissing
-                            : mutation::MutationErrorCode::TransportFailure,
-                        transport::describe(fetched.error()),
+                        mutation::MutationErrorCode::LocalIo,
+                        status_error ? status_error.message()
+                                     : "downloaded pack is not a regular file",
+                        enc_path,
+                        job.first_op_index);
+                    return;
+                }
+                auto verified = crypto::pack::load_verified_pack(
+                    enc_path, key, job.pack_hash);
+                std::error_code ignored;
+                std::filesystem::remove(enc_path, ignored);
+                if (!verified) {
+                    errors[i] = mutation::detail::make_error(
+                        mutation::MutationErrorCode::CryptoFailure,
+                        "Micro-Pack authentication/extraction failed: " +
+                            verified.error(),
                         record.plan.operations[job.first_op_index].path,
                         job.first_op_index);
                     return;
                 }
-            } else if (status_error ||
-                       !std::filesystem::is_regular_file(status) ||
-                       platform::private_storage::is_reparse_or_symlink(
-                           enc_path)) {
-                errors[i] = mutation::detail::make_error(
-                    mutation::MutationErrorCode::LocalIo,
-                    status_error ? status_error.message()
-                                 : "downloaded pack is not a regular file",
-                    enc_path,
-                    job.first_op_index);
-                return;
-            }
-            const auto pack_dir = extract_dir / hash_hex(job.pack_hash);
-            auto extracted = crypto::pack::decrypt_and_verify_pack(
-                enc_path, key, job.pack_hash, &pack_dir);
-            std::error_code ignored;
-            std::filesystem::remove(enc_path, ignored);
-            if (!extracted) {
-                errors[i] = mutation::detail::make_error(
-                    mutation::MutationErrorCode::CryptoFailure,
-                    "Micro-Pack authentication/extraction failed: " +
-                        extracted.error(),
-                    record.plan.operations[job.first_op_index].path,
-                    job.first_op_index);
-            } else if (meter && batch_ok) {
-                ProgressMeter::add(meter->work);
-            }
-        });
+                for (const auto op_idx : job.op_indices) {
+                    const auto& op = record.plan.operations[op_idx];
+                    const auto blob_hash = hash_from_hex(op.hash);
+                    const auto member =
+                        blob_hash ? verified->member_bytes(*blob_hash)
+                                  : std::nullopt;
+                    if (!member) {
+                        errors[i] = mutation::detail::make_error(
+                            mutation::MutationErrorCode::IntegrityMismatch,
+                            "blob missing from authenticated Micro-Pack: " +
+                                op.hash,
+                            op.path,
+                            op_idx);
+                        return;
+                    }
+                    const auto* condition =
+                        op_idx < destinations.size() && destinations[op_idx]
+                            ? &*destinations[op_idx]
+                            : nullptr;
+                    auto applied = mutation::apply_preverified_bytes_download(
+                        op,
+                        op_idx,
+                        local_root,
+                        *member,
+                        workspace,
+                        record.progress[op_idx],
+                        condition);
+                    if (!applied) {
+                        errors[i] = std::move(applied.error());
+                        return;
+                    }
+                    installed[i].push_back(op_idx);
+                }
+                if (meter && batch_ok) {
+                    ProgressMeter::add(meter->work);
+                }
+            });
 
-    std::optional<mutation::MutationError> first_err;
-    for (const auto& e : errors) {
-        if (e &&
-            (!first_err || e->operation_index < first_err->operation_index)) {
-            first_err = *e;
+        std::vector<std::size_t> applied_in_window;
+        for (const auto& ops : installed) {
+            applied_in_window.insert(
+                applied_in_window.end(), ops.begin(), ops.end());
+        }
+        if (!applied_in_window.empty()) {
+            for (const auto op_idx : applied_in_window) {
+                record.progress[op_idx].state =
+                    transaction::OperationState::Applied;
+            }
+            if (checkpoint) {
+                if (auto saved = checkpoint(); !saved) {
+                    return std::unexpected(saved.error());
+                }
+            }
+            if (on_applied) {
+                on_applied(applied_in_window);
+            }
+        }
+
+        std::optional<mutation::MutationError> first_err;
+        for (const auto& e : errors) {
+            if (e && (!first_err ||
+                      e->operation_index < first_err->operation_index)) {
+                first_err = *e;
+            }
+        }
+        if (first_err) {
+            return first_err;
         }
     }
-    if (first_err) {
-        return std::unexpected(*first_err);
-    }
 
-    for (const auto op_idx : apply_order) {
-        const auto& op = record.plan.operations[op_idx];
-        if (op.action != Action::Download) {
-            continue;
-        }
-        if (const auto h = hash_from_hex(op.hash)) {
-            if (const auto* pack = history::find_packed_blob(manifest, *h)) {
-                ready.emplace(op.hash,
-                              extract_dir / hash_hex(pack->pack_hash) /
-                                  (op.hash + ".plain"));
-            }
-        }
-    }
-
-    return ready;
+    return std::optional<mutation::MutationError>{};
 }
 
 namespace {
@@ -4121,33 +4196,8 @@ execute(const runtime::RuntimeData& runtime_data,
                               std::to_string(operation.size)];
         }
     }
-    auto preverified_downloads = detail::prefetch_manifest_downloads(
-        observed_input.storage.storage_manifest,
-        apply_order,
-        *record,
-        runtime_data.local_dir,
-        storage,
-        key,
-        *workspace,
-        parallelism,
-        meter);
-    if (!preverified_downloads) {
-        return fail_mutation(preverified_downloads.error().operation_index,
-                             preverified_downloads.error());
-    }
     std::unordered_set<std::string> populated_downloads;
     detail::ChunkDownloadSession chunk_session;
-    const auto chunked_entry =
-        [&](const kasumi::Operation& op) -> const history::ChunkedFileEntry* {
-        if (op.action != Action::Download ||
-            observed_input.storage.storage_manifest.empty()) {
-            return nullptr;
-        }
-        const auto h = hash_from_hex(op.hash);
-        return h ? history::find_chunked_file(
-                       observed_input.storage.storage_manifest, *h)
-                 : nullptr;
-    };
     for (std::size_t position = 0; position < apply_order.size();) {
         const auto first = apply_order[position];
         const auto& first_operation = record->plan.operations[first];
@@ -4156,137 +4206,203 @@ execute(const runtime::RuntimeData& runtime_data,
             first_operation.action == Action::CopyLocal;
         if (auto prepared = prepare_destination(first); !prepared)
             return std::unexpected(prepared.error());
-        if (first_operation.action == Action::Download &&
-            preverified_downloads->contains(first_operation.hash)) {
-            if (meter)
-                meter->phase(Activity::Installing);
-            std::size_t end = position;
-            while (end < apply_order.size()) {
-                const auto op_idx = apply_order[end];
-                const auto& op = record->plan.operations[op_idx];
-                const auto it = op.action == Action::Download
-                                    ? preverified_downloads->find(op.hash)
-                                    : preverified_downloads->end();
-                if (it == preverified_downloads->end()) {
-                    break;
-                }
-                if (end > position) {
-                    if (auto prepared = prepare_destination(op_idx); !prepared)
-                        return std::unexpected(prepared.error());
-                }
-                auto applied = mutation::apply_preverified_download(
-                    op,
-                    op_idx,
-                    runtime_data.local_dir,
-                    it->second,
-                    *workspace,
-                    record->progress[op_idx],
-                    destinations[op_idx] ? &*destinations[op_idx] : nullptr);
-                if (!applied) {
-                    return fail_mutation(op_idx, applied.error());
-                }
-                record->progress[op_idx].state =
-                    transaction::OperationState::Applied;
-                ++end;
-            }
-            if (auto saved_batch = save_active_record(); !saved_batch) {
-                return std::unexpected(saved_batch.error());
-            }
-            report_applied(
-                std::span{apply_order}.subspan(position, end - position));
-            position = end;
-            continue;
-        }
-        if (const auto* chunked = chunked_entry(first_operation)) {
-            auto applied = detail::apply_chunked_download(
-                *chunked,
-                first_operation,
-                first,
-                runtime_data.local_dir,
-                storage,
-                key,
-                *workspace,
-                parallelism,
-                record->progress[first],
-                destinations[first] ? &*destinations[first] : nullptr,
-                chunk_session,
-                meter);
-            if (!applied) {
-                return fail_mutation(first, applied.error());
-            }
-            auto marked = mark_applied(first);
-            if (!marked) {
-                return std::unexpected(marked.error());
-            }
-            report_applied({&first, 1});
-            ++position;
-            continue;
-        }
         if (first_operation.action == Action::Download) {
-            std::unordered_set<std::string> window_keys;
-            std::vector<mutation::DownloadCacheMode> window_modes;
-            std::vector<std::string> populated_in_window;
-            std::size_t end = position;
-            while (end < apply_order.size()) {
-                const auto& operation =
-                    record->plan.operations[apply_order[end]];
-                if (operation.action != Action::Download ||
-                    preverified_downloads->contains(operation.hash) ||
-                    chunked_entry(operation) != nullptr) {
-                    break;
-                }
-                auto content_key =
-                    operation.hash + ':' + std::to_string(operation.size);
-                if (populated_downloads.contains(content_key) ||
-                    window_keys.contains(content_key)) {
-                    break;
-                }
-                const bool multi = download_counts[content_key] > 1;
-                window_modes.push_back(
-                    multi ? mutation::DownloadCacheMode::Populate
-                          : mutation::DownloadCacheMode::None);
-                window_keys.insert(content_key);
-                if (multi) {
-                    populated_in_window.push_back(std::move(content_key));
-                }
+            std::size_t end = position + 1;
+            while (end < apply_order.size() &&
+                   record->plan.operations[apply_order[end]].action ==
+                       Action::Download) {
                 ++end;
             }
-            if (end > position + 1) {
-                for (std::size_t i = position + 1; i < end; ++i)
-                    if (auto prepared = prepare_destination(apply_order[i]);
-                        !prepared)
-                        return std::unexpected(prepared.error());
-                if (meter)
-                    meter->phase(Activity::Downloading, end - position);
-                auto failure = run_content_window(
-                    std::span<const std::size_t>{apply_order}.subspan(
-                        position, end - position),
-                    parallelism,
+            for (std::size_t i = position + 1; i < end; ++i) {
+                if (auto prepared = prepare_destination(apply_order[i]);
+                    !prepared) {
+                    return std::unexpected(prepared.error());
+                }
+            }
+
+            std::vector<std::size_t> packed_indices;
+            std::vector<std::size_t> chunked_indices;
+            std::vector<std::size_t> loose_indices;
+            const auto& manifest = observed_input.storage.storage_manifest;
+            for (std::size_t i = position; i < end; ++i) {
+                const auto op_idx = apply_order[i];
+                if (manifest.empty()) {
+                    loose_indices.push_back(op_idx);
+                    continue;
+                }
+                const auto h =
+                    hash_from_hex(record->plan.operations[op_idx].hash);
+                if (h && history::find_packed_blob(manifest, *h) != nullptr) {
+                    packed_indices.push_back(op_idx);
+                } else if (h &&
+                           history::find_chunked_file(manifest, *h) !=
+                               nullptr) {
+                    chunked_indices.push_back(op_idx);
+                } else {
+                    loose_indices.push_back(op_idx);
+                }
+            }
+
+            if (!packed_indices.empty()) {
+                auto packed_result = detail::apply_packed_downloads(
+                    manifest,
+                    packed_indices,
                     *record,
-                    *paths,
                     runtime_data.local_dir,
                     storage,
                     key,
                     *workspace,
                     destinations,
-                    window_modes,
-                    &journal_session,
+                    parallelism,
+                    [&]() -> std::expected<void, Error> {
+                        return save_active_record();
+                    },
+                    [&](std::span<const std::size_t> applied) {
+                        report_applied(applied);
+                    },
                     meter);
-                if (!failure) {
-                    return std::unexpected(failure.error());
+                if (!packed_result) {
+                    return std::unexpected(packed_result.error());
                 }
-                if (*failure) {
-                    return fail_mutation((*failure)->first,
-                                         (*failure)->second);
+                if (*packed_result) {
+                    return fail_mutation((*packed_result)->operation_index,
+                                         **packed_result);
                 }
-                for (auto& content_key : populated_in_window) {
-                    populated_downloads.insert(std::move(content_key));
+            }
+
+            for (const auto op_idx : chunked_indices) {
+                const auto& op = record->plan.operations[op_idx];
+                const auto h = hash_from_hex(op.hash);
+                const auto* chunked =
+                    h ? history::find_chunked_file(manifest, *h) : nullptr;
+                if (!chunked) {
+                    continue;
+                }
+                auto applied = detail::apply_chunked_download(
+                    *chunked,
+                    op,
+                    op_idx,
+                    runtime_data.local_dir,
+                    storage,
+                    key,
+                    *workspace,
+                    parallelism,
+                    record->progress[op_idx],
+                    destinations[op_idx] ? &*destinations[op_idx] : nullptr,
+                    chunk_session,
+                    meter);
+                if (!applied) {
+                    return fail_mutation(op_idx, applied.error());
+                }
+                auto marked = mark_applied(op_idx);
+                if (!marked) {
+                    return std::unexpected(marked.error());
+                }
+                report_applied({&op_idx, 1});
+            }
+
+            for (std::size_t loose_pos = 0; loose_pos < loose_indices.size();) {
+                std::unordered_set<std::string> window_keys;
+                std::vector<mutation::DownloadCacheMode> window_modes;
+                std::vector<std::string> populated_in_window;
+                std::size_t batch_end = loose_pos;
+                while (batch_end < loose_indices.size()) {
+                    const auto& operation =
+                        record->plan.operations[loose_indices[batch_end]];
+                    auto content_key =
+                        operation.hash + ':' + std::to_string(operation.size);
+                    if (populated_downloads.contains(content_key) ||
+                        window_keys.contains(content_key)) {
+                        break;
+                    }
+                    const bool multi = download_counts[content_key] > 1;
+                    window_modes.push_back(
+                        multi ? mutation::DownloadCacheMode::Populate
+                              : mutation::DownloadCacheMode::None);
+                    window_keys.insert(content_key);
+                    if (multi) {
+                        populated_in_window.push_back(std::move(content_key));
+                    }
+                    ++batch_end;
+                }
+                if (batch_end > loose_pos + 1) {
+                    const auto window_span =
+                        std::span<const std::size_t>{loose_indices}.subspan(
+                            loose_pos, batch_end - loose_pos);
+                    if (meter)
+                        meter->phase(Activity::Downloading, window_span.size());
+                    auto failure = run_content_window(window_span,
+                                                      parallelism,
+                                                      *record,
+                                                      *paths,
+                                                      runtime_data.local_dir,
+                                                      storage,
+                                                      key,
+                                                      *workspace,
+                                                      destinations,
+                                                      window_modes,
+                                                      &journal_session,
+                                                      meter);
+                    if (!failure) {
+                        return std::unexpected(failure.error());
+                    }
+                    if (*failure) {
+                        return fail_mutation((*failure)->first,
+                                             (*failure)->second);
+                    }
+                    for (auto& content_key : populated_in_window) {
+                        populated_downloads.insert(std::move(content_key));
+                    }
+                    if (meter)
+                        ProgressMeter::add(meter->work, window_span.size());
+                    loose_pos = batch_end;
+                    continue;
+                }
+                const auto op_idx = loose_indices[loose_pos];
+                const auto& operation = record->plan.operations[op_idx];
+                const auto content_key =
+                    operation.hash + ':' + std::to_string(operation.size);
+                auto download_cache = mutation::DownloadCacheMode::None;
+                if (download_counts[content_key] > 1) {
+                    download_cache =
+                        populated_downloads.insert(content_key).second
+                            ? mutation::DownloadCacheMode::Populate
+                            : mutation::DownloadCacheMode::Reuse;
+                }
+                if (meter) {
+                    const bool needs_download =
+                        download_cache != mutation::DownloadCacheMode::Reuse;
+                    meter->phase(needs_download ? Activity::Downloading
+                                                : Activity::Installing,
+                                 1,
+                                 0,
+                                 &operation.path);
+                }
+                auto applied = mutation::apply_operation(
+                    operation,
+                    op_idx,
+                    runtime_data.local_dir,
+                    storage,
+                    key,
+                    *workspace,
+                    record->progress[op_idx],
+                    download_cache,
+                    destinations[op_idx] ? &*destinations[op_idx] : nullptr);
+                if (!applied) {
+                    return fail_mutation(op_idx, applied.error());
+                }
+                auto marked = mark_applied(op_idx);
+                if (!marked) {
+                    return std::unexpected(marked.error());
                 }
                 if (meter)
-                    ProgressMeter::add(meter->work, end - position);
-                position = end;
-                continue;
+                    ProgressMeter::add(meter->work);
+                report_applied({&op_idx, 1});
+                ++loose_pos;
             }
+
+            position = end;
+            continue;
         }
         if (record->plan.operations[first].action != Action::Upload) {
             const auto& operation = first_operation;
