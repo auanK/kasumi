@@ -1063,9 +1063,12 @@ bool same_epoch_frontier(
         });
 }
 
+using RoundedTimestamps = std::unordered_map<std::string, std::int64_t>;
+
 bool same_materialized_head_rows(const std::vector<NodeRow>& expected_rows,
                                  const std::vector<NodeRow>& actual_rows,
-                                 const Snapshot& observed_local_tree) noexcept {
+                                 const Snapshot& observed_local_tree,
+                                 const RoundedTimestamps& rounded) noexcept {
     if (expected_rows.size() != actual_rows.size()) {
         return false;
     }
@@ -1079,6 +1082,14 @@ bool same_materialized_head_rows(const std::vector<NodeRow>& expected_rows,
             if (exp.size != act.size || exp.hash != act.hash) {
                 return false;
             }
+        }
+        if (const auto written = rounded.find(exp.path);
+            written != rounded.end()) {
+            if (!platform::metadata::filesystem_equivalent(written->second,
+                                                           act.mtime)) {
+                return false;
+            }
+            continue;
         }
         if (exp.mtime == 0 ||
             platform::metadata::filesystem_equivalent(exp.mtime, act.mtime)) {
@@ -1100,18 +1111,26 @@ bool same_materialized_head_rows(const std::vector<NodeRow>& expected_rows,
 }
 
 bool same_materialized_row(const NodeRow& expected,
-                           const NodeRow& actual) noexcept {
+                           const NodeRow& actual,
+                           const RoundedTimestamps& rounded) noexcept {
+    const auto written = rounded.find(expected.path);
+    const auto mtime =
+        written == rounded.end() ? expected.mtime : written->second;
     return expected.path == actual.path && expected.hash == actual.hash &&
            expected.size == actual.size &&
-           (expected.mtime == 0 || platform::metadata::filesystem_equivalent(
-                                       expected.mtime, actual.mtime)) &&
+           (expected.mtime == 0 ||
+            platform::metadata::filesystem_equivalent(mtime, actual.mtime)) &&
            expected.is_directory == actual.is_directory;
 }
 
 bool same_materialized_rows(std::span<const NodeRow> expected,
-                            std::span<const NodeRow> actual) noexcept {
+                            std::span<const NodeRow> actual,
+                            const RoundedTimestamps& rounded) noexcept {
     return expected.size() == actual.size() &&
-           std::ranges::equal(expected, actual, same_materialized_row);
+           std::ranges::equal(
+               expected, actual, [&](const auto& exp, const auto& act) {
+                   return same_materialized_row(exp, act, rounded);
+               });
 }
 
 transaction::Record
@@ -3160,7 +3179,7 @@ uploads_to_replay(const transaction::Record& record,
     return replay;
 }
 
-std::expected<void, Error>
+std::expected<detail::RoundedTimestamps, Error>
 restore_transaction_metadata(const Snapshot& expected_tree,
                              const Snapshot& observed_tree,
                              const transaction::Record& record,
@@ -3177,6 +3196,7 @@ restore_transaction_metadata(const Snapshot& expected_tree,
         return std::unexpected(
             detail::make_error(ErrorCode::MutationFailure, paths.error()));
     }
+    detail::RoundedTimestamps rounded;
     for (const auto& path_name : *paths) {
         const auto* row = find_row(expected_tree, path_name);
         if (row == nullptr) {
@@ -3244,8 +3264,19 @@ restore_transaction_metadata(const Snapshot& expected_tree,
                 "failed to restore materialized timestamp for " + path_name +
                     ": " + written.error()));
         }
+        const auto materialized =
+            platform::metadata::unix_nanoseconds(*written);
+        if (!materialized) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::MutationFailure,
+                "materialized timestamp is out of range for " + path_name));
+        }
+        if (!platform::metadata::filesystem_equivalent(row->mtime,
+                                                       *materialized)) {
+            rounded.emplace(path_name, *materialized);
+        }
     }
-    return {};
+    return rounded;
 }
 
 bool same_result(const reconciliation::Result& left,
@@ -4185,7 +4216,10 @@ execute(const runtime::RuntimeData& runtime_data,
                 const auto* expected_dir = find_row(
                     reconciliation_result.candidate_shared_tree, row.path);
                 if (expected_dir != nullptr) {
-                    row.mtime = expected_dir->mtime;
+                    const auto written = timestamps->find(row.path);
+                    row.mtime = written == timestamps->end()
+                                    ? expected_dir->mtime
+                                    : written->second;
                 }
             }
             validation_local_tree.rows.push_back(std::move(row));
@@ -4206,7 +4240,8 @@ execute(const runtime::RuntimeData& runtime_data,
     if (record->publication_required &&
         !detail::same_materialized_rows(
             reconciliation_result.candidate_shared_tree.rows,
-            publication_tree->rows)) {
+            publication_tree->rows,
+            *timestamps)) {
         return fail_terminal(detail::make_error(
             ErrorCode::CompositionMismatch,
             "materialized tree does not match reconciled candidate tree"));
@@ -4222,7 +4257,8 @@ execute(const runtime::RuntimeData& runtime_data,
             found->commit.tree != observed_input.storage.tree ||
             !detail::same_materialized_head_rows(found->commit.tree.rows,
                                                  publication_tree->rows,
-                                                 observed_input.local_tree)) {
+                                                 observed_input.local_tree,
+                                                 *timestamps)) {
             return fail_terminal(detail::make_error(
                 ErrorCode::CompositionMismatch,
                 "local materialization diverges from observed head"));

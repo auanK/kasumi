@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <vector>
@@ -342,6 +343,23 @@ TEST(PlatformMetadataTest, RejectsTimestampBeforeWindowsFiletimeEpoch) {
     const auto result =
         kasumi::platform::metadata::set_last_write_time(file, representable);
     EXPECT_FALSE(result.has_value());
+}
+
+TEST(PlatformMetadataTest, RejectsWindowsDirectoryJunction) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("platform-metadata-junction");
+    const auto target = kasumi::test::workspace_path(workspace, "target");
+    const auto junction = kasumi::test::workspace_path(workspace, "junction");
+    ASSERT_TRUE(std::filesystem::create_directory(target));
+    const std::string command = "cmd.exe /c mklink /J \"" + junction.string() +
+                                "\" \"" + target.string() + "\"";
+    ASSERT_EQ(std::system(command.c_str()), 0);
+    EXPECT_FALSE(
+        kasumi::platform::metadata::last_write_time(junction).has_value());
+    EXPECT_FALSE(
+        kasumi::platform::metadata::set_last_write_time(
+            junction, timestamp(std::chrono::hours{1}))
+            .has_value());
 }
 #endif
 

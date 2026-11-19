@@ -2,10 +2,13 @@
 
 #include "platform/path.hpp"
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <ratio>
 #include <system_error>
@@ -137,6 +140,27 @@ to_windows_ticks(std::filesystem::file_time_type value) noexcept {
 
 namespace {
 
+template <typename Duration>
+bool matches_written_time(Duration requested, Duration actual) noexcept {
+    if (requested == actual) {
+        return true;
+    }
+    using namespace std::chrono;
+    using Unsigned = std::make_unsigned_t<typename Duration::rep>;
+    const auto earlier = std::min(requested.count(), actual.count());
+    const auto later = std::max(requested.count(), actual.count());
+    const Unsigned distance =
+        static_cast<Unsigned>(later) - static_cast<Unsigned>(earlier);
+    // FAT, exFAT and network filesystems can quantize timestamps when written.
+    constexpr std::array<nanoseconds, 9> resolutions{
+        100ns, 1us, 10us, 100us, 1ms, 10ms, 100ms, 1s, 2s};
+    return std::ranges::any_of(resolutions, [&](const auto resolution) {
+        const auto ticks = duration_cast<Duration>(resolution).count();
+        return ticks != 0 && distance < static_cast<Unsigned>(ticks) &&
+               actual.count() % ticks == 0;
+    });
+}
+
 std::optional<std::int64_t>
 duration_to_nanoseconds(
     std::filesystem::file_time_type::duration duration) noexcept {
@@ -192,9 +216,19 @@ auto with_windows_metadata_handle(const std::filesystem::path& path,
             std::string{open_error_prefix} +
             std::system_category().message(static_cast<int>(GetLastError())));
     }
-    auto result = fn(handle);
-    CloseHandle(handle);
-    return result;
+    const std::unique_ptr<void, decltype(&CloseHandle)> guard{handle,
+                                                              CloseHandle};
+    FILE_ATTRIBUTE_TAG_INFO tag_info{};
+    if (!GetFileInformationByHandleEx(
+            handle, FileAttributeTagInfo, &tag_info, sizeof(tag_info))) {
+        return std::unexpected(
+            "failed to inspect timestamp attributes: " +
+            std::system_category().message(static_cast<int>(GetLastError())));
+    }
+    if ((tag_info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return std::unexpected("timestamp path is a reparse point");
+    }
+    return fn(handle);
 }
 
 FILETIME to_file_time(std::uint64_t ticks) {
@@ -326,7 +360,7 @@ last_write_time(const std::filesystem::path& path) {
 #endif
 }
 
-std::expected<void, std::string>
+std::expected<std::filesystem::file_time_type, std::string>
 set_last_write_time(const std::filesystem::path& path,
                     std::filesystem::file_time_type value) {
     auto status = read_status(path);
@@ -344,7 +378,12 @@ set_last_write_time(const std::filesystem::path& path,
         return std::unexpected("failed to confirm timestamp: " +
                                actual.error());
     }
-    const bool matches = (*written == *actual);
+    using WindowsDuration =
+        std::chrono::duration<std::uint64_t, std::ratio<1, 10000000>>;
+    if (matches_written_time(WindowsDuration{*written},
+                             WindowsDuration{*actual})) {
+        return detail::from_windows_ticks(*actual);
+    }
 #else
     std::error_code error;
     std::filesystem::last_write_time(path, value, error);
@@ -356,13 +395,13 @@ set_last_write_time(const std::filesystem::path& path,
         return std::unexpected("failed to confirm timestamp: " +
                                error.message());
     }
-    const bool matches = (value == actual);
-#endif
-    if (!matches) {
-        return std::unexpected("timestamp verification failed for " +
-                               kasumi::platform::path::to_utf8(path));
+    if (matches_written_time(value.time_since_epoch(),
+                             actual.time_since_epoch())) {
+        return actual;
     }
-    return {};
+#endif
+    return std::unexpected("timestamp verification failed for " +
+                           kasumi::platform::path::to_utf8(path));
 }
 
 } // namespace kasumi::platform::metadata

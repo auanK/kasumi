@@ -28,8 +28,8 @@ bool filesystem_equivalent(std::int64_t left_ns,
 std::expected<std::filesystem::file_time_type, std::string>
 last_write_time(const std::filesystem::path& path);
 
-// Sets and verifies last write time; rejects symbolic links.
-std::expected<void, std::string>
+// Sets last write time and returns the verified value stored by the filesystem.
+std::expected<std::filesystem::file_time_type, std::string>
 set_last_write_time(const std::filesystem::path& path,
                     std::filesystem::file_time_type value);
 
