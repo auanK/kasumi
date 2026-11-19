@@ -233,14 +233,30 @@ Result copy_file_overwrite(const std::filesystem::path& source,
 #if defined(_WIN32)
     if (!CopyFileW(source.c_str(), staging.c_str(), TRUE)) {
         const auto win_err = GetLastError();
+        if (win_err == ERROR_FILE_EXISTS || win_err == ERROR_ALREADY_EXISTS) {
+            guard.active = false;
+        }
         return std::unexpected(make_error(std::error_code(
             static_cast<int>(win_err), std::system_category())));
+    }
+    const auto attributes = GetFileAttributesW(staging.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        ((attributes & FILE_ATTRIBUTE_READONLY) != 0 &&
+         !SetFileAttributesW(staging.c_str(),
+                             (attributes & ~FILE_ATTRIBUTE_READONLY) == 0
+                                 ? FILE_ATTRIBUTE_NORMAL
+                                 : attributes & ~FILE_ATTRIBUTE_READONLY))) {
+        return std::unexpected(make_error(std::error_code(
+            static_cast<int>(GetLastError()), std::system_category())));
     }
 #else
     error.clear();
     std::filesystem::copy_file(
         source, staging, std::filesystem::copy_options::none, error);
     if (error) {
+        if (error == std::errc::file_exists) {
+            guard.active = false;
+        }
         return std::unexpected(make_error(error));
     }
 #endif
@@ -278,10 +294,7 @@ ListingResult scan_directory(const std::filesystem::path& base,
     }
     std::error_code error;
     std::vector<std::string> identifiers;
-    Iterator iterator{
-        base,
-        std::filesystem::directory_options::skip_permission_denied,
-        error};
+    Iterator iterator{base, std::filesystem::directory_options::none, error};
     if (error) {
         return std::unexpected(make_error(error));
     }
@@ -314,6 +327,9 @@ ListingResult scan_directory(const std::filesystem::path& base,
             }
             identifiers.push_back(platform::path::to_logical_utf8(rel));
         }
+    }
+    if (error) {
+        return std::unexpected(make_error(error));
     }
     std::ranges::sort(identifiers);
     return identifiers;

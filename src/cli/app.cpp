@@ -7,7 +7,6 @@
 #include "cli/i18n.hpp"
 #include "cli/parser.hpp"
 #include "cli/presenter.hpp"
-#include "cli/update.hpp"
 #include "cli/wizard.hpp"
 #include "platform/cancellation.hpp"
 
@@ -21,25 +20,79 @@
 #include <utility>
 #include <variant>
 #include <vector>
-#ifndef _WIN32
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <atomic>
+#include <windows.h>
+#else
 #include <signal.h>
 #endif
 
 namespace {
 
-void request_cancellation(int) {
+void request_cancellation(int signal_number) {
     kasumi::platform::cancellation::request();
+#ifdef _WIN32
+    std::signal(signal_number, request_cancellation);
+#else
+    static_cast<void>(signal_number);
+#endif
 }
+
+#ifdef _WIN32
+std::atomic<DWORD> console_thread_id{};
+
+BOOL WINAPI handle_console_control(DWORD event) noexcept {
+    if (event != CTRL_C_EVENT && event != CTRL_BREAK_EVENT &&
+        event != CTRL_CLOSE_EVENT) {
+        return FALSE;
+    }
+    kasumi::platform::cancellation::request();
+    // Wake an interactive prompt without interrupting writes to other handles.
+    const auto input = GetStdHandle(STD_INPUT_HANDLE);
+    if (input != nullptr && input != INVALID_HANDLE_VALUE) {
+        CancelIoEx(input, nullptr);
+    }
+    if (event == CTRL_CLOSE_EVENT) {
+        // Windows terminates the process once the close handler returns.
+        const auto thread =
+            OpenThread(SYNCHRONIZE,
+                       FALSE,
+                       console_thread_id.load(std::memory_order_relaxed));
+        if (thread != nullptr) {
+            WaitForSingleObject(thread, 4000);
+            CloseHandle(thread);
+        }
+    }
+    return TRUE;
+}
+
+struct ConsoleCancellation {
+    bool installed = false;
+
+    ConsoleCancellation() noexcept {
+        console_thread_id.store(GetCurrentThreadId(),
+                                std::memory_order_relaxed);
+        installed = SetConsoleCtrlHandler(handle_console_control, TRUE) != 0;
+        if (installed) {
+            SetConsoleCtrlHandler(nullptr, FALSE);
+        }
+        std::signal(SIGINT, request_cancellation);
+    }
+
+    ~ConsoleCancellation() {
+        if (installed) {
+            SetConsoleCtrlHandler(handle_console_control, FALSE);
+        }
+    }
+};
+#endif
 
 } // namespace
 
 namespace kasumi::cli {
 
 int run(int argc, char* argv[]) {
-    if (argc >= 2 && argv != nullptr && argv[1] != nullptr &&
-        std::string_view{argv[1]}.starts_with("--kasumi-update-")) {
-        return update::run(argc, argv);
-    }
     if (argc < 1 || argv == nullptr) {
         i18n::set_language(i18n::Language::English);
         return present_parse_error({});
@@ -115,27 +168,16 @@ int run(int argc, char* argv[]) {
     };
     platform::cancellation::reset();
 #ifdef _WIN32
-    std::signal(SIGINT, request_cancellation);
+    const ConsoleCancellation console_cancellation;
     std::signal(SIGTERM, request_cancellation);
 #else
-    if (std::holds_alternative<ConfigureInvocation>(*parse_result) ||
-        std::holds_alternative<KeyInvocation>(*parse_result)) {
-        // The wizard's blocking stdin read must not restart after SIGINT.
-        struct sigaction action{};
-        action.sa_handler = request_cancellation;
-        sigemptyset(&action.sa_mask);
-        action.sa_flags = 0;
-        sigaction(SIGINT, &action, nullptr);
-        sigaction(SIGTERM, &action, nullptr);
-    } else {
-        std::signal(SIGINT, request_cancellation);
-        std::signal(SIGTERM, request_cancellation);
-    }
+    struct sigaction action{};
+    action.sa_handler = request_cancellation;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = 0;
+    sigaction(SIGINT, &action, nullptr);
+    sigaction(SIGTERM, &action, nullptr);
 #endif
-
-    if (std::holds_alternative<UpdateInvocation>(*parse_result)) {
-        return finish(update::run(effective_argc, effective_argv));
-    }
 
     const auto environment = application::default_execution_environment();
 

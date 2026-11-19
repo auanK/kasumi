@@ -21,6 +21,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace kasumi::application {
@@ -34,6 +35,25 @@ inline constexpr std::size_t upload_batch_max_items = 256;
 inline constexpr std::uint64_t upload_batch_max_bytes =
     256 * 1024 * 1024; // 256 MiB
 inline constexpr auto transaction_resumption_ttl = std::chrono::hours(24);
+
+enum class TypeChangeStep {
+    Unrelated,
+    RemoveFile,
+    RemoveDirectory,
+    Install
+};
+
+std::vector<TypeChangeStep>
+local_type_changes(std::span<const transaction::Operation> operations);
+
+void order_local_type_changes(std::span<const TypeChangeStep> steps,
+                              std::vector<std::size_t>& order);
+
+std::expected<void, Error>
+prepare_type_change_install(transaction::Record& record,
+                            std::size_t index,
+                            const std::filesystem::path& root,
+                            const platform::Workspace& workspace);
 
 inline void
 order_local_copies(std::span<const transaction::Operation> operations,
@@ -186,6 +206,38 @@ std::expected<void, UploadBatchError> transfer_and_verify_upload_batch(
     const platform::Workspace& workspace,
     std::size_t parallelism,
     ProgressMeter* meter = nullptr);
+
+// Authenticates an existing object against the expected plaintext identity.
+std::expected<bool, Error>
+verify_existing_content(transport::Transport& storage,
+                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                        std::string_view identifier,
+                        std::string_view plaintext_hash,
+                        std::optional<std::uint64_t> size,
+                        const platform::Workspace& workspace,
+                        std::size_t operation_index,
+                        bool is_pack = false);
+
+std::expected<void, Error>
+resume_manifest_repairs(const journal::Paths& paths,
+                        transaction::Record& record,
+                        const history::StorageManifest& manifest,
+                        const std::filesystem::path& local_root,
+                        transport::Transport& storage,
+                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                        const platform::Workspace& workspace);
+
+std::expected<std::unordered_map<std::string, std::filesystem::path>,
+              mutation::MutationError>
+prefetch_manifest_downloads(const history::StorageManifest& manifest,
+                            std::span<const std::size_t> apply_order,
+                            const transaction::Record& record,
+                            const std::filesystem::path& local_root,
+                            transport::Transport& storage,
+                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                            const platform::Workspace& workspace,
+                            std::size_t parallelism,
+                            ProgressMeter* meter = nullptr);
 
 // Initializes state.db (if needed) and persists the committed StoredState.
 std::expected<void, Error>

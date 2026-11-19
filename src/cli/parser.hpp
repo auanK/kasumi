@@ -19,7 +19,6 @@ struct ShowInvocation {
 struct KeyInvocation {
     std::string profile_name;
 };
-struct UpdateInvocation {};
 struct HelpInvocation {
     std::string topic;
 };
@@ -31,7 +30,6 @@ using Invocation = std::variant<application::Request,
                                 ListInvocation,
                                 ShowInvocation,
                                 KeyInvocation,
-                                UpdateInvocation,
                                 HelpInvocation>;
 
 // Command-line argument parsing failure.

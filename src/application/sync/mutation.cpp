@@ -583,6 +583,16 @@ MutationResult install_download_candidate(
     std::string_view prepared_hash,
     const std::filesystem::path& candidate,
     const DestinationPrecondition* condition) {
+    using platform::private_storage::PrivateOutputFile;
+    struct CandidateGuard {
+        PrivateOutputFile file;
+        ~CandidateGuard() noexcept {
+            static_cast<void>(
+                platform::private_storage::remove_private_file_if_owned(file));
+        }
+    } cleanup{{.path = candidate,
+               .identity =
+                   platform::private_storage::query_file_identity(candidate)}};
     // shortcut: validation and replace are separate; upgrade if external-writer
     // isolation becomes required.
     auto prepared = detail::validate_prepared_destination(operation,
@@ -598,13 +608,11 @@ MutationResult install_download_candidate(
         mutation_fault_test::hit("before_download_replace", destination);
         if (auto synced = sync_file_checked(candidate, operation_index);
             !synced) {
-            remove_temporary_file(candidate);
             return synced;
         }
         auto installed =
             platform::durability::replace_atomically(candidate, destination);
         if (!installed) {
-            remove_temporary_file(candidate);
             return std::unexpected(
                 make_error(MutationErrorCode::LocalIo,
                            "failed to replace local file: " + installed.error(),
@@ -1058,6 +1066,12 @@ apply_copy_local(const Operation& operation,
         }
     } staging_guard{&staged_file.value()};
 
+    auto recorded_id = detail::record_copy_installed_identity(
+        workspace, operation_index, staging_guard.file->identity);
+    if (!recorded_id) {
+        return std::unexpected(recorded_id.error());
+    }
+
     std::array<std::uint8_t, 64 * 1024> buffer;
     std::optional<MutationError> write_error;
     auto streamed = platform::private_storage::stream_regular_file(
@@ -1110,12 +1124,6 @@ apply_copy_local(const Operation& operation,
     auto synced = sync_file_checked(candidate, operation_index);
     if (!synced) {
         return synced;
-    }
-
-    auto recorded_id = detail::record_copy_installed_identity(
-        workspace, operation_index, staging_guard.file->identity);
-    if (!recorded_id) {
-        return std::unexpected(recorded_id.error());
     }
 
     mutation_fault_test::hit("before_copy_local_install", destination);

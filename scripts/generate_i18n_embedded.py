@@ -28,7 +28,6 @@ EXCEPTIONS = {
 PREFIXES = sorted(
     [
         ("Label", "labels."),
-        ("Update", "update."),
         ("Progress", "progress."),
         ("ResolveMissing", "resolve_missing."),
         ("Help", "command_help."),

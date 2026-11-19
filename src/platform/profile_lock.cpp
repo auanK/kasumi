@@ -105,7 +105,7 @@ acquire_profile_lock(const std::filesystem::path& lock_path) {
     }
     acquired = reinterpret_cast<std::intptr_t>(handle);
 #else
-    int flags = O_RDONLY | O_CREAT;
+    int flags = O_RDONLY | O_CREAT | O_NONBLOCK;
 #ifdef O_CLOEXEC
     flags |= O_CLOEXEC;
 #endif
@@ -140,14 +140,11 @@ acquire_profile_lock(const std::filesystem::path& lock_path) {
         static_cast<void>(::close(handle));
         return std::unexpected("profile lock is not a regular file");
     }
-    if (::lstat(lock_path.c_str(), &path_status) != 0 ||
-        !S_ISREG(path_status.st_mode) ||
-        path_status.st_dev != lock_status.st_dev ||
-        path_status.st_ino != lock_status.st_ino) {
-        static_cast<void>(::close(handle));
-        return std::unexpected("profile lock path changed while opening");
-    }
-    if (::flock(handle, LOCK_EX | LOCK_NB) != 0) {
+    int flock_result = 0;
+    do {
+        flock_result = ::flock(handle, LOCK_EX | LOCK_NB);
+    } while (flock_result != 0 && errno == EINTR);
+    if (flock_result != 0) {
         const auto code = errno;
         static_cast<void>(::close(handle));
         if (code == EWOULDBLOCK || code == EAGAIN) {
@@ -157,6 +154,13 @@ acquire_profile_lock(const std::filesystem::path& lock_path) {
         return std::unexpected(
             "could not lock profile: " +
             std::error_code{code, std::generic_category()}.message());
+    }
+    if (::lstat(lock_path.c_str(), &path_status) != 0 ||
+        !S_ISREG(path_status.st_mode) ||
+        path_status.st_dev != lock_status.st_dev ||
+        path_status.st_ino != lock_status.st_ino) {
+        static_cast<void>(::close(handle));
+        return std::unexpected("profile lock path changed while locking");
     }
     acquired = handle;
 #endif

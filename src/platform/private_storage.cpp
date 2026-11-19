@@ -614,7 +614,17 @@ ensure_directory(const std::filesystem::path& path) {
     const auto status = std::filesystem::symlink_status(path, error);
     if (error == std::errc::no_such_file_or_directory ||
         (!error && status.type() == std::filesystem::file_type::not_found)) {
-        return private_storage::create_directory(path);
+        auto created = private_storage::create_directory(path);
+        if (created) {
+            return created;
+        }
+        std::error_code retry_error;
+        const auto after = std::filesystem::symlink_status(path, retry_error);
+        if (retry_error ||
+            after.type() == std::filesystem::file_type::not_found) {
+            return created;
+        }
+        return protect_directory(path);
     }
     if (error) {
         return std::unexpected(system_error("symlink_status failed", error));
@@ -1019,23 +1029,9 @@ publish_private_file(PrivateOutputFile& file,
         return std::unexpected(windows_error("FlushFileBuffers failed", code));
     }
 
-    std::wstring target_str = target_path.wstring();
-    const DWORD rename_info_size = static_cast<DWORD>(
-        sizeof(FILE_RENAME_INFO) + target_str.size() * sizeof(WCHAR));
-    std::vector<char> buffer(rename_info_size, 0);
-    FILE_RENAME_INFO* rename_info =
-        reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
-    rename_info->ReplaceIfExists = TRUE;
-    rename_info->RootDirectory = nullptr;
-    rename_info->FileNameLength =
-        static_cast<DWORD>(target_str.size() * sizeof(WCHAR));
-    std::memcpy(rename_info->FileName,
-                target_str.c_str(),
-                target_str.size() * sizeof(WCHAR));
-
-    if (!SetFileInformationByHandle(
-            h, FileRenameInfo, rename_info, rename_info_size)) {
-        const auto code = GetLastError();
+    if (const auto code =
+            detail::rename_windows_handle(h, target_path, FileRenameInfo, TRUE);
+        code != ERROR_SUCCESS) {
         return std::unexpected(
             windows_error("SetFileInformationByHandle rename failed", code));
     }
@@ -1254,17 +1250,8 @@ write_atomically(const std::filesystem::path& path, std::string_view bytes) {
     return std::unexpected("could not reserve temporary file");
 }
 
-std::expected<std::uint64_t, StreamError>
-stream_regular_file_raw(const std::filesystem::path& path,
-                        std::span<std::uint8_t> scratch,
-                        bool (*on_chunk)(void*, std::span<const std::uint8_t>),
-                        void* context,
-                        std::optional<std::uint64_t> expected_size,
-                        std::optional<FileSlice> slice) {
-    if (scratch.empty() || on_chunk == nullptr) {
-        return make_stream_error(StreamErrorKind::ReadFailed,
-                                 "invalid stream buffer or callback");
-    }
+std::expected<RegularFileInput, StreamError>
+open_regular_file(const std::filesystem::path& path) {
 #if defined(_WIN32)
     const auto handle =
         CreateFileW(path.c_str(),
@@ -1307,7 +1294,7 @@ stream_regular_file_raw(const std::filesystem::path& path,
     }
     const auto file_size = static_cast<std::uint64_t>(actual_size.QuadPart);
 #else
-    const int flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | (slice ? O_NONBLOCK : 0);
+    const int flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK;
     const int fd = ::open(path.c_str(), flags);
     if (fd < 0) {
         const std::error_code sys_err{errno, std::generic_category()};
@@ -1330,6 +1317,87 @@ stream_regular_file_raw(const std::filesystem::path& path,
     }
     const auto file_size = static_cast<std::uint64_t>(st.st_size);
 #endif
+    return RegularFileInput{std::move(guard), file_size};
+}
+
+bool RegularFileInput::seek(std::uint64_t offset) const noexcept {
+    if (offset > size) {
+        return false;
+    }
+#if defined(_WIN32)
+    LARGE_INTEGER position{};
+    position.QuadPart = static_cast<LONGLONG>(offset);
+    return SetFilePointerEx(reinterpret_cast<HANDLE>(handle.value),
+                            position,
+                            nullptr,
+                            FILE_BEGIN) != 0;
+#else
+    return ::lseek(static_cast<int>(handle.value),
+                   static_cast<off_t>(offset),
+                   SEEK_SET) >= 0;
+#endif
+}
+
+std::expected<std::size_t, StreamError>
+RegularFileInput::read(std::span<std::uint8_t> buffer) const {
+#if defined(_WIN32)
+    DWORD count = 0;
+    const auto requested = std::min<std::size_t>(buffer.size(), MAXDWORD);
+    if (!ReadFile(reinterpret_cast<HANDLE>(handle.value),
+                  buffer.data(),
+                  static_cast<DWORD>(requested),
+                  &count,
+                  nullptr)) {
+        const DWORD code = GetLastError();
+        return make_stream_error(
+            StreamErrorKind::ReadFailed,
+            windows_error("ReadFile failed", code),
+            {static_cast<int>(code), std::system_category()});
+    }
+#else
+    const auto requested = std::min<std::size_t>(
+        buffer.size(), std::numeric_limits<ssize_t>::max());
+    ssize_t count = 0;
+    do {
+        count =
+            ::read(static_cast<int>(handle.value), buffer.data(), requested);
+    } while (count < 0 && errno == EINTR);
+    if (count < 0) {
+        const std::error_code error{errno, std::generic_category()};
+        return make_stream_error(
+            StreamErrorKind::ReadFailed, error.message(), error);
+    }
+#endif
+    return static_cast<std::size_t>(count);
+}
+
+bool RegularFileInput::read_exact(std::span<std::uint8_t> buffer) const {
+    while (!buffer.empty()) {
+        const auto count = read(buffer);
+        if (!count || *count == 0) {
+            return false;
+        }
+        buffer = buffer.subspan(*count);
+    }
+    return true;
+}
+
+std::expected<std::uint64_t, StreamError>
+stream_regular_file_raw(const std::filesystem::path& path,
+                        std::span<std::uint8_t> scratch,
+                        bool (*on_chunk)(void*, std::span<const std::uint8_t>),
+                        void* context,
+                        std::optional<std::uint64_t> expected_size,
+                        std::optional<FileSlice> slice) {
+    if (scratch.empty() || on_chunk == nullptr) {
+        return make_stream_error(StreamErrorKind::ReadFailed,
+                                 "invalid stream buffer or callback");
+    }
+    auto input = open_regular_file(path);
+    if (!input) {
+        return std::unexpected(input.error());
+    }
+    const auto file_size = input->size;
     if (expected_size && file_size != *expected_size) {
         return make_stream_error(StreamErrorKind::SizeMismatch,
                                  "file size does not match expected size");
@@ -1339,14 +1407,7 @@ stream_regular_file_raw(const std::filesystem::path& path,
             return make_stream_error(StreamErrorKind::SizeMismatch,
                                      "slice exceeds file size");
         }
-#if defined(_WIN32)
-        LARGE_INTEGER offset{};
-        offset.QuadPart = static_cast<LONGLONG>(slice->offset);
-        const bool seek_ok = SetFilePointerEx(handle, offset, nullptr, FILE_BEGIN) != 0;
-#else
-        const bool seek_ok = ::lseek(fd, static_cast<off_t>(slice->offset), SEEK_SET) >= 0;
-#endif
-        if (!seek_ok) {
+        if (!input->seek(slice->offset)) {
             return make_stream_error(StreamErrorKind::ReadFailed,
                                      "could not seek to file slice");
         }
@@ -1357,34 +1418,19 @@ stream_regular_file_raw(const std::filesystem::path& path,
             ? static_cast<std::size_t>(std::min<std::uint64_t>(
                   scratch.size(), slice->size - total_read))
             : scratch.size();
-#if defined(_WIN32)
-        DWORD count = 0;
-        if (!ReadFile(handle,
-                      scratch.data(),
-                      static_cast<DWORD>(requested),
-                      &count,
-                      nullptr)) {
-            const DWORD code = GetLastError();
-            return make_stream_error(
-                StreamErrorKind::ReadFailed,
-                windows_error("ReadFile failed", code),
-                {static_cast<int>(code), std::system_category()});
+        const auto count = input->read(scratch.first(requested));
+        if (!count) {
+            return std::unexpected(count.error());
         }
-#else
-        const auto count = ::read(fd, scratch.data(), requested);
-        if (count < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            const std::error_code error{errno, std::generic_category()};
-            return make_stream_error(
-                StreamErrorKind::ReadFailed, error.message(), error);
-        }
-#endif
-        if (count == 0) {
+        if (*count == 0) {
             break;
         }
-        const auto chunk_size = static_cast<std::size_t>(count);
+        const auto chunk_size = *count;
+        if (!slice && expected_size &&
+            chunk_size > *expected_size - total_read) {
+            return make_stream_error(StreamErrorKind::SizeMismatch,
+                                     "stream exceeded expected size");
+        }
         total_read += chunk_size;
         if (!on_chunk(context, scratch.first(chunk_size))) {
             return make_stream_error(StreamErrorKind::Aborted,
@@ -1394,6 +1440,10 @@ stream_regular_file_raw(const std::filesystem::path& path,
     if (slice && total_read != slice->size) {
         return make_stream_error(StreamErrorKind::SizeMismatch,
                                  "file ended before the end of the slice");
+    }
+    if (!slice && expected_size && total_read != *expected_size) {
+        return make_stream_error(StreamErrorKind::SizeMismatch,
+                                 "stream ended before expected size");
     }
     return total_read;
 }

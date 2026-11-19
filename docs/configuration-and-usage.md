@@ -87,7 +87,6 @@ Use `kasumi <command> --help` for the complete arguments, options and examples.
 | Audit referenced payloads | `kasumi fsck <profile>` |
 | Reclaim eligible remote storage | `kasumi gc <profile>` |
 | Resolve permanently missing content as logical deletion | `kasumi resolve-missing <profile>` |
-| Update the executable | `kasumi update` |
 
 `--full` belongs only to Sync and Status, after the profile. It displays every
 plan and pending-path item (otherwise lists longer than ten items show the first
@@ -120,26 +119,14 @@ its current work; a no-op is not a full integrity audit. See
 
 ### Updating Kasumi
 
-Run the command with no command-specific arguments:
+For a portable installation, download the new archive and its SHA-256 checksum
+from [GitHub Releases](https://github.com/auanK/kasumi/releases), then
+[verify the archive](getting-started.md#verify-downloads). Stop Kasumi and
+replace the executable manually with the one from the verified archive.
 
-```sh
-kasumi update
-```
-
-The command supports official Windows and Linux x86_64 binaries. Kasumi queries the official GitHub Releases API and selects the newest release on its supported channel. Until a stable release with a nonzero major version exists, it selects the newest development release, including prereleases; afterwards it selects only stable releases with a nonzero major version.
-
-Kasumi downloads the platform archive and its published SHA-256 checksum, verifies the archive, then replaces only the Kasumi executable. It keeps the previous executable beside it as a `.kasumi-previous-*` recovery copy. If verification of the replacement fails, Kasumi attempts to restore that copy; this is not a universal rollback guarantee. The updater does not access profile data, configuration files, keys, or configured remote storage, and it does not migrate local data.
-
-On Windows, Kasumi uses the built-in `tar` command and starts a helper that waits for the original process to exit before replacing the executable. If installation permissions require administrator privileges and the current process lacks them, the updater cancels and instructs the user to run as administrator; it completes the update directly when permissions are sufficient.
-
-Windows update duration ends at installer handoff, not at the separate installer's completion.
-Cancellation is observed at safe stage boundaries and can wait for an ongoing native or network call.
-
-On Linux, `curl`, `tar`, and `sha256sum` must be available. Kasumi installs without root when the executable's directory is writable. If permissions deny replacement, it attempts `pkexec`; it falls back to `sudo` only when authentication through `pkexec` is unavailable and the terminal is interactive.
-
-Installations managed by a package manager must be updated through that manager.
-Read [Upgrading Kasumi](best-practices.md#upgrading-kasumi) for compatibility
-and backup requirements before replacing binaries.
+For a managed installation, update through the package manager that installed
+Kasumi. Read [Upgrading Kasumi](best-practices.md#upgrading-kasumi) for
+compatibility and backup precautions before replacing binaries.
 
 ### Partial Synchronization and Explicit Data-Loss Operations
 
@@ -201,7 +188,7 @@ kasumi [--lang <code>] <command> [subcommand] [arguments] [options]
 
 `--lang <code>` is the optional global prefix, before the command. Command
 options follow required arguments; `--full` is available only to Sync and Status.
-`config`, `list`, and `update` take no profile.
+`config` and `list` take no profile.
 
 `kasumi --help` (`-h`) shows global Help. Add `--help` or `-h` after a command,
 subcommand or otherwise valid invocation for contextual Help. Help returns 0

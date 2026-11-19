@@ -46,7 +46,9 @@
 #include <future>
 #include <limits>
 #include <mutex>
+#include <numeric>
 #include <optional>
+#include <ranges>
 #include <system_error>
 #include <thread>
 #include <unordered_map>
@@ -1063,9 +1065,12 @@ bool same_epoch_frontier(
         });
 }
 
+using RoundedTimestamps = std::unordered_map<std::string, std::int64_t>;
+
 bool same_materialized_head_rows(const std::vector<NodeRow>& expected_rows,
                                  const std::vector<NodeRow>& actual_rows,
-                                 const Snapshot& observed_local_tree) noexcept {
+                                 const Snapshot& observed_local_tree,
+                                 const RoundedTimestamps& rounded) noexcept {
     if (expected_rows.size() != actual_rows.size()) {
         return false;
     }
@@ -1079,6 +1084,14 @@ bool same_materialized_head_rows(const std::vector<NodeRow>& expected_rows,
             if (exp.size != act.size || exp.hash != act.hash) {
                 return false;
             }
+        }
+        if (const auto written = rounded.find(exp.path);
+            written != rounded.end()) {
+            if (!platform::metadata::filesystem_equivalent(written->second,
+                                                           act.mtime)) {
+                return false;
+            }
+            continue;
         }
         if (exp.mtime == 0 ||
             platform::metadata::filesystem_equivalent(exp.mtime, act.mtime)) {
@@ -1100,18 +1113,26 @@ bool same_materialized_head_rows(const std::vector<NodeRow>& expected_rows,
 }
 
 bool same_materialized_row(const NodeRow& expected,
-                           const NodeRow& actual) noexcept {
+                           const NodeRow& actual,
+                           const RoundedTimestamps& rounded) noexcept {
+    const auto written = rounded.find(expected.path);
+    const auto mtime =
+        written == rounded.end() ? expected.mtime : written->second;
     return expected.path == actual.path && expected.hash == actual.hash &&
            expected.size == actual.size &&
-           (expected.mtime == 0 || platform::metadata::filesystem_equivalent(
-                                       expected.mtime, actual.mtime)) &&
+           (expected.mtime == 0 ||
+            platform::metadata::filesystem_equivalent(mtime, actual.mtime)) &&
            expected.is_directory == actual.is_directory;
 }
 
 bool same_materialized_rows(std::span<const NodeRow> expected,
-                            std::span<const NodeRow> actual) noexcept {
+                            std::span<const NodeRow> actual,
+                            const RoundedTimestamps& rounded) noexcept {
     return expected.size() == actual.size() &&
-           std::ranges::equal(expected, actual, same_materialized_row);
+           std::ranges::equal(
+               expected, actual, [&](const auto& exp, const auto& act) {
+                   return same_materialized_row(exp, act, rounded);
+               });
 }
 
 transaction::Record
@@ -1160,6 +1181,98 @@ bool has_local_rollback_work(const transaction::Record& record) noexcept {
     return false;
 }
 
+std::vector<TypeChangeStep>
+local_type_changes(std::span<const transaction::Operation> operations) {
+    std::unordered_set<std::filesystem::path> deleted_files;
+    std::unordered_set<std::filesystem::path> deleted_directories;
+    for (const auto& operation : operations) {
+        if (operation.action == Action::DeleteLocal) {
+            deleted_files.insert(operation.path);
+        } else if (operation.action == Action::DeleteLocalDirectory) {
+            deleted_directories.insert(operation.path);
+        }
+    }
+    std::unordered_set<std::filesystem::path> to_file;
+    std::unordered_set<std::filesystem::path> to_directory;
+    for (const auto& operation : operations) {
+        if (operation.action == Action::Download &&
+            deleted_directories.contains(operation.path)) {
+            to_file.insert(operation.path);
+        } else if (operation.action == Action::CreateLocalDirectory &&
+                   deleted_files.contains(operation.path)) {
+            to_directory.insert(operation.path);
+        }
+    }
+    std::vector<TypeChangeStep> steps(operations.size(),
+                                      TypeChangeStep::Unrelated);
+    if (to_file.empty() && to_directory.empty()) {
+        return steps;
+    }
+    const auto inside = [](const auto& roots, std::filesystem::path path) {
+        for (; !path.empty(); path = path.parent_path()) {
+            if (roots.contains(path)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (std::size_t index = 0; index < operations.size(); ++index) {
+        const auto& operation = operations[index];
+        const auto& path = operation.path;
+        if ((operation.action == Action::DeleteLocal ||
+             operation.action == Action::DeleteIgnoredLocalFile) &&
+            (to_directory.contains(path) || inside(to_file, path))) {
+            steps[index] = TypeChangeStep::RemoveFile;
+        } else if (operation.action == Action::DeleteLocalDirectory &&
+                   inside(to_file, path)) {
+            steps[index] = TypeChangeStep::RemoveDirectory;
+        } else if ((operation.action == Action::Download ||
+                    operation.action == Action::CreateLocalDirectory) &&
+                   (to_file.contains(path) || inside(to_directory, path))) {
+            steps[index] = TypeChangeStep::Install;
+        }
+    }
+    return steps;
+}
+
+void order_local_type_changes(std::span<const TypeChangeStep> steps,
+                              std::vector<std::size_t>& order) {
+    const auto first = std::stable_partition(
+        order.begin(), order.end(), [&](std::size_t index) {
+            return steps[index] == TypeChangeStep::Unrelated;
+        });
+    const auto first_directory =
+        std::stable_partition(first, order.end(), [&](std::size_t index) {
+            return steps[index] == TypeChangeStep::RemoveFile;
+        });
+    std::stable_partition(first_directory, order.end(), [&](std::size_t index) {
+        return steps[index] == TypeChangeStep::RemoveDirectory;
+    });
+}
+
+std::expected<void, Error>
+prepare_type_change_install(transaction::Record& record,
+                            std::size_t index,
+                            const std::filesystem::path& root,
+                            const platform::Workspace& workspace) {
+    auto& progress = record.progress[index];
+    auto prepared = mutation::prepare_operation(
+        record.plan.operations[index], index, root, workspace, progress);
+    if (!prepared) {
+        return std::unexpected(make_error(ErrorCode::MutationFailure,
+                                          mutation::describe(prepared.error()),
+                                          index));
+    }
+    if (prepared->had_original) {
+        return std::unexpected(
+            make_error(ErrorCode::ConcurrentModification,
+                       "replacement destination appeared during sync",
+                       index));
+    }
+    progress = std::move(*prepared);
+    return {};
+}
+
 std::vector<std::size_t>
 next_upload_batch_chunk(std::span<const std::size_t> pending_uploads,
                         std::size_t& cursor,
@@ -1195,9 +1308,10 @@ std::expected<void, Error> rollback_operations_in_workspace(
     }
     const auto dependencies =
         mutation::detail::destination_dependencies(record.plan.operations);
-    for (std::size_t index = record.plan.operations.size(); index > 0;
-         --index) {
-        const auto operation_index = index - 1;
+    std::vector<std::size_t> order(record.plan.operations.size());
+    std::iota(order.begin(), order.end(), std::size_t{0});
+    order_local_type_changes(local_type_changes(record.plan.operations), order);
+    for (const auto operation_index : order | std::views::reverse) {
         const auto& operation = record.plan.operations[operation_index];
         auto& progress = record.progress[operation_index];
         if ((local_mutations_only && !is_local_mutation(operation.action)) ||
@@ -1319,6 +1433,33 @@ std::expected<void, UploadBatchError> transfer_and_verify_upload_batch(
         });
     }
     return {};
+}
+
+std::expected<bool, Error>
+verify_existing_content(transport::Transport& storage,
+                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                        std::string_view identifier,
+                        std::string_view plaintext_hash,
+                        std::optional<std::uint64_t> size,
+                        const platform::Workspace& workspace,
+                        std::size_t operation_index,
+                        bool is_pack) {
+    const auto checked = history_storage::audit_content_object(storage,
+                                                               key,
+                                                               identifier,
+                                                               plaintext_hash,
+                                                               size,
+                                                               workspace.root,
+                                                               operation_index,
+                                                               is_pack);
+    if (!checked) {
+        return std::unexpected(
+            make_error(ErrorCode::ObservationFailure,
+                       "could not authenticate existing content: " +
+                           checked.error().detail,
+                       operation_index));
+    }
+    return checked->state == history_storage::ContentObjectState::Present;
 }
 
 std::expected<void, Error>
@@ -1667,6 +1808,11 @@ struct PlannedPack {
     std::vector<std::size_t> operation_indices;
 };
 
+constexpr std::size_t pack_upload_window_size = std::min(
+    detail::upload_batch_max_items,
+    static_cast<std::size_t>(detail::upload_batch_max_bytes /
+                             crypto::pack::MAXIMUM_PACK_PLAINTEXT_SIZE));
+
 struct PlannedChunkUpload {
     Hash file_hash{};
     std::uint64_t file_size = 0;
@@ -1731,6 +1877,97 @@ resolve_pre_mutation_source_path(const std::filesystem::path& local_root,
     return resolved ? *resolved : (local_root / operation.path);
 }
 
+using RepairOperations =
+    std::unordered_map<Hash, std::vector<std::size_t>, decltype(&hash_key)>;
+
+std::expected<void, Error>
+plan_manifest_repairs(UploadLayoutPlan& layout,
+                      const history::StorageManifest& manifest,
+                      const transaction::Record& record,
+                      const RepairOperations& repair_ops_by_hash,
+                      std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+    HashSet handled_packs{0, hash_key};
+    std::optional<std::size_t> incomplete_pack;
+    for (const auto& [op_hash, indices] : repair_ops_by_hash) {
+        if (const auto* chunked =
+                history::find_chunked_file(manifest, op_hash)) {
+            PlannedChunkUpload upload{
+                .file_hash = chunked->file_hash,
+                .file_size = chunked->file_size,
+                .primary_op_index = indices.front(),
+                .chunks = {},
+                .operation_indices = indices,
+            };
+            upload.chunks.reserve(chunked->chunks.size());
+            std::uint64_t offset = 0;
+            for (const auto& c : chunked->chunks) {
+                upload.chunks.push_back(crypto::pack::FastCdcChunk{
+                    .hash = c.hash,
+                    .offset = offset,
+                    .size = c.size,
+                });
+                offset += c.size;
+            }
+            layout.chunked_uploads.push_back(std::move(upload));
+        } else if (const auto* packed =
+                       history::find_packed_blob(manifest, op_hash)) {
+            if (!handled_packs.insert(packed->pack_hash).second) {
+                continue;
+            }
+            PlannedPack pack{.pack_hash = packed->pack_hash,
+                             .pack_identifier = crypto::pack_identifier(
+                                 key, packed->pack_hash),
+                             .blobs = {},
+                             .operation_indices = {}};
+            std::vector<crypto::pack::PackMemberDescriptor> descriptors;
+            bool complete = true;
+            auto first_pack_operation = indices.front();
+            for (const auto& entry : manifest.packed_blobs) {
+                if (entry.pack_hash != packed->pack_hash) {
+                    continue;
+                }
+                const auto found = repair_ops_by_hash.find(entry.blob_hash);
+                if (found == repair_ops_by_hash.end()) {
+                    complete = false;
+                    continue;
+                }
+                const auto op_index = found->second.front();
+                first_pack_operation = std::min(first_pack_operation, op_index);
+                if (record.plan.operations[op_index].size != entry.size) {
+                    complete = false;
+                    continue;
+                }
+                descriptors.push_back(
+                    {entry.blob_hash, static_cast<std::uint32_t>(entry.size)});
+                pack.blobs.push_back(PlannedSmallUpload{
+                    .hash = entry.blob_hash,
+                    .size = static_cast<std::uint32_t>(entry.size),
+                    .op_index = op_index,
+                });
+                pack.operation_indices.insert(pack.operation_indices.end(),
+                                              found->second.begin(),
+                                              found->second.end());
+            }
+            if (complete && crypto::pack::compute_pack_hash(descriptors) ==
+                                packed->pack_hash) {
+                std::ranges::sort(pack.operation_indices);
+                layout.packs.push_back(std::move(pack));
+            } else {
+                incomplete_pack =
+                    std::min(incomplete_pack.value_or(first_pack_operation),
+                             first_pack_operation);
+            }
+        }
+    }
+    if (incomplete_pack) {
+        return std::unexpected(detail::make_error(
+            ErrorCode::MutationFailure,
+            "cannot reconstruct the original absent pack from local sources",
+            incomplete_pack));
+    }
+    return {};
+}
+
 std::expected<UploadLayoutPlan, Error>
 build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
                          const transport::Transport& storage,
@@ -1744,8 +1981,7 @@ build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
 
     const auto& observed_manifest = observed_input.storage.storage_manifest;
     const auto& missing = reconciliation_result.missing_objects;
-    std::unordered_map<Hash, std::vector<std::size_t>, decltype(&hash_key)>
-        repair_ops_by_hash{0, hash_key};
+    RepairOperations repair_ops_by_hash{0, hash_key};
     if (!observed_manifest.empty() && !missing.empty()) {
         for (std::size_t index = 0; index < record.plan.operations.size();
              ++index) {
@@ -1945,84 +2181,10 @@ build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
     } else if (!record.publication_required &&
                reconciliation_result.requires_storage_repair &&
                !observed_input.storage.storage_manifest.empty()) {
-        HashSet handled_packs{0, hash_key};
-        std::optional<std::size_t> incomplete_pack;
-        for (const auto& [op_hash, indices] : repair_ops_by_hash) {
-            if (const auto* chunked = history::find_chunked_file(
-                    observed_input.storage.storage_manifest, op_hash)) {
-                PlannedChunkUpload upload{
-                    .file_hash = chunked->file_hash,
-                    .file_size = chunked->file_size,
-                    .primary_op_index = indices.front(),
-                    .chunks = {},
-                    .operation_indices = indices,
-                };
-                upload.chunks.reserve(chunked->chunks.size());
-                std::uint64_t offset = 0;
-                for (const auto& c : chunked->chunks) {
-                    upload.chunks.push_back(crypto::pack::FastCdcChunk{
-                        .hash = c.hash,
-                        .offset = offset,
-                        .size = c.size,
-                    });
-                    offset += c.size;
-                }
-                layout.chunked_uploads.push_back(std::move(upload));
-            } else if (const auto* packed = history::find_packed_blob(
-                           observed_input.storage.storage_manifest, op_hash)) {
-                if (!handled_packs.insert(packed->pack_hash).second) {
-                    continue;
-                }
-                PlannedPack pack{.pack_hash = packed->pack_hash,
-                                 .pack_identifier = crypto::pack_identifier(
-                                     key, packed->pack_hash),
-                                 .blobs = {},
-                                 .operation_indices = {}};
-                std::vector<crypto::pack::PackMemberDescriptor> descriptors;
-                bool complete = true;
-                auto first_pack_operation = indices.front();
-                for (const auto& entry :
-                     observed_input.storage.storage_manifest.packed_blobs) {
-                    if (entry.pack_hash != packed->pack_hash) {
-                        continue;
-                    }
-                    const auto found = repair_ops_by_hash.find(entry.blob_hash);
-                    if (found == repair_ops_by_hash.end()) {
-                        complete = false;
-                        continue;
-                    }
-                    const auto op_index = found->second.front();
-                    first_pack_operation =
-                        std::min(first_pack_operation, op_index);
-                    if (record.plan.operations[op_index].size != entry.size) {
-                        complete = false;
-                        continue;
-                    }
-                    descriptors.push_back({entry.blob_hash,
-                                           static_cast<std::uint32_t>(entry.size)});
-                    pack.blobs.push_back(PlannedSmallUpload{
-                        .hash = entry.blob_hash,
-                        .size = static_cast<std::uint32_t>(entry.size),
-                        .op_index = op_index,
-                    });
-                    pack.operation_indices.push_back(op_index);
-                }
-                if (complete && crypto::pack::compute_pack_hash(descriptors) ==
-                                    packed->pack_hash) {
-                    std::ranges::sort(pack.operation_indices);
-                    layout.packs.push_back(std::move(pack));
-                } else {
-                    incomplete_pack = std::min(
-                        incomplete_pack.value_or(first_pack_operation),
-                        first_pack_operation);
-                }
-            }
-        }
-        if (incomplete_pack) {
-            return std::unexpected(detail::make_error(
-                ErrorCode::MutationFailure,
-                "cannot reconstruct the original absent pack from local sources",
-                incomplete_pack));
+        if (auto planned = plan_manifest_repairs(
+                layout, observed_manifest, record, repair_ops_by_hash, key);
+            !planned) {
+            return std::unexpected(planned.error());
         }
     }
 
@@ -2158,8 +2320,9 @@ execute_packed_upload_batch(std::span<const PlannedPack* const> packs,
 std::expected<void, detail::UploadBatchError> execute_chunked_upload_batch(
     std::span<const PlannedChunkUpload* const> uploads,
     const transaction::Record& record,
-    const reconciliation::Input& observed_input,
-    const reconciliation::Result& reconciliation_result,
+    const history::StorageManifest& live_manifest,
+    const HashSet& missing_files,
+    const HashSet& invalid_chunks,
     const std::filesystem::path& local_root,
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
@@ -2171,11 +2334,10 @@ std::expected<void, detail::UploadBatchError> execute_chunked_upload_batch(
     }
 
     HashSet known_live_chunks{0, hash_key};
-    if (observed_input.storage.history_present) {
-        for (const auto& entry :
-             observed_input.storage.storage_manifest.chunked_files) {
-            if (!reconciliation_result.missing_objects.contains(entry.file_hash)) {
-                for (const auto& c : entry.chunks) {
+    for (const auto& entry : live_manifest.chunked_files) {
+        if (!missing_files.contains(entry.file_hash)) {
+            for (const auto& c : entry.chunks) {
+                if (!invalid_chunks.contains(c.hash)) {
                     known_live_chunks.insert(c.hash);
                 }
             }
@@ -2427,17 +2589,130 @@ std::expected<void, detail::UploadBatchError> execute_chunked_upload_batch(
     return {};
 }
 
+} // namespace
+
+std::expected<void, Error> detail::resume_manifest_repairs(
+    const journal::Paths& paths,
+    transaction::Record& record,
+    const history::StorageManifest& manifest,
+    const std::filesystem::path& local_root,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const platform::Workspace& workspace) {
+    if (manifest.empty()) {
+        return {};
+    }
+
+    RepairOperations repairs{0, hash_key};
+    for (std::size_t index = 0; index < record.plan.operations.size();
+         ++index) {
+        const auto& operation = record.plan.operations[index];
+        if (operation.action == Action::Upload) {
+            if (const auto hash = hash_from_hex(operation.hash);
+                hash && (history::find_packed_blob(manifest, *hash) ||
+                         history::find_chunked_file(manifest, *hash))) {
+                repairs[*hash].push_back(index);
+            }
+        }
+    }
+    if (repairs.empty()) {
+        return {};
+    }
+
+    UploadLayoutPlan pending;
+    if (auto planned =
+            plan_manifest_repairs(pending, manifest, record, repairs, key);
+        !planned) {
+        return planned;
+    }
+    std::vector<const PlannedPack*> packs;
+    for (const auto& pack : pending.packs) {
+        const auto verified =
+            verify_existing_content(storage,
+                                    key,
+                                    pack.pack_identifier,
+                                    hash_hex(pack.pack_hash),
+                                    std::nullopt,
+                                    workspace,
+                                    pack.operation_indices.front(),
+                                    true);
+        if (!verified) {
+            return std::unexpected(verified.error());
+        }
+        if (!*verified) {
+            packs.push_back(&pack);
+        }
+    }
+    const auto parallelism = application::content_concurrency();
+    for (std::span<const PlannedPack* const> remaining{packs};
+         !remaining.empty();) {
+        const auto window = remaining.first(
+            std::min(remaining.size(), pack_upload_window_size));
+        if (auto result = execute_packed_upload_batch(window,
+                                                      record,
+                                                      local_root,
+                                                      storage,
+                                                      key,
+                                                      workspace,
+                                                      parallelism,
+                                                      nullptr);
+            !result) {
+            return std::unexpected(mutation_error(result.error().mutation));
+        }
+        for (const auto* pack : window) {
+            for (const auto index : pack->operation_indices) {
+                record.progress[index].state =
+                    transaction::OperationState::Applied;
+            }
+        }
+        if (auto checkpoint = save_record(paths, record, key); !checkpoint) {
+            return checkpoint;
+        }
+        remaining = remaining.subspan(window.size());
+    }
+
+    std::vector<const PlannedChunkUpload*> chunks;
+    for (const auto& upload : pending.chunked_uploads) {
+        chunks.push_back(&upload);
+    }
+    const HashSet none{0, hash_key};
+    // A repair checkpoint may have been written by a client that used loose
+    // objects.
+    if (auto result = execute_chunked_upload_batch(chunks,
+                                                   record,
+                                                   history::StorageManifest{},
+                                                   none,
+                                                   none,
+                                                   local_root,
+                                                   storage,
+                                                   key,
+                                                   workspace,
+                                                   parallelism,
+                                                   nullptr);
+        !result) {
+        return std::unexpected(mutation_error(result.error().mutation));
+    }
+
+    for (const auto& [hash, indices] : repairs) {
+        for (const auto index : indices) {
+            record.progress[index].state = transaction::OperationState::Applied;
+        }
+    }
+    return save_record(paths, record, key);
+}
+
 std::expected<std::unordered_map<std::string, std::filesystem::path>,
               mutation::MutationError>
-prefetch_manifest_downloads(const history::StorageManifest& manifest,
-                            std::span<const std::size_t> apply_order,
-                            const transaction::Record& record,
-                            const std::filesystem::path& local_root,
-                            transport::Transport& storage,
-                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                            const platform::Workspace& workspace,
-                            std::size_t parallelism,
-                            ProgressMeter* meter) {
+detail::prefetch_manifest_downloads(
+    const history::StorageManifest& manifest,
+    std::span<const std::size_t> apply_order,
+    const transaction::Record& record,
+    const std::filesystem::path& local_root,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const platform::Workspace& workspace,
+    std::size_t parallelism,
+    ProgressMeter* meter) {
     std::unordered_map<std::string, std::filesystem::path> ready;
     if (manifest.empty()) {
         return ready;
@@ -2552,8 +2827,14 @@ prefetch_manifest_downloads(const history::StorageManifest& manifest,
             [&](std::size_t i) {
                 const auto& job = pack_jobs[i];
                 const auto enc_path = dl_dir / job.identifier;
-                if (!batch_ok &&
-                    !std::filesystem::is_regular_file(enc_path)) {
+                std::error_code status_error;
+                const auto status =
+                    std::filesystem::symlink_status(enc_path, status_error);
+                const bool absent =
+                    status_error == std::errc::no_such_file_or_directory ||
+                    (!status_error &&
+                     status.type() == std::filesystem::file_type::not_found);
+                if (absent) {
                     auto fetched =
                         transport::get(storage, job.identifier, enc_path);
                     if (!fetched) {
@@ -2569,9 +2850,21 @@ prefetch_manifest_downloads(const history::StorageManifest& manifest,
                             job.first_op_index);
                         return;
                     }
+                } else if (status_error ||
+                           !std::filesystem::is_regular_file(status) ||
+                           platform::private_storage::is_reparse_or_symlink(
+                               enc_path)) {
+                    errors[i] = mutation::detail::make_error(
+                        mutation::MutationErrorCode::LocalIo,
+                        status_error ? status_error.message()
+                                     : "downloaded pack is not a regular file",
+                        enc_path,
+                        job.first_op_index);
+                    return;
                 }
+                const auto pack_dir = extract_dir / hash_hex(job.pack_hash);
                 auto extracted = crypto::pack::decrypt_and_verify_pack(
-                    enc_path, key, job.pack_hash, &extract_dir);
+                    enc_path, key, job.pack_hash, &pack_dir);
                 std::error_code ignored;
                 std::filesystem::remove(enc_path, ignored);
                 if (!extracted) {
@@ -2602,9 +2895,13 @@ prefetch_manifest_downloads(const history::StorageManifest& manifest,
             if (op.action != Action::Download) {
                 continue;
             }
-            if (const auto h = hash_from_hex(op.hash);
-                h && history::find_packed_blob(manifest, *h) != nullptr) {
-                ready.emplace(op.hash, extract_dir / (op.hash + ".plain"));
+            if (const auto h = hash_from_hex(op.hash)) {
+                if (const auto* pack =
+                        history::find_packed_blob(manifest, *h)) {
+                    ready.emplace(op.hash,
+                                  extract_dir / hash_hex(pack->pack_hash) /
+                                      (op.hash + ".plain"));
+                }
             }
         }
     }
@@ -2939,7 +3236,87 @@ prefetch_manifest_downloads(const history::StorageManifest& manifest,
     return ready;
 }
 
-std::expected<void, Error>
+namespace {
+
+std::expected<std::vector<bool>, Error>
+uploads_to_replay(const transaction::Record& record,
+                  const history::StorageManifest& target_manifest,
+                  const std::vector<bool>& content_upload_required,
+                  transport::Transport& storage,
+                  std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                  const platform::Workspace& workspace,
+                  HashSet& invalid_chunks) {
+    std::vector<bool> replay(record.progress.size());
+    struct CheckedObject {
+        bool verified;
+        std::optional<std::uint64_t> size;
+    };
+    std::unordered_map<std::string, CheckedObject> checked_objects;
+    for (std::size_t i = 0; i < record.progress.size(); ++i) {
+        const auto& op = record.plan.operations[i];
+        if (op.action != Action::Upload || !content_upload_required[i] ||
+            record.progress[i].state != transaction::OperationState::Applied) {
+            continue;
+        }
+        const auto hash = hash_from_hex(op.hash);
+        if (!hash) {
+            return std::unexpected(
+                detail::make_error(ErrorCode::RecoveryConflict,
+                                   "invalid checkpointed upload hash",
+                                   i));
+        }
+        const auto verify = [&](const Hash& object_hash,
+                                std::optional<std::uint64_t> size)
+            -> std::expected<bool, Error> {
+            const auto identifier =
+                size ? crypto::content_identifier(key, object_hash)
+                     : crypto::pack_identifier(key, object_hash);
+            if (const auto prior = checked_objects.find(identifier);
+                prior != checked_objects.end()) {
+                return prior->second.verified && prior->second.size == size;
+            }
+            auto verified =
+                detail::verify_existing_content(storage,
+                                                key,
+                                                identifier,
+                                                hash_hex(object_hash),
+                                                size,
+                                                workspace,
+                                                i,
+                                                !size);
+            if (verified) {
+                checked_objects.emplace(identifier,
+                                        CheckedObject{*verified, size});
+            }
+            return verified;
+        };
+        if (const auto* chunked =
+                history::find_chunked_file(target_manifest, *hash)) {
+            for (const auto& chunk : chunked->chunks) {
+                auto verified = verify(chunk.hash, chunk.size);
+                if (!verified) {
+                    return std::unexpected(verified.error());
+                }
+                if (!*verified) {
+                    invalid_chunks.insert(chunk.hash);
+                    replay[i] = true;
+                }
+            }
+        } else {
+            const auto* pack =
+                history::find_packed_blob(target_manifest, *hash);
+            auto verified = pack ? verify(pack->pack_hash, std::nullopt)
+                                 : verify(*hash, op.size);
+            if (!verified) {
+                return std::unexpected(verified.error());
+            }
+            replay[i] = !*verified;
+        }
+    }
+    return replay;
+}
+
+std::expected<detail::RoundedTimestamps, Error>
 restore_transaction_metadata(const Snapshot& expected_tree,
                              const Snapshot& observed_tree,
                              const transaction::Record& record,
@@ -2956,6 +3333,7 @@ restore_transaction_metadata(const Snapshot& expected_tree,
         return std::unexpected(
             detail::make_error(ErrorCode::MutationFailure, paths.error()));
     }
+    detail::RoundedTimestamps rounded;
     for (const auto& path_name : *paths) {
         const auto* row = find_row(expected_tree, path_name);
         if (row == nullptr) {
@@ -3023,8 +3401,19 @@ restore_transaction_metadata(const Snapshot& expected_tree,
                 "failed to restore materialized timestamp for " + path_name +
                     ": " + written.error()));
         }
+        const auto materialized =
+            platform::metadata::unix_nanoseconds(*written);
+        if (!materialized) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::MutationFailure,
+                "materialized timestamp is out of range for " + path_name));
+        }
+        if (!platform::metadata::filesystem_equivalent(row->mtime,
+                                                       *materialized)) {
+            rounded.emplace(path_name, *materialized);
+        }
     }
-    return {};
+    return rounded;
 }
 
 bool same_result(const reconciliation::Result& left,
@@ -3209,10 +3598,33 @@ execute(const runtime::RuntimeData& runtime_data,
                                same_operation)) {
             record_storage = std::move(**existing);
         } else {
-            return std::unexpected(detail::make_error(
-                ErrorCode::RecoveryRequired, "pending transaction exists"));
+            auto& stale = **existing;
+            if (!stale.publication_required ||
+                stale.phase >= transaction::Phase::CommitPrepared ||
+                detail::has_local_rollback_work(stale)) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::RecoveryRequired, "pending transaction exists"));
+            }
+            auto stale_workspace = detail::open_transaction_workspace(
+                *profile, stale.operation_id, key);
+            if (!stale_workspace) {
+                return std::unexpected(stale_workspace.error());
+            }
+            // The new plan was observed before any mutation from this record.
+            if (auto discarded =
+                    detail::rollback_transaction(*paths,
+                                                 stale,
+                                                 *stale_workspace,
+                                                 runtime_data.local_dir,
+                                                 key);
+                !discarded) {
+                return discarded;
+            }
+            journal_session.invalidate();
+            existing->reset();
         }
-    } else {
+    }
+    if (!record_storage) {
         auto record =
             journal::create_record(observed_input.local_generation,
                                    observed_input.storage.generation,
@@ -3300,11 +3712,17 @@ execute(const runtime::RuntimeData& runtime_data,
 
     const bool use_handoff_progress =
         handoff_progress.size() == record->plan.operations.size();
+    const auto type_changes =
+        detail::local_type_changes(record->plan.operations);
     for (std::size_t index = 0; index < record->plan.operations.size();
          ++index) {
         const auto& current_progress =
             use_handoff_progress ? handoff_progress[index]
                                  : record->progress[index];
+        if (type_changes[index] == detail::TypeChangeStep::Install &&
+            current_progress.state == transaction::OperationState::Pending) {
+            continue;
+        }
         auto prepared =
             mutation::prepare_operation(record->plan.operations[index],
                                         index,
@@ -3344,6 +3762,21 @@ execute(const runtime::RuntimeData& runtime_data,
                                                 enable_micro_packs);
     if (!layout_plan) {
         return fail_terminal(layout_plan.error());
+    }
+    HashSet invalid_chunks{0, hash_key};
+    std::vector<bool> replay_uploads(record->progress.size());
+    if (*existing && record->publication_required) {
+        auto replay = uploads_to_replay(*record,
+                                        layout_plan->target_manifest,
+                                        content_upload_required,
+                                        storage,
+                                        key,
+                                        *workspace,
+                                        invalid_chunks);
+        if (!replay) {
+            return std::unexpected(replay.error());
+        }
+        replay_uploads = std::move(*replay);
     }
 
     std::optional<publication::PreparedCommit> prepared_commit;
@@ -3433,8 +3866,9 @@ execute(const runtime::RuntimeData& runtime_data,
     for (std::size_t index = 0; index < record->plan.operations.size();
          ++index) {
         if (!content_upload_required[index] ||
-            record->progress[index].state ==
-                transaction::OperationState::Applied) {
+            (record->progress[index].state ==
+                 transaction::OperationState::Applied &&
+             !replay_uploads[index])) {
             record->progress[index].state =
                 transaction::OperationState::Applied;
             continue;
@@ -3450,6 +3884,7 @@ execute(const runtime::RuntimeData& runtime_data,
                               return record->plan.operations[index].action !=
                                      Action::DeleteLocalDirectory;
                           });
+    detail::order_local_type_changes(type_changes, remaining_operations);
     for (const auto index : remaining_operations) {
         apply_order.push_back(index);
     }
@@ -3548,6 +3983,18 @@ execute(const runtime::RuntimeData& runtime_data,
         record->plan.operations.size());
     const auto prepare_destination =
         [&](std::size_t index) -> std::expected<void, Error> {
+        if (type_changes[index] == detail::TypeChangeStep::Install &&
+            record->progress[index].state ==
+                transaction::OperationState::Pending) {
+            auto prepared = detail::prepare_type_change_install(
+                *record, index, runtime_data.local_dir, *workspace);
+            if (!prepared) {
+                return fail_terminal(prepared.error());
+            }
+            if (auto checkpoint = save_active_record(); !checkpoint) {
+                return checkpoint;
+            }
+        }
         auto condition = mutation::detail::effective_destination(
             *record, index, dependencies);
         if (!condition)
@@ -3566,16 +4013,16 @@ execute(const runtime::RuntimeData& runtime_data,
                               std::to_string(operation.size)];
         }
     }
-    auto preverified_downloads =
-        prefetch_manifest_downloads(observed_input.storage.storage_manifest,
-                                    apply_order,
-                                    *record,
-                                    runtime_data.local_dir,
-                                    storage,
-                                    key,
-                                    *workspace,
-                                    parallelism,
-                                    meter);
+    auto preverified_downloads = detail::prefetch_manifest_downloads(
+        observed_input.storage.storage_manifest,
+        apply_order,
+        *record,
+        runtime_data.local_dir,
+        storage,
+        key,
+        *workspace,
+        parallelism,
+        meter);
     if (!preverified_downloads) {
         return fail_mutation(preverified_downloads.error().operation_index,
                              preverified_downloads.error());
@@ -3744,7 +4191,8 @@ execute(const runtime::RuntimeData& runtime_data,
                    Action::Upload) {
             const auto op_index = apply_order[end];
             if (record->progress[op_index].state !=
-                transaction::OperationState::Applied) {
+                    transaction::OperationState::Applied ||
+                replay_uploads[op_index]) {
                 pending_uploads.push_back(op_index);
             }
             ++end;
@@ -3780,9 +4228,13 @@ execute(const runtime::RuntimeData& runtime_data,
             loose_pending_uploads.push_back(op_index);
         }
 
-        if (!planned_packs_pending.empty()) {
+        for (std::span<const PlannedPack* const> remaining{
+                 planned_packs_pending};
+             !remaining.empty();) {
+            const auto window = remaining.first(
+                std::min(remaining.size(), pack_upload_window_size));
             if (auto pack_ok =
-                    execute_packed_upload_batch(planned_packs_pending,
+                    execute_packed_upload_batch(window,
                                                 *record,
                                                 runtime_data.local_dir,
                                                 storage,
@@ -3798,7 +4250,7 @@ execute(const runtime::RuntimeData& runtime_data,
                 return fail_mutation(pack_ok.error().mutation.operation_index,
                                      pack_ok.error().mutation);
             }
-            for (const auto* pack : planned_packs_pending) {
+            for (const auto* pack : window) {
                 for (const auto op_idx : pack->operation_indices) {
                     record->progress[op_idx].state =
                         transaction::OperationState::Applied;
@@ -3807,20 +4259,22 @@ execute(const runtime::RuntimeData& runtime_data,
             if (auto saved_pack = save_active_record(); !saved_pack) {
                 return std::unexpected(saved_pack.error());
             }
+            remaining = remaining.subspan(window.size());
         }
 
         if (!planned_chunks_pending.empty()) {
-            if (auto chunk_ok =
-                    execute_chunked_upload_batch(planned_chunks_pending,
-                                                 *record,
-                                                 observed_input,
-                                                 reconciliation_result,
-                                                 runtime_data.local_dir,
-                                                 storage,
-                                                 key,
-                                                 *workspace,
-                                                 parallelism,
-                                                 meter);
+            if (auto chunk_ok = execute_chunked_upload_batch(
+                    planned_chunks_pending,
+                    *record,
+                    observed_input.storage.storage_manifest,
+                    reconciliation_result.missing_objects,
+                    invalid_chunks,
+                    runtime_data.local_dir,
+                    storage,
+                    key,
+                    *workspace,
+                    parallelism,
+                    meter);
                 !chunk_ok) {
                 if (chunk_ok.error().transport_after_unknown_transfer) {
                     return std::unexpected(
@@ -3946,7 +4400,10 @@ execute(const runtime::RuntimeData& runtime_data,
                 const auto* expected_dir = find_row(
                     reconciliation_result.candidate_shared_tree, row.path);
                 if (expected_dir != nullptr) {
-                    row.mtime = expected_dir->mtime;
+                    const auto written = timestamps->find(row.path);
+                    row.mtime = written == timestamps->end()
+                                    ? expected_dir->mtime
+                                    : written->second;
                 }
             }
             validation_local_tree.rows.push_back(std::move(row));
@@ -3967,7 +4424,8 @@ execute(const runtime::RuntimeData& runtime_data,
     if (record->publication_required &&
         !detail::same_materialized_rows(
             reconciliation_result.candidate_shared_tree.rows,
-            publication_tree->rows)) {
+            publication_tree->rows,
+            *timestamps)) {
         return fail_terminal(detail::make_error(
             ErrorCode::CompositionMismatch,
             "materialized tree does not match reconciled candidate tree"));
@@ -3983,7 +4441,8 @@ execute(const runtime::RuntimeData& runtime_data,
             found->commit.tree != observed_input.storage.tree ||
             !detail::same_materialized_head_rows(found->commit.tree.rows,
                                                  publication_tree->rows,
-                                                 observed_input.local_tree)) {
+                                                 observed_input.local_tree,
+                                                 *timestamps)) {
             return fail_terminal(detail::make_error(
                 ErrorCode::CompositionMismatch,
                 "local materialization diverges from observed head"));

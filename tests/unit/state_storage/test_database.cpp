@@ -1,4 +1,5 @@
 #include "core/hasher.hpp"
+#include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/path.hpp"
 #include "state_storage/database.hpp"
@@ -6,9 +7,11 @@
 
 #include <algorithm>
 #include <array>
+#include <barrier>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <gtest/gtest.h>
 #include <limits>
 #include <memory>
@@ -140,6 +143,42 @@ TEST(StateStorageDatabaseTest, InitializesFreshDatabaseIdempotently) {
     const auto loaded = kasumi::state_storage::load_state(database_path);
     ASSERT_TRUE(loaded.has_value());
     EXPECT_FALSE(*loaded);
+}
+
+TEST(StateStorageDatabaseTest,
+     ConcurrentInitializationPublishesOneValidDatabase) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-init-concurrent");
+    const auto path = kasumi::test::workspace_path(workspace, "state.db");
+    std::barrier start{3};
+    const auto initialize = [&] {
+        start.arrive_and_wait();
+        return kasumi::state_storage::initialize(path);
+    };
+    auto first = std::async(std::launch::async, initialize);
+    auto second = std::async(std::launch::async, initialize);
+    start.arrive_and_wait();
+
+    EXPECT_TRUE(first.get());
+    EXPECT_TRUE(second.get());
+    EXPECT_TRUE(kasumi::state_storage::validate(path));
+    EXPECT_EQ(query_text(path, "PRAGMA journal_mode"),
+              std::vector<std::string>{"wal"});
+}
+
+TEST(StateStorageDatabaseTest, FreshInitializationPreservesOrphanedSidecar) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-init-sidecar");
+    const auto path = kasumi::test::workspace_path(workspace, "state.db");
+    const auto sidecar =
+        kasumi::test::workspace_path(workspace, "state.db-wal");
+    kasumi::test::write_text(sidecar, "previous state");
+
+    EXPECT_FALSE(kasumi::state_storage::initialize(path));
+    EXPECT_FALSE(std::filesystem::exists(path));
+    EXPECT_EQ(kasumi::test::read_text(sidecar), "previous state");
+    ASSERT_TRUE(std::filesystem::remove(sidecar));
+    EXPECT_TRUE(kasumi::state_storage::initialize(path));
 }
 
 TEST(StateStorageDatabaseTest,
@@ -690,6 +729,51 @@ TEST(StateStorageDatabaseTest, ValidationRequiresCurrentExistingSchema) {
               std::vector<std::string>{"99"});
 }
 
+TEST(StateStorageDatabaseTest, ValidationRecoversSchemaFromUncheckpointedWal) {
+    auto [workspace, database] = make_db("persistence-recover-wal");
+    execute_sql(database, "PRAGMA user_version = 0");
+    auto writer = open_database(database, SQLITE_OPEN_READWRITE);
+    ASSERT_EQ(
+        sqlite3_exec(
+            writer.get(), "PRAGMA user_version = 1", nullptr, nullptr, nullptr),
+        SQLITE_OK);
+
+    const auto recovered = database.parent_path() / "recovered.sqlite";
+    ASSERT_TRUE(std::filesystem::copy_file(database, recovered));
+    const auto wal = [](const auto& path) {
+        return kasumi::platform::path::temporary_sibling_path(path, "", "-wal");
+    };
+    ASSERT_TRUE(std::filesystem::copy_file(wal(database), wal(recovered)));
+    EXPECT_TRUE(kasumi::state_storage::validate(recovered));
+    EXPECT_EQ(query_text(recovered, "PRAGMA user_version"),
+              std::vector<std::string>{"1"});
+}
+
+TEST(StateStorageDatabaseTest, RejectsRedirectedDatabaseAndWal) {
+    auto [workspace, database] = make_db("persistence-redirected-input");
+    const auto alias = database.parent_path() / "alias.sqlite";
+    std::error_code error;
+    std::filesystem::create_symlink(database, alias, error);
+    if (error) {
+        GTEST_SKIP() << error.message();
+    }
+    EXPECT_FALSE(kasumi::state_storage::validate(alias));
+    EXPECT_FALSE(kasumi::state_storage::load_state(alias));
+    EXPECT_FALSE(kasumi::state_storage::save_file_cache_delta(alias, {}));
+    EXPECT_TRUE(std::filesystem::remove(alias));
+
+    const auto wal =
+        kasumi::platform::path::temporary_sibling_path(database, "", "-wal");
+    const auto untouched = database.parent_path() / "untouched";
+    kasumi::test::write_text(untouched, "original");
+    std::filesystem::create_symlink(untouched, wal);
+    EXPECT_FALSE(kasumi::state_storage::initialize(database));
+    EXPECT_FALSE(kasumi::state_storage::validate(database));
+    EXPECT_FALSE(kasumi::state_storage::load_file_cache(database));
+    EXPECT_EQ(kasumi::test::read_text(untouched), "original");
+    EXPECT_TRUE(std::filesystem::remove(wal));
+}
+
 TEST(StateStorageDatabaseTest, CorruptHashReturnsControlledError) {
     auto [workspace, database_path] = make_db("persistence-corrupt-hash");
     execute_sql(database_path,
@@ -949,6 +1033,47 @@ TEST(StateStorageDatabaseTest, InitializesWithWalJournalMode) {
     EXPECT_EQ(journal_mode[0], "wal");
 }
 
+TEST(StateStorageDatabaseTest, SaveWaitsForContendingWriter) {
+    using namespace std::chrono_literals;
+    auto [workspace, path] = make_db("persistence-contending-writer");
+    auto writer = open_database(path, SQLITE_OPEN_READWRITE);
+    auto lock = kasumi::sqlite::begin(writer.get());
+    ASSERT_TRUE(lock) << lock.error();
+    const auto tree = make_snapshot("docs/file", "data", 4);
+    std::promise<void> started;
+    auto ready = started.get_future();
+    auto pending = std::async(std::launch::async, [&] {
+        started.set_value();
+        return kasumi::state_storage::save_state(
+            path,
+            {.tree = tree, .height = 1, .commit_id = std::string(64, 'a')});
+    });
+    ready.wait();
+    EXPECT_EQ(pending.wait_for(100ms), std::future_status::timeout);
+    ASSERT_TRUE(kasumi::sqlite::commit(*lock));
+    ASSERT_TRUE(pending.get());
+    const auto saved = kasumi::state_storage::load_state(path);
+    ASSERT_TRUE(saved && *saved);
+    EXPECT_EQ((*saved)->tree, tree);
+}
+
+TEST(StateStorageDatabaseTest, SaveRequiresWalAndInitializeRestoresIt) {
+    auto [workspace, path] = make_db("persistence-require-wal");
+    execute_sql(path, "PRAGMA journal_mode=DELETE");
+    const kasumi::state_storage::StoredState state{
+        .tree = make_snapshot("docs/file", "data", 4),
+        .height = 1,
+        .commit_id = std::string(64, 'a')};
+
+    EXPECT_FALSE(kasumi::state_storage::save_state(path, state));
+    EXPECT_EQ(query_text(path, "PRAGMA journal_mode"),
+              std::vector<std::string>{"delete"});
+    ASSERT_TRUE(kasumi::state_storage::initialize(path));
+    EXPECT_EQ(query_text(path, "PRAGMA journal_mode"),
+              std::vector<std::string>{"wal"});
+    EXPECT_TRUE(kasumi::state_storage::save_state(path, state));
+}
+
 TEST(StateStorageDatabaseTest, NewReadWriteConnectionAppliesSynchronousNormal) {
     auto [workspace, database_path] =
         make_db("persistence-connection-synchronous");
@@ -1119,7 +1244,8 @@ TEST(StateStorageDatabaseTest, ExtremeTimestampsPreservedBitwise) {
     EXPECT_EQ(loaded->at(2).mtime_nanoseconds, 0);
 }
 
-TEST(StateStorageDatabaseTest, UnknownFingerprintKindsAreIgnoredAndPreserved) {
+TEST(StateStorageDatabaseTest,
+     LegacyFingerprintsArePrunedAndFutureKindIsPreserved) {
     auto [workspace, database_path] =
         make_db("persistence-unknown-fingerprints");
 
@@ -1140,6 +1266,10 @@ TEST(StateStorageDatabaseTest, UnknownFingerprintKindsAreIgnoredAndPreserved) {
                     "', 200, 2, "
                     "'0000000000000005', '0000000000000006', "
                     "'0000000000000007', '0000000000000008')");
+
+    execute_sql(database_path,
+                "INSERT INTO file_cache VALUES ('future.txt', 'hash', 1, 99, "
+                "'0', '0', '0', '0')");
 
     execute_sql(database_path,
                 "INSERT INTO file_cache (path, hash, size, fingerprint_kind, "
@@ -1172,9 +1302,7 @@ TEST(StateStorageDatabaseTest, UnknownFingerprintKindsAreIgnoredAndPreserved) {
         query_text(database_path,
                    "SELECT path FROM file_cache WHERE fingerprint_kind != 3 "
                    "ORDER BY path");
-    EXPECT_EQ(remaining_unknown,
-              (std::vector<std::string>{"platform_kind_one.txt",
-                                        "platform_kind_two.txt"}));
+    EXPECT_EQ(remaining_unknown, (std::vector<std::string>{"future.txt"}));
 }
 
 TEST(StateStorageDatabaseTest, CorruptedCacheEntriesIgnoredFailClosed) {

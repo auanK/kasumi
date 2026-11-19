@@ -1052,6 +1052,34 @@ TEST(LocalCopyDependenciesTest, CopyRecoveryInterruptedMixedCopyAndMove) {
 }
 
 #if defined(KASUMI_SYNC_CRASH_HELPER_PATH)
+TEST(LocalCopyDependenciesTest,
+     RecoveryRemovesOwnedStagingAfterCrashWhileCopying) {
+    SyncNode source, replica;
+    ASSERT_TRUE(
+        init_pair(source, "copy_crash_source", replica, "copy_crash_replica"));
+    const std::string payload(128U * 1024U, 'c');
+    write_local_file(source, "original", payload);
+    ASSERT_TRUE(sync_pair(source, replica));
+    write_local_file(source, "duplicate", payload);
+    ASSERT_TRUE(sync_ok(source));
+
+    const auto child = run_crash_child(replica,
+                                       "sync",
+                                       "during_copy_local_write",
+                                       "",
+                                       replica.profile / "copy_crash.signal");
+    ASSERT_TRUE(child.reached_point) << child.detail;
+    ASSERT_TRUE(child.was_killed);
+    ASSERT_TRUE(sync_ok(replica));
+    EXPECT_EQ(read_local_file(replica, "original"), payload);
+    EXPECT_EQ(read_local_file(replica, "duplicate"), payload);
+    for (const auto& entry :
+         std::filesystem::directory_iterator(replica.local)) {
+        EXPECT_FALSE(
+            entry.path().filename().string().contains(".kasumi-copy-"));
+    }
+}
+
 TEST(LocalCopyDependenciesTest, RecoveryPreservesDependencyOrderRealCrash) {
     SyncNode node_a, node_b;
     ASSERT_TRUE(

@@ -669,6 +669,41 @@ TEST(ReachabilityTest, EpochAnchorMustBePresentAndMatchItsHeight) {
                  1);
 }
 
+TEST(ReachabilityTest,
+     PrunedParentsBeforeAuthenticatedEpochDoNotBreakInventory) {
+    namespace epoch = kasumi::application::history_storage::epoch;
+    auto workspace =
+        kasumi::test::make_temp_workspace("reachability-pruned-epoch");
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    const auto anchor =
+        make_commit(1, {std::string(64, 'b')}, "before", "base");
+    ASSERT_TRUE(anchor);
+    const auto anchor_id = commit_id(*anchor);
+    const auto head = make_commit(2, {anchor_id}, "after", "new");
+    ASSERT_TRUE(head);
+    add_fake_commit(storage, workspace, *anchor, "anchor", false);
+    add_fake_commit(storage, workspace, *head, "head");
+
+    const auto sealed = epoch::seal(
+        epoch::Epoch{
+            .vault_id = std::string(64, 'a'),
+            .sequence = 0,
+            .issued_at = 1,
+            .policy = {},
+            .anchors = {{.commit_id = anchor_id, .height = 1}},
+        },
+        test_key());
+    ASSERT_TRUE(sealed) << sealed.error().detail;
+    ASSERT_TRUE(epoch::publish(
+        storage, test_key(), *sealed, kasumi::test::workspace_root(workspace)));
+    const auto result = fake_inventory(storage, workspace);
+    EXPECT_EQ(result.reachable_commits.size(), 2U);
+    EXPECT_TRUE(result.missing_parent_ids.empty());
+    EXPECT_TRUE(result.invalid_parent_ids.empty());
+}
+
 TEST(ReachabilityTest, InventoryIsReadOnly) {
     auto workspace =
         kasumi::test::make_temp_workspace("reachability-read-only");

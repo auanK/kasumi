@@ -1,7 +1,6 @@
 #include "application/execute.hpp"
 #include "application/inspection/inspect.hpp"
 #include "cli/app.hpp"
-#include "cli/update.hpp"
 #include "kasumi/test/scoped_environment.hpp"
 #include "platform/cancellation.hpp"
 
@@ -9,7 +8,6 @@
 #include <csignal>
 #include <cmath>
 #include <gtest/gtest.h>
-#include <print>
 #include <regex>
 #include <string>
 #include <thread>
@@ -182,24 +180,6 @@ TEST(CliBoundaryTest,
     }
 }
 
-TEST(CliBoundaryTest, UpdateOutcomesHaveDurationWithoutRunningAnInstaller) {
-    const auto language =
-        kasumi::test::scoped_environment_variable("KASUMI_LANG", "en");
-    for (const auto selected :
-         {Outcome::Success, Outcome::Failure, Outcome::Cancelled}) {
-        outcome = selected;
-        const auto output = run({"kasumi", "update"});
-        EXPECT_EQ(output.code,
-                  selected == Outcome::Success   ? 0
-                  : selected == Outcome::Failure ? 1
-                                                 : 130);
-        expect_duration(output);
-        if (selected == Outcome::Failure) {
-            EXPECT_NE(output.out.find(transport_detail), std::string::npos);
-        }
-    }
-}
-
 TEST(CliBoundaryTest, DurationUsesTheSelectedLanguage) {
     outcome = Outcome::Success;
     const auto output = run({"kasumi", "--lang", "pt-BR", "gc", "demo"});
@@ -279,14 +259,3 @@ inspect(InspectionInput input) {
 }
 
 } // namespace kasumi::application
-
-namespace kasumi::cli::update {
-int run(int, char*[]) {
-    perform();
-    if (outcome == Outcome::Failure) {
-        std::println("[ERROR] {}", transport_detail);
-        return 1;
-    }
-    return outcome == Outcome::Cancelled ? 130 : 0;
-}
-} // namespace kasumi::cli::update

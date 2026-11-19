@@ -71,7 +71,9 @@ void advance(ChildCursor& cursor) {
 }
 
 bool same_hash(const NodeRow* left, const NodeRow* right) {
-    return (!left && !right) || (left && right && left->hash == right->hash);
+    return (!left && !right) ||
+           (left && right && left->is_directory == right->is_directory &&
+            left->hash == right->hash);
 }
 
 void compare_nodes_3way(
@@ -218,17 +220,23 @@ void compare_nodes_3way(
                                    "",
                                    platform::path::from_utf8(
                                        conflict_artifact->path));
+                        } else if (l != nullptr) {
+                            add_op(Action::DeleteLocal, target);
                         }
                         add_op(Action::CreateLocalDirectory, target);
                     }
                 } else {
+                    if (l && l->is_directory) {
+                        recurse(l, b, nullptr);
+                        add_op(Action::DeleteLocalDirectory, target);
+                    }
                     add_op(Action::Download,
                            target,
                            hash_hex(c->hash),
                            {},
                            c->size);
                 }
-                if ((l && l->is_directory) || c->is_directory)
+                if (c->is_directory)
                     recurse(l, b, c);
             }
         } else if (same_hash(c, b)) {
@@ -239,13 +247,17 @@ void compare_nodes_3way(
                        b ? hash_hex(b->hash) : "");
             } else {
                 if (l->is_directory) {
+                    if (c && !c->is_directory)
+                        add_op(Action::DeleteRemote, target, hash_hex(c->hash));
                     if (!c || !c->is_directory)
                         add_op(Action::CreateRemoteDirectory, target);
                 } else {
+                    if (c && c->is_directory)
+                        add_op(Action::DeleteRemoteDirectory, target);
                     add_op(
                         Action::Upload, target, hash_hex(l->hash), {}, l->size);
                 }
-                if ((c && c->is_directory) || l->is_directory)
+                if (l->is_directory)
                     recurse(l, b, c);
             }
         } else if (!l && c) {
@@ -286,40 +298,16 @@ void compare_nodes_3way(
                            c->size,
                            true);
                 };
-            if (!b) {
-                if (l->is_directory) {
-                    add_op(Action::CreateRemoteDirectory, target);
-                    download_remote_conflict(target);
-                    recurse(l, nullptr, nullptr);
-                } else {
-                    const auto conflict =
-                        conflict_path(".kasumiconflict_local");
-                    add_op(Action::RenameLocal, target, "", conflict, 0, true);
-                    add_op(Action::Upload,
-                           conflict,
-                           hash_hex(l->hash),
-                           {},
-                           l->size);
-                    add_op(Action::CreateLocalDirectory, target);
-                    recurse(nullptr, nullptr, c);
-                }
-            } else if (l->mtime > c->mtime) {
-                add_op(Action::DeleteRemote, target, hash_hex(c->hash));
-                recurse(l, nullptr, nullptr);
-            } else if (l->is_directory) {
-                download_remote_conflict({});
+            if (l->is_directory) {
+                add_op(Action::CreateRemoteDirectory, target);
+                download_remote_conflict(target);
                 recurse(l, nullptr, nullptr);
             } else {
-                if (c->is_directory) {
-                    add_op(Action::CreateLocalDirectory, target);
-                } else {
-                    add_op(Action::DeleteLocal, target);
-                    add_op(Action::Download,
-                           target,
-                           hash_hex(c->hash),
-                           {},
-                           c->size);
-                }
+                const auto conflict = conflict_path(".kasumiconflict_local");
+                add_op(Action::RenameLocal, target, "", conflict, 0, true);
+                add_op(
+                    Action::Upload, conflict, hash_hex(l->hash), {}, l->size);
+                add_op(Action::CreateLocalDirectory, target);
                 recurse(nullptr, nullptr, c);
             }
         } else if (l && c && !l->is_directory) {

@@ -1,5 +1,6 @@
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
+#include "runtime/paths.hpp"
 #include "runtime/vault.hpp"
 
 #include <algorithm>
@@ -110,10 +111,18 @@ TEST(VaultTest, RejectsWeakPasswordInputs) {
 }
 
 #if defined(_WIN32) || defined(__linux__)
+struct ScopedVaultEntry {
+    std::filesystem::path key_path;
+    ~ScopedVaultEntry() {
+        static_cast<void>(kasumi::runtime::vault::delete_vault(key_path));
+    }
+};
+
 TEST(VaultTest, OsVaultRoundTripsOverwritesAndDeletes) {
     auto workspace = kasumi::test::make_temp_workspace("vault-os-win");
     const auto key_path =
         kasumi::test::workspace_path(workspace, "app/profiles/demo/key.bin");
+    const ScopedVaultEntry cleanup{key_path};
 
     EXPECT_EQ(kasumi::runtime::vault::read_vault(key_path).error().code,
               kasumi::runtime::ErrorCode::KeyNotFound);
@@ -137,6 +146,31 @@ TEST(VaultTest, OsVaultRoundTripsOverwritesAndDeletes) {
     EXPECT_EQ(kasumi::runtime::vault::read_vault(key_path).error().code,
               kasumi::runtime::ErrorCode::KeyNotFound);
     EXPECT_TRUE(kasumi::runtime::vault::delete_vault(key_path));
+}
+
+TEST(VaultTest, ProfileRemovalKeepsVaultKeyWhenDirectoryCannotBeRemoved) {
+    auto workspace = kasumi::test::make_temp_workspace("vault-remove-profile");
+    const auto paths = kasumi::runtime::resolve_profile_paths(
+        kasumi::test::workspace_root(workspace), "demo");
+    ASSERT_TRUE(paths) << paths.error().detail;
+    const ScopedVaultEntry cleanup{paths->key_path};
+    kasumi::test::write_text(paths->profile_dir, "blocked");
+
+    KeyBytes key{};
+    key.fill(0x3c);
+    const auto stored =
+        kasumi::runtime::vault::write_vault(paths->key_path, key);
+    ASSERT_TRUE(stored) << stored.error().detail;
+    EXPECT_FALSE(kasumi::runtime::remove_profile_directory(*paths));
+    const auto retained = kasumi::runtime::vault::read_vault(paths->key_path);
+    EXPECT_TRUE(retained && *retained == key);
+
+    EXPECT_TRUE(std::filesystem::remove(paths->profile_dir));
+    const auto removed = kasumi::runtime::remove_profile_directory(*paths);
+    EXPECT_TRUE(removed) << (removed ? "" : removed.error().detail);
+    const auto missing = kasumi::runtime::vault::read_vault(paths->key_path);
+    ASSERT_FALSE(missing);
+    EXPECT_EQ(missing.error().code, kasumi::runtime::ErrorCode::KeyNotFound);
 }
 #endif
 

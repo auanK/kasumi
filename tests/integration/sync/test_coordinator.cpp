@@ -12699,13 +12699,69 @@ TEST(SyncCoordinatorTest, NonGenesisUploadSubBatchResumesSafely) {
     ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
     EXPECT_EQ(*recovered, RecoveryResult::ResumableTransaction);
 
+    const auto identifier = [&](std::size_t index) {
+        return kasumi::crypto::content_identifier(
+            key,
+            kasumi::hash_from_hex(plan->plan.operations[index].hash).value());
+    };
+    const auto missing = identifier(0);
+    const auto corrupt = identifier(1);
+    ASSERT_EQ(state->objects.erase(missing), 1U);
+    ASSERT_TRUE(state->objects.contains(corrupt));
+    const auto expected = state->objects.at(corrupt);
+    state->objects.at(corrupt) = {0};
+
     state->fail_content_put_at = 0;
     state->content_put_count = 0;
 
     const auto second_exec =
         coord::execute(runtime_data, storage, key, *observed, *plan);
     ASSERT_TRUE(second_exec.has_value()) << second_exec.error().detail;
-    EXPECT_EQ(state->content_put_count, 4U);
+    EXPECT_EQ(state->content_put_count, 6U);
+    EXPECT_TRUE(state->objects.contains(missing));
+    EXPECT_EQ(state->objects.at(corrupt).size(), expected.size());
+    ASSERT_TRUE(
+        recover_expect(runtime_data, storage, key, RecoveryResult::NoJournal));
+}
+
+TEST(SyncCoordinatorTest, EditedUploadReplacesAnUnpublishedCheckpoint) {
+    auto [workspace, profile, local, storage_path, runtime_data, key] =
+        make_coordinator_env("stale-upload-checkpoint");
+    AmbiguousPublicationState* state = nullptr;
+    auto storage = make_initialized_ambiguous_storage(state);
+    kasumi::test::write_text(local / "file", "original");
+    auto input = empty_publication_input();
+    const auto original = app_obs::collect_local_tree(local);
+    ASSERT_TRUE(original);
+    input.local_tree = *original;
+    const auto before = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(before);
+    auto record = sync_journal::create_record(0, 0, before->plan);
+    ASSERT_TRUE(record);
+    ASSERT_EQ(record->progress.size(), 1U);
+    const auto staged = coord::detail::create_transaction_workspace(
+        profile, record->operation_id, key);
+    ASSERT_TRUE(staged);
+    record->phase = kasumi::transaction::Phase::FilesStaged;
+    record->progress.front().state =
+        kasumi::transaction::OperationState::Applied;
+    const auto paths = sync_journal::make_paths(profile);
+    ASSERT_TRUE(paths);
+    ASSERT_TRUE(sync_journal::save(*paths, *record, key));
+
+    // A same-size edit passes the cheap resume probe but changes the plan.
+    kasumi::test::write_text(local / "file", "modified");
+    ASSERT_TRUE(recover_expect(
+        runtime_data, storage, key, RecoveryResult::ResumableTransaction));
+    const auto edited = app_obs::collect_local_tree(local);
+    ASSERT_TRUE(edited);
+    input.local_tree = *edited;
+    const auto after = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(after);
+    const auto synced =
+        coord::execute(runtime_data, storage, key, input, *after);
+    ASSERT_TRUE(synced) << synced.error().detail;
+    EXPECT_FALSE(std::filesystem::exists(staged->root));
     ASSERT_TRUE(
         recover_expect(runtime_data, storage, key, RecoveryResult::NoJournal));
 }

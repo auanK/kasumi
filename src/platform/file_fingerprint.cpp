@@ -76,9 +76,14 @@ regular_file_fingerprint(const std::filesystem::path& path) {
         return std::unexpected(std::system_category().message(errno));
     if (!S_ISREG(status.st_mode))
         return std::optional<FileFingerprint>{};
+#if defined(__APPLE__)
+    const auto& change_time = status.st_ctimespec;
+#else
+    const auto& change_time = status.st_ctim;
+#endif
     const auto ctime_ns =
-        static_cast<std::uint64_t>(status.st_ctim.tv_sec) * 1000000000ULL +
-        static_cast<std::uint64_t>(status.st_ctim.tv_nsec);
+        static_cast<std::uint64_t>(change_time.tv_sec) * 1000000000ULL +
+        static_cast<std::uint64_t>(change_time.tv_nsec);
     return FileFingerprint{
         .kind = FileFingerprintKind::PosixFileIdentity,
         .value = {static_cast<std::uint64_t>(status.st_dev),

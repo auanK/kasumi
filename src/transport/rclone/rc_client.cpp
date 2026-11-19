@@ -30,7 +30,6 @@ namespace kasumi::transport::rclone_detail {
 namespace {
 
 constexpr std::size_t maximum_response_size = 64 * 1024;
-constexpr std::size_t maximum_rc_payload_size = 64U * 1024U * 1024U;
 constexpr auto default_read_timeout = std::chrono::seconds{5};
 constexpr auto read_retry_delay = std::chrono::milliseconds{75};
 constexpr int maximum_read_attempts = 2;
@@ -104,6 +103,28 @@ struct InFlightRequest {
 };
 
 } // namespace
+
+std::string rc_error_detail(const State& state,
+                            std::string_view message,
+                            std::string_view fallback) {
+    const auto contains = [&](std::string_view secret) {
+        return !secret.empty() && message.contains(secret);
+    };
+    if (message.empty() || message.size() > 2048 || contains(state.username) ||
+        contains(state.password) || contains(state.base_url) ||
+        contains("KASUMI_") || contains("access_token") ||
+        contains("refresh_token") || contains("Authorization:")) {
+        return std::string{fallback};
+    }
+    std::string cleaned{message};
+    std::ranges::replace_if(
+        cleaned,
+        [](unsigned char byte) {
+            return byte < 0x20 || byte == 0x7f;
+        },
+        ' ');
+    return cleaned;
+}
 
 struct RcRuntime {
     std::mutex pool_mutex;
@@ -203,7 +224,6 @@ std::unique_ptr<httplib::Client> acquire_client(State& state,
     client->set_connection_timeout(std::chrono::seconds(1));
     client->set_write_timeout(std::chrono::seconds(5));
     client->set_follow_location(false);
-    client->set_payload_max_length(maximum_rc_payload_size);
     client->set_keep_alive(true);
     client->set_tcp_nodelay(true);
     return client;
@@ -297,15 +317,41 @@ post_rc_impl(State& state,
     struct RequestGuard {
         RcRuntime& runtime;
         InFlightRequest* entry;
+        void unregister() noexcept {
+            if (entry != nullptr) {
+                std::lock_guard lock(runtime.watcher_mutex);
+                std::erase(runtime.active_requests, entry);
+                entry = nullptr;
+            }
+        }
         ~RequestGuard() noexcept {
-            std::lock_guard lock(runtime.watcher_mutex);
-            std::erase(runtime.active_requests, entry);
+            unregister();
         }
     } request_guard{runtime, honour_cancellation ? &in_flight : nullptr};
 
     const auto trace = platform::perf_trace::begin();
-    const auto response =
-        client->Post(path, std::string{request_body}, "application/json");
+    std::string body;
+    bool oversized = false;
+    httplib::Request request;
+    request.method = "POST";
+    request.path = path;
+    request.body = request_body;
+    request.set_header("Content-Type", "application/json");
+    request.response_handler = [&](const httplib::Response& headers) {
+        oversized =
+            headers.get_header_value_u64("Content-Length") > response_limit;
+        return !oversized;
+    };
+    request.content_receiver =
+        [&](const char* bytes, std::size_t count, auto, auto) {
+            oversized = count > response_limit - body.size();
+            if (!oversized) {
+                body.append(bytes, count);
+            }
+            return !oversized;
+        };
+    const auto response = client->send(request);
+    request_guard.unregister();
     if (trace.active) {
         platform::perf_trace::finish(
             std::string{"rc/"} + std::string{path_suffix}, trace);
@@ -313,6 +359,12 @@ post_rc_impl(State& state,
     if (honour_cancellation && platform::cancellation::requested()) {
         return std::unexpected(
             make_error(ErrorCode::Cancelled, "operation cancelled by user"));
+    }
+    if (oversized) {
+        return std::unexpected(make_error(ErrorCode::ProtocolFailure,
+                                          "RC response exceeds limit of " +
+                                              std::to_string(response_limit) +
+                                              " bytes"));
     }
     if (!response) {
         return std::unexpected(
@@ -326,14 +378,6 @@ post_rc_impl(State& state,
     if (!server_closed) {
         release_client(runtime, std::move(client));
     }
-    if (response->body.size() > response_limit) {
-        return std::unexpected(make_error(
-            ErrorCode::ProtocolFailure,
-            "RC response exceeds limit",
-            static_cast<int>(std::min(
-                response->body.size(),
-                static_cast<std::size_t>((std::numeric_limits<int>::max)())))));
-    }
     if (response->status == 401 || response->status == 403) {
         return std::unexpected(make_error(ErrorCode::PermissionDenied,
                                           "RC authentication rejected",
@@ -342,20 +386,27 @@ post_rc_impl(State& state,
     if (response->status < 200 || response->status >= 300) {
         std::string detail = "unexpected RC HTTP status; body omitted";
         try {
-            const auto json = nlohmann::json::parse(response->body);
+            const auto json = nlohmann::json::parse(body);
             if (json.contains("error") && json["error"].is_string()) {
-                detail = json["error"].get<std::string>();
+                detail = rc_error_detail(
+                    state, json["error"].get_ref<const std::string&>(), detail);
             }
         } catch (...) {
         }
+        const auto code = response->status >= 500 && response->status <= 599
+                              ? ErrorCode::BackendUnavailable
+                              : ErrorCode::ProtocolFailure;
         return std::unexpected(
-            make_error(ErrorCode::ProtocolFailure, detail, response->status));
+            make_error(code, std::move(detail), response->status));
     }
-    return response->body;
+    return body;
 }
 
 bool transient_read_failure(const Error& error) noexcept {
-    return error.code == ErrorCode::Io || error.code == ErrorCode::Timeout;
+    return error.code == ErrorCode::Io || error.code == ErrorCode::Timeout ||
+           (error.code == ErrorCode::BackendUnavailable &&
+            (error.native_code == 502 || error.native_code == 503 ||
+             error.native_code == 504));
 }
 
 std::expected<void, Error> validate_rc_handshake(State& state, int child_pid) {
@@ -482,6 +533,9 @@ post_rc_read_only(State& state,
         }
         const auto retry_at = std::chrono::steady_clock::now();
         if (retry_at + read_retry_delay >= expires_at) {
+            if (last_error.code == ErrorCode::BackendUnavailable) {
+                return std::unexpected(std::move(last_error));
+            }
             return std::unexpected(contextualize(
                 make_error(ErrorCode::Timeout, "RC read deadline exceeded")));
         }
@@ -510,7 +564,8 @@ bool request_core_quit_best_effort(State& state) noexcept {
                                "core/quit",
                                "{}",
                                maximum_response_size,
-                               default_read_timeout)
+                               std::chrono::seconds{2},
+                               false)
                            .has_value();
     } catch (...) {
     }

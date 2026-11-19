@@ -355,7 +355,16 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
         }
         return std::unexpected(std::move(msg));
     };
-    if (private_storage::query_directory_identity(quarantine) !=
+#ifdef _WIN32
+    const auto native_quarantine = extended_path(quarantine, error);
+    if (error) {
+        return fail_restoring("could not resolve quarantined workspace: " +
+                              error.message());
+    }
+#else
+    const auto& native_quarantine = quarantine;
+#endif
+    if (private_storage::query_directory_identity(native_quarantine) !=
         workspace.identity) {
         const auto restored = restore();
         return std::unexpected(
@@ -365,26 +374,12 @@ std::expected<void, std::string> remove_workspace(const Workspace& workspace) {
                       : std::string{}));
     }
 
-#ifdef _WIN32
-    const auto native_quarantine = extended_path(quarantine, error);
-    if (error) {
-        return fail_restoring("could not resolve quarantined workspace: " +
-                              error.message());
-    }
     // shortcut: same-user writers can race inside quarantine; use
     // handle-relative recursive deletion if that threat is in scope.
     auto secured = private_storage::protect_tree(native_quarantine);
     if (!secured) {
         return fail_restoring(secured.error());
     }
-#else
-    // shortcut: same-user writers can race inside quarantine; use
-    // handle-relative recursive deletion if that threat is in scope.
-    auto secured = private_storage::protect_tree(quarantine);
-    if (!secured) {
-        return fail_restoring(secured.error());
-    }
-#endif
 
 #ifdef KASUMI_WORKSPACE_FAULT_TESTS
     if (workspace_fault_test::interrupt_cleanup(quarantine)) {

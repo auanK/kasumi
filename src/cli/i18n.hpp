@@ -38,7 +38,6 @@ enum class Key {
     ProgressListing,
     ProgressAuthenticating,
     ProgressAuditing,
-    ProgressUpdating,
     ProgressRemoving,
     ProgressObject,
     ProgressObjects,
@@ -78,7 +77,6 @@ enum class Key {
     HelpList,
     HelpShow,
     HelpKey,
-    HelpUpdate,
     HelpRemoteHeads,
     HelpRemoteTree,
     HelpRemoteCommits,
@@ -100,20 +98,6 @@ enum class Key {
 
     // Version
     VersionText,
-    UpdateChecking,
-    UpdateCurrentVersion,
-    UpdateLatestVersion,
-    UpdateDownloading,
-    UpdateVerifying,
-    UpdateInstalling,
-    UpdateHandoffStarted,
-    UpdateAlreadyCurrent,
-    UpdateCompleted,
-    UpdateAdminRequired,
-    UpdateRequestPermission,
-    UpdateElevationUnavailable,
-    UpdateManagedInstallation,
-    UpdateFailed,
 
     // Sync & Status
     SyncInProgress,

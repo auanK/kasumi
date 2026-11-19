@@ -200,7 +200,9 @@ class CliProcessTest(unittest.TestCase):
                     time.sleep(0.01)
                 else:
                     self.fail("wizard menu was not observable")
-                process.send_signal(signal.CTRL_C_EVENT)
+                # CTRL_BREAK_EVENT targets the child process group on Windows.
+                process.send_signal(signal.CTRL_BREAK_EVENT)
+                process.wait(timeout=5)
                 remaining, error = process.communicate(timeout=5)
                 output += remaining
             finally:

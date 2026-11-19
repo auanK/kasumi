@@ -119,6 +119,7 @@ int run_profile_key(const application::ExecutionEnvironment& environment,
 int run_config_wizard(const application::ExecutionEnvironment& environment) {
     const auto prompt_line = [](std::string_view label, std::string& value) {
         std::print("{}", label);
+        std::fflush(stdout);
         if (platform::cancellation::requested()) {
             return false;
         }

@@ -307,10 +307,8 @@ kasumi_add_test_suite(
         unit/cli/test_interface.cpp
         unit/cli/test_parser.cpp
         unit/cli/test_presenter.cpp
-        unit/cli/test_update.cpp
     LIBRARIES
         kasumi_cli
-        monocypher
 )
 
 # Substitute Application entry points to exercise CLI outcomes without I/O.

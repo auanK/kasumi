@@ -130,8 +130,8 @@ Before replacing binaries:
 4. Preserve journals and diagnostics for partial or uncertain operations. Never
    delete SQLite, accepted state, or recovery evidence to force initialization.
 
-[`kasumi update`](configuration-and-usage.md#updating-kasumi) replaces only the
-executable; it does not migrate data or validate cross-version compatibility.
+[Update portable installations manually](configuration-and-usage.md#updating-kasumi).
+For managed installations, use the package manager that installed Kasumi.
 
 ## Automation
 

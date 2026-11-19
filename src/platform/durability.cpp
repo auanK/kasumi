@@ -7,12 +7,15 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <system_error>
 #include <vector>
 
 #if defined(__linux__)
 #include <linux/fs.h>
 #include <sys/syscall.h>
+#elif defined(__APPLE__)
+#include <stdio.h>
 #endif
 
 #if defined(_WIN32)
@@ -26,6 +29,50 @@
 #endif
 
 namespace kasumi::platform::detail {
+
+#if defined(_WIN32)
+DWORD rename_windows_handle(HANDLE file,
+                            const std::filesystem::path& target,
+                            FILE_INFO_BY_HANDLE_CLASS info_class,
+                            DWORD flags) {
+    std::error_code path_error;
+    const auto resolved = std::filesystem::absolute(target, path_error);
+    if (path_error) {
+        return path_error.value() != 0
+                   ? static_cast<DWORD>(path_error.value())
+                   : ERROR_INVALID_NAME;
+    }
+    const auto& name = resolved.native();
+    if (name.size() >
+        (std::numeric_limits<DWORD>::max() - sizeof(FILE_RENAME_INFO)) /
+            sizeof(wchar_t)) {
+        return ERROR_FILENAME_EXCED_RANGE;
+    }
+    const auto name_bytes = name.size() * sizeof(wchar_t);
+    const auto size = sizeof(FILE_RENAME_INFO) + name_bytes;
+    std::vector<FILE_RENAME_INFO> buffer((size - 1) / sizeof(FILE_RENAME_INFO) +
+                                         1);
+    auto& rename = buffer.front();
+    if (info_class == FileRenameInfo) {
+        rename.ReplaceIfExists = flags != 0;
+#if defined(FILE_RENAME_FLAG_POSIX_SEMANTICS)
+    } else {
+        rename.Flags = flags;
+#endif
+    }
+    rename.FileNameLength = static_cast<DWORD>(name_bytes);
+    std::memcpy(reinterpret_cast<std::byte*>(buffer.data()) +
+                    offsetof(FILE_RENAME_INFO, FileName),
+                name.data(),
+                name_bytes);
+    return retry_windows_file_operation([&] {
+        return SetFileInformationByHandle(
+                   file, info_class, buffer.data(), static_cast<DWORD>(size))
+                   ? ERROR_SUCCESS
+                   : GetLastError();
+    });
+}
+#endif
 
 std::error_code rename_no_replace(const std::filesystem::path& source,
                                   const std::filesystem::path& destination) {
@@ -42,6 +89,11 @@ std::error_code rename_no_replace(const std::filesystem::path& source,
                   AT_FDCWD,
                   destination.c_str(),
                   RENAME_NOREPLACE) == 0) {
+        return {};
+    }
+    return {errno, std::generic_category()};
+#elif defined(__APPLE__)
+    if (::renamex_np(source.c_str(), destination.c_str(), RENAME_EXCL) == 0) {
         return {};
     }
     return {errno, std::generic_category()};
@@ -100,6 +152,75 @@ std::expected<void, std::string> sync_posix_path(
     return std::string{operation} + " (native_code=" + std::to_string(code) +
            ")";
 }
+
+#if defined(_WIN32)
+std::expected<void, std::string>
+sync_read_only_file(const std::filesystem::path& path) {
+    // Pin the entry while clearing and restoring the attribute by handle.
+    constexpr DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    constexpr DWORD flags = FILE_FLAG_OPEN_REPARSE_POINT;
+    const auto file = CreateFileW(path.c_str(),
+                                  FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+                                  share,
+                                  nullptr,
+                                  OPEN_EXISTING,
+                                  flags,
+                                  nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return std::unexpected(
+            native_error("sync_file: open attributes failed", GetLastError()));
+    }
+    const std::unique_ptr<void, decltype(&CloseHandle)> file_guard{file,
+                                                                   CloseHandle};
+    FILE_ATTRIBUTE_TAG_INFO info{};
+    if (!GetFileInformationByHandleEx(
+            file, FileAttributeTagInfo, &info, sizeof(info))) {
+        return std::unexpected(
+            native_error("sync_file: query attributes failed", GetLastError()));
+    }
+    if ((info.FileAttributes & FILE_ATTRIBUTE_READONLY) == 0 ||
+        (info.FileAttributes &
+         (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY |
+          FILE_ATTRIBUTE_DEVICE)) != 0) {
+        return std::unexpected(
+            native_error("sync_file: CreateFileW failed", ERROR_ACCESS_DENIED));
+    }
+    FILE_BASIC_INFO attributes{};
+    attributes.FileAttributes = info.FileAttributes & ~FILE_ATTRIBUTE_READONLY;
+    if (attributes.FileAttributes == 0) {
+        attributes.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    }
+    if (!SetFileInformationByHandle(
+            file, FileBasicInfo, &attributes, sizeof(attributes))) {
+        return std::unexpected(
+            native_error("sync_file: clear read-only failed", GetLastError()));
+    }
+
+    HANDLE writable = INVALID_HANDLE_VALUE;
+    const auto open_error = detail::retry_windows_file_operation([&] {
+        writable = ReOpenFile(file, GENERIC_WRITE, share, flags);
+        return writable == INVALID_HANDLE_VALUE ? GetLastError()
+                                                : ERROR_SUCCESS;
+    });
+    const std::unique_ptr<void, decltype(&CloseHandle)> writable_guard{
+        writable == INVALID_HANDLE_VALUE ? nullptr : writable, CloseHandle};
+    attributes.FileAttributes = info.FileAttributes;
+    if (!SetFileInformationByHandle(
+            file, FileBasicInfo, &attributes, sizeof(attributes))) {
+        return std::unexpected(native_error(
+            "sync_file: restore read-only failed", GetLastError()));
+    }
+    if (open_error != ERROR_SUCCESS) {
+        return std::unexpected(
+            native_error("sync_file: reopen failed", open_error));
+    }
+    if (!FlushFileBuffers(writable)) {
+        return std::unexpected(
+            native_error("sync_file: FlushFileBuffers failed", GetLastError()));
+    }
+    return {};
+}
+#endif
 
 bool path_not_found(const std::error_code& error) noexcept {
     return error == std::errc::no_such_file_or_directory;
@@ -201,47 +322,37 @@ replace_atomically(const std::filesystem::path& source,
     }
 
 #if defined(_WIN32)
-    if (MoveFileExW(source.wstring().c_str(),
-                    target.wstring().c_str(),
-                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) {
-        const auto error = GetLastError();
+    const auto error = detail::retry_windows_file_operation([&] {
+        return MoveFileExW(source.c_str(),
+                           target.c_str(),
+                           MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
+                   ? ERROR_SUCCESS
+                   : GetLastError();
+    });
+    if (error != ERROR_SUCCESS) {
 #if defined(FILE_RENAME_FLAG_POSIX_SEMANTICS)
         if (error == ERROR_ACCESS_DENIED) {
             // MoveFileEx may reject an open target despite delete sharing.
             // A single POSIX rename keeps those readers on the old snapshot.
-            std::error_code path_error;
-            const auto target_name =
-                std::filesystem::absolute(target, path_error).wstring();
-            if (path_error) {
-                return std::unexpected("replace_atomically: " +
-                                       path_error.message());
-            }
-            const auto name_bytes = target_name.size() * sizeof(wchar_t);
-            if (name_bytes >
-                std::numeric_limits<DWORD>::max() - sizeof(FILE_RENAME_INFO)) {
-                return std::unexpected(
-                    "replace_atomically: target path is too long");
-            }
-            std::vector<std::byte> buffer(sizeof(FILE_RENAME_INFO) +
-                                          name_bytes);
-            auto* rename = reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
-            rename->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS |
-                            FILE_RENAME_FLAG_POSIX_SEMANTICS;
-            rename->RootDirectory = nullptr;
-            rename->FileNameLength = static_cast<DWORD>(name_bytes);
-            std::memcpy(rename->FileName, target_name.data(), name_bytes);
-            const auto file = CreateFileW(
-                source.c_str(),
-                GENERIC_READ | GENERIC_WRITE | DELETE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                nullptr,
-                OPEN_EXISTING,
-                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
-                nullptr);
-            if (file == INVALID_HANDLE_VALUE) {
+            HANDLE file = INVALID_HANDLE_VALUE;
+            const auto open_error = detail::retry_windows_file_operation([&] {
+                file = CreateFileW(
+                    source.c_str(),
+                    GENERIC_READ | GENERIC_WRITE | DELETE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr,
+                    OPEN_EXISTING,
+                    FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
+                    nullptr);
+                return file == INVALID_HANDLE_VALUE ? GetLastError()
+                                                    : ERROR_SUCCESS;
+            });
+            if (open_error != ERROR_SUCCESS) {
                 return std::unexpected(native_error(
-                    "replace_atomically: open source failed", GetLastError()));
+                    "replace_atomically: open source failed", open_error));
             }
+            const std::unique_ptr<void, decltype(&CloseHandle)> guard{
+                file, CloseHandle};
             FILE_ATTRIBUTE_TAG_INFO attributes{};
             if (!GetFileInformationByHandleEx(file,
                                               FileAttributeTagInfo,
@@ -250,20 +361,19 @@ replace_atomically(const std::filesystem::path& source,
                 (attributes.FileAttributes &
                  (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY |
                   FILE_ATTRIBUTE_DEVICE)) != 0) {
-                CloseHandle(file);
                 return std::unexpected(
                     "replace_atomically: source is not a regular file");
             }
-            const bool flushed = FlushFileBuffers(file) != 0;
-            const bool renamed =
-                flushed &&
-                SetFileInformationByHandle(file,
-                                           FileRenameInfoEx,
-                                           rename,
-                                           static_cast<DWORD>(buffer.size()));
-            const auto rename_error = renamed ? ERROR_SUCCESS : GetLastError();
-            CloseHandle(file);
-            if (!renamed) {
+            const auto rename_error =
+                FlushFileBuffers(file)
+                    ? detail::rename_windows_handle(
+                          file,
+                          target,
+                          FileRenameInfoEx,
+                          FILE_RENAME_FLAG_REPLACE_IF_EXISTS |
+                              FILE_RENAME_FLAG_POSIX_SEMANTICS)
+                    : GetLastError();
+            if (rename_error != ERROR_SUCCESS) {
                 return std::unexpected(native_error(
                     "replace_atomically: POSIX rename failed", rename_error));
             }
@@ -367,17 +477,27 @@ std::expected<void, std::string> sync_file(const std::filesystem::path& path) {
     }
 
 #if defined(_WIN32)
-    HANDLE file =
-        CreateFileW(path.wstring().c_str(),
-                    GENERIC_READ | GENERIC_WRITE,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    nullptr,
-                    OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-                    nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
+    HANDLE file = INVALID_HANDLE_VALUE;
+    const auto open_error = detail::retry_windows_file_operation(
+        [&] {
+            file = CreateFileW(
+                path.wstring().c_str(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                nullptr);
+            return file == INVALID_HANDLE_VALUE ? GetLastError()
+                                                : ERROR_SUCCESS;
+        },
+        false);
+    if (open_error != ERROR_SUCCESS) {
+        if (open_error == ERROR_ACCESS_DENIED) {
+            return sync_read_only_file(path);
+        }
         return std::unexpected(
-            native_error("sync_file: CreateFileW failed", GetLastError()));
+            native_error("sync_file: CreateFileW failed", open_error));
     }
 
     FILE_ATTRIBUTE_TAG_INFO tag_info{};

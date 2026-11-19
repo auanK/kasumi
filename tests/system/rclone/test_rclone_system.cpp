@@ -46,6 +46,11 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 #ifndef KASUMI_SYSTEM_RCLONE_EXECUTABLE
 #define KASUMI_SYSTEM_RCLONE_EXECUTABLE "rclone"
 #endif
@@ -264,17 +269,17 @@ RcloneHarness make_rclone_harness() {
         return workspace.root / relative;
     };
 
-    for (const std::string_view path : {"cwd-trap",
-                                        "r",
-                                        "r/storage",
-                                        "rclone-cache",
-                                        "client-a/app-data",
-                                        "client-a/local",
-                                        "client-b/app-data",
-                                        "client-b/local",
-                                        "client-c/app-data",
-                                        "client-c/local"}) {
-        create_system_directory(workspace.root / path);
+    for (const std::string_view relative : {"cwd-trap",
+                                            "r",
+                                            "r/storage",
+                                            "rclone-cache",
+                                            "client-a/app-data",
+                                            "client-a/local",
+                                            "client-b/app-data",
+                                            "client-b/local",
+                                            "client-c/app-data",
+                                            "client-c/local"}) {
+        create_system_directory(workspace.root / relative);
     }
 
     auto current_directory = use_current_directory(path("cwd-trap"));
@@ -396,6 +401,40 @@ std::string put_content_blob(kasumi::transport::Transport& storage,
     return identifier;
 }
 
+#if !defined(_WIN32)
+TEST(RcloneSystemTest, StartupRetriesAfterChildExitsAndOpensWorkingSession) {
+    auto harness = make_rclone_harness();
+    const auto shim = harness_path(harness, "rclone-retry");
+    const auto failed_attempt = harness_path(harness, "first-attempt");
+    auto executable = kasumi::test::scoped_environment_variable(
+        "TEST_RCLONE_RETRY_EXECUTABLE", KASUMI_SYSTEM_RCLONE_EXECUTABLE);
+    auto marker = kasumi::test::scoped_environment_variable(
+        "TEST_RCLONE_RETRY_MARKER",
+        kasumi::platform::path::to_utf8(failed_attempt));
+    kasumi::test::write_text(shim,
+                             "#!/bin/sh\n"
+                             "if [ ! -e \"$TEST_RCLONE_RETRY_MARKER\" ]; then\n"
+                             "    printf 'temporary startup failure\\n' > "
+                             "\"$TEST_RCLONE_RETRY_MARKER\" || exit 2\n"
+                             "    exit 1\n"
+                             "fi\n"
+                             "exec \"$TEST_RCLONE_RETRY_EXECUTABLE\" \"$@\"\n");
+    std::filesystem::permissions(shim,
+                                 std::filesystem::perms::owner_exec,
+                                 std::filesystem::perm_options::add);
+    auto storage = kasumi::transport::detail::open_rclone_backend({
+        .remote_name = std::string{remote_name},
+        .remote_root = std::string{remote_root},
+        .executable = shim,
+        .config_path = harness_path(harness, "rclone.conf"),
+    });
+    ASSERT_TRUE(storage) << kasumi::transport::describe(storage.error());
+    EXPECT_TRUE(std::filesystem::is_regular_file(failed_attempt));
+    ASSERT_TRUE(kasumi::transport::initialize(*storage));
+    EXPECT_TRUE(kasumi::transport::list(*storage));
+}
+#endif
+
 TEST(RcloneSystemTest, RealTransportSmokeUsesAnIsolatedRcProcess) {
     auto harness = make_rclone_harness();
     auto storage = open_transport(harness);
@@ -479,6 +518,18 @@ TEST(RcloneSystemTest, KilledOwnedRcloneFailsClosedAndCleansUp) {
     // Stop the polling worker before taking its mutex, as destroy_state does.
     state->stop_drain.store(true);
     state->drain_future.wait();
+#if defined(_WIN32)
+    const auto [pid, pid_error] = state->process.pid();
+    ASSERT_FALSE(pid_error);
+    const auto child = OpenProcess(
+        PROCESS_TERMINATE | SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
+    ASSERT_NE(child, nullptr);
+    const auto terminated = TerminateProcess(child, 0xc0000005U);
+    const auto exited = WaitForSingleObject(child, 2000);
+    CloseHandle(child);
+    ASSERT_TRUE(terminated);
+    ASSERT_EQ(exited, WAIT_OBJECT_0);
+#else
     {
         std::lock_guard lock(state->process_mutex);
         const auto stopped = state->process.stop(reproc::stop_actions{
@@ -486,6 +537,7 @@ TEST(RcloneSystemTest, KilledOwnedRcloneFailsClosedAndCleansUp) {
         ASSERT_FALSE(stopped.second);
         state->process_started = false;
     }
+#endif
 
     const auto response = kasumi::transport::rclone_detail::post_rc_read_only(
         *state,
@@ -510,6 +562,31 @@ TEST(RcloneSystemTest, DirectMissingGetPreservesObjectNotFoundSemantics) {
     ASSERT_FALSE(missing.has_value());
     EXPECT_EQ(missing.error().code,
               kasumi::transport::ErrorCode::ObjectNotFound);
+}
+
+TEST(RcloneSystemTest, LargeRemovalReportsEveryObjectAgainstRealBackend) {
+    auto harness = make_rclone_harness();
+    auto storage = open_transport(harness);
+    ASSERT_TRUE(storage) << kasumi::transport::describe(storage.error());
+    kasumi::transport::RemoveBatch batch{.concurrency = 8};
+    for (std::size_t index = 0; index < 600; ++index) {
+        auto identifier =
+            "content/" + std::string(96, 'a') + std::to_string(index);
+        kasumi::test::write_text(storage_root(harness) / identifier, "payload");
+        batch.items.push_back({std::move(identifier)});
+    }
+    const auto removed = kasumi::transport::remove_batch(*storage, batch);
+    if (!removed &&
+        removed.error().code == kasumi::transport::ErrorCode::Unsupported) {
+        GTEST_SKIP() << "installed rclone does not support job/batch";
+    }
+    ASSERT_TRUE(removed) << kasumi::transport::describe(removed.error());
+    ASSERT_EQ(removed->items.size(), batch.items.size());
+    for (const auto& item : removed->items) {
+        EXPECT_EQ(item.result, kasumi::transport::Removal::Removed)
+            << item.identifier;
+    }
+    EXPECT_TRUE(std::filesystem::is_empty(storage_root(harness) / "content"));
 }
 
 TEST(RcloneSystemTest, BootstrapAndSecondClientUseOneImmutableHead) {

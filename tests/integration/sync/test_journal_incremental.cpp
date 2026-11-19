@@ -1252,6 +1252,30 @@ TEST(JournalSessionOptimizationTest, RetirementLifecycle) {
     EXPECT_FALSE(save_after_retire);
 }
 
+TEST(JournalSessionOptimizationTest,
+     FreshSessionStartsAfterInterruptedRetirement) {
+    auto [owner, profile, paths, key] =
+        make_journal_env("journal-retirement-restart");
+    ASSERT_TRUE(paths);
+    const auto retired = profile / "transaction.bin.enc.cleared";
+    ASSERT_TRUE(std::filesystem::create_directory(retired));
+    EXPECT_EQ(sync::journal::inspect(*paths, key),
+              sync::journal::InspectionResult::Retired);
+    EXPECT_TRUE(std::filesystem::exists(retired));
+
+    sync::journal::Session session;
+    const auto loaded = sync::journal::load(*paths, key, &session);
+    ASSERT_TRUE(loaded) << loaded.error();
+    EXPECT_FALSE(*loaded);
+    EXPECT_FALSE(std::filesystem::exists(retired));
+    const auto record =
+        sync::journal::create_record(0, 0, kasumi::make_sync_plan({}, 0));
+    ASSERT_TRUE(record) << record.error();
+    ASSERT_TRUE(save_advance(*paths, *record, key, session));
+    EXPECT_EQ(sync::journal::inspect(*paths, key),
+              sync::journal::InspectionResult::Active);
+}
+
 TEST(JournalSessionOptimizationTest, NullSessionUsesPersistedAuthority) {
     auto owner = kasumi::test::make_temp_workspace("journal-null-session");
     const auto profile = kasumi::test::workspace_path(owner, "profile");

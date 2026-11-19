@@ -43,13 +43,20 @@ run_with_recovery(OperationContext& context,
                                   : ErrorCode::GarbageCollectionFailure;
     auto callback = make_progress_callback<Callback, Progress>(
         context, initial_stage, last_progress);
-    if (auto recovery = sync::coordinator::recover_if_needed(
-            context.runtime, context.storage, context.key);
-        !recovery) {
+    const auto recovery = sync::coordinator::recover_if_needed(
+        context.runtime, context.storage, context.key);
+    if (!recovery) {
         return std::unexpected(
             make_error(context,
                        failure_code,
                        sync::coordinator::describe(recovery.error())));
+    }
+    if (context.operation == Operation::GarbageCollect &&
+        *recovery == sync::coordinator::RecoveryResult::ResumableTransaction) {
+        return fail_app(context,
+                        failure_code,
+                        "complete the interrupted upload with sync before "
+                        "garbage collection");
     }
     auto res = fn(std::move(callback));
     if (!res) {

@@ -55,7 +55,20 @@ std::string sanitize_terminal_text(std::string_view text) {
                 continue;
             }
         }
-        if ((byte < 0x20U && byte != '\n' && byte != '\t') || byte == 0x7FU) {
+        if (byte >= 0xC2U && byte <= 0xF4U) {
+            const std::size_t width = byte < 0xE0U ? 2 : byte < 0xF0U ? 3 : 4;
+            if (width <= text.size() - index &&
+                std::ranges::all_of(text.substr(index + 1, width - 1),
+                                    [](unsigned char next) {
+                                        return next >= 0x80U && next <= 0xBFU;
+                                    })) {
+                cleaned.append(text.substr(index, width));
+                index += width - 1;
+                continue;
+            }
+        }
+        if ((byte < 0x20U && byte != '\n' && byte != '\t') ||
+            (byte >= 0x7FU && byte <= 0x9FU)) {
             cleaned.push_back('?');
             continue;
         }
@@ -325,6 +338,13 @@ void render_indexed(const Range& items,
     }
 }
 
+std::string remote_text(std::string_view text) {
+    auto cleaned = sanitize_terminal_text(text);
+    std::ranges::replace(cleaned, '\n', '?');
+    std::ranges::replace(cleaned, '\t', '?');
+    return cleaned;
+}
+
 template <typename Report>
 int present_remote_report(const Report& report) = delete;
 
@@ -336,14 +356,14 @@ int present_remote_report(const application::RemoteHeadsReport& report) {
 
     i18n::println(i18n::Key::RemoteHeadsHeader, report.heads.size());
     render_indexed(report.heads, [](const auto& head) {
-        i18n::println(i18n::Key::FieldCommit, head.commit_id);
+        i18n::println(i18n::Key::FieldCommit, remote_text(head.commit_id));
         i18n::println(i18n::Key::FieldHeight, head.height);
         i18n::println(i18n::Key::FieldCreatedAt, head.created_at);
         i18n::println(i18n::Key::FieldParents, head.parent_ids.size());
         i18n::println(i18n::Key::FieldFiles, head.file_count);
         i18n::println(i18n::Key::FieldDirectories, head.directory_count);
         i18n::println(i18n::Key::FieldSize, format_size(head.total_bytes));
-        i18n::println(i18n::Key::FieldRoot, head.root_hash);
+        i18n::println(i18n::Key::FieldRoot, remote_text(head.root_hash));
     });
     return 0;
 }
@@ -354,7 +374,7 @@ int present_remote_report(const application::RemoteTreeReport& report) {
         return 0;
     }
 
-    i18n::println(i18n::Key::RemoteTreeHead, report.commit_id);
+    i18n::println(i18n::Key::RemoteTreeHead, remote_text(report.commit_id));
     i18n::println(i18n::Key::RemoteTreeHeight, report.height);
     i18n::println(i18n::Key::RemoteTreeFiles, report.file_count);
     i18n::println(i18n::Key::RemoteTreeDirectories, report.directory_count);
@@ -362,7 +382,7 @@ int present_remote_report(const application::RemoteTreeReport& report) {
     std::println("\n/");
     for (const auto& entry : report.entries) {
         const auto indent = std::string(entry_depth(entry.path) * 2, ' ');
-        const auto name = entry_name(entry.path);
+        const auto name = remote_text(entry_name(entry.path));
         if (entry.type == application::RemoteTreeEntryType::Directory) {
             std::println("{}{}/", indent, name);
         } else {
@@ -386,7 +406,7 @@ int present_remote_report(const application::RemoteCommitsReport& report) {
                                ? i18n::tr(i18n::Key::LabelAncestralMarker)
                                : i18n::tr(i18n::Key::LabelAncestral);
         std::println("\n[{}] {}", index + 1, label);
-        i18n::println(i18n::Key::FieldCommit, commit.commit_id);
+        i18n::println(i18n::Key::FieldCommit, remote_text(commit.commit_id));
         i18n::println(i18n::Key::FieldHeight, commit.height);
         i18n::println(i18n::Key::FieldCreatedAt, commit.created_at);
         i18n::println(i18n::Key::FieldParents, commit.parent_ids.size());
@@ -427,12 +447,13 @@ int present_remote_report(const application::RemoteStatReport& report) {
     i18n::println(i18n::Key::RemoteStatView);
     i18n::println(i18n::Key::FieldHeight, report.observed_height);
     i18n::println(i18n::Key::FieldConflicts, yes_no(report.has_conflicts));
-    i18n::println(i18n::Key::FieldPath, report.path);
+    i18n::println(i18n::Key::FieldPath, remote_text(report.path));
     i18n::println(i18n::Key::FieldType,
                   report.type == application::RemoteTreeEntryType::Directory
                       ? i18n::tr(i18n::Key::RemoteStatDirectory)
                       : i18n::tr(i18n::Key::RemoteStatFile));
-    i18n::println(i18n::Key::FieldLogicalHash, report.logical_hash);
+    i18n::println(i18n::Key::FieldLogicalHash,
+                  remote_text(report.logical_hash));
     i18n::println(i18n::Key::FieldSize, format_size(report.size));
     i18n::println(i18n::Key::FieldModifiedAt,
                   report.modified_at_unix_nanoseconds);
@@ -452,7 +473,7 @@ std::string_view variant_state(application::RemoteCommitVariantState state) {
 int present_remote_report(const application::RemoteCommitReport& report) {
     const auto& commit = report.commit;
     i18n::println(i18n::Key::RemoteCommitHeader);
-    i18n::println(i18n::Key::FieldCommit, commit.commit_id);
+    i18n::println(i18n::Key::FieldCommit, remote_text(commit.commit_id));
     i18n::println(i18n::Key::FieldHeight, commit.height);
     i18n::println(i18n::Key::FieldCreatedAt, commit.created_at);
     i18n::println(i18n::Key::FieldLogicalHead, yes_no(commit.logical_head));
@@ -460,19 +481,21 @@ int present_remote_report(const application::RemoteCommitReport& report) {
                   yes_no(commit.physically_marked));
     i18n::println(i18n::Key::FieldAncestralMarker,
                   yes_no(commit.ancestral_marked));
-    i18n::println(i18n::Key::FieldRoot, commit.root_hash);
+    i18n::println(i18n::Key::FieldRoot, remote_text(commit.root_hash));
     i18n::println(i18n::Key::FieldEntries, commit.entry_count);
     i18n::println(i18n::Key::FieldSize, format_size(commit.total_bytes));
     i18n::println(i18n::Key::FieldParentsCount, commit.parent_ids.size());
     for (const auto& parent : commit.parent_ids) {
-        std::println("    {}", parent);
+        std::println("    {}", remote_text(parent));
     }
     i18n::println(i18n::Key::FieldPhysicalVariants, report.variants.size());
     render_indexed(
         report.variants,
         [](const auto& variant) {
-            i18n::println(i18n::Key::FieldCiphertext, variant.ciphertext_id);
-            i18n::println(i18n::Key::FieldObject, variant.object_identifier);
+            i18n::println(i18n::Key::FieldCiphertext,
+                          remote_text(variant.ciphertext_id));
+            i18n::println(i18n::Key::FieldObject,
+                          remote_text(variant.object_identifier));
             i18n::println(i18n::Key::FieldState, variant_state(variant.state));
         },
         "\n  ");
@@ -481,29 +504,32 @@ int present_remote_report(const application::RemoteCommitReport& report) {
 
 int present_remote_report(const application::RemoteFileReport& report) {
     i18n::println(i18n::Key::RemoteFileSavedHeader);
-    i18n::println(i18n::Key::FieldPath, report.path);
-    i18n::println(i18n::Key::FieldDestination, report.destination_path);
-    i18n::println(i18n::Key::FieldLogicalHash, report.logical_hash);
+    i18n::println(i18n::Key::FieldPath, remote_text(report.path));
+    i18n::println(i18n::Key::FieldDestination,
+                  remote_text(report.destination_path));
+    i18n::println(i18n::Key::FieldLogicalHash,
+                  remote_text(report.logical_hash));
     i18n::println(i18n::Key::FieldSize, format_size(report.size));
     return 0;
 }
 
 void present_epoch_info(const application::RemoteEpochInfo& epoch) {
     i18n::println(i18n::Key::FieldSequence, epoch.sequence);
-    i18n::println(i18n::Key::FieldEpochId, epoch.epoch_id);
-    i18n::println(i18n::Key::FieldVaultId, epoch.vault_id);
+    i18n::println(i18n::Key::FieldEpochId, remote_text(epoch.epoch_id));
+    i18n::println(i18n::Key::FieldVaultId, remote_text(epoch.vault_id));
     i18n::println(i18n::Key::FieldIssuedAt, epoch.issued_at);
     i18n::println(i18n::Key::FieldMinRetention,
                   epoch.min_history_depth,
                   epoch.min_history_age_hours);
     i18n::println(i18n::Key::FieldPreviousEpoch,
-                  dash_or(epoch.previous_epoch_id));
-    i18n::println(i18n::Key::FieldNextEpoch, dash_or(epoch.next_epoch_id));
+                  remote_text(dash_or(epoch.previous_epoch_id)));
+    i18n::println(i18n::Key::FieldNextEpoch,
+                  remote_text(dash_or(epoch.next_epoch_id)));
     i18n::println(i18n::Key::FieldAnchors, epoch.anchors.size());
     for (const auto& anchor : epoch.anchors) {
         std::println("    {}",
                      i18n::format(i18n::Key::FieldAnchorItem,
-                                  anchor.commit_id,
+                                  remote_text(anchor.commit_id),
                                   anchor.height));
     }
 }
@@ -533,17 +559,18 @@ std::string_view content_state(application::RemoteContentState state) {
 }
 
 void present_content_info(const application::RemoteContentInfo& content) {
-    i18n::println(i18n::Key::FieldContentId, content.content_id);
+    i18n::println(i18n::Key::FieldContentId, remote_text(content.content_id));
     i18n::println(i18n::Key::FieldState, content_state(content.state));
     i18n::println(i18n::Key::FieldReferenced, yes_no(content.referenced));
     i18n::println(i18n::Key::FieldPhysicallyPresent,
                   yes_no(content.physically_present));
     i18n::println(i18n::Key::FieldCurrentTree, yes_no(content.current_tree));
-    i18n::println(i18n::Key::FieldLogicalHash, dash_or(content.logical_hash));
+    i18n::println(i18n::Key::FieldLogicalHash,
+                  remote_text(dash_or(content.logical_hash)));
     i18n::println(i18n::Key::FieldLogicalSize, content.size);
     i18n::println(i18n::Key::FieldPathsCount, content.paths.size());
     for (const auto& path : content.paths) {
-        std::println("    {}", path);
+        std::println("    {}", remote_text(path));
     }
 }
 
@@ -592,10 +619,12 @@ int present_remote_report(const application::RemoteMarkersReport& report) {
     i18n::println(i18n::Key::FieldAncestralsCount, report.ancestral_count);
     i18n::println(i18n::Key::FieldInvalidCount, report.invalid_count);
     render_indexed(report.markers, [](const auto& marker) {
-        i18n::println(i18n::Key::FieldObject, marker.object_identifier);
-        i18n::println(i18n::Key::FieldCommit, dash_or(marker.commit_id));
+        i18n::println(i18n::Key::FieldObject,
+                      remote_text(marker.object_identifier));
+        i18n::println(i18n::Key::FieldCommit,
+                      remote_text(dash_or(marker.commit_id)));
         i18n::println(i18n::Key::FieldCiphertext,
-                      dash_or(marker.ciphertext_id));
+                      remote_text(dash_or(marker.ciphertext_id)));
         i18n::println(i18n::Key::FieldState, marker_state(marker.state));
     });
     return 0;
@@ -619,14 +648,15 @@ int present_remote_report(const application::RemoteObjectsReport& report) {
     i18n::println(i18n::Key::RemoteObjectsHeader, report.objects.size());
     i18n::println(i18n::Key::FieldUnknownOrInvalid, report.unknown_count);
     render_indexed(report.objects, [](const auto& object) {
-        i18n::println(i18n::Key::FieldIdentifier, object.identifier);
+        i18n::println(i18n::Key::FieldIdentifier,
+                      remote_text(object.identifier));
         i18n::println(i18n::Key::FieldCategory,
                       object_category(object.category));
         i18n::println(i18n::Key::FieldStructure,
                       object.structurally_valid
                           ? i18n::tr(i18n::Key::FieldStructureValid)
                           : i18n::tr(i18n::Key::FieldStructureInvalid));
-        i18n::println(i18n::Key::FieldRelation, object.relation);
+        i18n::println(i18n::Key::FieldRelation, remote_text(object.relation));
     });
     return 0;
 }
@@ -648,7 +678,8 @@ int present_remote_report(const application::RemoteOrphansReport& report) {
     i18n::println(i18n::Key::RemoteOrphansHeader, report.objects.size());
     i18n::println(i18n::Key::RemoteOrphansReadOnlyHint);
     render_indexed(report.objects, [](const auto& object) {
-        i18n::println(i18n::Key::FieldIdentifier, object.identifier);
+        i18n::println(i18n::Key::FieldIdentifier,
+                      remote_text(object.identifier));
         i18n::println(i18n::Key::FieldClassification, orphan_kind(object.kind));
         i18n::println(i18n::Key::FieldStructuralCandidate,
                       yes_no(object.removal_candidate));
@@ -662,14 +693,16 @@ int present_remote_report(const application::RemoteWritersReport& report) {
                   report.barrier_present ? i18n::tr(i18n::Key::FieldPresent)
                                          : i18n::tr(i18n::Key::FieldAbsent));
     if (report.barrier_identifier.has_value()) {
-        i18n::println(i18n::Key::FieldIdentifier, *report.barrier_identifier);
+        i18n::println(i18n::Key::FieldIdentifier,
+                      remote_text(*report.barrier_identifier));
     }
     i18n::println(i18n::Key::FieldMaintenanceBlocked,
                   yes_no(report.maintenance_blocked));
     i18n::println(i18n::Key::FieldProtocolConsistent,
                   yes_no(report.protocol_consistent));
     render_indexed(report.writers, [](const auto& writer) {
-        i18n::println(i18n::Key::FieldIdentifier, writer.identifier);
+        i18n::println(i18n::Key::FieldIdentifier,
+                      remote_text(writer.identifier));
         i18n::println(i18n::Key::FieldState,
                       writer.state == application::RemoteWriterState::Invalid
                           ? i18n::tr(i18n::Key::WriterStateInvalid)
@@ -701,7 +734,7 @@ int present_remote_report(const application::RemoteHealthReport& report) {
     i18n::println(i18n::Key::FieldUnknownObjects, report.unknown_object_count);
     i18n::println(i18n::Key::FieldReasons, report.reasons.size());
     for (const auto& reason : report.reasons) {
-        std::println("    {}", reason);
+        std::println("    {}", remote_text(reason));
     }
     return 0;
 }
@@ -969,7 +1002,7 @@ namespace {
 bool is_byte_transfer(application::Activity activity) noexcept {
     using A = application::Activity;
     return activity == A::Uploading || activity == A::Downloading ||
-           activity == A::Auditing || activity == A::Updating;
+           activity == A::Auditing;
 }
 
 std::string format_bytes_rate(double bytes_per_second) {
@@ -992,8 +1025,9 @@ void ProgressDisplay::clear_line() noexcept {
         std::fputs("\r\x1b[2K", stdout);
     } else {
         std::fputc('\r', stdout);
+        const auto columns = platform::terminal_width(terminal_);
         const auto width =
-            std::min(rendered_width_, platform::terminal_width(terminal_) - 1);
+            std::min(rendered_width_, columns > 0 ? columns - 1 : 0);
         for (std::size_t i = 0; i < width; ++i) {
             std::fputc(' ', stdout);
         }
@@ -1002,7 +1036,7 @@ void ProgressDisplay::clear_line() noexcept {
     rendered_width_ = 0;
 }
 
-void ProgressDisplay::flush_transfer(TransferMetricsState& state) noexcept {
+void ProgressDisplay::flush_transfer(TransferMetricsState& state) noexcept try {
     if (!terminal_.interactive || !state.active || state.completed_reported ||
         !state.last_event ||
         (state.last_event->bytes == 0 && state.last_event->objects == 0)) {
@@ -1035,9 +1069,12 @@ void ProgressDisplay::flush_transfer(TransferMetricsState& state) noexcept {
     }
     std::fflush(stdout);
     state.completed_reported = true;
+} catch (...) {
+    state = {};
+    clear_line();
 }
 
-void ProgressDisplay::finish(bool keep) noexcept {
+void ProgressDisplay::finish(bool keep) noexcept try {
     if (!keep) {
         upload_state_ = {};
         download_state_ = {};
@@ -1100,6 +1137,13 @@ void ProgressDisplay::finish(bool keep) noexcept {
     last_extra_.clear();
     rendered_last_ = true;
     std::fflush(stdout);
+} catch (...) {
+    upload_state_ = {};
+    download_state_ = {};
+    last_event_.reset();
+    last_extra_.clear();
+    rendered_last_ = true;
+    clear_line();
 }
 
 void ProgressDisplay::render_event(const application::ActivityProgress& event,
@@ -1118,7 +1162,6 @@ void ProgressDisplay::render_event(const application::ActivityProgress& event,
         K::ProgressListing,
         K::ProgressAuthenticating,
         K::ProgressAuditing,
-        K::ProgressUpdating,
         K::ProgressRemoving,
     };
 
@@ -1230,7 +1273,6 @@ void ProgressDisplay::show(const application::ActivityProgress& raw_event,
         K::ProgressListing,
         K::ProgressAuthenticating,
         K::ProgressAuditing,
-        K::ProgressUpdating,
         K::ProgressRemoving,
     };
 

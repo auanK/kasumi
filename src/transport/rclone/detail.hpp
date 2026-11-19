@@ -41,6 +41,7 @@ struct State {
     std::atomic_bool sha256_unsupported = false;
 #if defined(_WIN32)
     void* job_handle = nullptr;
+    void* process_wait_handle = nullptr;
 #endif
     std::once_flag rc_runtime_once;
     std::unique_ptr<RcRuntime, void (*)(RcRuntime*) noexcept> rc_runtime{
@@ -71,6 +72,10 @@ std::expected<void, Error> establish_rc_connection(State& state, int child_pid);
 
 // Requests shutdown and reports whether RC acknowledged the request.
 bool request_core_quit_best_effort(State& state) noexcept;
+
+std::string rc_error_detail(const State& state,
+                            std::string_view message,
+                            std::string_view fallback);
 
 // Sends an RC request adhering to response size and read timeout limits.
 std::expected<std::string, Error>

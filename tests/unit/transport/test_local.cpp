@@ -50,6 +50,52 @@ TEST(LocalTransportTest, StoresListsAndRemovesObjects) {
     EXPECT_TRUE(result.diagnostics.empty());
 }
 
+#if defined(_WIN32)
+TEST(LocalTransportTest, ReadOnlySourceDoesNotMakeStoredCopyReadOnly) {
+    auto workspace = kasumi::test::make_temp_workspace("local-readonly-copy");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto source = root / "source";
+    const auto replacement = root / "replacement";
+    kasumi::test::write_text(source, "read-only source");
+    kasumi::test::write_text(replacement, "replacement");
+    using namespace std::filesystem;
+    permissions(source,
+                perms::owner_write | perms::group_write | perms::others_write,
+                perm_options::remove);
+    auto storage = kasumi::transport::open_transport((root / "store").string());
+    ASSERT_TRUE(storage);
+    ASSERT_TRUE(kasumi::transport::initialize(*storage));
+    ASSERT_TRUE(kasumi::transport::put(*storage, source, "object"));
+    ASSERT_TRUE(kasumi::transport::put(*storage, replacement, "object"));
+    EXPECT_EQ(kasumi::test::read_text(root / "store" / "object"),
+              "replacement");
+    EXPECT_EQ(status(source).permissions() & perms::owner_write, perms::none);
+    EXPECT_EQ(
+        std::distance(directory_iterator(root / "store"), directory_iterator{}),
+        1);
+}
+#else
+TEST(LocalTransportTest, ListingFailsWhenNestedDirectoryIsUnreadable) {
+    auto workspace = kasumi::test::make_temp_workspace("local-denied-list");
+    const auto root = kasumi::test::workspace_path(workspace, "store");
+    auto storage = kasumi::transport::open_transport(root.string());
+    ASSERT_TRUE(storage);
+    ASSERT_TRUE(kasumi::transport::initialize(*storage));
+    const auto blocked = root / "a";
+    kasumi::test::write_text(blocked / "hidden", "object");
+    std::filesystem::permissions(blocked, std::filesystem::perms::none);
+    std::error_code accessed;
+    std::filesystem::directory_iterator probe(blocked, accessed);
+    const auto listed = kasumi::transport::list(*storage);
+    std::filesystem::permissions(blocked, std::filesystem::perms::owner_all);
+    if (!accessed) {
+        GTEST_SKIP() << "current account can read the restricted directory";
+    }
+    ASSERT_FALSE(listed);
+    EXPECT_EQ(listed.error().code, ErrorCode::PermissionDenied);
+}
+#endif
+
 TEST(LocalTransportTest, ReportsBytesDuringSingleAndBatchCopies) {
     auto workspace = kasumi::test::make_temp_workspace("local-copy-progress");
     const auto root = kasumi::test::workspace_root(workspace);

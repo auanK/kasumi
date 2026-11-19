@@ -95,6 +95,14 @@ resolve_profile_paths(const std::filesystem::path& app_data_dir,
 std::expected<void, Error> ensure_profile_directory(const ProfilePaths& paths) {
     const auto profiles = paths.profile_dir.parent_path();
     const auto application = profiles.parent_path();
+    const auto app_parent = application.parent_path();
+    if (!app_parent.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(app_parent, ec);
+        if (ec) {
+            return fail(ErrorCode::IoFailure, ec.message());
+        }
+    }
     for (const auto& directory : {application, profiles, paths.profile_dir}) {
         if (auto secured =
                 platform::private_storage::ensure_directory(directory);
@@ -106,12 +114,11 @@ std::expected<void, Error> ensure_profile_directory(const ProfilePaths& paths) {
 }
 
 std::expected<void, Error> remove_profile_directory(const ProfilePaths& paths) {
-    auto vault_removed = vault::delete_vault(paths.key_path);
     std::error_code ec;
     const auto status = std::filesystem::symlink_status(paths.profile_dir, ec);
     if (ec == std::errc::no_such_file_or_directory ||
         status.type() == std::filesystem::file_type::not_found) {
-        return vault_removed;
+        return vault::delete_vault(paths.key_path);
     }
     if (ec) {
         return fail(ErrorCode::IoFailure, ec.message());
@@ -125,7 +132,7 @@ std::expected<void, Error> remove_profile_directory(const ProfilePaths& paths) {
     if (ec) {
         return fail(ErrorCode::IoFailure, ec.message());
     }
-    return vault_removed;
+    return vault::delete_vault(paths.key_path);
 }
 
 std::expected<void, Error>
@@ -133,26 +140,31 @@ rename_profile_directory(const ProfilePaths& source,
                          const ProfilePaths& destination) {
     std::error_code ec;
     const auto status = std::filesystem::symlink_status(source.profile_dir, ec);
-    if (!ec && status.type() != std::filesystem::file_type::not_found) {
-        if (std::filesystem::is_symlink(status)) {
-            return fail(ErrorCode::IoFailure,
-                        "source profile directory cannot be a symlink");
-        }
-        if (auto secured =
-                platform::private_storage::protect_tree(source.profile_dir);
-            !secured) {
-            return fail(ErrorCode::IoFailure, secured.error());
-        }
-        if (auto parent = platform::private_storage::protect_directory(
-                destination.profile_dir.parent_path());
-            !parent) {
-            return fail(ErrorCode::IoFailure, parent.error());
-        }
-        std::filesystem::rename(
-            source.profile_dir, destination.profile_dir, ec);
-        if (ec) {
-            return fail(ErrorCode::IoFailure, ec.message());
-        }
+    if (ec == std::errc::no_such_file_or_directory ||
+        (!ec && status.type() == std::filesystem::file_type::not_found)) {
+        return {};
+    }
+    if (ec) {
+        return fail(ErrorCode::IoFailure, ec.message());
+    }
+    if (!std::filesystem::is_directory(status) ||
+        platform::private_storage::is_reparse_or_symlink(source.profile_dir)) {
+        return fail(ErrorCode::IoFailure,
+                    "source profile path must be a plain directory");
+    }
+    if (auto secured =
+            platform::private_storage::protect_tree(source.profile_dir);
+        !secured) {
+        return fail(ErrorCode::IoFailure, secured.error());
+    }
+    if (auto parent = platform::private_storage::protect_directory(
+            destination.profile_dir.parent_path());
+        !parent) {
+        return fail(ErrorCode::IoFailure, parent.error());
+    }
+    std::filesystem::rename(source.profile_dir, destination.profile_dir, ec);
+    if (ec) {
+        return fail(ErrorCode::IoFailure, ec.message());
     }
     return {};
 }

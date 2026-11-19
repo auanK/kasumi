@@ -405,15 +405,27 @@ bool stop_process(State& state) noexcept {
     if (!state.process_started) {
         return true;
     }
-    bool stopped = false;
+    const auto exited = [&]() noexcept {
+#if defined(_WIN32)
+        // reproc reports Windows exit statuses with the high bit set as errors.
+        return state.process_wait_handle &&
+               WaitForSingleObject(state.process_wait_handle, 0) ==
+                   WAIT_OBJECT_0;
+#else
+        return false;
+#endif
+    };
+    bool stopped = exited();
     try {
-        std::lock_guard process_lock(state.process_mutex);
-        const auto result = state.process.stop(reproc::stop_actions{
-            {reproc::stop::wait, reproc::milliseconds(2000)},
-            {reproc::stop::terminate, reproc::milliseconds(2000)},
-            {reproc::stop::kill, reproc::milliseconds(2000)},
-        });
-        stopped = !result.second && result.first >= 0;
+        if (!stopped) {
+            std::lock_guard process_lock(state.process_mutex);
+            const auto result = state.process.stop(reproc::stop_actions{
+                {reproc::stop::wait, reproc::milliseconds(2000)},
+                {reproc::stop::terminate, reproc::milliseconds(2000)},
+                {reproc::stop::kill, reproc::milliseconds(2000)},
+            });
+            stopped = !result.second || exited();
+        }
     } catch (...) {
     }
     if (!stopped) {
@@ -425,7 +437,7 @@ bool stop_process(State& state) noexcept {
         try {
             std::lock_guard process_lock(state.process_mutex);
             const auto waited = state.process.wait(reproc::milliseconds(2000));
-            stopped = !waited.second && waited.first >= 0;
+            stopped = !waited.second || exited();
         } catch (...) {
             stopped = false;
         }
@@ -439,7 +451,6 @@ bool stop_process(State& state) noexcept {
     if (stopped) {
         state.process_started = false;
     }
-    close_job_handle(state);
     return stopped;
 }
 
@@ -449,11 +460,19 @@ void clear_secrets(State& state) noexcept {
     wipe_secret_string(state.base_url);
 }
 
-bool reset_failed_attempt(State& state) noexcept {
-    const bool stopped = stop_process(state);
+bool shutdown_state(State& state) noexcept {
+    (void)request_core_quit_best_effort(state);
+    state.stop_drain.store(true);
     wait_for_drain(state);
-    state.port = 0;
-    state.ready = false;
+    stop_rc_runtime(state);
+    const bool stopped = stop_process(state);
+    close_job_handle(state);
+#if defined(_WIN32)
+    if (state.process_wait_handle) {
+        CloseHandle(state.process_wait_handle);
+        state.process_wait_handle = nullptr;
+    }
+#endif
     clear_secrets(state);
     return stopped;
 }
@@ -486,6 +505,10 @@ std::expected<int, Error> start_process(State& state) {
                                           "could not query rclone PID",
                                           child_pid.second.value()));
     }
+#if defined(_WIN32)
+    state.process_wait_handle =
+        OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(child_pid.first));
+#endif
     attach_kill_on_close_job(state, child_pid.first);
     try {
         state.drain_future = std::async(std::launch::async, [&state]() {
@@ -556,8 +579,13 @@ resolve_rclone_executable(const detail::RcloneConfiguration& configuration) {
         if (found_through_path) {
             std::error_code error;
             const auto current = std::filesystem::current_path(error);
-            if (!error && path_is_within(*normalized, current)) {
-                return std::nullopt;
+            if (!error) {
+                if (std::filesystem::equivalent(
+                        candidate.parent_path(), current, error) ||
+                    std::filesystem::equivalent(
+                        normalized->parent_path(), current, error)) {
+                    return std::nullopt;
+                }
             }
         }
         return normalized;
@@ -690,25 +718,29 @@ start_state(detail::RcloneConfiguration configuration) {
         return std::unexpected(executable.error());
     }
     configuration.executable = std::move(*executable);
-    std::unique_ptr<State> state;
-    try {
-        state = std::make_unique<State>();
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(
-            make_error(ErrorCode::Io, "could not allocate RC session"));
-    }
-    state->configuration = std::move(configuration);
     Error last_error = make_error(ErrorCode::Unknown, "RC startup failed");
     for (int attempt = 0; attempt < 3; ++attempt) {
-        const auto result = prepare_attempt(*state);
-        if (result) {
-            return state.release();
+        bool cleaned = false;
+        const auto dispose = [&cleaned](State* state) noexcept {
+            cleaned = shutdown_state(*state);
+            delete state;
+        };
+        try {
+            // Each attempt owns a single-use reproc handle and its own RC pool.
+            std::unique_ptr<State, decltype(dispose)> state{new State, dispose};
+            state->configuration = configuration;
+            auto result = prepare_attempt(*state);
+            if (result) {
+                return state.release();
+            }
+            last_error = std::move(result.error());
+        } catch (const std::bad_alloc&) {
+            return std::unexpected(
+                make_error(ErrorCode::Io, "could not allocate RC session"));
         }
-        last_error = result.error();
         const bool missing_executable =
             definitely_missing_executable(last_error);
         const bool cancelled = last_error.code == ErrorCode::Cancelled;
-        const bool cleaned = reset_failed_attempt(*state);
         if (!cleaned || missing_executable || cancelled) {
             if (!cleaned) {
                 last_error =
@@ -719,10 +751,9 @@ start_state(detail::RcloneConfiguration configuration) {
             break;
         }
     }
-    last_error.message +=
-        " (rclone executable: " +
-        platform::path::to_utf8(state->configuration.executable) + ")";
-    destroy_state(state.release());
+    last_error.message += " (rclone executable: " +
+                          platform::path::to_utf8(configuration.executable) +
+                          ")";
     return std::unexpected(std::move(last_error));
 }
 
@@ -731,19 +762,7 @@ void destroy_state(void* context) noexcept {
     if (state == nullptr) {
         return;
     }
-    state->stop_drain.store(true);
-    wait_for_drain(*state);
-    const bool quit_acknowledged = request_core_quit_best_effort(*state);
-    stop_rc_runtime(*state);
-    if (quit_acknowledged) {
-        try {
-            std::lock_guard process_lock(state->process_mutex);
-            (void)state->process.kill();
-        } catch (...) {
-        }
-    }
-    (void)stop_process(*state);
-    clear_secrets(*state);
+    (void)shutdown_state(*state);
     delete state;
 }
 

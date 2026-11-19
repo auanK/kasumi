@@ -172,11 +172,10 @@ TEST(CliAppTest, PrintsHelpInPortugueseWhenFlagProvided) {
 
 TEST(CliAppTest, PrintsPreviewStartingProgressOnce) {
     auto workspace = kasumi::test::make_temp_workspace("cli-app-preview");
-#if defined(_WIN32)
-    auto scoped_env = kasumi::test::scoped_environment_variable(
-        "KASUMI_WORKSPACE",
-        kasumi::test::workspace_path(workspace, "config").string());
-#endif
+    auto scoped_root = kasumi::test::scoped_config_home(
+        kasumi::test::workspace_path(workspace, "config"));
+    auto scoped_lang =
+        kasumi::test::scoped_environment_variable("KASUMI_LANG", "en");
     const auto output =
         run_cli_out({"kasumi", "sync", "missing", "--dry-run"}, 1);
     const auto expected_starting =
@@ -187,11 +186,10 @@ TEST(CliAppTest, PrintsPreviewStartingProgressOnce) {
 
 TEST(CliAppTest, PrintsStatusStartingProgressOnce) {
     auto workspace = kasumi::test::make_temp_workspace("cli-app-status");
-#if defined(_WIN32)
-    auto scoped_env = kasumi::test::scoped_environment_variable(
-        "KASUMI_WORKSPACE",
-        kasumi::test::workspace_path(workspace, "config").string());
-#endif
+    auto scoped_root = kasumi::test::scoped_config_home(
+        kasumi::test::workspace_path(workspace, "config"));
+    auto scoped_lang =
+        kasumi::test::scoped_environment_variable("KASUMI_LANG", "en");
     const auto output = run_cli_out({"kasumi", "status", "missing"}, 1);
     const auto expected_starting = "Checking status of \"missing\"...";
     EXPECT_NE(output.find(expected_starting), std::string::npos);
@@ -200,11 +198,10 @@ TEST(CliAppTest, PrintsStatusStartingProgressOnce) {
 
 TEST(CliAppTest, AcceptsFullFlagOnStatusAndPreview) {
     auto workspace = kasumi::test::make_temp_workspace("cli-app-full-flag");
-#if defined(_WIN32)
-    auto scoped_env = kasumi::test::scoped_environment_variable(
-        "KASUMI_WORKSPACE",
-        kasumi::test::workspace_path(workspace, "config").string());
-#endif
+    auto scoped_root = kasumi::test::scoped_config_home(
+        kasumi::test::workspace_path(workspace, "config"));
+    auto scoped_lang =
+        kasumi::test::scoped_environment_variable("KASUMI_LANG", "en");
     const auto output =
         run_cli_out({"kasumi", "status", "missing", "--full"}, 1);
     EXPECT_NE(output.find("Checking status of \"missing\"..."),

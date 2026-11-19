@@ -10,6 +10,7 @@
 #include <monocypher.h>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -215,6 +216,29 @@ write_new(const std::filesystem::path& path,
 namespace {
 
 #if defined(_WIN32)
+template <typename Operation> DWORD credential_call(Operation operation) {
+    for (unsigned attempt = 0;; ++attempt) {
+        if (operation()) {
+            return ERROR_SUCCESS;
+        }
+        const auto error = GetLastError();
+        if (attempt == 3 ||
+            (error != ERROR_SHARING_VIOLATION &&
+             error != ERROR_LOCK_VIOLATION && error != ERROR_BUSY &&
+             error != ERROR_ACCESS_DENIED)) {
+            return error;
+        }
+        Sleep(10UL << attempt);
+    }
+}
+
+std::string credential_error(std::string_view operation, DWORD error) {
+    return "Windows Credential Manager: " + std::string{operation} + " (" +
+           std::to_string(error) + "): " +
+           std::error_code{static_cast<int>(error), std::system_category()}
+               .message();
+}
+
 std::wstring vault_target_name(const std::filesystem::path& key_path) {
     std::error_code ec;
     const auto abs = std::filesystem::absolute(key_path, ec);
@@ -449,6 +473,7 @@ struct DbusApi {
     using ErrorIsSetFn = dbus_bool_t (*)(const DbusError*);
     using BusGetFn = DbusConnection* (*)(int, DbusError*);
     using ConnUnrefFn = void (*)(DbusConnection*);
+    using ConnSetExitOnDisconnectFn = void (*)(DbusConnection*, dbus_bool_t);
     using MsgNewMethodCallFn = DbusMessage* (*)(const char*,
                                                 const char*,
                                                 const char*,
@@ -470,6 +495,7 @@ struct DbusApi {
     ErrorIsSetFn error_is_set = nullptr;
     BusGetFn bus_get = nullptr;
     ConnUnrefFn conn_unref = nullptr;
+    ConnSetExitOnDisconnectFn conn_set_exit_on_disconnect = nullptr;
     MsgNewMethodCallFn msg_new_method_call = nullptr;
     MsgUnrefFn msg_unref = nullptr;
     MsgGetTypeFn msg_get_type = nullptr;
@@ -496,6 +522,9 @@ struct DbusApi {
                 load_symbol(handle, "dbus_error_is_set", res.error_is_set) &&
                 load_symbol(handle, "dbus_bus_get", res.bus_get) &&
                 load_symbol(handle, "dbus_connection_unref", res.conn_unref) &&
+                load_symbol(handle,
+                            "dbus_connection_set_exit_on_disconnect",
+                            res.conn_set_exit_on_disconnect) &&
                 load_symbol(handle,
                             "dbus_message_new_method_call",
                             res.msg_new_method_call) &&
@@ -571,6 +600,7 @@ connect_session_dbus(const DbusApi& dbus, ErrorCode err_code) {
         return fail(err_code,
                     err.message("failed to connect to D-Bus session bus"));
     }
+    dbus.conn_set_exit_on_disconnect(conn, 0);
     return conn;
 }
 
@@ -1361,14 +1391,16 @@ read_vault(const std::filesystem::path& key_path) {
 #if defined(_WIN32)
     const auto target = vault_target_name(key_path);
     PCREDENTIALW cred = nullptr;
-    if (!CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &cred)) {
-        if (GetLastError() == ERROR_NOT_FOUND) {
-            return fail(ErrorCode::KeyNotFound,
-                        "profile key is missing in OS vault; run 'kasumi key "
-                        "<profile>' to re-enter the key");
-        }
+    const auto error = credential_call([&] {
+        return CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &cred);
+    });
+    if (error == ERROR_NOT_FOUND) {
         return fail(ErrorCode::KeyNotFound,
-                    "failed to read key from Windows Credential Manager");
+                    "profile key is missing in OS vault; run 'kasumi key "
+                    "<profile>' to re-enter the key");
+    }
+    if (error != ERROR_SUCCESS) {
+        return fail(ErrorCode::IoFailure, credential_error("read key", error));
     }
     struct CredGuard {
         PCREDENTIALW ptr;
@@ -1425,9 +1457,12 @@ write_vault(const std::filesystem::path& key_path, const KeyBytes& clear_key) {
     cred.CredentialBlob = stored.data();
     cred.Persist = CRED_PERSIST_LOCAL_MACHINE;
 
-    if (!CredWriteW(&cred, 0)) {
+    const auto error = credential_call([&] {
+        return CredWriteW(&cred, 0);
+    });
+    if (error != ERROR_SUCCESS) {
         return fail(ErrorCode::KeyWriteFailure,
-                    "failed to store key in Windows Credential Manager");
+                    credential_error("store key", error));
     }
     return {};
 #elif defined(__linux__)
@@ -1453,10 +1488,12 @@ std::expected<void, runtime::Error>
 delete_vault(const std::filesystem::path& key_path) {
 #if defined(_WIN32)
     const auto target = vault_target_name(key_path);
-    if (!CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0) &&
-        GetLastError() != ERROR_NOT_FOUND) {
+    const auto error = credential_call([&] {
+        return CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0);
+    });
+    if (error != ERROR_SUCCESS && error != ERROR_NOT_FOUND) {
         return fail(ErrorCode::IoFailure,
-                    "failed to delete key from Windows Credential Manager");
+                    credential_error("delete key", error));
     }
     return {};
 #elif defined(__linux__)
