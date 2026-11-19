@@ -88,7 +88,6 @@ INSTANTIATE_TEST_SUITE_P(
         {"gc", "remove-barrier"},
         {"resolve-missing"},
         {"config"},
-        {"update"},
         {"remote"},
         {"remote", "heads"},
         {"remote", "tree"},

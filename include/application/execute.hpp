@@ -27,7 +27,6 @@ enum class Activity {
     Listing,
     Authenticating,
     Auditing,
-    Updating,
     Removing,
 };
 

@@ -1002,7 +1002,7 @@ namespace {
 bool is_byte_transfer(application::Activity activity) noexcept {
     using A = application::Activity;
     return activity == A::Uploading || activity == A::Downloading ||
-           activity == A::Auditing || activity == A::Updating;
+           activity == A::Auditing;
 }
 
 std::string format_bytes_rate(double bytes_per_second) {
@@ -1162,7 +1162,6 @@ void ProgressDisplay::render_event(const application::ActivityProgress& event,
         K::ProgressListing,
         K::ProgressAuthenticating,
         K::ProgressAuditing,
-        K::ProgressUpdating,
         K::ProgressRemoving,
     };
 
@@ -1274,7 +1273,6 @@ void ProgressDisplay::show(const application::ActivityProgress& raw_event,
         K::ProgressListing,
         K::ProgressAuthenticating,
         K::ProgressAuditing,
-        K::ProgressUpdating,
         K::ProgressRemoving,
     };
 

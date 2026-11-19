@@ -21,7 +21,8 @@ Add the executable's directory to `PATH`, or use its full path in the commands
 below. Local storage requires no rclone installation. For a rclone remote,
 install `rclone` in a directory on `PATH` outside the synchronized folder and
 configure the provider's credentials with `rclone config` on each machine.
-The binary updater has additional [platform prerequisites](configuration-and-usage.md#updating-kasumi).
+See [Updating Kasumi](configuration-and-usage.md#updating-kasumi) for portable
+and managed installations.
 
 ### Verify Downloads
 

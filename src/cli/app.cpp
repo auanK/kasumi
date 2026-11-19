@@ -7,7 +7,6 @@
 #include "cli/i18n.hpp"
 #include "cli/parser.hpp"
 #include "cli/presenter.hpp"
-#include "cli/update.hpp"
 #include "cli/wizard.hpp"
 #include "platform/cancellation.hpp"
 
@@ -94,10 +93,6 @@ struct ConsoleCancellation {
 namespace kasumi::cli {
 
 int run(int argc, char* argv[]) {
-    if (argc >= 2 && argv != nullptr && argv[1] != nullptr &&
-        std::string_view{argv[1]}.starts_with("--kasumi-update-")) {
-        return update::run(argc, argv);
-    }
     if (argc < 1 || argv == nullptr) {
         i18n::set_language(i18n::Language::English);
         return present_parse_error({});
@@ -183,10 +178,6 @@ int run(int argc, char* argv[]) {
     sigaction(SIGINT, &action, nullptr);
     sigaction(SIGTERM, &action, nullptr);
 #endif
-
-    if (std::holds_alternative<UpdateInvocation>(*parse_result)) {
-        return finish(update::run(effective_argc, effective_argv));
-    }
 
     const auto environment = application::default_execution_environment();
 
