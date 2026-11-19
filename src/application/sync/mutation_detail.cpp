@@ -241,6 +241,39 @@ download_candidate_path(const std::filesystem::path& destination,
             "-" + std::to_string(operation_index));
 }
 
+std::expected<void, MutationError>
+remove_download_candidate_if_present(const std::filesystem::path& destination,
+                                     const platform::Workspace& workspace,
+                                     std::size_t operation_index) {
+    const auto candidate =
+        download_candidate_path(destination, workspace, operation_index);
+    auto status = read_status(candidate, operation_index);
+    if (!status) {
+        return std::unexpected(status.error());
+    }
+    if (missing(*status)) {
+        return {};
+    }
+    if (std::filesystem::is_symlink(*status) ||
+        !std::filesystem::is_regular_file(*status) ||
+        platform::private_storage::is_reparse_or_symlink(candidate)) {
+        return std::unexpected(
+            make_error(MutationErrorCode::DestinationConflict,
+                       "download candidate is not a regular file",
+                       candidate,
+                       operation_index));
+    }
+    std::error_code error;
+    if (!std::filesystem::remove(candidate, error) || error) {
+        return std::unexpected(make_error(
+            MutationErrorCode::LocalIo,
+            error ? error.message() : "failed to remove download candidate",
+            candidate,
+            operation_index));
+    }
+    return sync_parent_checked(candidate, operation_index);
+}
+
 std::filesystem::path
 copy_candidate_path(const std::filesystem::path& destination,
                     const platform::Workspace& workspace,

@@ -5,6 +5,7 @@
 #include "application/sync/journal.hpp"
 #include "application/sync/mutation.hpp"
 #include "application/sync/mutation_batch.hpp"
+#include "application/sync/mutation_detail.hpp"
 #include "application/sync/mutation_fault_test.hpp"
 #include "application/sync/publication.hpp"
 #include "application/sync/reobservation.hpp"
@@ -2076,6 +2077,177 @@ TEST(SyncContentBatchTest,
     ASSERT_FALSE(missing);
     EXPECT_EQ(missing.error().code,
               sync::mutation::MutationErrorCode::RemoteContentMissing);
+}
+
+namespace {
+
+struct PreparedRepairDownloadRecovery {
+    Fixture fixture;
+    kasumi::runtime::RuntimeData runtime{};
+    kasumi::transaction::Record record{};
+    kasumi::platform::Workspace workspace{};
+    std::filesystem::path pack_candidate;
+    std::filesystem::path chunk_candidate;
+    std::filesystem::path loose_candidate;
+};
+
+void setup_repair_download_recovery(PreparedRepairDownloadRecovery& out,
+                                    std::string name) {
+    using kasumi::Action;
+    using kasumi::hasher::hash_string;
+    out.fixture = make_fixture(std::move(name));
+    out.runtime = runtime_data(*out.fixture);
+    const auto alpha = hash_string("alpha");
+    const auto beta = hash_string("beta");
+    const std::array<kasumi::crypto::pack::PackMemberDescriptor, 2> members{{
+        {alpha, 5},
+        {beta, 4},
+    }};
+    const auto pack = kasumi::crypto::pack::compute_pack_hash(members);
+    ASSERT_TRUE(pack);
+    const auto combined = hash_string("left-right");
+    const auto left = hash_string("left-");
+    const auto right = hash_string("right");
+    kasumi::history::StorageManifest manifest{
+        .packed_blobs = {{alpha, 5, *pack}, {beta, 4, *pack}},
+        .chunked_files = {{combined, 10, {{left, 5}, {right, 5}}}},
+    };
+    std::ranges::sort(manifest.packed_blobs,
+                      {},
+                      &kasumi::history::PackedBlobEntry::blob_hash);
+
+    kasumi::Snapshot tree{.rows = {{.path = "", .is_directory = true}}};
+    std::vector<kasumi::Operation> operations;
+    const auto add = [&](Action action,
+                         std::string_view path,
+                         std::string_view content) {
+        const auto hash = hash_string(content);
+        tree.rows.push_back(
+            {.path = std::string{path}, .hash = hash, .size = content.size()});
+        operations.push_back({.action = action,
+                              .path = std::string{path},
+                              .hash = kasumi::hash_hex(hash),
+                              .size = content.size()});
+        if (action == Action::Upload) {
+            kasumi::test::write_text(out.fixture->local / path, content);
+        }
+    };
+    add(Action::Upload, "alpha.txt", "alpha");
+    add(Action::Upload, "beta.txt", "beta");
+    add(Action::Upload, "chunked.bin", "left-right");
+    add(Action::Upload, "loose-seed.txt", "already uploaded");
+    add(Action::Download, "pack-copy.txt", "alpha");
+    add(Action::Download, "chunk-copy.bin", "left-right");
+    add(Action::Download, "loose-copy.txt", "already uploaded");
+    kasumi::finalize_snapshot(tree);
+
+    const auto prepared = sync::publication::prepare_commit(
+        tree, false, 0, {}, 1, out.fixture->key, manifest);
+    ASSERT_TRUE(prepared) << prepared.error().detail;
+    const auto remote = sync::publication::publish_commit(
+        out.fixture->base,
+        out.fixture->key,
+        *prepared,
+        out.fixture->workspace->root);
+    ASSERT_TRUE(remote) << remote.error().detail;
+    const auto height = prepared->commit.height;
+    ASSERT_TRUE(kasumi::state_storage::initialize(out.runtime.database_path));
+    ASSERT_TRUE(kasumi::state_storage::save_state(
+        out.runtime.database_path,
+        {.tree = tree,
+         .height = height,
+         .commit_id = remote->head.commit_id,
+         .ciphertext_id = remote->head.ciphertext_id,
+         .epoch_id = {},
+         .pending_materializations = {},
+         .storage_manifest = manifest}));
+
+    const auto seed = [&](std::string_view bytes) {
+        const auto source = out.fixture->workspace->root / "seed.plain";
+        const auto encrypted = out.fixture->workspace->root / "seed.enc";
+        kasumi::test::write_text(source, bytes);
+        ASSERT_TRUE(
+            kasumi::crypto::encrypt_file(source, encrypted, out.fixture->key));
+        ASSERT_TRUE(kasumi::transport::put(
+            out.fixture->base,
+            encrypted,
+            kasumi::crypto::content_identifier(out.fixture->key,
+                                               hash_string(bytes))));
+        ASSERT_TRUE(std::filesystem::remove(encrypted));
+    };
+    ASSERT_NO_FATAL_FAILURE(seed("already uploaded"));
+    ASSERT_NO_FATAL_FAILURE(seed("left-"));
+
+    auto record = sync::journal::create_record(
+        height,
+        height,
+        kasumi::make_sync_plan(std::move(operations), height),
+        false,
+        remote->head.commit_id);
+    ASSERT_TRUE(record) << record.error();
+    record->observed_base_id = remote->head.commit_id;
+    auto workspace = sync::coordinator::detail::create_transaction_workspace(
+        out.fixture->profile, record->operation_id, out.fixture->key);
+    ASSERT_TRUE(workspace) << workspace.error().detail;
+    ASSERT_NO_FATAL_FAILURE(
+        prepare_recovery_record(*out.fixture, *record, *workspace));
+    const auto paths = sync::journal::make_paths(out.fixture->profile);
+    ASSERT_TRUE(paths);
+    ASSERT_TRUE(sync::journal::save(*paths, *record, out.fixture->key));
+
+    for (std::size_t i = 0; i < record->plan.operations.size(); ++i) {
+        const auto& op = record->plan.operations[i];
+        const auto candidate = sync::mutation::detail::download_candidate_path(
+            out.fixture->local / op.path, *workspace, i);
+        if (op.path == "pack-copy.txt") {
+            out.pack_candidate = candidate;
+        } else if (op.path == "chunk-copy.bin") {
+            out.chunk_candidate = candidate;
+        } else if (op.path == "loose-copy.txt") {
+            out.loose_candidate = candidate;
+        }
+    }
+    out.record = std::move(*record);
+    out.workspace = std::move(*workspace);
+}
+
+} // namespace
+
+TEST(SyncContentBatchTest, RepairRecoveryClearsResidualDownloadCandidate) {
+    PreparedRepairDownloadRecovery env;
+    ASSERT_NO_FATAL_FAILURE(
+        setup_repair_download_recovery(env, "repair-residual-candidate"));
+    kasumi::test::write_text(env.pack_candidate, "stale partial pack copy");
+    kasumi::test::write_text(env.chunk_candidate, "stale partial chunked copy");
+    kasumi::test::write_text(env.loose_candidate, "stale partial loose copy");
+
+    const auto outcome = sync::coordinator::recover_if_needed(
+        env.runtime, env.fixture->storage, env.fixture->key);
+    ASSERT_TRUE(outcome) << outcome.error().detail;
+    EXPECT_EQ(*outcome, sync::coordinator::RecoveryResult::RolledForward);
+    EXPECT_EQ(kasumi::test::read_text(env.fixture->local / "pack-copy.txt"),
+              "alpha");
+    EXPECT_EQ(kasumi::test::read_text(env.fixture->local / "chunk-copy.bin"),
+              "left-right");
+    EXPECT_EQ(kasumi::test::read_text(env.fixture->local / "loose-copy.txt"),
+              "already uploaded");
+    EXPECT_FALSE(std::filesystem::exists(env.pack_candidate));
+    EXPECT_FALSE(std::filesystem::exists(env.chunk_candidate));
+    EXPECT_FALSE(std::filesystem::exists(env.loose_candidate));
+}
+
+TEST(SyncContentBatchTest, RepairRecoveryRejectsNonRegularDownloadCandidate) {
+    PreparedRepairDownloadRecovery env;
+    ASSERT_NO_FATAL_FAILURE(
+        setup_repair_download_recovery(env, "repair-nonregular-candidate"));
+    ASSERT_TRUE(std::filesystem::create_directory(env.pack_candidate));
+
+    const auto outcome = sync::coordinator::recover_if_needed(
+        env.runtime, env.fixture->storage, env.fixture->key);
+    ASSERT_FALSE(outcome);
+    EXPECT_EQ(outcome.error().code,
+              sync::coordinator::ErrorCode::RecoveryConflict);
+    EXPECT_TRUE(std::filesystem::is_directory(env.pack_candidate));
 }
 
 } // namespace

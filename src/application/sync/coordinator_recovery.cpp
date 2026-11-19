@@ -469,6 +469,28 @@ std::expected<void, Error> resume_pending_local_mutations(
                 detail::make_error(ErrorCode::RecoveryConflict,
                                    mutation::describe(condition.error()),
                                    index));
+        if (operation.action == Action::Download) {
+            auto destination = mutation::detail::resolve_local_path(
+                runtime_data.local_dir, operation.path, index);
+            if (!destination) {
+                return std::unexpected(
+                    detail::make_error(ErrorCode::RecoveryConflict,
+                                       destination.error().detail,
+                                       index));
+            }
+            if (auto cleaned =
+                    mutation::detail::remove_download_candidate_if_present(
+                        *destination, *workspace, index);
+                !cleaned) {
+                return std::unexpected(detail::make_error(
+                    cleaned.error().code ==
+                            mutation::MutationErrorCode::DestinationConflict
+                        ? ErrorCode::RecoveryConflict
+                        : ErrorCode::MutationFailure,
+                    cleaned.error().detail,
+                    index));
+            }
+        }
         const auto staged = operation.action == Action::Download
                                 ? prefetched.find(operation.hash)
                                 : prefetched.end();
