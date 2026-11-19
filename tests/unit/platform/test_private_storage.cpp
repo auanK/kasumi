@@ -1,16 +1,19 @@
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
+#include "platform/durability.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/profile_lock.hpp"
 #include "platform/workspace.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdlib>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <string>
+#include <thread>
 #include <vector>
 
 // clang-format off
@@ -396,6 +399,66 @@ TEST(WorkspaceTest, PathOnlyWorkspaceCannotRemoveExistingDirectory) {
 }
 
 #if defined(_WIN32)
+TEST(PrivateStorageTest, SyncsReadOnlyFileAndPreservesItsAttributes) {
+    auto workspace = kasumi::test::make_temp_workspace("sync-readonly");
+    const auto path = kasumi::test::workspace_path(workspace, "data");
+    kasumi::test::write_text(path, "payload");
+    const auto original = GetFileAttributesW(path.c_str());
+    ASSERT_NE(original, INVALID_FILE_ATTRIBUTES);
+    const auto attributes =
+        (original & ~FILE_ATTRIBUTE_NORMAL) | FILE_ATTRIBUTE_READONLY;
+    ASSERT_TRUE(SetFileAttributesW(path.c_str(), attributes));
+
+    const auto synced = kasumi::platform::durability::sync_file(path);
+    EXPECT_TRUE(synced) << (synced ? "" : synced.error());
+    EXPECT_EQ(GetFileAttributesW(path.c_str()), attributes);
+    EXPECT_EQ(kasumi::test::read_text(path), "payload");
+    EXPECT_TRUE(SetFileAttributesW(path.c_str(), original));
+}
+
+TEST(PrivateStorageTest, ReplacementWaitsForReaderToReleaseDestination) {
+    auto workspace = kasumi::test::make_temp_workspace("replace-busy");
+    const auto source = kasumi::test::workspace_path(workspace, "new");
+    const auto destination = kasumi::test::workspace_path(workspace, "target");
+    kasumi::test::write_text(source, "new version");
+    kasumi::test::write_text(destination, "old version");
+    const auto reader = CreateFileW(destination.c_str(),
+                                    GENERIC_READ,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    nullptr,
+                                    OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL,
+                                    nullptr);
+    ASSERT_NE(reader, INVALID_HANDLE_VALUE) << GetLastError();
+    {
+        std::jthread release([reader] {
+            std::this_thread::sleep_for(std::chrono::milliseconds{30});
+            CloseHandle(reader);
+        });
+        const auto replaced = kasumi::platform::durability::replace_atomically(
+            source, destination);
+        EXPECT_TRUE(replaced) << (replaced ? "" : replaced.error());
+    }
+    EXPECT_EQ(kasumi::test::read_text(destination), "new version");
+}
+
+TEST(PrivateStorageTest, RemovesWorkspaceWhoseQuarantineExceedsMaxPath) {
+    auto fixture = kasumi::test::make_temp_workspace("long-quarantine");
+    const auto& base = kasumi::test::workspace_root(fixture);
+    constexpr std::size_t parent_length = 240;
+    if (base.native().size() >= parent_length - 1) {
+        GTEST_SKIP() << "temporary root is already too long";
+    }
+    const auto parent =
+        base / std::wstring(parent_length - base.native().size() - 1, L'p');
+    ASSERT_TRUE(std::filesystem::create_directory(parent));
+    auto workspace = kasumi::platform::create_workspace_at(parent / "owned");
+    ASSERT_TRUE(workspace) << workspace.error();
+    const auto removed = kasumi::platform::remove_workspace(*workspace);
+    EXPECT_TRUE(removed) << (removed ? "" : removed.error());
+    EXPECT_FALSE(std::filesystem::exists(workspace->root));
+}
+
 TEST(PrivateStorageTest, RemovesWorkspaceWithNestedLongPath) {
     auto owner = kasumi::test::make_temp_workspace("long-workspace-cleanup");
     auto workspace = kasumi::platform::create_workspace_at(
@@ -447,6 +510,25 @@ TEST(PrivateStorageTest, RemovesWorkspaceWithNestedLongPath) {
     }
 }
 #endif
+
+TEST(PrivateStorageTest, StreamRejectsFileTruncatedAfterOpening) {
+    auto workspace = kasumi::test::make_temp_workspace("stream-truncated");
+    const auto path = kasumi::test::workspace_path(workspace, "data");
+    kasumi::test::write_text(path, "abcdefgh");
+    std::array<std::uint8_t, 4> scratch{};
+    const auto streamed =
+        kasumi::platform::private_storage::stream_regular_file(
+            path,
+            scratch,
+            [&](std::span<const std::uint8_t>) {
+                std::filesystem::resize_file(path, scratch.size());
+                return true;
+            },
+            8);
+    ASSERT_FALSE(streamed);
+    EXPECT_EQ(streamed.error().kind,
+              kasumi::platform::private_storage::StreamErrorKind::SizeMismatch);
+}
 
 TEST(PrivateStorageTest, AtomicWriteReplacesContentAndLeavesNoTemporaryFile) {
     auto workspace =

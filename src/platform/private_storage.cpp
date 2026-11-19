@@ -614,7 +614,17 @@ ensure_directory(const std::filesystem::path& path) {
     const auto status = std::filesystem::symlink_status(path, error);
     if (error == std::errc::no_such_file_or_directory ||
         (!error && status.type() == std::filesystem::file_type::not_found)) {
-        return private_storage::create_directory(path);
+        auto created = private_storage::create_directory(path);
+        if (created) {
+            return created;
+        }
+        std::error_code retry_error;
+        const auto after = std::filesystem::symlink_status(path, retry_error);
+        if (retry_error ||
+            after.type() == std::filesystem::file_type::not_found) {
+            return created;
+        }
+        return protect_directory(path);
     }
     if (error) {
         return std::unexpected(system_error("symlink_status failed", error));
@@ -1019,23 +1029,9 @@ publish_private_file(PrivateOutputFile& file,
         return std::unexpected(windows_error("FlushFileBuffers failed", code));
     }
 
-    std::wstring target_str = target_path.wstring();
-    const DWORD rename_info_size = static_cast<DWORD>(
-        sizeof(FILE_RENAME_INFO) + target_str.size() * sizeof(WCHAR));
-    std::vector<char> buffer(rename_info_size, 0);
-    FILE_RENAME_INFO* rename_info =
-        reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
-    rename_info->ReplaceIfExists = TRUE;
-    rename_info->RootDirectory = nullptr;
-    rename_info->FileNameLength =
-        static_cast<DWORD>(target_str.size() * sizeof(WCHAR));
-    std::memcpy(rename_info->FileName,
-                target_str.c_str(),
-                target_str.size() * sizeof(WCHAR));
-
-    if (!SetFileInformationByHandle(
-            h, FileRenameInfo, rename_info, rename_info_size)) {
-        const auto code = GetLastError();
+    if (const auto code =
+            detail::rename_windows_handle(h, target_path, FileRenameInfo, TRUE);
+        code != ERROR_SUCCESS) {
         return std::unexpected(
             windows_error("SetFileInformationByHandle rename failed", code));
     }
@@ -1307,7 +1303,7 @@ stream_regular_file_raw(const std::filesystem::path& path,
     }
     const auto file_size = static_cast<std::uint64_t>(actual_size.QuadPart);
 #else
-    const int flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | (slice ? O_NONBLOCK : 0);
+    const int flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK;
     const int fd = ::open(path.c_str(), flags);
     if (fd < 0) {
         const std::error_code sys_err{errno, std::generic_category()};
@@ -1385,6 +1381,11 @@ stream_regular_file_raw(const std::filesystem::path& path,
             break;
         }
         const auto chunk_size = static_cast<std::size_t>(count);
+        if (!slice && expected_size &&
+            chunk_size > *expected_size - total_read) {
+            return make_stream_error(StreamErrorKind::SizeMismatch,
+                                     "stream exceeded expected size");
+        }
         total_read += chunk_size;
         if (!on_chunk(context, scratch.first(chunk_size))) {
             return make_stream_error(StreamErrorKind::Aborted,
@@ -1394,6 +1395,10 @@ stream_regular_file_raw(const std::filesystem::path& path,
     if (slice && total_read != slice->size) {
         return make_stream_error(StreamErrorKind::SizeMismatch,
                                  "file ended before the end of the slice");
+    }
+    if (!slice && expected_size && total_read != *expected_size) {
+        return make_stream_error(StreamErrorKind::SizeMismatch,
+                                 "stream ended before expected size");
     }
     return total_read;
 }
