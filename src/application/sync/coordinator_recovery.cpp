@@ -447,6 +447,8 @@ std::expected<void, Error> resume_pending_local_mutations(
         }
         prefetched = std::move(*staged);
     }
+    detail::ChunkDownloadSession chunk_session;
+    const auto parallelism = application::content_concurrency();
     for (const auto index : replay_order) {
         const auto& operation = record.plan.operations[index];
         if (type_changes[index] == detail::TypeChangeStep::Install &&
@@ -469,6 +471,7 @@ std::expected<void, Error> resume_pending_local_mutations(
                 detail::make_error(ErrorCode::RecoveryConflict,
                                    mutation::describe(condition.error()),
                                    index));
+        const history::ChunkedFileEntry* chunked = nullptr;
         if (operation.action == Action::Download) {
             auto destination = mutation::detail::resolve_local_path(
                 runtime_data.local_dir, operation.path, index);
@@ -490,29 +493,48 @@ std::expected<void, Error> resume_pending_local_mutations(
                     cleaned.error().detail,
                     index));
             }
+            if (!manifest.empty()) {
+                if (const auto h = hash_from_hex(operation.hash)) {
+                    chunked = history::find_chunked_file(manifest, *h);
+                }
+            }
         }
         const auto staged = operation.action == Action::Download
                                 ? prefetched.find(operation.hash)
                                 : prefetched.end();
-        auto applied = staged != prefetched.end()
-                           ? mutation::apply_preverified_download(
-                                 operation,
-                                 index,
-                                 runtime_data.local_dir,
-                                 staged->second,
-                                 *workspace,
-                                 record.progress[index],
-                                 *condition ? &**condition : nullptr)
-                           : mutation::apply_operation(
-                                 operation,
-                                 index,
-                                 runtime_data.local_dir,
-                                 storage,
-                                 key,
-                                 *workspace,
-                                 record.progress[index],
-                                 mutation::DownloadCacheMode::None,
-                                 *condition ? &**condition : nullptr);
+        auto applied =
+            chunked != nullptr
+                ? detail::apply_chunked_download(
+                      *chunked,
+                      operation,
+                      index,
+                      runtime_data.local_dir,
+                      storage,
+                      key,
+                      *workspace,
+                      parallelism,
+                      record.progress[index],
+                      *condition ? &**condition : nullptr,
+                      chunk_session)
+            : staged != prefetched.end()
+                ? mutation::apply_preverified_download(
+                      operation,
+                      index,
+                      runtime_data.local_dir,
+                      staged->second,
+                      *workspace,
+                      record.progress[index],
+                      *condition ? &**condition : nullptr)
+                : mutation::apply_operation(
+                      operation,
+                      index,
+                      runtime_data.local_dir,
+                      storage,
+                      key,
+                      *workspace,
+                      record.progress[index],
+                      mutation::DownloadCacheMode::None,
+                      *condition ? &**condition : nullptr);
         if (!applied) {
             return std::unexpected(detail::make_error(
                 applied.error().code ==

@@ -4,10 +4,13 @@
 #include "application/history_storage/epoch.hpp"
 #include "application/sync/coordinator.hpp"
 #include "application/sync/journal.hpp"
+#include "application/sync/mutation.hpp"
 #include "application/sync/mutation_batch.hpp"
 #include "application/sync/publication.hpp"
+#include "core/history.hpp"
 #include "core/transaction/types.hpp"
 #include "crypto/file_crypto.hpp"
+#include "platform/private_storage.hpp"
 #include "platform/workspace.hpp"
 #include "runtime/resolver.hpp"
 #include "state_storage/database.hpp"
@@ -16,12 +19,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstring>
 #include <expected>
 #include <filesystem>
 #include <optional>
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace kasumi::application {
@@ -228,6 +233,47 @@ resume_manifest_repairs(const journal::Paths& paths,
                         transport::Transport& storage,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                         const platform::Workspace& workspace);
+
+struct ChunkHashKey {
+    std::size_t operator()(const Hash& value) const noexcept {
+        std::size_t seed = 0;
+        static_assert(sizeof(seed) <= sizeof(Hash));
+        std::memcpy(&seed, value.data(), sizeof(seed));
+        return seed;
+    }
+};
+
+struct ChunkSource {
+    std::filesystem::path source_path;
+    platform::private_storage::FileIdentity identity{};
+    std::uint64_t offset = 0;
+    std::uint32_t size = 0;
+};
+
+struct ChunkDownloadSession {
+    bool directories_ready = false;
+    std::filesystem::path chunk_dl_dir;
+    std::filesystem::path chunk_plain_dir;
+    std::unordered_map<Hash, ChunkSource, ChunkHashKey> local_seeds;
+    std::unordered_map<Hash, ChunkSource, ChunkHashKey> downloaded_slices;
+    std::unordered_set<std::string> seeded_paths;
+};
+
+// Downloads FastCDC chunks in bounded windows, assembles directly into the
+// destination staging candidate, and registers verified slices for reuse.
+mutation::MutationResult apply_chunked_download(
+    const history::ChunkedFileEntry& entry,
+    const kasumi::Operation& operation,
+    std::size_t operation_index,
+    const std::filesystem::path& local_root,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const platform::Workspace& workspace,
+    std::size_t parallelism,
+    const transaction::OperationProgress& progress,
+    const mutation::DestinationPrecondition* destination,
+    ChunkDownloadSession& session,
+    ProgressMeter* meter = nullptr);
 
 std::expected<std::unordered_map<std::string, std::filesystem::path>,
               mutation::MutationError>

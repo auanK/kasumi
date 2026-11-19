@@ -1514,14 +1514,20 @@ TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
         };
         bool chunks_checked = false;
         bool assembled_checked = false;
+        std::filesystem::path chunk_plain_dir;
         namespace fault = kasumi::application::sync::mutation_fault_test;
         fault::set_hook([&](std::string_view point, const auto& path) {
             if (point == "fastcdc_chunks_ready") {
+                chunk_plain_dir = path;
                 EXPECT_EQ(count_chunk_files(path),
                           static_cast<std::ptrdiff_t>(needed_hashes.size()));
                 chunks_checked = true;
             } else if (point == "fastcdc_file_ready") {
-                EXPECT_EQ(count_chunk_files(path.parent_path()), 0);
+                EXPECT_EQ(path.parent_path(), second_local);
+                EXPECT_NE(path.filename().string().find(".kasumi-new-"),
+                          std::string::npos);
+                EXPECT_FALSE(chunk_plain_dir.empty());
+                EXPECT_TRUE(std::filesystem::is_empty(chunk_plain_dir));
                 assembled_checked = true;
             }
         });
@@ -1749,10 +1755,12 @@ TEST(SyncContentBatchTest,
     auto result = kasumi::reconciliation::reconcile(*input);
     ASSERT_TRUE(result) << result.error().detail;
     std::size_t download_windows = 0;
+    std::filesystem::path chunk_plain_dir;
     namespace fault = kasumi::application::sync::mutation_fault_test;
     fault::set_hook([&](std::string_view point, const auto& path) {
         if (point == "fastcdc_chunks_ready") {
             ++download_windows;
+            chunk_plain_dir = path;
             EXPECT_TRUE(
                 std::filesystem::is_empty(path.parent_path() / "chunk-dl"));
             const auto chunks = std::ranges::count_if(
@@ -1762,10 +1770,11 @@ TEST(SyncContentBatchTest,
                 });
             EXPECT_LE(chunks, 64);
         } else if (point == "fastcdc_file_ready") {
-            for (const auto& entry :
-                 std::filesystem::directory_iterator(path.parent_path())) {
-                EXPECT_NE(entry.path().extension(), ".chunk");
-            }
+            EXPECT_EQ(path.parent_path(), fixture->local);
+            EXPECT_NE(path.filename().string().find(".kasumi-new-"),
+                      std::string::npos);
+            EXPECT_FALSE(chunk_plain_dir.empty());
+            EXPECT_TRUE(std::filesystem::is_empty(chunk_plain_dir));
         }
     });
     const auto downloaded = execute_with(*fixture, *input, *result);

@@ -1477,6 +1477,70 @@ apply_operation(const Operation& operation,
                                       operation_index));
 }
 
+MutationResult apply_streamed_download(
+    const Operation& operation,
+    std::size_t operation_index,
+    const std::filesystem::path& local_root,
+    const platform::Workspace& workspace,
+    const transaction::OperationProgress& progress,
+    const DestinationPrecondition* destination_condition,
+    const DownloadCandidatePopulator& populate) {
+    if (operation.action != Action::Download) {
+        return std::unexpected(make_error(
+            MutationErrorCode::InvalidOperation,
+            "streamed download requires a download operation",
+            operation.path,
+            operation_index));
+    }
+    if (!populate) {
+        return std::unexpected(make_error(
+            MutationErrorCode::InvalidOperation,
+            "streamed download requires a candidate populator",
+            operation.path,
+            operation_index));
+    }
+    auto destination =
+        resolve_local_path(local_root, operation.path, operation_index);
+    if (!destination) {
+        return std::unexpected(destination.error());
+    }
+    auto prep = prepare_download_candidate(operation,
+                                           operation_index,
+                                           *destination,
+                                           workspace,
+                                           progress,
+                                           destination_condition);
+    if (!prep) {
+        return std::unexpected(prep.error());
+    }
+    if (prep->already_applied) {
+        return {};
+    }
+
+    std::filesystem::path backup_file;
+    if (progress.had_original &&
+        progress.backup_slot != (std::numeric_limits<std::uint32_t>::max)()) {
+        backup_file =
+            platform::workspace_file(workspace, progress.backup_slot, ".backup");
+    }
+    if (auto populated = populate(
+            prep->candidate,
+            *destination,
+            backup_file.empty() ? nullptr : &backup_file);
+        !populated) {
+        remove_temporary_file(prep->candidate);
+        return populated;
+    }
+    return install_download_candidate(operation,
+                                      operation_index,
+                                      *destination,
+                                      workspace,
+                                      progress,
+                                      prep->prepared_hash,
+                                      prep->candidate,
+                                      destination_condition);
+}
+
 MutationResult apply_preverified_download(
     const Operation& operation,
     std::size_t operation_index,
