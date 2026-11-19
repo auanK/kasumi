@@ -180,7 +180,8 @@ void notify(const GarbageCollectProgressCallback& on_progress,
             GarbageCollectStage stage,
             std::optional<std::size_t> candidate_count,
             std::size_t removed_objects,
-            std::chrono::nanoseconds elapsed = {}) noexcept {
+            std::chrono::nanoseconds elapsed = {},
+            std::optional<std::size_t> listed_objects = std::nullopt) noexcept {
     if (!on_progress) {
         return;
     }
@@ -190,6 +191,7 @@ void notify(const GarbageCollectProgressCallback& on_progress,
             .candidate_count = candidate_count,
             .removed_objects = removed_objects,
             .removal_elapsed = elapsed,
+            .listed_objects = listed_objects,
         });
     } catch (...) {
         // Progress is observational and must not alter the operation.
@@ -315,12 +317,19 @@ required_variants(const history_storage::ReachabilityInventory& inventory,
 std::expected<std::vector<std::string>, Error>
 observe(transport::Transport& storage,
         KeySpan key,
-        const std::filesystem::path& workspace_root) {
+        const std::filesystem::path& workspace_root,
+        const GarbageCollectProgressCallback& on_progress) {
     auto listing = transport::list(storage);
     if (!listing) {
         return std::unexpected(
             transport_error(listing.error(), "could not list remote objects"));
     }
+    notify(on_progress,
+           GarbageCollectStage::Analyzing,
+           std::nullopt,
+           0,
+           {},
+           listing->size());
     std::ranges::sort(*listing);
 
     const auto layout = history_storage::derive_remote_layout(key);
@@ -548,7 +557,8 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
 
         failure_diagnostic.stage = GarbageCollectStage::Analyzing;
         notify(on_progress, GarbageCollectStage::Analyzing, std::nullopt, 0);
-        auto observed_candidates = observe(storage, key, workspace_root);
+        auto observed_candidates =
+            observe(storage, key, workspace_root, on_progress);
         if (!observed_candidates) {
             return finish(std::unexpected(observed_candidates.error()));
         }
@@ -556,6 +566,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
         const auto& candidates = *observed_candidates;
         const auto candidate_count = candidates.size();
         failure_diagnostic.candidate_objects = candidate_count;
+        notify(on_progress, GarbageCollectStage::Analyzing, candidate_count, 0);
 
         if (!*online) {
             failure_diagnostic.stage = GarbageCollectStage::Finalizing;
@@ -717,6 +728,8 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             return finish(std::unexpected(apply.error()));
         }
         const auto removed_objects = *apply;
+        const auto removal_elapsed =
+            std::chrono::steady_clock::now() - removal_started;
 
         failure_diagnostic.stage = GarbageCollectStage::Finalizing;
         failure_diagnostic.failed_identifier.reset();
@@ -727,12 +740,14 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
         notify(on_progress,
                GarbageCollectStage::Finalizing,
                candidate_count,
-               removed_objects);
+               removed_objects,
+               removal_elapsed);
 
         return finish(GarbageCollectResult{
             .candidate_objects = candidate_count,
             .removed_objects = removed_objects,
             .analysis_only = false,
+            .removal_elapsed = removal_elapsed,
         });
     } catch (const std::exception& error) {
         return fail_exception(error.what());

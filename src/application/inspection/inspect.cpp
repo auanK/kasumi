@@ -917,6 +917,7 @@ inspect_contents(const observation::history::StorageView& observed,
             return obs_fail(operation,
                             "failed to download object during audit");
         }
+        ProgressMeter::add(context.progress->work);
         if (audited->state == history_storage::ContentObjectState::Missing) {
             content.physically_present = false;
             content.state = RemoteContentState::Missing;

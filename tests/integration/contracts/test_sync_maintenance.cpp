@@ -763,6 +763,13 @@ TEST(SyncMaintenanceTest, FsckPublishesOrderedStagesAndAuthenticatedTotals) {
     EXPECT_EQ(events[5].stage, kasumi::application::FsckStage::Finalizing);
     EXPECT_EQ(events[5].completed_objects, 1U);
     EXPECT_EQ(events[5].completed_plaintext_bytes, 6U);
+    const auto& completed =
+        std::get<kasumi::application::FsckCompleted>(result->data);
+    EXPECT_EQ(completed.checked_plaintext_bytes,
+              events.back().completed_plaintext_bytes);
+    EXPECT_EQ(completed.wire_download_bytes, events.back().wire_download_bytes);
+    EXPECT_GT(completed.wire_download_bytes, 6U);
+    EXPECT_EQ(completed.physical_objects_downloaded, 1U);
 }
 
 std::string content_id_for(const std::string& master_hex,

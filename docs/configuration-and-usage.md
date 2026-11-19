@@ -90,8 +90,8 @@ Use `kasumi <command> --help` for the complete arguments, options and examples.
 
 `--full` belongs only to Sync and Status, after the profile. It displays every
 plan and pending-path item (otherwise lists longer than ten items show the first
-and last five), keeps per-stage live progress statistics across all stages, and
-prints the wire transfer summary at the end of Sync. Preview and Status do not
+and last five) and keeps the detailed progress lines for each activity.
+Preview and Status do not
 execute the plan, recover transactions or persist file-hash cache changes. See
 [Preview and Status](architecture/planning-and-status.md).
 
@@ -342,6 +342,6 @@ Kasumi does not normalize Unicode filename spelling.
 
 ## Progress and transfer metrics
 
-Interactive terminals update one live progress line during long operations. By default, Sync keeps only the aggregated transfer progress line under the apply stage (followed by average, minimum, and maximum transfer speeds upon completion), while non-transfer stages erase their transient progress line when moving on; `--full` keeps per-stage lines across all stages and prints the final wire transfer summary. Redirected output uses plain stage lines and spaced audit milestones.
+Sync, Status, and dry-run report the current planning activity, such as comparing snapshots, checking remote content, and preparing changes. Interactive output shows elapsed time when an ETA is unavailable. Known totals, such as objects checked and operations prepared, are shown as counts. While applying changes, Sync and Resolve Missing show confirmed operations out of the plan. A second line shows file or batch transfer progress and an ETA when the transfer total is known. A single checkpoint can advance the plan by several operations. FSCK, garbage collection, and remote content audits show progress against their known object totals. Redirected output uses plain stage lines and spaced progress milestones. With `--full`, Sync and Status retain more per-activity detail in the output.
 
-Sync keeps its logical plan summary and, with `--full`, reports the actual encoded payload bytes, physical object counts, and local reuse (verified FastCDC slices and deduplicated uploads) separately. These payload measurements exclude HTTP headers and protocol control objects.
+Sync keeps its logical plan summary and reports the actual encoded payload bytes, physical object counts, and local reuse (verified FastCDC slices and deduplicated uploads) separately. Transfer progress and speeds appear under Applying changes. FSCK reports the logical audit totals alongside wire download bytes, physical objects downloaded, and files reassembled. Garbage collection reports remote objects listed, candidates found, and removals confirmed by the transport. These payload measurements exclude HTTP headers and protocol control objects.

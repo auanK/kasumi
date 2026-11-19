@@ -2,6 +2,7 @@
 
 #include "application/observation/file_metadata.hpp"
 #include "application/observation/state.hpp"
+#include "application/progress.hpp"
 #include "application/sync/coordinator_detail.hpp"
 #include "application/sync/journal.hpp"
 #include "application/sync/mutation.hpp"
@@ -144,9 +145,10 @@ std::expected<void, Error> observe_content_availability(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     std::span<const Hash> confirmed_missing,
     bool allow_unreferenced_content_reuse,
-    bool trust_existing_content = false,
+    bool trust_existing_content,
     const std::unordered_set<std::string>* initial_content_identifiers =
-        nullptr) {
+        nullptr,
+    ProgressMeter* meter = nullptr) {
     HashSet hashes{0, hash_key};
     std::unordered_map<Hash, std::uint64_t, decltype(&hash_key)> upload_sizes{
         0, hash_key};
@@ -301,6 +303,10 @@ std::expected<void, Error> observe_content_availability(
     requested_physical.erase(std::ranges::unique(requested_physical).begin(),
                              requested_physical.end());
 
+    if (meter) {
+        meter->phase(Activity::CheckingRemoteContent,
+                     requested_physical.size());
+    }
     std::vector<transport::Presence> presences;
     bool probed = false;
     if (has_chunked_probe && requested_physical.size() >= 8U &&
@@ -350,7 +356,13 @@ std::expected<void, Error> observe_content_availability(
                                        transport::describe(observed.error())));
             }
             presences.push_back(*observed);
+            if (meter) {
+                ProgressMeter::add(meter->work);
+            }
         }
+    }
+    if (meter) {
+        meter->work.store(requested_physical.size(), std::memory_order_relaxed);
     }
 
     std::unordered_map<std::string_view, bool> physical_present;
@@ -365,7 +377,13 @@ std::expected<void, Error> observe_content_availability(
     std::vector<Hash> missing;
     HashSet absent_packs{0, hash_key};
     missing.reserve(logical_probes.size());
+    if (meter) {
+        meter->phase(Activity::Verifying, logical_probes.size());
+    }
     for (std::size_t index = 0; index < logical_probes.size(); ++index) {
+        if (meter) {
+            meter->work.store(index, std::memory_order_relaxed);
+        }
         const auto& [hash, phys_ids] = logical_probes[index];
         const bool present =
             std::ranges::all_of(phys_ids, [&](const std::string& phys_id) {
@@ -441,6 +459,9 @@ std::expected<void, Error> observe_content_availability(
     input.known_missing_content_objects.insert(confirmed_missing.begin(),
                                                confirmed_missing.end());
     input.known_missing_content_objects.insert(missing.begin(), missing.end());
+    if (meter) {
+        meter->work.store(logical_probes.size(), std::memory_order_relaxed);
+    }
     return {};
 }
 
@@ -452,7 +473,11 @@ stage_attempt(const runtime::RuntimeData& runtime_data,
               std::span<const std::uint8_t, crypto::KEY_SIZE> key,
               std::optional<platform::Workspace>& workspace,
               std::string& out_operation_id,
-              std::vector<transaction::OperationProgress>& out_progress) {
+              std::vector<transaction::OperationProgress>& out_progress,
+              ProgressMeter* meter) {
+    if (meter) {
+        meter->phase(Activity::PreparingPlan, result.plan.operations.size());
+    }
     auto record = journal::create_record(
         input.local_generation,
         input.storage.generation,
@@ -474,6 +499,9 @@ stage_attempt(const runtime::RuntimeData& runtime_data,
         detail::local_type_changes(record->plan.operations);
     for (std::size_t index = 0; index < record->plan.operations.size();
          ++index) {
+        if (meter) {
+            meter->work.store(index, std::memory_order_relaxed);
+        }
         if (type_changes[index] == detail::TypeChangeStep::Install) {
             continue;
         }
@@ -491,6 +519,10 @@ stage_attempt(const runtime::RuntimeData& runtime_data,
                                    index));
         }
         record->progress[index] = *prepared;
+    }
+    if (meter) {
+        meter->work.store(record->plan.operations.size(),
+                          std::memory_order_relaxed);
     }
     out_operation_id = std::move(record->operation_id);
     out_progress = std::move(record->progress);
@@ -657,7 +689,8 @@ refresh_content_availability(
     std::span<const Hash> confirmed_missing,
     bool allow_unreferenced_content_reuse,
     bool trust_existing_content,
-    const std::unordered_set<std::string>* initial_content_identifiers) {
+    const std::unordered_set<std::string>* initial_content_identifiers,
+    ProgressMeter* meter) {
     auto availability =
         observe_content_availability(input,
                                      reconciliation_result,
@@ -666,9 +699,13 @@ refresh_content_availability(
                                      confirmed_missing,
                                      allow_unreferenced_content_reuse,
                                      trust_existing_content,
-                                     initial_content_identifiers);
+                                     initial_content_identifiers,
+                                     meter);
     if (!availability) {
         return std::unexpected(availability.error());
+    }
+    if (meter) {
+        meter->phase(Activity::ComparingSnapshots);
     }
     auto available_result = reconciliation::reconcile(input);
     if (!available_result) {
@@ -691,6 +728,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
           bool trust_existing_content,
           const std::unordered_set<std::string>* initial_content_identifiers,
           bool retain_staged_workspace) {
+    auto* meter = session ? session->progress : nullptr;
     const auto no_work = [](const reconciliation::Result& candidate) {
         return !candidate.requires_publication &&
                !candidate.requires_local_mutation &&
@@ -707,6 +745,9 @@ stabilize(const runtime::RuntimeData& runtime_data,
     const auto reconcile_and_refresh =
         [&](reconciliation::Input& target,
             bool allow_reuse) -> std::expected<reconciliation::Result, Error> {
+        if (meter) {
+            meter->phase(Activity::ComparingSnapshots);
+        }
         auto recalculated = reconciliation::reconcile(target);
         if (!recalculated) {
             return std::unexpected(detail::make_error(
@@ -719,7 +760,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
                                             confirmed_missing,
                                             allow_reuse,
                                             trust_existing_content,
-                                            initial_content_identifiers);
+                                            initial_content_identifiers,
+                                            meter);
     };
 
     if (trust_existing_content && observed_input.storage.history_present) {
@@ -735,7 +777,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
                                          confirmed_missing,
                                          allow_unreferenced_content_reuse,
                                          trust_existing_content,
-                                         initial_content_identifiers);
+                                         initial_content_identifiers,
+                                         meter);
         if (!available) {
             return std::unexpected(available.error());
         }
@@ -758,6 +801,9 @@ stabilize(const runtime::RuntimeData& runtime_data,
          ++attempt) {
         std::size_t verification_pass = 0;
         while (true) {
+            if (meter && result.requires_local_mutation) {
+                meter->phase(Activity::Verifying);
+            }
             auto verification = verify_destructive_local_operations(
                 runtime_data, input, result, session);
             if (!verification) {
@@ -804,12 +850,16 @@ stabilize(const runtime::RuntimeData& runtime_data,
                                         key,
                                         workspace,
                                         staged_operation_id,
-                                        staged_progress);
+                                        staged_progress,
+                                        meter);
             if (!staged) {
                 return fail_with_cleanup(staged.error());
             }
         }
 
+        if (meter) {
+            meter->phase(Activity::Scanning);
+        }
         auto observed = observation::collect_reconciliation_input(
             runtime_data,
             storage,
@@ -843,6 +893,9 @@ stabilize(const runtime::RuntimeData& runtime_data,
         observed->pending_deletion_authority = input.pending_deletion_authority;
         mutation_fault_test::hit("before_final_local_observation",
                                  runtime_data.local_dir);
+        if (meter) {
+            meter->phase(Activity::Scanning);
+        }
         auto local_after_storage = observation::collect_local_observation(
             runtime_data.local_dir, session, observed->ignore_list);
         if (!local_after_storage) {

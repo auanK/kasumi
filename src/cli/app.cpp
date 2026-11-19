@@ -12,10 +12,13 @@
 
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
+#include <mutex>
 #include <print>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -29,6 +32,50 @@
 #endif
 
 namespace {
+
+class CommandProgress {
+public:
+    explicit CommandProgress(bool full = false,
+                             kasumi::platform::Terminal terminal =
+                                 kasumi::platform::stdout_terminal())
+        : display_(terminal, full) {
+        if (!terminal.interactive) {
+            return;
+        }
+        try {
+            ticker_ = std::jthread([this](std::stop_token stop) {
+                std::unique_lock lock(mutex_);
+                while (!stop.stop_requested()) {
+                    wake_.wait_for(lock, stop, std::chrono::seconds(1), [] {
+                        return false;
+                    });
+                    if (!stop.stop_requested()) {
+                        display_.heartbeat();
+                    }
+                }
+            });
+        } catch (...) {
+        }
+    }
+
+    void update(const kasumi::application::ExecutionProgress& progress,
+                kasumi::application::Operation operation =
+                    kasumi::application::Operation::Sync) {
+        std::lock_guard lock(mutex_);
+        display_.update(progress, operation);
+    }
+
+    void finish(bool keep) noexcept {
+        ticker_ = {};
+        display_.finish(keep);
+    }
+
+private:
+    kasumi::cli::ProgressDisplay display_;
+    std::mutex mutex_;
+    std::condition_variable_any wake_;
+    std::jthread ticker_;
+};
 
 void request_cancellation(int signal_number) {
     kasumi::platform::cancellation::request();
@@ -209,7 +256,7 @@ int run(int argc, char* argv[]) {
             return finish(
                 present_cancellation(application::Operation::Preview));
         }
-        ProgressDisplay display;
+        CommandProgress display;
         auto result = application::inspect({
             .request = request,
             .credentials = std::move(creds),
@@ -245,8 +292,6 @@ int run(int argc, char* argv[]) {
                          : i18n::Key::ManualBarrierRemovalWarning));
     }
 
-    application::ProgressCallback on_progress{};
-    ProgressDisplay display(platform::stdout_terminal(), full);
     constexpr std::array<std::pair<application::Operation, i18n::Key>, 6>
         starting_keys{{
             {application::Operation::Sync, i18n::Key::SyncStarting},
@@ -256,15 +301,13 @@ int run(int argc, char* argv[]) {
             {application::Operation::GarbageCollect, i18n::Key::GcStarting},
             {application::Operation::ResolveMissing, i18n::Key::SyncStarting},
         }};
+    bool reports_progress = false;
     for (const auto& [op, key] : starting_keys) {
         if (op != request.operation) {
             continue;
         }
         std::println("{}", i18n::format(key, request.profile_name));
-        on_progress = [operation = request.operation,
-                       &display](const auto& progress) {
-            display.update(progress, operation);
-        };
+        reports_progress = true;
         break;
     }
 
@@ -274,6 +317,14 @@ int run(int argc, char* argv[]) {
         return finish(present_cancellation(request.operation));
     }
 
+    CommandProgress display(full);
+    application::ProgressCallback on_progress;
+    if (reports_progress) {
+        on_progress = [operation = request.operation,
+                       &display](const auto& progress) {
+            display.update(progress, operation);
+        };
+    }
     auto result = application::execute({.request = request,
                                         .credentials = std::move(creds),
                                         .environment = environment,

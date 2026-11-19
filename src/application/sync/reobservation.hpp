@@ -39,7 +39,8 @@ refresh_content_availability(
     bool allow_unreferenced_content_reuse = false,
     bool trust_existing_content = false,
     const std::unordered_set<std::string>* initial_content_identifiers =
-        nullptr);
+        nullptr,
+    ProgressMeter* meter = nullptr);
 
 // Re-observes until the plan stabilizes or fails. When
 // content_availability_is_current is true, the initial availability probe and

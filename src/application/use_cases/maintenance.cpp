@@ -91,6 +91,13 @@ std::expected<Response, Error> run_fsck(OperationContext& context) {
                 .checked_plaintext_bytes =
                     last_progress ? last_progress->completed_plaintext_bytes
                                   : std::nullopt,
+                .wire_download_bytes =
+                    last_progress ? last_progress->wire_download_bytes : 0,
+                .physical_objects_downloaded =
+                    last_progress ? last_progress->physical_objects_downloaded
+                                  : 0,
+                .files_reassembled =
+                    last_progress ? last_progress->files_reassembled : 0,
             };
         });
 }
@@ -112,6 +119,7 @@ std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
                 .candidate_objects = collected->candidate_objects,
                 .analysis_only = collected->analysis_only,
                 .removed_objects = collected->removed_objects,
+                .removal_elapsed = collected->removal_elapsed,
             };
         });
 }

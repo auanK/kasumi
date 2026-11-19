@@ -923,9 +923,12 @@ TEST(RcloneStorageTest, MalformedPhysicalHashResponseIsProtocolFailure) {
 }
 
 TEST(RcloneStorageTest, AsyncCopyReportsProgressAndStopsCancelledJobs) {
-    for (const auto* outcome : {"success", "failure", "missing", "cancel"}) {
+    for (const auto* outcome :
+         {"success", "upload", "failure", "missing", "cancel"}) {
         SCOPED_TRACE(outcome);
         const std::string_view mode = outcome;
+        const bool upload = mode == "upload";
+        const bool success = mode == "success" || upload;
         RcServerState remote;
         std::string group;
         std::atomic_int polls = 0;
@@ -950,12 +953,12 @@ TEST(RcloneStorageTest, AsyncCopyReportsProgressAndStopsCancelledJobs) {
             "/rc/job/status", [&](const auto& input, auto& response) {
                 EXPECT_EQ(nlohmann::json::parse(input.body).at("jobid"), 7);
                 const auto poll = ++polls;
-                if (mode == "success" && poll == 1) {
+                if (success && poll == 1) {
                     response.status = 503;
                     response.set_content(
                         R"({"error":"temporary upstream error"})",
                         "application/json");
-                } else if ((mode == "success" && poll > 2) || stops > 0) {
+                } else if ((success && poll > 2) || stops > 0) {
                     response.set_content(
                         R"({"finished":true,"success":true,"error":""})",
                         "application/json");
@@ -976,16 +979,23 @@ TEST(RcloneStorageTest, AsyncCopyReportsProgressAndStopsCancelledJobs) {
             });
         remote.server.Post(
             "/rc/core/stats", [&](const auto& input, auto& response) {
-                EXPECT_EQ(nlohmann::json::parse(input.body).at("group"), group);
-                response.set_content(
-                    nlohmann::json{{"bytes", polls > 2 ? 128 : 64},
-                                   {"totalBytes", 128},
-                                   {"speed", 32},
-                                   {"eta", 2},
-                                   {"transfers", polls > 2 ? 1 : 0},
-                                   {"totalTransfers", 1}}
-                        .dump(),
-                    "application/json");
+                const auto body = nlohmann::json::parse(input.body);
+                EXPECT_EQ(body.at("group"), group);
+                const bool done = polls > 2;
+                const int count = upload ? 2 : 1;
+                auto stats = nlohmann::json{{"bytes", done ? 128 : 64},
+                                            {"totalBytes", 128},
+                                            {"speed", 32},
+                                            {"eta", 2},
+                                            {"transfers", done ? count : 0},
+                                            {"totalTransfers", count}};
+                if (upload && !done) {
+                    EXPECT_EQ(body.at("short"), false);
+                    stats["transferring"] = {
+                        {{"name", "other"}, {"bytes", 48}, {"size", 96}},
+                        {{"name", "object"}, {"bytes", 16}, {"size", 32}}};
+                }
+                response.set_content(stats.dump(), "application/json");
             });
         remote.server.Post(
             "/rc/core/stats-delete", [&](const auto& input, auto& response) {
@@ -1012,23 +1022,41 @@ TEST(RcloneStorageTest, AsyncCopyReportsProgressAndStopsCancelledJobs) {
             }
         };
         kasumi::platform::cancellation::reset();
-        const auto result =
-            mode == "missing"
-                ? kasumi::transport::get_with_progress(
-                      storage, "object", root / "object", progress)
-                : kasumi::transport::get_batch(storage,
-                                               {.destination_root = root,
-                                                .identifiers = {"object"},
-                                                .on_progress = progress});
+        const auto result = [&] {
+            if (upload) {
+                kasumi::test::write_text(root / "object", std::string(32, 'o'));
+                kasumi::test::write_text(root / "other", std::string(96, 'x'));
+                return kasumi::transport::put_batch(
+                    storage,
+                    {.source_root = root,
+                     .identifiers = {"object", "other"},
+                     .on_progress = progress,
+                     .progress_identifier = "object"});
+            }
+            if (mode == "missing") {
+                return kasumi::transport::get_with_progress(
+                    storage, "object", root / "object", progress);
+            }
+            return kasumi::transport::get_batch(storage,
+                                                {.destination_root = root,
+                                                 .identifiers = {"object"},
+                                                 .on_progress = progress});
+        }();
         kasumi::platform::cancellation::reset();
         stop_rc_server(remote);
-        if (mode == "success") {
+        if (success) {
             ASSERT_TRUE(result) << result.error().message;
             ASSERT_EQ(events.size(), 2U);
             EXPECT_EQ(events.front().bytes_transferred, 64U);
             EXPECT_EQ(events.front().eta_seconds, 2U);
             EXPECT_EQ(events.back().bytes_transferred, 128U);
-            EXPECT_EQ(events.back().objects_completed, 1U);
+            EXPECT_EQ(events.back().objects_completed, upload ? 2U : 1U);
+            if (upload) {
+                ASSERT_TRUE(events.front().item);
+                EXPECT_EQ(events.front().item->bytes, 16U);
+                EXPECT_EQ(events.front().item->total_bytes, 32U);
+                EXPECT_FALSE(events.back().item);
+            }
         } else {
             using E = kasumi::transport::ErrorCode;
             ASSERT_FALSE(result);

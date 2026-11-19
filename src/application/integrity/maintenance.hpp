@@ -6,6 +6,7 @@
 #include "runtime/resolver.hpp"
 #include "transport/transport.hpp"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -58,6 +59,7 @@ struct GarbageCollectResult {
     // physical audit; no presence read-back is performed after deletion.
     std::size_t removed_objects = 0;
     bool analysis_only = false;
+    std::chrono::nanoseconds removal_elapsed{};
 };
 
 using GarbageCollectProgressCallback =

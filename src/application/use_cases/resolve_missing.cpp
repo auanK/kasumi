@@ -61,6 +61,7 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
     collected->pending_deletion_authority = authority;
 
     meter.notify(SyncProgress{.stage = SyncStage::Calculating});
+    meter.phase(Activity::ComparingSnapshots);
     auto reconciled = reconciliation::reconcile(*collected);
     if (!reconciled) {
         return std::unexpected(
@@ -97,6 +98,7 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
         }
     } staged_guard{stable->staged, context.key};
 
+    meter.phase(Activity::PreparingPlan);
     std::unordered_set<std::string> eligible_paths;
     for (const auto& auth_row : authority) {
         const auto pending =
@@ -176,6 +178,7 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
         }
     } writer_guard{writer};
     if (stable->result.requires_publication) {
+        meter.phase(Activity::PreparingRemote);
         const auto layout = history_storage::derive_remote_layout(context.key);
         auto registered =
             history_storage::maintenance_protocol::register_writer(
@@ -190,7 +193,11 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
         writer = std::move(*registered);
     }
 
-    meter.notify(SyncProgress{.stage = SyncStage::Applying});
+    meter.notify(SyncProgress{
+        .stage = SyncStage::Applying,
+        .total_items =
+            static_cast<std::uint32_t>(sync_plan_size(stable->result.plan)),
+    });
     auto synchronized = sync::coordinator::execute(
         context.runtime,
         context.storage,
@@ -217,7 +224,6 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
                        sync::coordinator::describe(synchronized.error())));
     }
 
-    meter.notify(SyncProgress{.stage = SyncStage::Finalizing});
     return make_response(context,
                          ResolveMissingCompleted{
                              .resolved_count = resolved_paths.size(),

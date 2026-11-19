@@ -436,11 +436,32 @@ Result validate_finished_job(const State& state, const nlohmann::json& result) {
     return {};
 }
 
+std::optional<TransferItemProgress> transfer_item(const nlohmann::json& stats,
+                                                  std::string_view identifier) {
+    const auto transferring = stats.find("transferring");
+    if (transferring == stats.end() || !transferring->is_array()) {
+        return std::nullopt;
+    }
+    for (const auto& item : *transferring) {
+        const auto name = item.find("name");
+        if (name != item.end() && name->is_string() &&
+            name->get_ref<const std::string&>() == identifier) {
+            const auto bytes = nonnegative_integer(item, "bytes");
+            const auto total = nonnegative_integer(item, "size");
+            if (bytes && total && *total > 0 && *bytes <= *total) {
+                return TransferItemProgress{*bytes, *total};
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 Result run_copy(State& state,
                 std::string_view endpoint,
                 nlohmann::json payload,
                 const TransportProgressCallback& callback,
-                bool read_only = false) {
+                bool read_only = false,
+                std::string_view progress_identifier = {}) {
     if (!callback) {
         const auto copied = request_json(state,
                                          endpoint,
@@ -601,11 +622,12 @@ Result run_copy(State& state,
                 return valid;
             }
         }
-        const auto stats = request_json(state,
-                                        "core/stats",
-                                        {{"group", group}, {"short", true}},
-                                        maximum_response_size,
-                                        2s);
+        const auto stats = request_json(
+            state,
+            "core/stats",
+            {{"group", group}, {"short", progress_identifier.empty() || done}},
+            maximum_response_size,
+            2s);
         bool sampled = false;
         if (stats) {
             if (const auto bytes = nonnegative_integer(*stats, "bytes")) {
@@ -629,6 +651,9 @@ Result run_copy(State& state,
                 }
                 latest.bytes_per_second = transfer_speed(*stats);
                 latest.eta_seconds = nonnegative_integer(*stats, "eta");
+                latest.item = progress_identifier.empty() || done
+                                  ? std::nullopt
+                                  : transfer_item(*stats, progress_identifier);
                 if (done) {
                     latest.total_bytes = latest.bytes_transferred;
                     latest.total_objects = latest.objects_completed;
@@ -640,6 +665,7 @@ Result run_copy(State& state,
         if (done) {
             if (!sampled && (latest.total_bytes || latest.bytes_transferred)) {
                 latest.total_bytes.reset();
+                latest.item.reset();
                 latest.eta_seconds = 0;
                 report_transfer(callback, latest);
             }
@@ -734,7 +760,8 @@ Result sync_copy_batch(State& state,
                        std::size_t max_parallel_transfers,
                        nlohmann::json base_config,
                        bool read_only,
-                       const TransportProgressCallback& callback) {
+                       const TransportProgressCallback& callback,
+                       std::string_view progress_identifier = {}) {
     nlohmann::json include_rules = nlohmann::json::array();
     for (const auto& identifier : identifiers) {
         // Reject rclone filter glob/brace metacharacters so an identifier
@@ -757,8 +784,12 @@ Result sync_copy_batch(State& state,
     if (!base_config.empty()) {
         payload["_config"] = std::move(base_config);
     }
-    return run_copy(
-        state, "sync/copy", std::move(payload), callback, read_only);
+    return run_copy(state,
+                    "sync/copy",
+                    std::move(payload),
+                    callback,
+                    read_only,
+                    progress_identifier);
 }
 
 Result rclone_put_batch(void* context, const PutBatch& batch) {
@@ -782,7 +813,8 @@ Result rclone_put_batch(void* context, const PutBatch& batch) {
                             {"NoUpdateModTime", true},
                             {"NoCheckDest", true}},
                            false,
-                           batch.on_progress);
+                           batch.on_progress,
+                           batch.progress_identifier);
 }
 
 Result rclone_get_progress(void* context,

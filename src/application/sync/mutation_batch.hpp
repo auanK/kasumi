@@ -48,9 +48,12 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
                    ProgressMeter* meter = nullptr);
 
 // Constructs the request and uploads the batch objects.
-MutationResult transfer_upload_batch(const StagedUploadBatch& batch,
-                                     transport::Transport& storage,
-                                     std::size_t max_parallel_transfers);
+MutationResult transfer_upload_batch(
+    const StagedUploadBatch& batch,
+    transport::Transport& storage,
+    std::size_t max_parallel_transfers,
+    std::string_view progress_identifier = {},
+    const transport::TransportProgressCallback& progress = {});
 
 // Verifies remote integrity of batch objects concurrently, bounding
 // in-flight requests by parallelism. Fails deterministically on the

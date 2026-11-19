@@ -126,18 +126,14 @@ TEST(CliPresenterTest, LocalizesSingularAndPluralWireObjectCounts) {
                  Operation::Sync);
     {
         const ScopedLanguage english{Language::English};
-        const auto concise_output = present_out(completed);
-        EXPECT_EQ(concise_output.find("Wire upload"), std::string::npos);
-        const auto full_output = present_out(completed, true);
-        EXPECT_NE(full_output.find("(1 object)"), std::string::npos);
-        EXPECT_NE(full_output.find("(2 objects)"), std::string::npos);
+        const auto output = present_out(completed);
+        EXPECT_NE(output.find("(1 object)"), std::string::npos);
+        EXPECT_NE(output.find("(2 objects)"), std::string::npos);
     }
     const ScopedLanguage portuguese{Language::Portuguese};
-    const auto concise_output = present_out(completed);
-    EXPECT_EQ(concise_output.find("Envio real"), std::string::npos);
-    const auto full_output = present_out(completed, true);
-    EXPECT_NE(full_output.find("(1 objeto)"), std::string::npos);
-    EXPECT_NE(full_output.find("(2 objetos)"), std::string::npos);
+    const auto output = present_out(completed);
+    EXPECT_NE(output.find("(1 objeto)"), std::string::npos);
+    EXPECT_NE(output.find("(2 objetos)"), std::string::npos);
 }
 
 TEST(CliPresenterTest, DefaultSyncProgressAggregatesApplyingAndHidesZeroStage) {

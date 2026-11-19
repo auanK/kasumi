@@ -205,7 +205,9 @@ std::expected<void, UploadBatchError> transfer_and_verify_upload_batch(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const platform::Workspace& workspace,
     std::size_t parallelism,
-    ProgressMeter* meter = nullptr);
+    ProgressMeter* meter = nullptr,
+    const std::filesystem::path* item = nullptr,
+    std::string_view progress_identifier = {});
 
 // Authenticates an existing object against the expected plaintext identity.
 std::expected<bool, Error>

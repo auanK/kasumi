@@ -777,22 +777,81 @@ TEST(ApplicationExecuteTest,
     EXPECT_FALSE(std::filesystem::exists(app / "profiles"));
 }
 
-TEST(ApplicationExecuteTest, SyncPublicBoundaryRemainsSuccessful) {
+TEST(ApplicationExecuteTest, SyncCompletesItsPlanBeforeReportingPublication) {
+    using kasumi::application::Activity;
+    using kasumi::application::ActivityProgress;
+    using kasumi::application::SyncCompleted;
+    using kasumi::application::SyncProgress;
+    using kasumi::application::SyncStage;
+
     auto workspace =
         kasumi::test::make_temp_workspace("application-sync-public");
     write_profile(workspace);
     ASSERT_TRUE(std::filesystem::create_directories(
-        kasumi::test::workspace_path(workspace, "local")));
+        kasumi::test::workspace_path(workspace, "local/nested")));
+    kasumi::test::write_text(
+        kasumi::test::workspace_path(workspace, "local/nested/child.txt"),
+        "child");
+    kasumi::test::write_text(
+        kasumi::test::workspace_path(workspace, "local/root.txt"), "root");
 
+    std::vector<SyncProgress> progress;
+    std::optional<ActivityProgress> preparation;
+    std::uint64_t upload_stage = 0;
+    std::uint64_t announced_upload_bytes = 0;
     const auto result = kasumi::application::execute(
         {Request{Operation::Sync, "demo"},
          Credentials{key()},
-         ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")}});
+         ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")},
+         [&](const auto& event) {
+             if (const auto* sync = std::get_if<SyncProgress>(&event)) {
+                 progress.push_back(*sync);
+             } else if (const auto* activity =
+                            std::get_if<ActivityProgress>(&event)) {
+                 if (activity->activity == Activity::PreparingPlan) {
+                     preparation = *activity;
+                 } else if (activity->activity == Activity::Uploading &&
+                            activity->stage_id != upload_stage) {
+                     upload_stage = activity->stage_id;
+                     EXPECT_EQ(activity->bytes, 0U);
+                     EXPECT_GT(activity->total_bytes.value_or(0), 0U);
+                     announced_upload_bytes +=
+                         activity->total_bytes.value_or(0);
+                 }
+             }
+         }});
     ASSERT_TRUE(result.has_value()) << result.error().detail;
+    const auto& completed = std::get<SyncCompleted>(result->data);
+    ASSERT_TRUE(completed.published);
+    ASSERT_GT(completed.total, 1U);
+    ASSERT_TRUE(preparation);
+    EXPECT_EQ(preparation->total_objects, completed.total);
+    EXPECT_EQ(preparation->objects, completed.total);
+    EXPECT_GT(completed.wire_upload_bytes, 0U);
+    EXPECT_EQ(announced_upload_bytes, completed.wire_upload_bytes);
+    std::uint32_t last_applied = 0;
+    const auto publish = std::ranges::find(
+        progress, SyncStage::Publishing, &SyncProgress::stage);
+    ASSERT_NE(publish, progress.end());
+    for (auto item = progress.begin(); item != publish; ++item) {
+        if (item->stage == SyncStage::Applying) {
+            EXPECT_EQ(item->total_items, completed.total);
+            EXPECT_GE(item->applied_items.value_or(0), last_applied);
+            last_applied = item->applied_items.value_or(0);
+        }
+    }
+    EXPECT_EQ(last_applied, completed.total);
+    EXPECT_NE(std::ranges::find(publish,
+                                progress.end(),
+                                SyncStage::Finalizing,
+                                &SyncProgress::stage),
+              progress.end());
 }
 
 TEST(ApplicationExecuteTest,
      GarbageCollectRunsThroughThePublicApplicationBoundary) {
+    using kasumi::application::GarbageCollectProgress;
+    using kasumi::application::GarbageCollectStage;
     auto workspace = kasumi::test::make_temp_workspace("application-gc-public");
     write_profile(workspace);
     ASSERT_TRUE(std::filesystem::create_directories(
@@ -801,16 +860,32 @@ TEST(ApplicationExecuteTest,
     seed_remote_history(workspace, orphan_content);
     ASSERT_FALSE(orphan_content.empty());
 
+    std::optional<std::size_t> listed;
+    std::size_t confirmed = 0;
     const auto result = kasumi::application::execute(
         {Request{Operation::GarbageCollect, "demo"},
          Credentials{key()},
-         ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")}});
+         ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")},
+         [&](const auto& event) {
+             if (const auto* progress =
+                     std::get_if<GarbageCollectProgress>(&event)) {
+                 if (progress->listed_objects) {
+                     listed = progress->listed_objects;
+                 }
+                 if (progress->stage == GarbageCollectStage::Applying) {
+                     confirmed = progress->removed_objects;
+                 }
+             }
+         }});
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     const auto* completed = std::get_if<GarbageCollectCompleted>(&result->data);
     ASSERT_NE(completed, nullptr);
     EXPECT_EQ(completed->candidate_objects, 1U);
     EXPECT_EQ(completed->removed_objects, 1U);
     EXPECT_FALSE(completed->analysis_only);
+    EXPECT_GT(listed.value_or(0), completed->candidate_objects);
+    EXPECT_EQ(confirmed, completed->removed_objects);
+    EXPECT_GT(completed->removal_elapsed.count(), 0);
 }
 
 // PARTIAL-R05: a candidate mutated after the single authenticated observation

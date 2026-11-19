@@ -113,6 +113,9 @@ struct InventoryAuditReport {
 struct FsckCompleted {
     std::size_t checked_objects = 0;
     std::optional<std::uint64_t> checked_plaintext_bytes = std::nullopt;
+    std::uint64_t wire_download_bytes = 0;
+    std::uint64_t physical_objects_downloaded = 0;
+    std::uint64_t files_reassembled = 0;
 };
 
 // High-level stages for garbage collection.
@@ -154,6 +157,7 @@ struct GarbageCollectCompleted {
     std::size_t candidate_objects = 0;
     bool analysis_only = false;
     std::size_t removed_objects = 0;
+    std::chrono::nanoseconds removal_elapsed{};
 };
 
 // Result of resolving unavailable pending materializations as logical

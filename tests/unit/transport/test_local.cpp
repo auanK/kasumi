@@ -3,6 +3,7 @@
 #include "kasumi/test/temp_workspace.hpp"
 #include "transport/transport.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <stdexcept>
@@ -129,6 +130,28 @@ TEST(LocalTransportTest, ReportsBytesDuringSingleAndBatchCopies) {
     ASSERT_GT(progress.size(), 2U);
     EXPECT_EQ(progress.back().total_bytes, size);
     EXPECT_EQ(progress.back().objects_completed, 1U);
+
+    progress.clear();
+    const auto staging = root / "upload";
+    ASSERT_TRUE(std::filesystem::create_directory(staging));
+    kasumi::test::write_text(staging / "large", std::string(size, 'x'));
+    kasumi::test::write_text(staging / "other", "another file");
+    ASSERT_TRUE(kasumi::transport::put_batch(*storage,
+                                             {.source_root = staging,
+                                              .identifiers = {"other", "large"},
+                                              .on_progress =
+                                                  [&](const auto& event) {
+                                                      progress.push_back(event);
+                                                  },
+                                              .progress_identifier = "large"}));
+    const auto item = std::ranges::find_if(progress, [](const auto& event) {
+        return event.item && event.item->bytes > 0;
+    });
+    ASSERT_NE(item, progress.end());
+    EXPECT_EQ(item->item->total_bytes, size);
+    EXPECT_GT(item->bytes_transferred, item->item->bytes);
+    EXPECT_FALSE(progress.front().item);
+    EXPECT_FALSE(progress.back().item);
 }
 
 TEST(LocalTransportTest, ListsOnlyDirectFilesUnderValidatedPrefix) {

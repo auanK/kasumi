@@ -166,8 +166,6 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 -> std::expected<void, Error> {
                 if (initial_pass) {
                     notify_stage(SyncStage::Observing);
-                } else {
-                    notify_stage(SyncStage::Calculating);
                 }
                 auto collected = observation::collect_reconciliation_input(
                     context.runtime,
@@ -219,6 +217,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                         confirmed_missing.begin(), confirmed_missing.end());
                 }
 
+                meter.phase(Activity::ComparingSnapshots);
                 auto reconciled = reconciliation::reconcile(*collected);
                 if (!reconciled) {
                     return fail_app(
@@ -241,7 +240,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                             {},
                             allow_unreferenced_content_reuse,
                             context.trust_existing_content,
-                            &context.initial_content_identifiers);
+                            &context.initial_content_identifiers,
+                            &meter);
                     if (!available) {
                         return fail_app(
                             context,
@@ -268,8 +268,16 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                         writer = std::move(**eager_writer);
                         (**eager_writer).storage = nullptr;
                     }
-                    if (remote_write_required &&
-                        !collected->storage.history_present) {
+                    const bool initialize_storage =
+                        remote_write_required &&
+                        !collected->storage.history_present;
+                    const bool register_writer =
+                        active_sync && !history_storage::maintenance_protocol::
+                                           registration_active(writer);
+                    if (initialize_storage || register_writer) {
+                        meter.phase(Activity::PreparingRemote);
+                    }
+                    if (initialize_storage) {
                         if (auto initialized =
                                 transport::initialize(context.storage);
                             !initialized) {
@@ -280,8 +288,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                                 SyncStage::Calculating);
                         }
                     }
-                    if (active_sync && !history_storage::maintenance_protocol::
-                                           registration_active(writer)) {
+                    if (register_writer) {
                         auto registered = history_storage::
                             maintenance_protocol::register_writer(
                                 context.storage,
@@ -344,6 +351,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             std::vector<Hash> confirmed_missing;
             std::expected<void, sync::coordinator::Error> synchronized;
             for (std::size_t attempt = 0; attempt < 3; ++attempt) {
+                meter.phase(Activity::PreparingRemote);
                 auto admission = history_storage::maintenance_protocol::
                     verify_writer_admission(writer, layout);
                 if (!admission) {
@@ -393,6 +401,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     break;
                 }
                 confirmed_missing.push_back(*missing_hash);
+                notify_stage(SyncStage::Calculating);
                 meter.phase(Activity::Reobserving,
                             std::nullopt,
                             static_cast<unsigned>(attempt + 2));
@@ -423,11 +432,6 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     fail_stage);
             }
 
-            if (summary.published) {
-                notify_stage(SyncStage::Publishing);
-            }
-
-            notify_stage(SyncStage::Finalizing);
             return finish_summary();
         } catch (const std::exception& exception) {
             return fail_app(context,
@@ -462,6 +466,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                             ErrorCode::InventoryAuditFailure,
                             "sync completed without a synchronization summary");
         }
+        meter.phase(Activity::Auditing);
         const auto audit = audit_remote_inventory(context.storage, context.key);
         if (!audit) {
             return std::unexpected(Error{

@@ -1574,6 +1574,8 @@ TEST(ApplicationInspectionTest,
     EXPECT_TRUE(listed_orphan->logical_hash.empty());
 
     bool audited_progress = false;
+    std::uint64_t audited_objects = 0;
+    std::optional<std::uint64_t> audit_total;
     const auto audit = inspect_request(
         workspace,
         InspectionRequest{.operation = InspectionOperation::RemoteContentsAudit,
@@ -1581,12 +1583,12 @@ TEST(ApplicationInspectionTest,
         Credentials{MasterKeyHex{test_key_hex()}},
         [&](const kasumi::application::ExecutionProgress& event) {
             if (const auto* activity =
-                    std::get_if<kasumi::application::ActivityProgress>(
-                        &event)) {
-                audited_progress |=
-                    activity->activity ==
-                        kasumi::application::Activity::Auditing &&
-                    activity->bytes > 0;
+                    std::get_if<kasumi::application::ActivityProgress>(&event);
+                activity &&
+                activity->activity == kasumi::application::Activity::Auditing) {
+                audited_progress |= activity->bytes > 0;
+                audited_objects = activity->objects;
+                audit_total = activity->total_objects;
             }
         });
     EXPECT_TRUE(audited_progress);
@@ -1594,6 +1596,8 @@ TEST(ApplicationInspectionTest,
         require_report<kasumi::application::RemoteContentsReport>(audit);
     ASSERT_TRUE(audited.has_value());
     EXPECT_TRUE(audited->audited);
+    EXPECT_EQ(audit_total, inventory->physical_count);
+    EXPECT_EQ(audited_objects, audited->valid_count + audited->invalid_count);
     EXPECT_EQ(audited->missing_count, 1U);
     EXPECT_EQ(audited->orphan_count, 1U);
     EXPECT_EQ(audited->valid_count, 2U);

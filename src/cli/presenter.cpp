@@ -830,6 +830,17 @@ void render_sync_summary(const application::SyncCompleted& summary) {
     std::println();
 }
 
+unsigned progress_percent(std::uint64_t done, std::uint64_t total) noexcept {
+    if (total == 0) {
+        return 0;
+    }
+    return done >= total
+               ? 100u
+               : std::min(99u,
+                          static_cast<unsigned>(static_cast<long double>(done) *
+                                                100.0L / total));
+}
+
 int render_inventory_audit(const application::InventoryAuditReport& report) {
     i18n::println(i18n::Key::SyncInventoryAuditHeader);
     std::println("{}",
@@ -899,6 +910,11 @@ void present(const application::GarbageCollectProgress& progress,
     }
 
     if (progress.stage == application::GarbageCollectStage::Analyzing &&
+        progress.listed_objects) {
+        i18n::println(i18n::Key::GcListedObjects, *progress.listed_objects);
+    }
+
+    if (progress.stage == application::GarbageCollectStage::Analyzing &&
         progress.candidate_count.has_value() &&
         state.last_candidate_count != progress.candidate_count) {
         if (*progress.candidate_count == 0) {
@@ -944,15 +960,9 @@ void present(const application::FsckProgress& progress,
         return;
     }
 
-    const auto calc_percent = [](std::uint64_t done, std::uint64_t total) {
-        return done == total ? 100u
-                             : static_cast<unsigned>(
-                                   static_cast<long double>(done) * 100.0L /
-                                   static_cast<long double>(total));
-    };
     const auto completed =
         std::min(progress.completed_objects, *progress.total_objects);
-    const auto percent = calc_percent(completed, *progress.total_objects);
+    const auto percent = progress_percent(completed, *progress.total_objects);
     if (state.last_object_percent == percent) {
         return;
     }
@@ -975,11 +985,12 @@ void present(const application::FsckProgress& progress,
             line += i18n::format(
                 i18n::Key::FsckProgressBytes, completed_size, total_size);
         } else {
-            line += i18n::format(
-                i18n::Key::FsckProgressBytesPercent,
-                completed_size,
-                total_size,
-                calc_percent(completed_bytes, *progress.total_plaintext_bytes));
+            line +=
+                i18n::format(i18n::Key::FsckProgressBytesPercent,
+                             completed_size,
+                             total_size,
+                             progress_percent(completed_bytes,
+                                              *progress.total_plaintext_bytes));
         }
     }
     std::println("{}.", line);
@@ -1005,6 +1016,53 @@ bool is_byte_transfer(application::Activity activity) noexcept {
            activity == A::Auditing;
 }
 
+i18n::Key progress_label(const application::ActivityProgress& event,
+                         bool show_batch = false) noexcept {
+    using A = application::Activity;
+    using K = i18n::Key;
+    static constexpr std::array labels{
+        K::ProgressScanning,
+        K::ProgressStaging,
+        K::ProgressUploading,
+        K::ProgressDownloading,
+        K::ProgressVerifying,
+        K::ProgressInstalling,
+        K::ProgressReobserving,
+        K::ProgressListing,
+        K::ProgressAuthenticating,
+        K::ProgressAuditing,
+        K::ProgressRemoving,
+        K::ProgressComparingSnapshots,
+        K::ProgressCheckingRemoteContent,
+        K::ProgressPreparingPlan,
+        K::ProgressPreparingRemote,
+    };
+    if (show_batch && event.total_objects && event.item_path.empty()) {
+        switch (event.activity) {
+            case A::Uploading:
+                return K::ProgressUploadingBatch;
+            case A::Downloading:
+                return K::ProgressDownloadingBatch;
+            case A::Verifying:
+                return K::ProgressVerifyingBatch;
+            default:
+                break;
+        }
+    }
+    return labels[static_cast<std::size_t>(event.activity)];
+}
+
+std::string progress_count(application::Activity activity,
+                           std::uint64_t done,
+                           std::uint64_t total) {
+    using K = i18n::Key;
+    const auto key = activity == application::Activity::PreparingPlan
+                         ? K::ProgressFractionChanges
+                         : (total == 1 ? K::ProgressFractionObject
+                                       : K::ProgressFractionObjects);
+    return i18n::format(key, done, total);
+}
+
 std::string format_bytes_rate(double bytes_per_second) {
     return i18n::format(i18n::Key::ProgressBytesRate,
                         format_size(static_cast<std::uint64_t>(
@@ -1023,6 +1081,9 @@ void ProgressDisplay::clear_line() noexcept {
     }
     if (terminal_.ansi) {
         std::fputs("\r\x1b[2K", stdout);
+        if (rendered_detail_) {
+            std::fputs("\x1b[1A\r\x1b[2K", stdout);
+        }
     } else {
         std::fputc('\r', stdout);
         const auto columns = platform::terminal_width(terminal_);
@@ -1034,6 +1095,48 @@ void ProgressDisplay::clear_line() noexcept {
         std::fputc('\r', stdout);
     }
     rendered_width_ = 0;
+    rendered_detail_ = false;
+}
+
+void ProgressDisplay::render_line(std::string_view line,
+                                  std::string_view detail) {
+    const auto width = platform::terminal_width(terminal_) - 1U;
+    clear_line();
+    if (!detail.empty() && terminal_.ansi && width > 0) {
+        std::print("{}\n{}",
+                   platform::fit_terminal_text(line, width),
+                   platform::fit_terminal_text(detail, width));
+        rendered_detail_ = true;
+    } else if (!detail.empty()) {
+        const auto combined = std::format("{} | {}", line, detail);
+        std::print("{}", platform::fit_terminal_text(combined, width));
+    } else {
+        std::print("{}", platform::fit_terminal_text(line, width));
+    }
+    rendered_width_ = width;
+    rendered_last_ = true;
+    std::fflush(stdout);
+}
+
+void ProgressDisplay::heartbeat() noexcept try {
+    const auto now = std::chrono::steady_clock::now();
+    if (terminal_.interactive && last_event_ &&
+        now - last_render_ >= std::chrono::seconds(1)) {
+        render_event(*last_event_, last_extra_);
+    }
+} catch (...) {
+}
+
+std::string ProgressDisplay::applying_line() const {
+    const auto applied = apply_progress_->applied_items.value_or(0);
+    const auto total = apply_progress_->total_items;
+    return (terminal_.interactive
+                ? std::string{"      "}
+                : std::string{i18n::tr(i18n::Key::SyncStageApplying)} + " | ") +
+           i18n::format(i18n::Key::SyncApplyingProgress,
+                        applied,
+                        total,
+                        progress_percent(applied, total));
 }
 
 void ProgressDisplay::flush_transfer(TransferMetricsState& state) noexcept try {
@@ -1047,6 +1150,7 @@ void ProgressDisplay::flush_transfer(TransferMetricsState& state) noexcept try {
     if (rendered_width_ != 0) {
         std::fputc('\n', stdout);
         rendered_width_ = 0;
+        rendered_detail_ = false;
     }
     const auto elapsed = std::chrono::duration<double>(
                              std::chrono::steady_clock::now() - state.started)
@@ -1129,6 +1233,7 @@ void ProgressDisplay::finish(bool keep) noexcept try {
         if (keep) {
             std::fputc('\n', stdout);
             rendered_width_ = 0;
+            rendered_detail_ = false;
         } else {
             clear_line();
         }
@@ -1151,22 +1256,11 @@ void ProgressDisplay::render_event(const application::ActivityProgress& event,
                                    bool force_complete) {
     using A = application::Activity;
     using K = i18n::Key;
-    static constexpr std::array labels{
-        K::ProgressScanning,
-        K::ProgressStaging,
-        K::ProgressUploading,
-        K::ProgressDownloading,
-        K::ProgressVerifying,
-        K::ProgressInstalling,
-        K::ProgressReobserving,
-        K::ProgressListing,
-        K::ProgressAuthenticating,
-        K::ProgressAuditing,
-        K::ProgressRemoving,
-    };
-
-    const auto label = labels[static_cast<std::size_t>(event.activity)];
-    std::string line = indented_ ? "      " : "";
+    const bool show_plan = apply_progress_ && !force_complete;
+    const bool show_file = show_plan && !event.item_path.empty();
+    const auto label = progress_label(event, show_plan);
+    std::string line =
+        indented_ && (!show_plan || terminal_.ansi) ? "      " : "";
     line += event.activity == A::Reobserving
                 ? i18n::format(label, event.attempt)
                 : std::string{i18n::tr(label)};
@@ -1175,6 +1269,11 @@ void ProgressDisplay::render_event(const application::ActivityProgress& event,
         line += " | ";
         line += text;
     };
+    const auto bytes =
+        show_file ? event.item_bytes.value_or(event.bytes) : event.bytes;
+    const auto total_bytes = show_file && event.item_bytes
+                                 ? event.item_total_bytes
+                                 : event.total_bytes;
     const bool scanning =
         event.activity == A::Scanning || event.activity == A::Reobserving;
     if (scanning) {
@@ -1187,15 +1286,13 @@ void ProgressDisplay::render_event(const application::ActivityProgress& event,
         if (event.observing_remote) {
             add(i18n::tr(K::ProgressRemotePending));
         }
-    } else if (event.objects != 0 || event.total_objects) {
-        add(event.total_objects ? i18n::format(*event.total_objects == 1
-                                                   ? K::ProgressFractionObject
-                                                   : K::ProgressFractionObjects,
-                                               event.objects,
-                                               *event.total_objects)
-                                : format_plural(event.objects,
-                                                K::ProgressObject,
-                                                K::ProgressObjects));
+    } else if ((event.objects != 0 || event.total_objects) &&
+               (!show_plan || (!show_file && (full_ || !total_bytes)))) {
+        add(event.total_objects
+                ? progress_count(
+                      event.activity, event.objects, *event.total_objects)
+                : format_plural(
+                      event.objects, K::ProgressObject, K::ProgressObjects));
     }
     if (event.staged_bytes) {
         if (event.bytes != 0 || *event.staged_bytes != 0) {
@@ -1203,26 +1300,34 @@ void ProgressDisplay::render_event(const application::ActivityProgress& event,
                              format_size(event.bytes),
                              format_size(*event.staged_bytes)));
         }
-    } else if (!scanning && (event.bytes != 0 || event.total_bytes)) {
-        add(event.total_bytes ? i18n::format(K::ProgressFraction,
-                                             format_size(event.bytes),
-                                             format_size(*event.total_bytes))
-                              : format_size(event.bytes));
+    } else if (!scanning && (bytes != 0 || total_bytes)) {
+        add(total_bytes ? i18n::format(K::ProgressFraction,
+                                       format_size(bytes),
+                                       format_size(*total_bytes))
+                        : format_size(bytes));
     }
     const bool object_rate = event.activity == A::Removing;
-    const auto value = object_rate ? event.objects : event.bytes;
-    const auto total = object_rate ? event.total_objects : event.total_bytes;
-    if (total && *total > 0 && !scanning) {
-        const auto percent = std::min(100.0,
-                                      100.0 * static_cast<double>(value) /
-                                          static_cast<double>(*total));
-        add(i18n::format(K::ProgressPercent, static_cast<unsigned>(percent)));
+    const auto value = object_rate ? event.objects : bytes;
+    const auto total = object_rate ? event.total_objects : total_bytes;
+    if (!scanning) {
+        if (!show_file && event.total_objects && *event.total_objects > 0 &&
+            (event.activity == A::Auditing || !total_bytes)) {
+            add(i18n::format(
+                K::ProgressPercent,
+                progress_percent(event.objects, *event.total_objects)));
+        } else if (total && *total > 0) {
+            add(i18n::format(K::ProgressPercent,
+                             progress_percent(value, *total)));
+        }
+    }
+    if (show_file) {
+        add(remote_text(platform::path::to_utf8(event.item_path)));
     }
     if (full_ && event.bytes_reused != 0) {
         add(i18n::format(K::ProgressReused, format_size(event.bytes_reused)));
     }
     const auto now = std::chrono::steady_clock::now();
-    double display_rate = rate_;
+    double display_rate = show_file && event.item_bytes ? 0.0 : rate_;
     if (force_complete && is_byte_transfer(event.activity) && event.bytes > 0) {
         const auto& state =
             event.activity == A::Uploading ? upload_state_ : download_state_;
@@ -1232,67 +1337,83 @@ void ProgressDisplay::render_event(const application::ActivityProgress& event,
             display_rate = static_cast<double>(event.bytes) / elapsed;
         }
     }
+    bool has_eta = false;
     if (display_rate > 0 && display_rate < 1e18 &&
         (force_complete || now - started_ >= std::chrono::milliseconds(500))) {
         add(object_rate ? i18n::format(K::ProgressObjectsRate,
                                        std::format("{:.1f}", display_rate))
                         : format_bytes_rate(display_rate));
-        if (!force_complete && total && *total > value && !scanning) {
+        if (!force_complete && total && *total > value && !scanning &&
+            event.activity != A::Auditing) {
             const auto eta =
                 std::ceil(static_cast<double>(*total - value) / display_rate);
             if (eta <= 86400.0 * 365.0) {
+                has_eta = true;
                 add(i18n::format(K::ProgressEta,
                                  format_eta(static_cast<std::uint64_t>(eta))));
             }
+        }
+    }
+    if (!force_complete && !has_eta) {
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::seconds>(now - started_)
+                .count();
+        if (elapsed > 0) {
+            add(i18n::format(K::ProgressElapsed,
+                             format_eta(static_cast<std::uint64_t>(elapsed))));
         }
     }
     if (!extra.empty()) {
         add(extra);
     }
 
-    const auto width = platform::terminal_width(terminal_) - 1U;
-    clear_line();
-    std::print("{}", platform::fit_terminal_text(line, width));
-    rendered_width_ = width;
-    rendered_last_ = true;
-    std::fflush(stdout);
+    if (show_plan) {
+        render_line(applying_line(), line);
+    } else {
+        render_line(line);
+    }
 }
 
 void ProgressDisplay::show(const application::ActivityProgress& raw_event,
                            std::string_view extra) {
     using A = application::Activity;
     using K = i18n::Key;
-    static constexpr std::array labels{
-        K::ProgressScanning,
-        K::ProgressStaging,
-        K::ProgressUploading,
-        K::ProgressDownloading,
-        K::ProgressVerifying,
-        K::ProgressInstalling,
-        K::ProgressReobserving,
-        K::ProgressListing,
-        K::ProgressAuthenticating,
-        K::ProgressAuditing,
-        K::ProgressRemoving,
-    };
 
     if (!terminal_.interactive) {
+        const bool activity_changed = activity_ != raw_event.activity;
         const bool transition =
-            activity_ != raw_event.activity || stage_id_ != raw_event.stage_id;
-        if (!transition) {
-            return;
+            activity_changed || stage_id_ != raw_event.stage_id;
+        if (transition) {
+            plain_milestone_.reset();
         }
         activity_ = raw_event.activity;
         stage_id_ = raw_event.stage_id;
-        if (raw_event.activity != A::Scanning &&
-            raw_event.activity != A::Removing) {
-            const auto label =
-                labels[static_cast<std::size_t>(raw_event.activity)];
-            const std::string line =
-                raw_event.activity == A::Reobserving
-                    ? i18n::format(label, raw_event.attempt)
-                    : std::string{i18n::tr(label)};
-            std::println("{}", line);
+        if (apply_progress_ && !full_) {
+            return;
+        }
+        const auto label = progress_label(raw_event);
+        if (raw_event.total_objects && *raw_event.total_objects > 0 &&
+            raw_event.activity != A::Scanning &&
+            raw_event.activity != A::Reobserving) {
+            const auto total = *raw_event.total_objects;
+            const auto done = std::min(raw_event.objects, total);
+            const auto percent = progress_percent(done, total);
+            if (plain_milestone_ != percent / 10) {
+                plain_milestone_ = percent / 10;
+                std::println("{} | {} | {}",
+                             i18n::tr(label),
+                             progress_count(raw_event.activity, done, total),
+                             i18n::format(K::ProgressPercent, percent));
+                std::fflush(stdout);
+            }
+        } else if ((activity_changed ||
+                    (transition && raw_event.activity == A::Reobserving)) &&
+                   raw_event.activity != A::Scanning &&
+                   raw_event.activity != A::Removing) {
+            std::println("{}",
+                         raw_event.activity == A::Reobserving
+                             ? i18n::format(label, raw_event.attempt)
+                             : std::string{i18n::tr(label)});
             std::fflush(stdout);
         }
         return;
@@ -1329,6 +1450,9 @@ void ProgressDisplay::show(const application::ActivityProgress& raw_event,
                 state.last_stage_id = raw_event.stage_id;
                 state.last_sample_bytes = state.base_bytes;
                 state.last_sample = now;
+                if (apply_progress_) {
+                    state.rate = 0;
+                }
             }
             state.last_objects = raw_event.objects;
             state.last_total_objects =
@@ -1399,14 +1523,22 @@ void ProgressDisplay::show(const application::ActivityProgress& raw_event,
         flush_transfer(download_state_);
     }
 
+    // Only the retained summary uses totals accumulated across transfer
+    // batches.
+    if (apply_progress_) {
+        event = raw_event;
+    }
     const bool transition =
         activity_ != event.activity || stage_id_ != event.stage_id;
     const bool object_rate = event.activity == A::Removing;
     const auto value = object_rate ? event.objects : event.bytes;
     const auto total = object_rate ? event.total_objects : event.total_bytes;
-    const bool complete = total && *total > 0 && value >= *total &&
-                          (!event.total_objects || *event.total_objects == 0 ||
-                           event.objects >= *event.total_objects);
+    const bool has_object_total =
+        event.total_objects && *event.total_objects > 0;
+    const bool complete =
+        (has_object_total || (total && *total > 0)) &&
+        (!has_object_total || event.objects >= *event.total_objects) &&
+        (!total || value >= *total);
 
     if (transition) {
         if (full_ && activity_) {
@@ -1470,11 +1602,42 @@ void ProgressDisplay::update(const application::ExecutionProgress& progress,
             if constexpr (std::is_same_v<T, application::ActivityProgress>) {
                 show(event);
             } else if constexpr (std::is_same_v<T, application::SyncProgress>) {
+                if (event.stage == application::SyncStage::Applying &&
+                    event.applied_items && apply_progress_ &&
+                    event.total_items == apply_progress_->total_items) {
+                    const auto previous = progress_percent(
+                        apply_progress_->applied_items.value_or(0),
+                        event.total_items);
+                    apply_progress_->applied_items = event.applied_items;
+                    if (terminal_.interactive) {
+                        if (last_event_) {
+                            render_event(*last_event_, last_extra_);
+                        } else {
+                            render_line(applying_line());
+                        }
+                    } else if (previous / 10 !=
+                               progress_percent(*event.applied_items,
+                                                event.total_items) /
+                                   10) {
+                        std::println("{}", applying_line());
+                    }
+                    return;
+                }
                 const bool was_applying = in_applying_;
                 const bool keep_stage =
                     full_ || (was_applying &&
                               event.stage != application::SyncStage::Applying);
+                if (apply_progress_) {
+                    clear_line();
+                }
+                if (terminal_.interactive && apply_progress_ &&
+                    apply_progress_->applied_items ==
+                        apply_progress_->total_items) {
+                    std::println("{}", applying_line());
+                }
                 finish(keep_stage);
+                started_ = std::chrono::steady_clock::now();
+                apply_progress_.reset();
                 if (was_applying &&
                     event.stage != application::SyncStage::Applying) {
                     upload_state_ = {};
@@ -1484,7 +1647,17 @@ void ProgressDisplay::update(const application::ExecutionProgress& progress,
                 indented_ = true;
                 activity_.reset();
                 stage_id_ = 0;
-                present(event, operation);
+                if (in_applying_ && event.total_items > 0) {
+                    apply_progress_ = event;
+                    if (terminal_.interactive) {
+                        present(event, operation);
+                        render_line(applying_line());
+                    } else {
+                        std::println("{}", applying_line());
+                    }
+                } else {
+                    present(event, operation);
+                }
             } else if constexpr (std::is_same_v<T, application::FsckProgress>) {
                 if (fsck_.last_stage != event.stage) {
                     const bool keep_fsck =
@@ -1492,7 +1665,8 @@ void ProgressDisplay::update(const application::ExecutionProgress& progress,
                             application::FsckStage::AuditingContent ||
                         full_;
                     finish(keep_fsck);
-                    indented_ = false;
+                    started_ = std::chrono::steady_clock::now();
+                    indented_ = true;
                     activity_.reset();
                     stage_id_ = 0;
                     if (terminal_.interactive) {
@@ -1501,33 +1675,47 @@ void ProgressDisplay::update(const application::ExecutionProgress& progress,
                         present(stage, fsck_);
                     }
                 }
-                if (!terminal_.interactive) {
+                if (!terminal_.interactive || event.total_objects == 0) {
                     present(event, fsck_);
                 } else if (event.stage ==
                                application::FsckStage::AuditingContent &&
                            event.total_objects) {
+                    using K = i18n::Key;
+                    auto detail =
+                        i18n::format(K::ProgressFsckCounts,
+                                     event.physical_objects_downloaded,
+                                     event.files_reassembled);
+                    if (event.completed_plaintext_bytes &&
+                        event.total_plaintext_bytes) {
+                        detail = i18n::format(
+                                     K::ProgressVerifiedBytes,
+                                     i18n::format(
+                                         K::ProgressFraction,
+                                         format_size(
+                                             *event.completed_plaintext_bytes),
+                                         format_size(
+                                             *event.total_plaintext_bytes))) +
+                                 " | " + detail;
+                    }
                     show({.activity = A::Auditing,
                           .bytes = event.wire_download_bytes,
-                          .total_bytes = event.total_wire_bytes},
-                         i18n::format(i18n::Key::ProgressFsckCounts,
-                                      event.completed_objects,
-                                      *event.total_objects,
-                                      event.physical_objects_downloaded,
-                                      event.files_reassembled));
+                          .total_bytes = event.total_wire_bytes,
+                          .objects = event.completed_objects,
+                          .total_objects = *event.total_objects},
+                         detail);
                 }
             } else {
                 if (gc_.last_stage != event.stage) {
-                    finish(full_ &&
-                           gc_.last_stage ==
-                               application::GarbageCollectStage::Applying);
-                    indented_ = false;
+                    finish(gc_.last_stage ==
+                           application::GarbageCollectStage::Applying);
+                    started_ = std::chrono::steady_clock::now();
+                    indented_ = true;
                     activity_.reset();
                     stage_id_ = 0;
                 }
                 present(event, gc_);
-                if (terminal_.interactive &&
-                    event.stage == application::GarbageCollectStage::Applying &&
-                    event.candidate_count) {
+                if (event.stage == application::GarbageCollectStage::Applying &&
+                    event.candidate_count && *event.candidate_count > 0) {
                     show({.activity = A::Removing,
                           .objects = event.removed_objects,
                           .total_objects = *event.candidate_count});
@@ -1555,9 +1743,9 @@ int present(const application::Response& response, bool full) {
                 } else {
                     print_ok_line(i18n::tr(i18n::Key::SyncCompleted));
                 }
-                if (full && (data.physical_objects_uploaded ||
-                             data.physical_objects_downloaded ||
-                             data.local_delta_reused_bytes)) {
+                if (data.physical_objects_uploaded ||
+                    data.physical_objects_downloaded ||
+                    data.local_delta_reused_bytes) {
                     i18n::println(
                         i18n::Key::ProgressWireSummary,
                         format_size(data.wire_upload_bytes),
@@ -1607,6 +1795,17 @@ int present(const application::Response& response, bool full) {
                         i18n::format(
                             i18n::Key::FsckSummaryBytes,
                             format_size(*data.checked_plaintext_bytes)));
+                }
+                if (data.wire_download_bytes ||
+                    data.physical_objects_downloaded ||
+                    data.files_reassembled) {
+                    i18n::println(
+                        i18n::Key::FsckWireSummary,
+                        format_size(data.wire_download_bytes),
+                        format_plural(data.physical_objects_downloaded,
+                                      i18n::Key::ProgressObject,
+                                      i18n::Key::ProgressObjects),
+                        data.files_reassembled);
                 }
                 return 0;
             } else if constexpr (
@@ -1659,9 +1858,23 @@ int present(const application::Response& response, bool full) {
                     return 0;
                 }
                 print_ok_line(i18n::tr(i18n::Key::GcCompleted));
-                std::println(
-                    "     {}",
-                    i18n::format(i18n::Key::GcSummary, data.candidate_objects));
+                auto metrics =
+                    i18n::format(i18n::Key::GcSummary, data.candidate_objects) +
+                    " " +
+                    i18n::format(i18n::Key::GcConfirmedRemovals,
+                                 data.removed_objects);
+                const auto seconds =
+                    std::chrono::duration<double>(data.removal_elapsed).count();
+                if (data.removed_objects > 0 && seconds > 0.0) {
+                    metrics +=
+                        " | " +
+                        i18n::format(i18n::Key::ProgressObjectsRate,
+                                     std::format("{:.1f}",
+                                                 static_cast<double>(
+                                                     data.removed_objects) /
+                                                     seconds));
+                }
+                std::println("     {}", metrics);
                 return 0;
             } else if constexpr (std::is_same_v<
                                      T,

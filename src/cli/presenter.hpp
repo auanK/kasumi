@@ -64,10 +64,13 @@ public:
            application::Operation operation = application::Operation::Sync);
     void show(const application::ActivityProgress& progress,
               std::string_view extra = {});
+    void heartbeat() noexcept;
     void finish(bool keep = false) noexcept;
 
 private:
     void clear_line() noexcept;
+    void render_line(std::string_view line, std::string_view detail = {});
+    std::string applying_line() const;
     void render_event(const application::ActivityProgress& event,
                       std::string_view extra,
                       bool force_complete = false);
@@ -77,6 +80,8 @@ private:
     bool full_ = false;
     bool indented_ = false;
     bool in_applying_ = false;
+    std::optional<application::SyncProgress> apply_progress_;
+    std::optional<unsigned> plain_milestone_;
     FsckProgressDisplayState fsck_;
     GarbageCollectProgressDisplayState gc_;
     TransferMetricsState upload_state_;
@@ -84,6 +89,7 @@ private:
     std::optional<application::Activity> activity_;
     std::uint64_t stage_id_ = 0;
     std::size_t rendered_width_ = 0;
+    bool rendered_detail_ = false;
     std::uint64_t last_value_ = 0;
     std::uint64_t last_objects_ = 0;
     double rate_ = 0;
@@ -91,7 +97,8 @@ private:
     std::optional<application::ActivityProgress> last_event_;
     std::string last_extra_;
     bool rendered_last_ = true;
-    std::chrono::steady_clock::time_point started_{};
+    std::chrono::steady_clock::time_point started_ =
+        std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point last_render_{};
 };
 

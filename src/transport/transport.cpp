@@ -527,7 +527,8 @@ Result run_transfer_batch(Transport& transport,
                           BatchFn batch_fn,
                           const std::filesystem::path& local_root,
                           TransferCounters* counters,
-                          SingleFn single_fn) {
+                          SingleFn single_fn,
+                          std::string_view progress_identifier = {}) {
     if (auto v = validate_batch(batch); !v) {
         return v;
     }
@@ -586,6 +587,13 @@ Result run_transfer_batch(Transport& transport,
                 combined.total_bytes = std::nullopt;
                 combined.objects_completed += objects;
                 combined.total_objects = batch.identifiers.size();
+                combined.item.reset();
+                if (identifier == progress_identifier && progress.total_bytes &&
+                    *progress.total_bytes > 0 &&
+                    progress.bytes_transferred <= *progress.total_bytes) {
+                    combined.item = TransferItemProgress{
+                        progress.bytes_transferred, *progress.total_bytes};
+                }
                 report(combined);
             });
         if (!result) {
@@ -677,7 +685,8 @@ Result put_batch(Transport& transport, const PutBatch& batch) {
                     return call_required(
                         transport, transport.storage.put, source, id);
                 });
-        });
+        },
+        batch.progress_identifier);
 }
 
 Result get_with_progress(Transport& transport,

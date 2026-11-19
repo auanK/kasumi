@@ -248,9 +248,12 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
     return batch;
 }
 
-MutationResult transfer_upload_batch(const StagedUploadBatch& batch,
-                                     transport::Transport& storage,
-                                     std::size_t max_parallel_transfers) {
+MutationResult
+transfer_upload_batch(const StagedUploadBatch& batch,
+                      transport::Transport& storage,
+                      std::size_t max_parallel_transfers,
+                      std::string_view progress_identifier,
+                      const transport::TransportProgressCallback& progress) {
     if (batch.objects.empty()) {
         return {};
     }
@@ -258,6 +261,8 @@ MutationResult transfer_upload_batch(const StagedUploadBatch& batch,
     transport::PutBatch request;
     request.source_root = batch.root;
     request.max_parallel_transfers = max_parallel_transfers;
+    request.on_progress = progress;
+    request.progress_identifier = progress_identifier;
     for (const auto& obj : batch.objects) {
         request.identifiers.push_back(obj.identifier);
     }

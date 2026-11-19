@@ -1405,11 +1405,24 @@ std::expected<void, UploadBatchError> transfer_and_verify_upload_batch(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const platform::Workspace& workspace,
     std::size_t parallelism,
-    ProgressMeter* meter) {
+    ProgressMeter* meter,
+    const std::filesystem::path* item,
+    std::string_view progress_identifier) {
+    const auto* single = progress_identifier.empty() ? item : nullptr;
     if (meter)
-        meter->phase(Activity::Uploading, batch.objects.size());
-    auto transferred =
-        mutation::transfer_upload_batch(batch, storage, parallelism);
+        meter->phase(Activity::Uploading, batch.objects.size(), 0, single);
+    transport::TransportProgressCallback progress;
+    if (meter && item && !progress_identifier.empty() && meter->observing()) {
+        progress = [meter, item](const auto& event) {
+            meter->transfer_item(*item, event.item);
+        };
+    }
+    auto transferred = mutation::transfer_upload_batch(
+        batch,
+        storage,
+        parallelism,
+        progress ? progress_identifier : std::string_view{},
+        progress);
     const bool transfer_unknown =
         !transferred && transferred.error().code ==
                             mutation::MutationErrorCode::RemoteResultUnknown;
@@ -1420,7 +1433,7 @@ std::expected<void, UploadBatchError> transfer_and_verify_upload_batch(
         });
     }
     if (meter)
-        meter->phase(Activity::Verifying, batch.objects.size());
+        meter->phase(Activity::Verifying, batch.objects.size(), 0, single);
     auto verified = mutation::verify_upload_batch(
         batch, storage, key, workspace, parallelism, meter);
     if (!verified) {
@@ -1624,7 +1637,8 @@ run_content_window(
     std::span<const std::optional<mutation::DestinationPrecondition>>
         destinations,
     std::span<const mutation::DownloadCacheMode> cache_modes,
-    journal::Session* session = nullptr) {
+    journal::Session* session,
+    ProgressMeter* meter) {
     const auto worker_count = std::min(parallelism, indices.size());
     ContentWindowState state;
     state.tasks.resize(worker_count);
@@ -1692,7 +1706,7 @@ run_content_window(
         }
         outstanding -= batch.size();
 
-        bool any_applied = false;
+        std::size_t applied = 0;
         for (auto& [slot, result] : batch) {
             static_cast<void>(slot);
             if (result.error) {
@@ -1702,14 +1716,16 @@ run_content_window(
             } else {
                 record.progress[result.index].state =
                     transaction::OperationState::Applied;
-                any_applied = true;
+                ++applied;
             }
         }
-        if (any_applied) {
+        if (applied != 0) {
             auto saved = detail::save_record(
                 paths, record, key, journal::SaveMode::Advance, session);
             if (!saved && !checkpoint_failure) {
                 checkpoint_failure = saved.error();
+            } else if (saved && !checkpoint_failure && meter) {
+                meter->applied(applied);
             }
         }
 
@@ -2573,8 +2589,14 @@ std::expected<void, detail::UploadBatchError> execute_chunked_upload_batch(
             });
         }
 
+        const auto* item =
+            uploads.size() == 1 &&
+                    uploads.front()->operation_indices.size() == 1 &&
+                    window.size() == to_upload.size()
+                ? &record.plan.operations[first_op].path
+                : nullptr;
         auto transferred = detail::transfer_and_verify_upload_batch(
-            batch, storage, key, workspace, parallelism, meter);
+            batch, storage, key, workspace, parallelism, meter, item);
         if (!transferred) {
             if (!transferred.error().transport_after_unknown_transfer) {
                 return transferred;
@@ -3096,7 +3118,14 @@ detail::prefetch_manifest_downloads(
                 }
                 if (!fetch.empty()) {
                     if (meter)
-                        meter->phase(Activity::Downloading, fetch.size());
+                        meter->phase(
+                            Activity::Downloading,
+                            fetch.size(),
+                            0,
+                            window.size() == job.entry->chunks.size()
+                                ? &record.plan.operations[job.first_op_index]
+                                       .path
+                                : nullptr);
                     batch_fetch(chunk_dl_dir, ids, parallelism);
                     if (platform::cancellation::requested()) {
                         return fail(
@@ -3889,6 +3918,27 @@ execute(const runtime::RuntimeData& runtime_data,
         apply_order.push_back(index);
     }
 
+    std::vector<bool> awaiting_apply_progress;
+    if (meter) {
+        awaiting_apply_progress.resize(record->plan.operations.size());
+        for (const auto index : apply_order) {
+            awaiting_apply_progress[index] = true;
+        }
+        meter->applied(record->plan.operations.size() - apply_order.size());
+    }
+    const auto report_applied = [&](std::span<const std::size_t> indices) {
+        if (meter) {
+            std::size_t completed = 0;
+            for (const auto index : indices) {
+                if (awaiting_apply_progress[index]) {
+                    awaiting_apply_progress[index] = false;
+                    ++completed;
+                }
+            }
+            meter->applied(completed);
+        }
+    };
+
     const auto mark_applied =
         [&](std::size_t index) -> std::expected<void, Error> {
         record->progress[index].state = transaction::OperationState::Applied;
@@ -4028,28 +4078,18 @@ execute(const runtime::RuntimeData& runtime_data,
                              preverified_downloads.error());
     }
     std::unordered_set<std::string> populated_downloads;
-    std::optional<Activity> local_activity;
     for (std::size_t position = 0; position < apply_order.size();) {
         const auto first = apply_order[position];
         const auto& first_operation = record->plan.operations[first];
         const bool is_content_install =
             first_operation.action == Action::Download ||
             first_operation.action == Action::CopyLocal;
-        if (meter && is_content_install) {
-            const bool loose_download =
-                first_operation.action == Action::Download &&
-                !preverified_downloads->contains(first_operation.hash);
-            const auto phase =
-                loose_download ? Activity::Downloading : Activity::Installing;
-            if (local_activity != phase) {
-                local_activity = phase;
-                meter->phase(phase);
-            }
-        }
         if (auto prepared = prepare_destination(first); !prepared)
             return std::unexpected(prepared.error());
         if (first_operation.action == Action::Download &&
             preverified_downloads->contains(first_operation.hash)) {
+            if (meter)
+                meter->phase(Activity::Installing);
             std::size_t end = position;
             while (end < apply_order.size()) {
                 const auto op_idx = apply_order[end];
@@ -4082,6 +4122,8 @@ execute(const runtime::RuntimeData& runtime_data,
             if (auto saved_batch = save_active_record(); !saved_batch) {
                 return std::unexpected(saved_batch.error());
             }
+            report_applied(
+                std::span{apply_order}.subspan(position, end - position));
             position = end;
             continue;
         }
@@ -4118,6 +4160,8 @@ execute(const runtime::RuntimeData& runtime_data,
                     if (auto prepared = prepare_destination(apply_order[i]);
                         !prepared)
                         return std::unexpected(prepared.error());
+                if (meter)
+                    meter->phase(Activity::Downloading, end - position);
                 auto failure = run_content_window(
                     std::span<const std::size_t>{apply_order}.subspan(
                         position, end - position),
@@ -4130,7 +4174,8 @@ execute(const runtime::RuntimeData& runtime_data,
                     *workspace,
                     destinations,
                     window_modes,
-                    &journal_session);
+                    &journal_session,
+                    meter);
                 if (!failure) {
                     return std::unexpected(failure.error());
                 }
@@ -4160,6 +4205,16 @@ execute(const runtime::RuntimeData& runtime_data,
                             : mutation::DownloadCacheMode::Reuse;
                 }
             }
+            if (meter && is_content_install) {
+                const bool needs_download =
+                    operation.action == Action::Download &&
+                    download_cache != mutation::DownloadCacheMode::Reuse;
+                meter->phase(needs_download ? Activity::Downloading
+                                            : Activity::Installing,
+                             1,
+                             0,
+                             &operation.path);
+            }
             auto applied = mutation::apply_operation(
                 record->plan.operations[first],
                 first,
@@ -4179,11 +4234,11 @@ execute(const runtime::RuntimeData& runtime_data,
             }
             if (meter && is_content_install)
                 ProgressMeter::add(meter->work);
+            report_applied({&first, 1});
             ++position;
             continue;
         }
 
-        local_activity.reset();
         std::size_t end = position;
         std::vector<std::size_t> pending_uploads;
         while (end < apply_order.size() &&
@@ -4259,6 +4314,9 @@ execute(const runtime::RuntimeData& runtime_data,
             if (auto saved_pack = save_active_record(); !saved_pack) {
                 return std::unexpected(saved_pack.error());
             }
+            for (const auto* pack : window) {
+                report_applied(pack->operation_indices);
+            }
             remaining = remaining.subspan(window.size());
         }
 
@@ -4292,6 +4350,9 @@ execute(const runtime::RuntimeData& runtime_data,
             if (auto saved_chunk = save_active_record(); !saved_chunk) {
                 return std::unexpected(saved_chunk.error());
             }
+            for (const auto* upload : planned_chunks_pending) {
+                report_applied(upload->operation_indices);
+            }
         }
 
         for (std::size_t chunk_start = 0;
@@ -4309,13 +4370,25 @@ execute(const runtime::RuntimeData& runtime_data,
 
             detail::ScopedUploadBatchCleanup batch_cleanup{*staged_batch};
 
+            const auto& first_object = staged_batch->objects.front();
+            const auto* item =
+                first_object.operation_indices.size() == 1
+                    ? &record->plan
+                           .operations[first_object.operation_indices.front()]
+                           .path
+                    : nullptr;
+            const std::string_view progress_id = item && chunk.size() > 1
+                                                     ? first_object.identifier
+                                                     : std::string_view{};
             if (auto batch_ok =
                     detail::transfer_and_verify_upload_batch(*staged_batch,
                                                              storage,
                                                              key,
                                                              *workspace,
                                                              parallelism,
-                                                             meter);
+                                                             meter,
+                                                             item,
+                                                             progress_id);
                 !batch_ok) {
                 if (batch_ok.error().transport_after_unknown_transfer) {
                     return std::unexpected(
@@ -4331,6 +4404,7 @@ execute(const runtime::RuntimeData& runtime_data,
             if (!checkpointed) {
                 return std::unexpected(checkpointed.error());
             }
+            report_applied(chunk);
 
             batch_cleanup.dismissed = true;
             auto cleaned = mutation::cleanup_upload_batch(*staged_batch);
@@ -4340,6 +4414,8 @@ execute(const runtime::RuntimeData& runtime_data,
             }
         }
 
+        report_applied(
+            std::span{apply_order}.subspan(position, end - position));
         position = end;
     }
     if (record->phase < transaction::Phase::LocalChangesApplied) {
@@ -4351,6 +4427,9 @@ execute(const runtime::RuntimeData& runtime_data,
 
     mutation_fault_test::hit("after-MoveLocal-consolidated-checkpoint");
 
+    if (meter) {
+        meter->phase(Activity::Verifying);
+    }
     const auto& expected_tree =
         record->publication_required
             ? reconciliation_result.candidate_shared_tree
@@ -4464,6 +4543,9 @@ execute(const runtime::RuntimeData& runtime_data,
                 }
             }
         }
+        if (meter) {
+            meter->notify(SyncProgress{.stage = SyncStage::Finalizing});
+        }
         if (auto saved_state = detail::save_state_checked(
                 runtime_data.database_path,
                 state_storage::StoredState{
@@ -4504,6 +4586,9 @@ execute(const runtime::RuntimeData& runtime_data,
         return fail_terminal(detail::make_error(
             ErrorCode::PublicationFailure,
             "speculative commit publication was not initialized"));
+    }
+    if (meter) {
+        meter->notify(SyncProgress{.stage = SyncStage::Publishing});
     }
     record->commit_id = prepared_commit->commit_id;
     record->parent_ids = prepared_commit->commit.parents;
@@ -4686,6 +4771,9 @@ execute(const runtime::RuntimeData& runtime_data,
         observed_input.storage, verified_new_epoch);
     if (!epoch_reference) {
         return std::unexpected(epoch_reference.error());
+    }
+    if (meter) {
+        meter->notify(SyncProgress{.stage = SyncStage::Finalizing});
     }
     if (auto saved_state = detail::save_state_checked(
             runtime_data.database_path,

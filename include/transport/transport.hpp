@@ -17,6 +17,11 @@
 
 namespace kasumi::transport {
 
+struct TransferItemProgress {
+    std::uint64_t bytes = 0;
+    std::uint64_t total_bytes = 0;
+};
+
 struct TransferProgress {
     std::uint64_t bytes_transferred = 0;
     std::optional<std::uint64_t> total_bytes = std::nullopt;
@@ -24,6 +29,7 @@ struct TransferProgress {
     std::optional<std::size_t> total_objects = std::nullopt;
     std::optional<double> bytes_per_second = std::nullopt;
     std::optional<std::uint64_t> eta_seconds = std::nullopt;
+    std::optional<TransferItemProgress> item = std::nullopt;
 };
 
 using TransportProgressCallback = std::function<void(const TransferProgress&)>;
@@ -76,6 +82,7 @@ struct PutBatch {
     std::vector<std::string> identifiers;
     std::size_t max_parallel_transfers = 0;
     TransportProgressCallback on_progress{};
+    std::string_view progress_identifier{};
 };
 
 // Function signature for uploading a batch of objects.

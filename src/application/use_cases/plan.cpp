@@ -112,6 +112,7 @@ std::expected<Response, Error> run_plan(OperationContext& context) {
 
     meter.notify(SyncProgress{.stage = SyncStage::Calculating});
 
+    meter.phase(Activity::ComparingSnapshots);
     auto reconciled = reconciliation::reconcile(*collected);
     if (!reconciled) {
         return fail_app(context,
@@ -120,6 +121,7 @@ std::expected<Response, Error> run_plan(OperationContext& context) {
                         SyncStage::Calculating);
     }
 
+    meter.phase(Activity::PreparingPlan);
     auto report = reconciliation_to_report(*collected, *reconciled);
     if (!report) {
         return fail_app(context,
