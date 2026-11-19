@@ -1413,6 +1413,71 @@ TEST(CryptoPackTest, MicroPackRoundTripExtractsAndRejectsTamper) {
                      .has_value());
 }
 
+TEST(CryptoPackTest, LoadVerifiedPackReturnsAuthenticatedMemberSlices) {
+    auto workspace = kasumi::test::make_temp_workspace("crypto-verified-pack");
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{
+        3, 5, 7, 11, 13};
+    const auto path_a = kasumi::test::workspace_path(workspace, "a.txt");
+    const auto path_b = kasumi::test::workspace_path(workspace, "b.txt");
+    const std::string content_a = "alpha in memory pack";
+    const std::string content_b = "beta in memory pack with extra bytes";
+    kasumi::test::write_text(path_a, content_a);
+    kasumi::test::write_text(path_b, content_b);
+
+    const auto hash_a = kasumi::hasher::hash_string(content_a);
+    const auto hash_b = kasumi::hasher::hash_string(content_b);
+    const std::array sources{
+        kasumi::crypto::pack::PackMemberSource{
+            .hash = hash_a,
+            .size = static_cast<std::uint32_t>(content_a.size()),
+            .source_path = path_a},
+        kasumi::crypto::pack::PackMemberSource{
+            .hash = hash_b,
+            .size = static_cast<std::uint32_t>(content_b.size()),
+            .source_path = path_b},
+    };
+    const auto pack_path = kasumi::test::workspace_path(workspace, "pack.bin");
+    const auto encrypted =
+        kasumi::crypto::pack::write_encrypted_pack(sources, pack_path, key);
+    ASSERT_TRUE(encrypted.has_value()) << encrypted.error();
+
+    const auto verified = kasumi::crypto::pack::load_verified_pack(
+        pack_path, key, encrypted->pack_hash);
+    ASSERT_TRUE(verified.has_value()) << verified.error();
+    EXPECT_EQ(verified->pack_hash, encrypted->pack_hash);
+    EXPECT_EQ(verified->members.size(), 2U);
+
+    const auto to_string = [](std::span<const std::uint8_t> bytes) {
+        return std::string{reinterpret_cast<const char*>(bytes.data()),
+                           bytes.size()};
+    };
+    const auto slice_a = verified->member_bytes(hash_a);
+    ASSERT_TRUE(slice_a.has_value());
+    EXPECT_EQ(to_string(*slice_a), content_a);
+
+    const auto slice_b = verified->member_bytes(hash_b);
+    ASSERT_TRUE(slice_b.has_value());
+    EXPECT_EQ(to_string(*slice_b), content_b);
+
+    EXPECT_FALSE(
+        verified->member_bytes(kasumi::hasher::hash_string("missing"))
+            .has_value());
+
+    auto wrong_hash = encrypted->pack_hash;
+    wrong_hash[0] ^= std::byte{0x01};
+    EXPECT_FALSE(
+        kasumi::crypto::pack::load_verified_pack(pack_path, key, wrong_hash)
+            .has_value());
+
+    auto raw_cipher = kasumi::test::read_binary(pack_path);
+    ASSERT_GT(raw_cipher.size(), kasumi::crypto::FILE_HEADER_SIZE + 8U);
+    raw_cipher[raw_cipher.size() - 5U] ^= std::byte{0xff};
+    kasumi::test::write_binary(pack_path, raw_cipher);
+    EXPECT_FALSE(kasumi::crypto::pack::load_verified_pack(
+                     pack_path, key, encrypted->pack_hash)
+                     .has_value());
+}
+
 TEST(CryptoPackTest, FastCdcReusesMajorityOfChunksAfterSmallMidFileEdit) {
     auto workspace = kasumi::test::make_temp_workspace("crypto-fastcdc");
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{1, 2, 3, 4};

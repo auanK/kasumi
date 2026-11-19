@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -101,13 +102,29 @@ apply_operation(const Operation& operation,
                 DownloadCacheMode download_cache = DownloadCacheMode::None,
                 const DestinationPrecondition* destination = nullptr);
 
-// Installs a previously extracted/reassembled verified plaintext file into the
-// local destination with full transactional backup/atomic-install guarantees.
-MutationResult apply_preverified_download(
+using DownloadCandidatePopulator = std::function<MutationResult(
+    const std::filesystem::path& candidate_path,
+    const std::filesystem::path& destination_path,
+    const std::filesystem::path* backup_path)>;
+
+// Streams/writes verified download content directly into a transaction-owned
+// staging candidate at the destination, then installs and syncs atomically.
+MutationResult apply_streamed_download(
     const Operation& operation,
     std::size_t operation_index,
     const std::filesystem::path& local_root,
-    const std::filesystem::path& verified_plaintext_source,
+    const platform::Workspace& workspace,
+    const transaction::OperationProgress& progress,
+    const DestinationPrecondition* destination,
+    const DownloadCandidatePopulator& populate);
+
+// Writes already-authenticated plaintext bytes into the local staging
+// candidate and atomically installs and syncs the destination.
+MutationResult apply_preverified_bytes_download(
+    const Operation& operation,
+    std::size_t operation_index,
+    const std::filesystem::path& local_root,
+    std::span<const std::uint8_t> verified_plaintext,
     const platform::Workspace& workspace,
     const transaction::OperationProgress& progress,
     const DestinationPrecondition* destination = nullptr);

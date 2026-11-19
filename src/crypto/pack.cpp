@@ -319,12 +319,10 @@ write_encrypted_pack(std::span<const PackMemberSource> members,
     };
 }
 
-std::expected<std::vector<PackMemberDescriptor>, std::string>
-decrypt_and_verify_pack(const std::filesystem::path& encrypted_path,
-                        std::span<const std::uint8_t, KEY_SIZE> master_key,
-                        std::optional<Hash> expected_pack_hash,
-                        const std::filesystem::path* extract_dir,
-                        Hash* out_pack_hash) {
+std::expected<VerifiedPack, std::string>
+load_verified_pack(const std::filesystem::path& encrypted_path,
+                   std::span<const std::uint8_t, KEY_SIZE> master_key,
+                   std::optional<Hash> expected_pack_hash) {
     const auto max_plain_wire =
         kpak_header_size + MAXIMUM_PACK_MEMBERS * kpak_entry_size +
         MAXIMUM_PACK_PLAINTEXT_SIZE;
@@ -344,7 +342,8 @@ decrypt_and_verify_pack(const std::filesystem::path& encrypted_path,
     if (!plain) {
         return std::unexpected("failed to authenticate and decrypt Micro-Pack");
     }
-    secure_memory::WipeGuard plain_guard{*plain};
+    bool transferred = false;
+    secure_memory::WipeGuard plain_guard{*plain, &transferred};
 
     if (plain->size() < kpak_header_size ||
         !std::equal(kpak_magic.begin(), kpak_magic.end(), plain->begin()) ||
@@ -363,14 +362,9 @@ decrypt_and_verify_pack(const std::filesystem::path& encrypted_path,
         return std::unexpected("truncated KPAK member table");
     }
 
-    std::vector<PackMemberDescriptor> descriptors;
-    descriptors.reserve(count);
-    struct Slice {
-        std::size_t offset = 0;
-        std::uint32_t size = 0;
-    };
-    std::vector<Slice> slices;
-    slices.reserve(count);
+    VerifiedPack pack;
+    pack.members.reserve(count);
+    pack.slices.reserve(count);
 
     std::uint64_t expected_cursor = 0;
     for (std::uint32_t i = 0; i < count; ++i) {
@@ -381,7 +375,7 @@ decrypt_and_verify_pack(const std::filesystem::path& encrypted_path,
         const std::uint32_t offset = wire::decode_le<std::uint32_t>(entry + HASH_SIZE);
         const std::uint32_t size =
             wire::decode_le<std::uint32_t>(entry + HASH_SIZE + 4);
-        if (i > 0 && !(descriptors.back().hash < hash)) {
+        if (i > 0 && !(pack.members.back().hash < hash)) {
             return std::unexpected("KPAK member hashes are not strictly sorted");
         }
         if (offset != expected_cursor ||
@@ -389,25 +383,44 @@ decrypt_and_verify_pack(const std::filesystem::path& encrypted_path,
             return std::unexpected("KPAK member offsets or sizes are invalid");
         }
         expected_cursor += size;
-        descriptors.push_back(PackMemberDescriptor{.hash = hash, .size = size});
-        slices.push_back(Slice{.offset = data_offset + offset, .size = size});
+        pack.members.push_back(PackMemberDescriptor{.hash = hash, .size = size});
+        pack.slices.push_back(
+            VerifiedPackSlice{.offset = data_offset + offset, .size = size});
     }
 
     if (data_offset + expected_cursor != plain->size()) {
         return std::unexpected("KPAK payload size mismatch");
     }
 
-    const auto pack_hash = compute_pack_hash(descriptors);
+    const auto pack_hash = compute_pack_hash(pack.members);
     if (!pack_hash || (expected_pack_hash && *pack_hash != *expected_pack_hash)) {
         return std::unexpected("KPAK pack hash verification failed");
     }
 
-    for (std::size_t i = 0; i < descriptors.size(); ++i) {
+    for (std::size_t i = 0; i < pack.members.size(); ++i) {
         const auto slice = std::span<const std::uint8_t>{
-            plain->data() + slices[i].offset, slices[i].size};
-        if (hash_span(slice) != descriptors[i].hash) {
+            plain->data() + pack.slices[i].offset, pack.slices[i].size};
+        if (hash_span(slice) != pack.members[i].hash) {
             return std::unexpected("KPAK member payload BLAKE3 mismatch");
         }
+    }
+
+    pack.pack_hash = *pack_hash;
+    pack.plaintext = std::move(*plain);
+    transferred = true;
+    return pack;
+}
+
+std::expected<std::vector<PackMemberDescriptor>, std::string>
+decrypt_and_verify_pack(const std::filesystem::path& encrypted_path,
+                        std::span<const std::uint8_t, KEY_SIZE> master_key,
+                        std::optional<Hash> expected_pack_hash,
+                        const std::filesystem::path* extract_dir,
+                        Hash* out_pack_hash) {
+    auto loaded =
+        load_verified_pack(encrypted_path, master_key, expected_pack_hash);
+    if (!loaded) {
+        return std::unexpected(std::move(loaded.error()));
     }
 
     if (extract_dir != nullptr) {
@@ -416,20 +429,24 @@ decrypt_and_verify_pack(const std::filesystem::path& encrypted_path,
             return std::unexpected("failed to prepare pack extraction dir: " +
                                    dir_ok.error());
         }
-        for (std::size_t i = 0; i < descriptors.size(); ++i) {
-            const auto hex = hash_hex(descriptors[i].hash);
+        for (std::size_t i = 0; i < loaded->members.size(); ++i) {
+            const auto hex = hash_hex(loaded->members[i].hash);
             const auto out_path = *extract_dir / (hex + ".plain");
             std::error_code ec;
             const auto status = std::filesystem::symlink_status(out_path, ec);
             if (!ec && !std::filesystem::is_symlink(status) &&
                 !platform::private_storage::is_reparse_or_symlink(out_path) &&
                 std::filesystem::is_regular_file(status) &&
-                content::verify_file(out_path, hex, descriptors[i].size)) {
+                content::verify_file(out_path, hex, loaded->members[i].size)) {
                 continue;
             }
+            const auto slice =
+                loaded->member_bytes(loaded->members[i].hash);
+            if (!slice) {
+                return std::unexpected("invalid KPAK member slice bounds");
+            }
             const std::string_view view(
-                reinterpret_cast<const char*>(plain->data() + slices[i].offset),
-                slices[i].size);
+                reinterpret_cast<const char*>(slice->data()), slice->size());
             auto written =
                 platform::private_storage::write_atomically(out_path, view);
             if (!written) {
@@ -440,9 +457,9 @@ decrypt_and_verify_pack(const std::filesystem::path& encrypted_path,
     }
 
     if (out_pack_hash != nullptr) {
-        *out_pack_hash = *pack_hash;
+        *out_pack_hash = loaded->pack_hash;
     }
-    return descriptors;
+    return std::move(loaded->members);
 }
 
 std::expected<FastCdcResult, std::string>

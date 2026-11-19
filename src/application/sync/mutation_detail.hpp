@@ -126,6 +126,13 @@ download_candidate_path(const std::filesystem::path& destination,
                         const platform::Workspace& workspace,
                         std::size_t operation_index);
 
+// Removes a residual transaction-owned download candidate if present; fails
+// closed on non-regular entries or links.
+MutationResult
+remove_download_candidate_if_present(const std::filesystem::path& destination,
+                                     const platform::Workspace& workspace,
+                                     std::size_t operation_index);
+
 std::filesystem::path
 copy_candidate_path(const std::filesystem::path& destination,
                     const platform::Workspace& workspace,
