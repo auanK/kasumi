@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.17.0]
+
+### Removed
+
+- Removed the `kasumi update` command, the built-in updater, and its private installer commands. Update portable installations manually from the official release archives. Update managed installations through the package manager that installed Kasumi.
+
+### Changed
+
+- Stage and upload Micro-Packs in bounded batches with checkpoints. Extract packs into separate workspaces so packs that share a blob can be processed concurrently.
+- Bound rclone removal batches by the expected response size, and stop reading oversized listings without retrying them.
+
+### Fixed
+
+- Verify remote payloads before reusing upload checkpoints. Replan paused uploads when local files or remote history change, so synchronization can continue before the pending transaction expires.
+- Recover interrupted local copies and partially initialized journals. Clean up owned temporary files on destination conflicts and release the remote writer marker if missing-content resolution fails.
+- Keep GC, remote health, and inventory audits working after Epoch pruning. Clear old pending materializations when advancing to a new Epoch.
+- Reconcile file-to-directory and directory-to-file changes in diff and plan, including three-way conflicts. Accept timestamps rounded to the destination filesystem's precision.
+- Verify that rclone batch downloads produced every requested object, report missing packs as missing content, and replace stale downloads even when file size and modification time match.
+- Preserve useful diagnostics for rclone server errors and uncertain writes. Bound async job polling, confirm termination when possible, and allow the child process to quit during cancellation.
+- Find trusted rclone executables on `PATH` from filesystem roots and home directories, recognize Windows child-process exit statuses correctly, and isolate temporary hash manifests.
+- Preserve local copies from read-only sources as writable on Windows, and report permission failures during storage enumeration.
+- Initialize SQLite databases atomically, recover interrupted WAL state, protect WAL sidecars before commit, and prune legacy file-cache rows. Reject redirected database files and sidecars.
+- Open only regular crypto inputs without following symlinks or reparse points. Bound Micro-Pack reads and wipe plaintext buffers before reuse.
+- Reject duplicate profile names and support renames that only change capitalization. Fix profile setup when the Linux configuration directory does not yet exist.
+- Improve Windows Credential Manager retries and diagnostics, handle Linux D-Bus disconnects without terminating the process, and improve cancellation and UTF-8 in the Windows console. Sanitize control characters in remote reports.
+- Harden Windows file replacement, profile locks, and cleanup of extended-length paths. Use native macOS change timestamps and exclusive renames.
+
 ## [0.16.0]
 
 ### Changed
