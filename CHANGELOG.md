@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.3]
+
+### Changed
+
+- Use a single remote listing instead of batched per-object presence probes when checking availability for 64 or more physical objects (outside storage audits), speeding up `initial-sync` and large non-chunked syncs while keeping automatic fallback to batched presence checks.
+- Send explicit raw file lists (`FilesFromRaw`) with `NoTraverse`, `NoCheckDest`, and `NoUpdateModTime` in rclone batch downloads so each download window fetches only the requested objects without traversing the remote root.
+- Stream FastCDC chunk decryption and verification directly into the temporary destination file, eliminating the `chunk-plain` plaintext staging directory during large-file downloads.
+
+### Fixed
+
+- Ensure storage object audits always probe remote presence directly instead of substituting bulk listing results, and avoid quadratic scanning when ordering storage repair operations.
+
 ## [0.17.2]
 
 ### Changed
