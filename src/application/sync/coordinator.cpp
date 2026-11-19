@@ -2842,19 +2842,11 @@ mutation::MutationResult detail::apply_chunked_download(
     namespace ps = platform::private_storage;
     if (!session.directories_ready) {
         session.chunk_dl_dir = workspace.root / "chunk-dl";
-        session.chunk_plain_dir = workspace.root / "chunk-plain";
         if (auto ok = ps::ensure_directory(session.chunk_dl_dir); !ok) {
             return std::unexpected(mutation::detail::make_error(
                 mutation::MutationErrorCode::LocalIo,
                 ok.error(),
                 session.chunk_dl_dir,
-                operation_index));
-        }
-        if (auto ok = ps::ensure_directory(session.chunk_plain_dir); !ok) {
-            return std::unexpected(mutation::detail::make_error(
-                mutation::MutationErrorCode::LocalIo,
-                ok.error(),
-                session.chunk_plain_dir,
                 operation_index));
         }
         session.directories_ready = true;
@@ -2914,9 +2906,11 @@ mutation::MutationResult detail::apply_chunked_download(
             blake3_hasher file_hash;
             blake3_hasher_init(&file_hash);
             crypto::secure_memory::WipeGuard wipe_hash{file_hash};
+            bool write_failed = false;
             auto append = [&](std::span<const std::uint8_t> slab) {
                 if (!ps::write_private_file(
                         *private_out, slab.data(), slab.size())) {
+                    write_failed = true;
                     return false;
                 }
                 blake3_hasher_update(&file_hash, slab.data(), slab.size());
@@ -2967,6 +2961,17 @@ mutation::MutationResult detail::apply_chunked_download(
                     }
                 }
 
+                struct WindowDlCleanup {
+                    const std::filesystem::path& dir;
+                    const std::vector<std::string>& ids;
+                    ~WindowDlCleanup() noexcept {
+                        std::error_code ignored;
+                        for (const auto& id : ids) {
+                            std::filesystem::remove(dir / id, ignored);
+                        }
+                    }
+                } dl_cleanup{session.chunk_dl_dir, ids};
+
                 if (!fetch.empty()) {
                     if (meter)
                         meter->phase(
@@ -2988,13 +2993,17 @@ mutation::MutationResult detail::apply_chunked_download(
                         fetch.size());
                     application::parallel_for_indexed(
                         fetch.size(), parallelism, [&](std::size_t i) {
-                            const auto& chunk = *fetch[i];
-                            const auto hex = hash_hex(chunk.hash);
                             const auto enc = session.chunk_dl_dir / ids[i];
-                            const auto plain =
-                                session.chunk_plain_dir / (hex + ".chunk");
-                            std::error_code ec;
-                            if (!std::filesystem::is_regular_file(enc, ec)) {
+                            std::error_code status_error;
+                            const auto status = std::filesystem::symlink_status(
+                                enc, status_error);
+                            const bool absent =
+                                status_error ==
+                                    std::errc::no_such_file_or_directory ||
+                                (!status_error &&
+                                 status.type() ==
+                                     std::filesystem::file_type::not_found);
+                            if (absent) {
                                 auto fetched =
                                     transport::get(storage, ids[i], enc);
                                 if (!fetched) {
@@ -3011,30 +3020,19 @@ mutation::MutationResult detail::apply_chunked_download(
                                         operation_index);
                                     return;
                                 }
-                            }
-                            const auto expected_max =
-                                crypto::encoded_file_size(chunk.size);
-                            const auto actual_size =
-                                std::filesystem::file_size(enc, ec);
-                            if (ec || !expected_max ||
-                                actual_size > *expected_max ||
-                                !crypto::decrypt_file(enc, plain, key) ||
-                                !crypto::content::verify_file(
-                                    plain, hex, chunk.size)) {
+                            } else if (status_error ||
+                                       !std::filesystem::is_regular_file(
+                                           status) ||
+                                       ps::is_reparse_or_symlink(enc)) {
                                 errors[i] = mutation::detail::make_error(
-                                    mutation::MutationErrorCode::CryptoFailure,
-                                    "FastCDC chunk failed authentication",
-                                    operation.path,
+                                    mutation::MutationErrorCode::LocalIo,
+                                    status_error
+                                        ? status_error.message()
+                                        : "downloaded chunk is not a regular "
+                                          "file",
+                                    enc,
                                     operation_index);
-                            }
-                            std::filesystem::remove(enc, ec);
-                            if (ec && !errors[i]) {
-                                errors[i] =
-                                    fail(mutation::MutationErrorCode::LocalIo,
-                                         "failed to remove encrypted FastCDC "
-                                         "chunk: " +
-                                             ec.message())
-                                        .error();
+                                return;
                             }
                         });
                     for (auto& error : errors) {
@@ -3047,7 +3045,7 @@ mutation::MutationResult detail::apply_chunked_download(
                 if (meter)
                     meter->phase(Activity::Installing, window.size());
                 mutation_fault_test::hit("fastcdc_chunks_ready",
-                                         session.chunk_plain_dir);
+                                         session.chunk_dl_dir);
                 for (const auto& chunk : window) {
                     if (const auto local_it =
                             session.local_seeds.find(chunk.hash);
@@ -3086,20 +3084,34 @@ mutation::MutationResult detail::apply_chunked_download(
                                 "previously staged FastCDC chunk changed");
                         }
                     } else {
-                        const auto path = session.chunk_plain_dir /
-                                          (hash_hex(chunk.hash) + ".chunk");
-                        const auto copied = ps::stream_regular_file(
-                            path, copy_buf, append, chunk.size);
-                        if (!copied) {
-                            return fail(mutation::MutationErrorCode::LocalIo,
-                                        "failed to concatenate FastCDC chunk");
-                        }
+                        const auto enc = session.chunk_dl_dir /
+                                         crypto::content_identifier(
+                                             key, chunk.hash);
+                        write_failed = false;
+                        const bool decrypted = crypto::decrypt_file_to_sink(
+                            enc,
+                            key,
+                            append,
+                            crypto::FilePurpose::Content,
+                            chunk.size,
+                            &chunk.hash);
                         std::error_code ec;
-                        std::filesystem::remove(path, ec);
+                        std::filesystem::remove(enc, ec);
+                        if (!decrypted) {
+                            return fail(
+                                write_failed
+                                    ? mutation::MutationErrorCode::LocalIo
+                                    : mutation::MutationErrorCode::
+                                          CryptoFailure,
+                                write_failed
+                                    ? "failed to write FastCDC chunk to "
+                                      "destination"
+                                    : "FastCDC chunk failed authentication");
+                        }
                         if (ec) {
                             return fail(
                                 mutation::MutationErrorCode::LocalIo,
-                                "failed to remove plaintext FastCDC chunk: " +
+                                "failed to remove encrypted FastCDC chunk: " +
                                     ec.message());
                         }
                     }

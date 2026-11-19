@@ -1355,6 +1355,78 @@ TEST(CryptoFileTest, V3CompressesRepetitivePayloadsAndSeparatesPurposes) {
                      .has_value());
 }
 
+TEST(CryptoFileTest, DecryptFileToSinkStreamsAndVerifiesHashAndSize) {
+    auto workspace = kasumi::test::make_temp_workspace("crypto-decrypt-sink");
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{
+        9, 10, 11, 12, 13};
+    const std::size_t payload_size = kasumi::crypto::CHUNK_SIZE + 4096U;
+    std::string payload(payload_size, '\0');
+    for (std::size_t i = 0; i < payload_size; ++i) {
+        payload[i] = static_cast<char>((i * 31U) & 0xffU);
+    }
+
+    const auto plain_path = kasumi::test::workspace_path(workspace, "plain");
+    const auto cipher_path = kasumi::test::workspace_path(workspace, "cipher");
+    kasumi::test::write_text(plain_path, payload);
+    ASSERT_TRUE(kasumi::crypto::encrypt_file(
+        plain_path, cipher_path, key, kasumi::crypto::FilePurpose::Content));
+
+    const auto expected_hash = kasumi::hasher::hash_string(payload);
+    std::string streamed;
+    streamed.reserve(payload_size);
+    const auto sink = [&](std::span<const std::uint8_t> bytes) {
+        streamed.append(reinterpret_cast<const char*>(bytes.data()),
+                        bytes.size());
+        return true;
+    };
+    EXPECT_TRUE(kasumi::crypto::decrypt_file_to_sink(
+        cipher_path,
+        key,
+        sink,
+        kasumi::crypto::FilePurpose::Content,
+        payload_size,
+        &expected_hash));
+    EXPECT_EQ(streamed, payload);
+
+    EXPECT_FALSE(kasumi::crypto::decrypt_file_to_sink(
+        cipher_path,
+        key,
+        [](std::span<const std::uint8_t>) { return true; },
+        kasumi::crypto::FilePurpose::Content,
+        payload_size - 1U,
+        &expected_hash));
+
+    auto wrong_hash = expected_hash;
+    wrong_hash[0] ^= std::byte{0x01};
+    EXPECT_FALSE(kasumi::crypto::decrypt_file_to_sink(
+        cipher_path,
+        key,
+        [](std::span<const std::uint8_t>) { return true; },
+        kasumi::crypto::FilePurpose::Content,
+        payload_size,
+        &wrong_hash));
+
+    EXPECT_FALSE(kasumi::crypto::decrypt_file_to_sink(
+        cipher_path,
+        key,
+        [](std::span<const std::uint8_t>) { return true; },
+        kasumi::crypto::FilePurpose::Pack,
+        payload_size,
+        &expected_hash));
+
+    auto raw_cipher = kasumi::test::read_binary(cipher_path);
+    ASSERT_GT(raw_cipher.size(), kasumi::crypto::FILE_HEADER_SIZE + 8U);
+    raw_cipher[raw_cipher.size() - 5U] ^= std::byte{0xff};
+    kasumi::test::write_binary(cipher_path, raw_cipher);
+    EXPECT_FALSE(kasumi::crypto::decrypt_file_to_sink(
+        cipher_path,
+        key,
+        [](std::span<const std::uint8_t>) { return true; },
+        kasumi::crypto::FilePurpose::Content,
+        payload_size,
+        &expected_hash));
+}
+
 TEST(CryptoPackTest, MicroPackRoundTripExtractsAndRejectsTamper) {
     auto workspace = kasumi::test::make_temp_workspace("crypto-micropack");
     const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{
