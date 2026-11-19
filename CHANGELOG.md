@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.17.1]
+
+### Added
+
+- Show the number of confirmed changes out of the current plan in Sync and Resolve Missing. Show the active file's progress when it can be measured separately, or show the batch's bytes, speed, and ETA when available.
+- Show live progress while comparing local and remote snapshots, checking remote content availability, and preparing changes. Interactive terminals show elapsed time during operations with no reliable ETA.
+
+### Changed
+
+- Include encoded upload and download bytes, physical object counts, and local reuse in the default Sync summary. The `--full` option keeps per-activity details and lists every plan item and pending path.
+- Show FSCK audit totals, verified plaintext, wire downloads, and reassembled files. Show garbage collection inventory size, candidates, confirmed removals, and removal rate. Keep stage messages and periodic progress updates readable when redirecting output.
+
+### Fixed
+
+- Count completed audit checks even when they find invalid or missing content. Keep transfer summaries under Applying changes and report publication and finalization as they happen.
+
 ## [0.17.0]
 
 ### Removed

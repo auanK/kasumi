@@ -1,32 +1,15 @@
-# Kasumi v0.17.0
+# Kasumi v0.17.1
 
-This release makes interrupted synchronization easier to recover and improves integrity checks across rclone, SQLite, and local storage.
+This release makes it easier to see what Kasumi is doing during planning, synchronization, and maintenance.
 
-## Removed
+## Highlights
 
-- **The `kasumi update` command was removed**, along with the built-in updater and its private installer commands. For a portable installation, download the official archive, verify its SHA-256 checksum, and replace the executable manually. For a managed installation, update through the package manager that installed Kasumi.
+- **Planning shows what is happening.** Sync, Status, and dry-run show the current planning step. In Sync, this includes checking remote content availability and preparing changes. The terminal shows counts when the total is known and elapsed time when an ETA is unavailable.
+- **Sync tracks the whole plan.** Sync and Resolve Missing show the number of confirmed changes out of the current plan. A second line shows the active file when its progress can be measured separately. Shared transfers show batch bytes, speed, and ETA when available. A checkpoint can confirm multiple changes together. Transfer metrics stay under Applying changes. Publication and finalization are displayed as they begin.
+- **The default summary includes transfers.** Sync reports encoded upload and download bytes, physical object counts, and data reused locally. Use `--full` to retain more per-activity detail and list every plan item and pending path.
+- **Audits and cleanup show meaningful totals.** FSCK reports verified plaintext and the bytes and objects downloaded. Garbage collection reports the size of the remote listing, candidates found, and confirmed removals with their rate. Remote content audit progress counts completed checks that find invalid or missing content.
 
-## Synchronization and recovery
+## Compatibility and installation
 
-- Sync verifies remote payloads before reusing upload checkpoints and can replan a paused upload when local files or remote history change.
-- Interrupted local copies and partially initialized journals recover cleanly. Destination conflicts clean up owned staging files, and missing-content resolution releases the writer marker on failure.
-- GC, remote health, and inventory audits work after Epoch pruning. Advancing to a new Epoch clears pending materializations from the prior one.
-- Diff and plan account for paths that change between files and directories, including three-way conflicts. Sync also accepts timestamps rounded to the destination filesystem's precision.
-- Micro-Packs upload in bounded batches with checkpoints. Parallel extraction handles packs that share blobs, and a missing pack is reported as missing remote content.
-
-## rclone and local storage
-
-- Batch downloads verify every requested object and overwrite stale local copies even when size and modification time match. Removal batches account for response size, and oversized listings fail without a duplicate request.
-- RC server failures and uncertain writes retain useful diagnostics. Cancellation requests that async copy jobs stop, checks the outcome, and lets the rclone process shut down.
-- rclone lookup works from filesystem roots and home directories, Windows process exits are recognized correctly, and hash manifests use separate temporary workspaces.
-- On Windows, copying a read-only source no longer makes the stored copy read-only. Local storage reports permission failures during enumeration.
-
-## State, profiles, and platform
-
-- SQLite initializes databases atomically, recovers interrupted WAL state, and prunes obsolete file-cache rows. It rejects redirected database files and sidecars. Crypto reads reject redirected inputs, bound Micro-Pack reads, and wipe plaintext buffers before reuse.
-- Profiles reject duplicate names and support renames that only change capitalization. Linux profile setup can create a missing configuration directory. Windows Credential Manager retries transient failures, and Linux D-Bus disconnects are handled without terminating Kasumi.
-- Windows console input and output handle UTF-8 and cancellation more reliably. Remote reports sanitize control characters. Windows file replacement, profile locking, and extended-path cleanup are more robust, and macOS uses native change timestamps and exclusive renames.
-
-## Compatibility
-
-- Existing Protocol v3 vaults use the same remote layout in v0.17.0. Review the [upgrade precautions](https://github.com/auanK/kasumi/blob/v0.17.0/docs/best-practices.md#upgrading-kasumi) before changing the executable on clients that share a vault.
+- Existing Protocol v3 vaults open directly with v0.17.1. See the [upgrade precautions](https://github.com/auanK/kasumi/blob/v0.17.1/docs/best-practices.md#upgrading-kasumi).
+- The built-in `kasumi update` command was removed in v0.17.0. For portable installations, download the archive for your platform, verify its SHA-256 checksum, and replace the executable. For managed installations, update through the package manager that installed Kasumi.
