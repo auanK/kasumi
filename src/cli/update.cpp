@@ -900,8 +900,8 @@ winhttp_location(std::string_view url,
                             nullptr,
                             &location_size,
                             WINHTTP_NO_HEADER_INDEX);
-        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || location_size == 0 ||
-            location_size > 64U * 1024U) {
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER ||
+            location_size <= sizeof(wchar_t) || location_size > 64U * 1024U) {
             return std::unexpected("HTTPS redirect has no valid Location");
         }
         std::wstring location(location_size / sizeof(wchar_t), L'\0');
@@ -913,7 +913,8 @@ winhttp_location(std::string_view url,
                                  WINHTTP_NO_HEADER_INDEX)) {
             return std::unexpected("could not read HTTPS redirect");
         }
-        location.resize((location_size / sizeof(wchar_t)) - 1);
+        // WinHTTP excludes the terminating NUL from the returned size.
+        location.resize(location_size / sizeof(wchar_t));
         auto value = narrow_utf8(location);
         if (!value) {
             return std::unexpected("invalid HTTPS redirect URL");
