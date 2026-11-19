@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.2]
+
+### Changed
+
+- Stream verified FastCDC chunks directly into the temporary destination file, avoiding an intermediate plaintext copy. Reuse verified slices from files already installed in the same sync.
+- Download Micro-Packs in bounded windows with per-window checkpoints and install authenticated members directly, eliminating the intermediate extraction directory during sync and recovery.
+
+### Fixed
+
+- Remove leftover temporary download files before replaying pending downloads during roll-forward recovery, and reject non-regular files or links during candidate cleanup.
+- Restore immediate rclone process termination after `core/quit` is acknowledged, removing the extra shutdown wait at the end of rclone sessions.
+
 ## [0.17.1]
 
 ### Added
