@@ -1196,6 +1196,12 @@ TEST(SyncContentBatchTest,
     ContentWindowProbe probe;
     probe.control_read_batch_supported = true;
     attach_probe(*fixture, probe);
+    fixture->storage.storage.list =
+        [](void*) -> kasumi::transport::ListingResult {
+        return std::unexpected(kasumi::transport::Error{
+            .code = kasumi::transport::ErrorCode::Unsupported,
+            .message = "bulk listing disabled"});
+    };
 
     kasumi::reconciliation::Input input;
     input.storage.generation = 1;

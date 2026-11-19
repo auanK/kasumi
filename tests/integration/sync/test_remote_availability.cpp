@@ -1998,6 +1998,77 @@ TEST(SyncRemoteAvailabilityTest,
     }
 }
 
+TEST(SyncRemoteAvailabilityTest,
+     LargeNonChunkedProbeUsesBulkListAndFallsBackCleanly) {
+    const auto key = test_key();
+    const auto run_case = [&](std::size_t count,
+                              bool audit,
+                              bool list_failure) {
+        SCOPED_TRACE(::testing::Message()
+                     << count << ", " << audit << ", " << list_failure);
+        kasumi::Snapshot local{
+            .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+        FakeState* state = nullptr;
+        auto storage = make_fake_transport(state);
+        state->control_read_batch_supported = true;
+        if (list_failure) {
+            state->fail_list = kasumi::transport::ErrorCode::Timeout;
+        }
+        std::vector<std::pair<kasumi::Hash, std::uint64_t>> items;
+        items.reserve(count);
+        std::unordered_set<std::string> remote_ids;
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto payload = "bulk-probe-content-" + std::to_string(i);
+            const auto hash = kasumi::hasher::hash_string(payload);
+            const auto size = static_cast<std::uint64_t>(payload.size());
+            local.rows.push_back(kasumi::NodeRow{
+                .path = "file-" + std::to_string(i) + ".txt",
+                .hash = hash,
+                .size = size,
+                .is_directory = false});
+            items.emplace_back(hash, size);
+            if (i % 2U == 0U) {
+                const auto id = kasumi::crypto::content_identifier(key, hash);
+                state->objects[id] = {1U};
+                remote_ids.insert(id);
+            }
+        }
+        kasumi::finalize_snapshot(local);
+
+        auto input = availability_input(empty_tree(), audit);
+        input.local_tree = local;
+        input.storage.history_present = false;
+        if (audit) {
+            input.storage.object_identifiers = std::move(remote_ids);
+        }
+        const auto planned = uploads_for(local);
+        const auto refreshed = kasumi::application::sync::coordinator::
+            reobservation::refresh_content_availability(
+                input, planned, storage, key, {}, true, true, nullptr);
+        ASSERT_TRUE(refreshed.has_value()) << refreshed.error().detail;
+
+        const bool expect_bulk_list = !audit && count >= 64U;
+        EXPECT_EQ(state->full_list_count, expect_bulk_list ? 1U : 0U);
+        EXPECT_EQ(state->control_read_batch_count,
+                  !expect_bulk_list || list_failure ? 1U : 0U);
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto& [hash, size] = items[i];
+            const auto id_key =
+                kasumi::hash_hex(hash) + ':' + std::to_string(size);
+            const bool present = i % 2U == 0U;
+            EXPECT_EQ(input.trusted_remote_content_objects.contains(id_key),
+                      present);
+            EXPECT_EQ(input.known_missing_content_objects.contains(hash),
+                      !present);
+        }
+    };
+
+    run_case(63U, false, false);
+    run_case(64U, false, false);
+    run_case(64U, false, true);
+    run_case(64U, true, false);
+}
+
 TEST(SyncRemoteAvailabilityTest, LocalCopyStillProbesRequiredContent) {
     const auto key = test_key();
     const auto hash = kasumi::hasher::hash_string("shared bytes");

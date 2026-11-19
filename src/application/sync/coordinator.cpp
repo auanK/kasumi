@@ -4011,6 +4011,7 @@ execute(const runtime::RuntimeData& runtime_data,
 
     std::vector<std::size_t> apply_order;
     apply_order.reserve(record->plan.operations.size());
+    std::vector<bool> in_apply_order(record->plan.operations.size(), false);
     if (!record->publication_required &&
         reconciliation_result.requires_storage_repair) {
         for (std::size_t index = 0; index < record->plan.operations.size();
@@ -4020,6 +4021,7 @@ execute(const runtime::RuntimeData& runtime_data,
                                             reconciliation_result,
                                             record->plan.operations[index])) {
                 apply_order.push_back(index);
+                in_apply_order[index] = true;
             }
         }
     }
@@ -4035,7 +4037,7 @@ execute(const runtime::RuntimeData& runtime_data,
                 transaction::OperationState::Applied;
             continue;
         }
-        if (std::ranges::find(apply_order, index) == apply_order.end()) {
+        if (!in_apply_order[index]) {
             remaining_operations.push_back(index);
         }
     }
