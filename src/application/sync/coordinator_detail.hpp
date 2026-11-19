@@ -254,7 +254,6 @@ struct ChunkSource {
 struct ChunkDownloadSession {
     bool directories_ready = false;
     std::filesystem::path chunk_dl_dir;
-    std::filesystem::path chunk_plain_dir;
     std::unordered_map<Hash, ChunkSource, ChunkHashKey> local_seeds;
     std::unordered_map<Hash, ChunkSource, ChunkHashKey> downloaded_slices;
     std::unordered_set<std::string> seeded_paths;

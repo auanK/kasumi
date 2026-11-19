@@ -946,17 +946,54 @@ Result rclone_get_batch(void* context, const GetBatch& batch) {
         return {};
     }
 
-    auto copied = sync_copy_batch(
-        **state,
-        batch.source_prefix.empty()
-            ? rooted_remote_fs(**state)
-            : join_remote_path(rooted_remote_fs(**state), batch.source_prefix),
-        platform::path::to_utf8(*absolute_destination),
-        batch.identifiers,
-        batch.max_parallel_transfers,
-        nlohmann::json::object(),
-        true,
-        batch.on_progress);
+    auto scratch = platform::create_workspace("rclone-get-batch");
+    if (!scratch) {
+        return std::unexpected(make_error(ErrorCode::Io, scratch.error()));
+    }
+    struct ScratchCleanup {
+        const platform::Workspace& workspace;
+        ~ScratchCleanup() noexcept {
+            platform::cleanup_workspace(workspace);
+        }
+    } cleanup{*scratch};
+    const auto files = scratch->root / "files";
+    {
+        std::ofstream file_list(files, std::ios::binary);
+        if (!file_list) {
+            return std::unexpected(
+                make_error(ErrorCode::Io, "failed to create batch file list"));
+        }
+        for (const auto& id : batch.identifiers) {
+            file_list << id << '\n';
+        }
+        file_list.close();
+        if (!file_list) {
+            return std::unexpected(
+                make_error(ErrorCode::Io, "failed to write batch file list"));
+        }
+    }
+
+    nlohmann::json config = {
+        {"NoTraverse", true},
+        {"NoUpdateModTime", true},
+        {"NoCheckDest", true},
+    };
+    if (batch.max_parallel_transfers > 0) {
+        config["Transfers"] = batch.max_parallel_transfers;
+    }
+    nlohmann::json payload = {
+        {"srcFs",
+         batch.source_prefix.empty()
+             ? rooted_remote_fs(**state)
+             : join_remote_path(rooted_remote_fs(**state), batch.source_prefix)},
+        {"dstFs", platform::path::to_utf8(*absolute_destination)},
+        {"createEmptySrcDirs", false},
+        {"_filter", {{"FilesFromRaw", {platform::path::to_utf8(files)}}}},
+        {"_config", std::move(config)},
+    };
+    auto copied = run_copy(
+        **state, "sync/copy", std::move(payload), batch.on_progress, true);
+    platform::cleanup_workspace(*scratch);
     if (!copied) {
         return copied;
     }

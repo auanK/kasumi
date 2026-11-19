@@ -1078,13 +1078,21 @@ TEST(RcloneStorageTest, AsyncCopyReportsProgressAndStopsCancelledJobs) {
 
 TEST(RcloneStorageTest, DownloadsExactBatchWithOneSequentialCopy) {
     RcServerState remote;
-    std::string request;
+    nlohmann::json request_body;
+    std::filesystem::path files_from_path;
+    std::string files_from_contents;
     remote.server.Post(
         "/rc/sync/copy",
         [&](const httplib::Request& input, httplib::Response& response) {
-            request = input.body;
+            request_body = nlohmann::json::parse(input.body);
+            files_from_path = kasumi::platform::path::from_utf8(
+                request_body.at("_filter")
+                    .at("FilesFromRaw")
+                    .at(0)
+                    .get<std::string>());
+            files_from_contents = kasumi::test::read_text(files_from_path);
             const auto destination = kasumi::platform::path::from_utf8(
-                nlohmann::json::parse(request).at("dstFs").get<std::string>());
+                request_body.at("dstFs").get<std::string>());
             kasumi::test::write_text(destination / "a/one", "one");
             kasumi::test::write_text(destination / "b/two", "two");
             response.set_content("{}", "application/json");
@@ -1102,11 +1110,14 @@ TEST(RcloneStorageTest, DownloadsExactBatchWithOneSequentialCopy) {
                               .max_parallel_transfers = 1});
     stop_rc_server(remote);
     ASSERT_TRUE(downloaded);
-    EXPECT_NE(request.find(R"("srcFs":"test:root/history/commits")"),
-              std::string::npos);
-    EXPECT_NE(request.find(R"("Transfers":1)"), std::string::npos);
-    EXPECT_NE(request.find("/a/one"), std::string::npos);
-    EXPECT_NE(request.find("/b/two"), std::string::npos);
+    EXPECT_EQ(request_body.at("srcFs"), "test:root/history/commits");
+    EXPECT_EQ(request_body.at("_config").at("Transfers"), 1);
+    EXPECT_EQ(request_body.at("_config").at("NoTraverse"), true);
+    EXPECT_EQ(request_body.at("_config").at("NoCheckDest"), true);
+    EXPECT_EQ(request_body.at("_config").at("NoUpdateModTime"), true);
+    EXPECT_FALSE(request_body.at("_filter").contains("IncludeRule"));
+    EXPECT_EQ(files_from_contents, "a/one\nb/two\n");
+    EXPECT_FALSE(std::filesystem::exists(files_from_path));
 }
 
 TEST(RcloneStorageTest, BatchCannotSucceedWithMissingOrStaleDestination) {

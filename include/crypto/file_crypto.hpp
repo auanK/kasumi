@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -84,11 +85,24 @@ bool encrypt_file(const std::filesystem::path& input_path,
                   std::span<const std::uint8_t, KEY_SIZE> master_key,
                   FilePurpose purpose = FilePurpose::Content);
 
+using DecryptedSink = std::function<bool(std::span<const std::uint8_t>)>;
+
 // Authenticates and decrypts the file; removes partial output on failure.
 bool decrypt_file(const std::filesystem::path& input_path,
                   const std::filesystem::path& output_path,
                   std::span<const std::uint8_t, KEY_SIZE> master_key,
                   FilePurpose purpose = FilePurpose::Content);
+
+// Streams and authenticates a KASUMI v3 encrypted regular file directly into
+// sink without creating a plaintext scratch file; verifies optional size and
+// BLAKE3 digest when supplied.
+bool decrypt_file_to_sink(
+    const std::filesystem::path& input_path,
+    std::span<const std::uint8_t, KEY_SIZE> master_key,
+    const DecryptedSink& sink,
+    FilePurpose purpose = FilePurpose::Content,
+    std::optional<std::uint64_t> expected_plaintext_size = std::nullopt,
+    const Hash* expected_plaintext_hash = nullptr);
 
 } // namespace kasumi::crypto
 

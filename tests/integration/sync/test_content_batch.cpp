@@ -1196,6 +1196,12 @@ TEST(SyncContentBatchTest,
     ContentWindowProbe probe;
     probe.control_read_batch_supported = true;
     attach_probe(*fixture, probe);
+    fixture->storage.storage.list =
+        [](void*) -> kasumi::transport::ListingResult {
+        return std::unexpected(kasumi::transport::Error{
+            .code = kasumi::transport::ErrorCode::Unsupported,
+            .message = "bulk listing disabled"});
+    };
 
     kasumi::reconciliation::Input input;
     input.storage.generation = 1;
@@ -1509,16 +1515,18 @@ TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
         const auto count_chunk_files = [](const std::filesystem::path& dir) {
             return std::ranges::count_if(std::filesystem::directory_iterator(dir),
                                          [](const auto& entry) {
-                                             return entry.path().extension() == ".chunk";
+                                             return entry.is_regular_file();
                                          });
         };
         bool chunks_checked = false;
         bool assembled_checked = false;
-        std::filesystem::path chunk_plain_dir;
+        std::filesystem::path chunk_dl_dir;
         namespace fault = kasumi::application::sync::mutation_fault_test;
         fault::set_hook([&](std::string_view point, const auto& path) {
             if (point == "fastcdc_chunks_ready") {
-                chunk_plain_dir = path;
+                chunk_dl_dir = path;
+                EXPECT_FALSE(std::filesystem::exists(
+                    path.parent_path() / "chunk-plain"));
                 EXPECT_EQ(count_chunk_files(path),
                           static_cast<std::ptrdiff_t>(needed_hashes.size()));
                 chunks_checked = true;
@@ -1526,8 +1534,10 @@ TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
                 EXPECT_EQ(path.parent_path(), second_local);
                 EXPECT_NE(path.filename().string().find(".kasumi-new-"),
                           std::string::npos);
-                EXPECT_FALSE(chunk_plain_dir.empty());
-                EXPECT_TRUE(std::filesystem::is_empty(chunk_plain_dir));
+                EXPECT_FALSE(chunk_dl_dir.empty());
+                EXPECT_TRUE(std::filesystem::is_empty(chunk_dl_dir));
+                EXPECT_FALSE(std::filesystem::exists(
+                    chunk_dl_dir.parent_path() / "chunk-plain"));
                 assembled_checked = true;
             }
         });
@@ -1755,26 +1765,26 @@ TEST(SyncContentBatchTest,
     auto result = kasumi::reconciliation::reconcile(*input);
     ASSERT_TRUE(result) << result.error().detail;
     std::size_t download_windows = 0;
-    std::filesystem::path chunk_plain_dir;
+    std::filesystem::path chunk_dl_dir;
     namespace fault = kasumi::application::sync::mutation_fault_test;
     fault::set_hook([&](std::string_view point, const auto& path) {
         if (point == "fastcdc_chunks_ready") {
             ++download_windows;
-            chunk_plain_dir = path;
-            EXPECT_TRUE(
-                std::filesystem::is_empty(path.parent_path() / "chunk-dl"));
+            chunk_dl_dir = path;
+            EXPECT_FALSE(
+                std::filesystem::exists(path.parent_path() / "chunk-plain"));
             const auto chunks = std::ranges::count_if(
                 std::filesystem::directory_iterator(path),
-                [](const auto& entry) {
-                    return entry.path().extension() == ".chunk";
-                });
+                [](const auto& entry) { return entry.is_regular_file(); });
             EXPECT_LE(chunks, 64);
         } else if (point == "fastcdc_file_ready") {
             EXPECT_EQ(path.parent_path(), fixture->local);
             EXPECT_NE(path.filename().string().find(".kasumi-new-"),
                       std::string::npos);
-            EXPECT_FALSE(chunk_plain_dir.empty());
-            EXPECT_TRUE(std::filesystem::is_empty(chunk_plain_dir));
+            EXPECT_FALSE(chunk_dl_dir.empty());
+            EXPECT_TRUE(std::filesystem::is_empty(chunk_dl_dir));
+            EXPECT_FALSE(std::filesystem::exists(
+                chunk_dl_dir.parent_path() / "chunk-plain"));
         }
     });
     const auto downloaded = execute_with(*fixture, *input, *result);

@@ -309,8 +309,12 @@ std::expected<void, Error> observe_content_availability(
     }
     std::vector<transport::Presence> presences;
     bool probed = false;
-    if (has_chunked_probe && requested_physical.size() >= 8U &&
-        storage.storage.list != nullptr) {
+    constexpr std::size_t bulk_list_probe_threshold = 64U;
+    const bool use_bulk_list =
+        !input.audit_storage_objects && storage.storage.list != nullptr &&
+        ((has_chunked_probe && requested_physical.size() >= 8U) ||
+         requested_physical.size() >= bulk_list_probe_threshold);
+    if (use_bulk_list) {
         if (auto listed = transport::list(storage)) {
             const std::unordered_set<std::string> remote_set(listed->begin(),
                                                              listed->end());

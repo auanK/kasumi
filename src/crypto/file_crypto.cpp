@@ -909,4 +909,101 @@ bool decrypt_file(const std::filesystem::path& input_path,
     });
 }
 
+bool decrypt_file_to_sink(const std::filesystem::path& input_path,
+                          std::span<const std::uint8_t, KEY_SIZE> master_key,
+                          const DecryptedSink& sink,
+                          FilePurpose purpose,
+                          std::optional<std::uint64_t> expected_plaintext_size,
+                          const Hash* expected_plaintext_hash) {
+    if (!sink || input_path.empty()) {
+        return false;
+    }
+    std::error_code ec;
+    const auto in_status = std::filesystem::symlink_status(input_path, ec);
+    if (ec || !std::filesystem::is_regular_file(in_status) ||
+        platform::private_storage::is_reparse_or_symlink(input_path)) {
+        return false;
+    }
+    return with_derived_key(master_key, purpose, [&](const Key& key) {
+        CryptoSession session;
+        try {
+            auto opened =
+                platform::private_storage::open_regular_file(input_path);
+            if (!opened) {
+                return false;
+            }
+            auto& input = *opened;
+            if (expected_plaintext_size) {
+                const auto max_wire =
+                    encoded_file_size(*expected_plaintext_size);
+                if (!max_wire || input.size > *max_wire) {
+                    return false;
+                }
+            }
+
+            std::array<std::uint8_t, FILE_MAGIC_SIZE> magic{};
+            if (!input.read_exact(magic) || magic != format_magic_v3) {
+                return false;
+            }
+
+            blake3_hasher digest_hasher;
+            blake3_hasher_init(&digest_hasher);
+            secure_memory::WipeGuard digest_guard{digest_hasher};
+            std::uint64_t total_written = 0;
+
+            const auto read_exact = [&](std::uint8_t* dst, std::size_t count) {
+                return input.read_exact({dst, count});
+            };
+            const auto write_exact = [&](const std::uint8_t* src,
+                                         std::size_t count) {
+                if (count == 0) {
+                    return true;
+                }
+                if (expected_plaintext_size &&
+                    count > *expected_plaintext_size - total_written) {
+                    return false;
+                }
+                if (expected_plaintext_hash != nullptr) {
+                    blake3_hasher_update(&digest_hasher, src, count);
+                }
+                if (!sink(std::span<const std::uint8_t>{src, count})) {
+                    return false;
+                }
+                total_written += count;
+                return true;
+            };
+            const auto at_eof = [&]() {
+                return at_end(input);
+            };
+
+            if (!decode_v3_stream(session,
+                                  key,
+                                  purpose,
+                                  input.size,
+                                  read_exact,
+                                  write_exact,
+                                  at_eof)) {
+                return false;
+            }
+            if (expected_plaintext_size &&
+                total_written != *expected_plaintext_size) {
+                return false;
+            }
+            if (expected_plaintext_hash != nullptr) {
+                Hash digest{};
+                blake3_hasher_finalize(
+                    &digest_hasher,
+                    reinterpret_cast<std::uint8_t*>(digest.data()),
+                    digest.size());
+                if (digest != *expected_plaintext_hash) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (...) {
+            return false;
+        }
+    });
+}
+
 } // namespace kasumi::crypto
