@@ -57,6 +57,9 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 #endif
 
 namespace kasumi::cli::update {
@@ -1220,7 +1223,17 @@ std::optional<std::filesystem::path> current_executable_path() {
         }
         buffer.resize(std::min<std::size_t>(buffer.size() * 2, 32768));
     }
-#else
+#elif defined(__APPLE__)
+    std::vector<char> buffer(1024);
+    auto size = static_cast<std::uint32_t>(buffer.size());
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        buffer.resize(size);
+        if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+            return std::nullopt;
+        }
+    }
+    return resolve_regular_executable(std::filesystem::path{buffer.data()});
+#elif defined(__linux__)
     std::vector<char> buffer(1024);
     for (;;) {
         const auto length =
@@ -1238,6 +1251,8 @@ std::optional<std::filesystem::path> current_executable_path() {
         }
         buffer.resize(std::min<std::size_t>(buffer.size() * 2, 65536));
     }
+#else
+    return std::nullopt;
 #endif
 }
 
@@ -2260,6 +2275,7 @@ std::optional<uid_t> invoking_user_id() {
 }
 #endif
 
+#if defined(_WIN32) || defined(__linux__)
 std::expected<void, std::string>
 validate_staging_root(const std::filesystem::path& root) {
     std::error_code error;
@@ -2308,6 +2324,7 @@ validate_staging_root(const std::filesystem::path& root) {
     return {};
 #endif
 }
+#endif
 
 #if defined(_WIN32)
 std::expected<PreparedExecutable, std::string>
@@ -2599,10 +2616,12 @@ std::string language_code() {
                                                                   : "en";
 }
 
+#if defined(_WIN32) || defined(__linux__)
 void select_helper_language(std::string_view language) {
     i18n::set_language(language == "pt-BR" ? i18n::Language::Portuguese
                                            : i18n::Language::English);
 }
+#endif
 
 int report_failure(std::string_view detail) {
     if (platform::cancellation::requested()) {
@@ -2906,17 +2925,16 @@ start_windows_helper(const std::filesystem::path& executable,
                      std::string_view version,
                      const WindowsFileIdentity& target_identity,
                      const platform::Workspace& workspace) {
-    auto id = platform::random::hex_id();
-    if (!id) {
-        return std::unexpected(id.error());
+    auto helper_workspace = platform::create_workspace("update-helper");
+    if (!helper_workspace) {
+        return std::unexpected(helper_workspace.error());
     }
+    ScopedWorkspaceCleanup cleanup{.value = *helper_workspace};
     std::error_code error;
-    const auto helper =
-        workspace.root /
-        platform::path::from_utf8("kasumi-update-helper-" + *id + ".exe");
+    const auto helper = helper_workspace->root / L"kasumi-update-helper.exe";
     if (!std::filesystem::copy_file(
             executable, helper, std::filesystem::copy_options::none, error) ||
-        error) {
+        error || !SetFileAttributesW(helper.c_str(), FILE_ATTRIBUTE_NORMAL)) {
         return std::unexpected(
             "could not prepare the Windows replacement helper");
     }
@@ -2927,7 +2945,6 @@ start_windows_helper(const std::filesystem::path& executable,
     if (!version_w || !language_w || !identity_w || !workspace.identity.valid ||
         !windows_path_has_no_reparse_points(executable) ||
         !windows_file_identity_matches(executable, target_identity)) {
-        std::filesystem::remove(helper, error);
         return std::unexpected("invalid installer handoff arguments");
     }
     const auto command_line = join_windows_arguments(
@@ -2952,7 +2969,6 @@ start_windows_helper(const std::filesystem::path& executable,
     startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
     const auto system_dir = windows_system_directory();
     if (!system_dir) {
-        std::filesystem::remove(helper, error);
         return std::unexpected(system_dir.error());
     }
     PROCESS_INFORMATION process{};
@@ -2966,23 +2982,33 @@ start_windows_helper(const std::filesystem::path& executable,
                         system_dir->c_str(),
                         &startup,
                         &process)) {
-        std::filesystem::remove(helper, error);
         return std::unexpected(
             "could not start the Windows replacement helper");
     }
     CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
+    const ScopedWindowsHandle child{process.hProcess};
     const auto ready_path = workspace.root / "helper-ready";
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds{10};
+    std::string failure = "Windows replacement helper did not initialize";
     while (std::chrono::steady_clock::now() < deadline) {
         if (std::filesystem::exists(ready_path, error) && !error) {
-            return {};
+            auto cleaner = start_windows_helper_cleanup(helper_workspace->root,
+                                                        process.dwProcessId);
+            if (cleaner) {
+                cleanup.released = true;
+                return {};
+            }
+            failure = std::move(cleaner.error());
+            break;
         }
-        Sleep(20);
+        if (WaitForSingleObject(child.value, 20) != WAIT_TIMEOUT) {
+            break;
+        }
     }
-    std::filesystem::remove(helper, error);
-    return std::unexpected("Windows replacement helper did not initialize");
+    TerminateProcess(child.value, 1);
+    WaitForSingleObject(child.value, 5000);
+    return std::unexpected(std::move(failure));
 }
 
 int run_windows_wait_helper(int argc, char* argv[]) {
@@ -3068,15 +3094,7 @@ int run_windows_wait_helper(int argc, char* argv[]) {
         }
         marker << "ready";
     }
-    struct HandoffCleanup {
-        platform::Workspace workspace;
-        std::filesystem::path helper;
-        ~HandoffCleanup() {
-            platform::cleanup_workspace(workspace);
-            static_cast<void>(MoveFileExW(
-                helper.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT));
-        }
-    } cleanup{.workspace = handoff_workspace, .helper = *helper};
+    const ScopedWorkspaceCleanup cleanup{.value = handoff_workspace};
     const DWORD parent_wait = WaitForSingleObject(parent, INFINITE);
     if (parent_wait != WAIT_OBJECT_0) {
         return report_failure("could not wait for the running Kasumi process");
@@ -3624,6 +3642,57 @@ int run_public_update(bool allow_elevation = true) {
 } // namespace
 
 #if defined(_WIN32)
+std::expected<void, std::string>
+start_windows_helper_cleanup(const std::filesystem::path& directory,
+                             std::uint32_t helper_pid) {
+    const auto system = windows_system_directory();
+    if (!system) {
+        return std::unexpected(system.error());
+    }
+    const auto powershell = *system / L"WindowsPowerShell/v1.0/powershell.exe";
+    // The private workspace is passed as the working directory, outside the
+    // script.
+    const auto command = join_windows_arguments(
+        {powershell.wstring(),
+         L"-NoProfile",
+         L"-NonInteractive",
+         L"-Command",
+         L"$dir = [Environment]::CurrentDirectory; "
+         L"[Environment]::CurrentDirectory = [Environment]::SystemDirectory; "
+         L"try { $p = [Diagnostics.Process]::GetProcessById(" +
+             std::to_wstring(helper_pid) +
+             L"); $p.WaitForExit() } "
+             L"catch [ArgumentException] {}; "
+             L"$exe = [IO.Path]::Combine($dir, 'kasumi-update-helper.exe'); "
+             L"for ($i = 0; $i -lt 50; ++$i) { "
+             L"try { [IO.File]::Delete($exe); [IO.Directory]::Delete($dir); "
+             L"break } "
+             L"catch [IO.IOException] { [Threading.Thread]::Sleep(100) } "
+             L"catch [UnauthorizedAccessException] { "
+             L"[Threading.Thread]::Sleep(100) } }"});
+    std::vector<wchar_t> buffer(command.begin(), command.end());
+    buffer.push_back(L'\0');
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(powershell.c_str(),
+                        buffer.data(),
+                        nullptr,
+                        nullptr,
+                        FALSE,
+                        CREATE_NO_WINDOW,
+                        nullptr,
+                        directory.c_str(),
+                        &startup,
+                        &process)) {
+        return std::unexpected(
+            "could not schedule Windows update helper cleanup");
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return {};
+}
+
 WindowsInstallationWritableResult check_windows_installation_writable(
     const std::filesystem::path& target,
     const WindowsIdentifierGenerator& id_generator) {
@@ -3879,7 +3948,7 @@ int run(int argc, char* argv[]) {
     if (mode == "--kasumi-update-helper") {
         return run_windows_wait_helper(argc, argv);
     }
-#else
+#elif defined(__linux__)
     if (mode == "--kasumi-update-install") {
         return run_linux_install_helper(argc, argv);
     }

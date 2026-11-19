@@ -147,9 +147,10 @@ rename_profile_directory(const ProfilePaths& source,
     if (ec) {
         return fail(ErrorCode::IoFailure, ec.message());
     }
-    if (std::filesystem::is_symlink(status)) {
+    if (!std::filesystem::is_directory(status) ||
+        platform::private_storage::is_reparse_or_symlink(source.profile_dir)) {
         return fail(ErrorCode::IoFailure,
-                    "source profile directory cannot be a symlink");
+                    "source profile path must be a plain directory");
     }
     if (auto secured =
             platform::private_storage::protect_tree(source.profile_dir);

@@ -164,6 +164,9 @@ InstallResult install_linux_handoff(const std::filesystem::path& archive,
 #endif
 
 #if defined(_WIN32)
+std::expected<void, std::string>
+start_windows_helper_cleanup(const std::filesystem::path& directory,
+                             std::uint32_t helper_pid);
 enum class WindowsInstallationWritableState {
     Writable,
     PermissionDenied,

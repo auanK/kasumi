@@ -1250,17 +1250,8 @@ write_atomically(const std::filesystem::path& path, std::string_view bytes) {
     return std::unexpected("could not reserve temporary file");
 }
 
-std::expected<std::uint64_t, StreamError>
-stream_regular_file_raw(const std::filesystem::path& path,
-                        std::span<std::uint8_t> scratch,
-                        bool (*on_chunk)(void*, std::span<const std::uint8_t>),
-                        void* context,
-                        std::optional<std::uint64_t> expected_size,
-                        std::optional<FileSlice> slice) {
-    if (scratch.empty() || on_chunk == nullptr) {
-        return make_stream_error(StreamErrorKind::ReadFailed,
-                                 "invalid stream buffer or callback");
-    }
+std::expected<RegularFileInput, StreamError>
+open_regular_file(const std::filesystem::path& path) {
 #if defined(_WIN32)
     const auto handle =
         CreateFileW(path.c_str(),
@@ -1326,6 +1317,87 @@ stream_regular_file_raw(const std::filesystem::path& path,
     }
     const auto file_size = static_cast<std::uint64_t>(st.st_size);
 #endif
+    return RegularFileInput{std::move(guard), file_size};
+}
+
+bool RegularFileInput::seek(std::uint64_t offset) const noexcept {
+    if (offset > size) {
+        return false;
+    }
+#if defined(_WIN32)
+    LARGE_INTEGER position{};
+    position.QuadPart = static_cast<LONGLONG>(offset);
+    return SetFilePointerEx(reinterpret_cast<HANDLE>(handle.value),
+                            position,
+                            nullptr,
+                            FILE_BEGIN) != 0;
+#else
+    return ::lseek(static_cast<int>(handle.value),
+                   static_cast<off_t>(offset),
+                   SEEK_SET) >= 0;
+#endif
+}
+
+std::expected<std::size_t, StreamError>
+RegularFileInput::read(std::span<std::uint8_t> buffer) const {
+#if defined(_WIN32)
+    DWORD count = 0;
+    const auto requested = std::min<std::size_t>(buffer.size(), MAXDWORD);
+    if (!ReadFile(reinterpret_cast<HANDLE>(handle.value),
+                  buffer.data(),
+                  static_cast<DWORD>(requested),
+                  &count,
+                  nullptr)) {
+        const DWORD code = GetLastError();
+        return make_stream_error(
+            StreamErrorKind::ReadFailed,
+            windows_error("ReadFile failed", code),
+            {static_cast<int>(code), std::system_category()});
+    }
+#else
+    const auto requested = std::min<std::size_t>(
+        buffer.size(), std::numeric_limits<ssize_t>::max());
+    ssize_t count = 0;
+    do {
+        count =
+            ::read(static_cast<int>(handle.value), buffer.data(), requested);
+    } while (count < 0 && errno == EINTR);
+    if (count < 0) {
+        const std::error_code error{errno, std::generic_category()};
+        return make_stream_error(
+            StreamErrorKind::ReadFailed, error.message(), error);
+    }
+#endif
+    return static_cast<std::size_t>(count);
+}
+
+bool RegularFileInput::read_exact(std::span<std::uint8_t> buffer) const {
+    while (!buffer.empty()) {
+        const auto count = read(buffer);
+        if (!count || *count == 0) {
+            return false;
+        }
+        buffer = buffer.subspan(*count);
+    }
+    return true;
+}
+
+std::expected<std::uint64_t, StreamError>
+stream_regular_file_raw(const std::filesystem::path& path,
+                        std::span<std::uint8_t> scratch,
+                        bool (*on_chunk)(void*, std::span<const std::uint8_t>),
+                        void* context,
+                        std::optional<std::uint64_t> expected_size,
+                        std::optional<FileSlice> slice) {
+    if (scratch.empty() || on_chunk == nullptr) {
+        return make_stream_error(StreamErrorKind::ReadFailed,
+                                 "invalid stream buffer or callback");
+    }
+    auto input = open_regular_file(path);
+    if (!input) {
+        return std::unexpected(input.error());
+    }
+    const auto file_size = input->size;
     if (expected_size && file_size != *expected_size) {
         return make_stream_error(StreamErrorKind::SizeMismatch,
                                  "file size does not match expected size");
@@ -1335,14 +1407,7 @@ stream_regular_file_raw(const std::filesystem::path& path,
             return make_stream_error(StreamErrorKind::SizeMismatch,
                                      "slice exceeds file size");
         }
-#if defined(_WIN32)
-        LARGE_INTEGER offset{};
-        offset.QuadPart = static_cast<LONGLONG>(slice->offset);
-        const bool seek_ok = SetFilePointerEx(handle, offset, nullptr, FILE_BEGIN) != 0;
-#else
-        const bool seek_ok = ::lseek(fd, static_cast<off_t>(slice->offset), SEEK_SET) >= 0;
-#endif
-        if (!seek_ok) {
+        if (!input->seek(slice->offset)) {
             return make_stream_error(StreamErrorKind::ReadFailed,
                                      "could not seek to file slice");
         }
@@ -1353,34 +1418,14 @@ stream_regular_file_raw(const std::filesystem::path& path,
             ? static_cast<std::size_t>(std::min<std::uint64_t>(
                   scratch.size(), slice->size - total_read))
             : scratch.size();
-#if defined(_WIN32)
-        DWORD count = 0;
-        if (!ReadFile(handle,
-                      scratch.data(),
-                      static_cast<DWORD>(requested),
-                      &count,
-                      nullptr)) {
-            const DWORD code = GetLastError();
-            return make_stream_error(
-                StreamErrorKind::ReadFailed,
-                windows_error("ReadFile failed", code),
-                {static_cast<int>(code), std::system_category()});
+        const auto count = input->read(scratch.first(requested));
+        if (!count) {
+            return std::unexpected(count.error());
         }
-#else
-        const auto count = ::read(fd, scratch.data(), requested);
-        if (count < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            const std::error_code error{errno, std::generic_category()};
-            return make_stream_error(
-                StreamErrorKind::ReadFailed, error.message(), error);
-        }
-#endif
-        if (count == 0) {
+        if (*count == 0) {
             break;
         }
-        const auto chunk_size = static_cast<std::size_t>(count);
+        const auto chunk_size = *count;
         if (!slice && expected_size &&
             chunk_size > *expected_size - total_read) {
             return make_stream_error(StreamErrorKind::SizeMismatch,

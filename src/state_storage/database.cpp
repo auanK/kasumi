@@ -205,24 +205,24 @@ std::string quote_sql_identifier(std::string_view identifier) {
     return quoted;
 }
 
-bool is_missing_status(const std::filesystem::file_status& status,
-                       const std::error_code& ec) noexcept {
-    return ec == std::errc::no_such_file_or_directory ||
-           (!ec && status.type() == std::filesystem::file_type::not_found);
-}
-
 bool protect_wal_sidecars(const std::filesystem::path& database_path) {
     for (const auto& suffix : {"-wal", "-shm"}) {
         const auto sidecar =
             platform::path::temporary_sibling_path(database_path, "", suffix);
         std::error_code ec;
         const auto status = std::filesystem::symlink_status(sidecar, ec);
-        if (is_missing_status(status, ec)) {
+        if (detail::missing_file(status, ec)) {
             continue;
         }
-        if (ec || std::filesystem::is_symlink(status) ||
-            !platform::private_storage::protect_file(sidecar)) {
+        if (ec || !std::filesystem::is_regular_file(status) ||
+            platform::private_storage::is_reparse_or_symlink(sidecar)) {
             return false;
+        }
+        if (!platform::private_storage::protect_file(sidecar)) {
+            const auto after = std::filesystem::symlink_status(sidecar, ec);
+            if (!detail::missing_file(after, ec)) {
+                return false;
+            }
         }
     }
     return true;
@@ -234,7 +234,7 @@ bool sidecars_absent(const std::filesystem::path& path) {
             platform::path::temporary_sibling_path(path, "", suffix);
         std::error_code ec;
         const auto status = std::filesystem::symlink_status(sidecar, ec);
-        if (!is_missing_status(status, ec)) {
+        if (!detail::missing_file(status, ec)) {
             return false;
         }
     }
@@ -637,7 +637,8 @@ bool initialize(const std::filesystem::path& database_path) {
         const auto path = std::filesystem::absolute(database_path);
         std::error_code status_error;
         auto status = std::filesystem::symlink_status(path, status_error);
-        if (is_missing_status(status, status_error) && sidecars_absent(path)) {
+        if (detail::missing_file(status, status_error) &&
+            sidecars_absent(path)) {
             const auto id = platform::random::hex_id();
             if (!id) {
                 return false;
@@ -659,7 +660,8 @@ bool initialize(const std::filesystem::path& database_path) {
             } cleanup{*created};
             platform::private_storage::close_private_file(*created);
             {
-                auto opened = sqlite::open(staging, SQLITE_OPEN_READWRITE);
+                auto opened =
+                    detail::open_state_database(staging, SQLITE_OPEN_READWRITE);
                 if (!opened) {
                     return false;
                 }
@@ -691,7 +693,7 @@ bool initialize(const std::filesystem::path& database_path) {
                 return false;
             }
             status = std::filesystem::symlink_status(path, status_error);
-        } else if (is_missing_status(status, status_error)) {
+        } else if (detail::missing_file(status, status_error)) {
             // A concurrent initializer may have published while we checked
             // sidecars.
             status = std::filesystem::symlink_status(path, status_error);
@@ -701,7 +703,7 @@ bool initialize(const std::filesystem::path& database_path) {
             !validate(path) || !platform::private_storage::protect_file(path)) {
             return false;
         }
-        auto opened = sqlite::open(path, SQLITE_OPEN_READWRITE);
+        auto opened = detail::open_state_database(path, SQLITE_OPEN_READWRITE);
         return opened && detail::require_wal_mode(opened->get(), true) &&
                protect_wal_sidecars(path);
     } catch (const std::exception&) {
@@ -711,7 +713,25 @@ bool initialize(const std::filesystem::path& database_path) {
 
 bool validate(const std::filesystem::path& database_path) {
     try {
-        auto opened = detail::open_state_database_readonly(database_path);
+        {
+            auto opened = detail::open_state_database_readonly(database_path);
+            if (!opened) {
+                return false;
+            }
+            try {
+                return valid_schema(opened->get());
+            } catch (const std::runtime_error&) {
+                const auto error = sqlite3_extended_errcode(opened->get());
+                if (error != SQLITE_READONLY_RECOVERY &&
+                    error != SQLITE_READONLY_CANTINIT &&
+                    error != SQLITE_READONLY_CANTLOCK &&
+                    error != SQLITE_READONLY_ROLLBACK) {
+                    return false;
+                }
+            }
+        }
+        auto opened =
+            detail::open_state_database(database_path, SQLITE_OPEN_READWRITE);
         return opened && valid_schema(opened->get());
     } catch (const std::exception&) {
         return false;
@@ -722,10 +742,9 @@ std::expected<std::optional<StoredState>, std::string>
 load_state(const std::filesystem::path& database_path) {
     try {
         std::error_code filesystem_error;
-        if (!std::filesystem::exists(database_path, filesystem_error)) {
-            if (filesystem_error) {
-                return std::unexpected(filesystem_error.message());
-            }
+        const auto status =
+            std::filesystem::symlink_status(database_path, filesystem_error);
+        if (detail::missing_file(status, filesystem_error)) {
             return std::optional<StoredState>{};
         }
         auto opened = detail::open_state_database_readonly(database_path);
@@ -909,8 +928,8 @@ bool save_state(const std::filesystem::path& database_path,
         if (!encoded_manifest_hex.empty()) {
             exec_stmt(upsert_meta, "storage_manifest", encoded_manifest_hex);
         }
-        require(sqlite::commit(*transaction));
-        return protect_wal_sidecars(database_path);
+        return protect_wal_sidecars(database_path) &&
+               sqlite::commit(*transaction).has_value();
     } catch (const std::exception&) {
         return false;
     }
@@ -922,12 +941,8 @@ load_file_cache(const std::filesystem::path& database_path) {
         std::error_code error;
         const auto db_status =
             std::filesystem::symlink_status(database_path, error);
-        if (is_missing_status(db_status, error)) {
+        if (detail::missing_file(db_status, error)) {
             return std::vector<FileCacheRow>{};
-        }
-        if (error || std::filesystem::is_symlink(db_status)) {
-            return std::unexpected(error ? error.message()
-                                         : "database path is a symlink");
         }
         auto opened = detail::open_state_database_readonly(database_path);
         if (!opened) {
@@ -955,9 +970,12 @@ bool save_file_cache_delta(const std::filesystem::path& database_path,
             return false;
         }
         const auto previous = read_cache_rows(opened->get());
+        require(sqlite::execute(
+            opened->get(),
+            "DELETE FROM file_cache WHERE fingerprint_kind IN (1, 2)"));
         write_cache_delta(opened->get(), previous, rows);
-        require(sqlite::commit(*transaction));
-        return protect_wal_sidecars(database_path);
+        return protect_wal_sidecars(database_path) &&
+               sqlite::commit(*transaction).has_value();
     } catch (const std::exception&) {
         return false;
     }

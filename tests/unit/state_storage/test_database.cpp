@@ -729,6 +729,51 @@ TEST(StateStorageDatabaseTest, ValidationRequiresCurrentExistingSchema) {
               std::vector<std::string>{"99"});
 }
 
+TEST(StateStorageDatabaseTest, ValidationRecoversSchemaFromUncheckpointedWal) {
+    auto [workspace, database] = make_db("persistence-recover-wal");
+    execute_sql(database, "PRAGMA user_version = 0");
+    auto writer = open_database(database, SQLITE_OPEN_READWRITE);
+    ASSERT_EQ(
+        sqlite3_exec(
+            writer.get(), "PRAGMA user_version = 1", nullptr, nullptr, nullptr),
+        SQLITE_OK);
+
+    const auto recovered = database.parent_path() / "recovered.sqlite";
+    ASSERT_TRUE(std::filesystem::copy_file(database, recovered));
+    const auto wal = [](const auto& path) {
+        return kasumi::platform::path::temporary_sibling_path(path, "", "-wal");
+    };
+    ASSERT_TRUE(std::filesystem::copy_file(wal(database), wal(recovered)));
+    EXPECT_TRUE(kasumi::state_storage::validate(recovered));
+    EXPECT_EQ(query_text(recovered, "PRAGMA user_version"),
+              std::vector<std::string>{"1"});
+}
+
+TEST(StateStorageDatabaseTest, RejectsRedirectedDatabaseAndWal) {
+    auto [workspace, database] = make_db("persistence-redirected-input");
+    const auto alias = database.parent_path() / "alias.sqlite";
+    std::error_code error;
+    std::filesystem::create_symlink(database, alias, error);
+    if (error) {
+        GTEST_SKIP() << error.message();
+    }
+    EXPECT_FALSE(kasumi::state_storage::validate(alias));
+    EXPECT_FALSE(kasumi::state_storage::load_state(alias));
+    EXPECT_FALSE(kasumi::state_storage::save_file_cache_delta(alias, {}));
+    EXPECT_TRUE(std::filesystem::remove(alias));
+
+    const auto wal =
+        kasumi::platform::path::temporary_sibling_path(database, "", "-wal");
+    const auto untouched = database.parent_path() / "untouched";
+    kasumi::test::write_text(untouched, "original");
+    std::filesystem::create_symlink(untouched, wal);
+    EXPECT_FALSE(kasumi::state_storage::initialize(database));
+    EXPECT_FALSE(kasumi::state_storage::validate(database));
+    EXPECT_FALSE(kasumi::state_storage::load_file_cache(database));
+    EXPECT_EQ(kasumi::test::read_text(untouched), "original");
+    EXPECT_TRUE(std::filesystem::remove(wal));
+}
+
 TEST(StateStorageDatabaseTest, CorruptHashReturnsControlledError) {
     auto [workspace, database_path] = make_db("persistence-corrupt-hash");
     execute_sql(database_path,
@@ -1199,7 +1244,8 @@ TEST(StateStorageDatabaseTest, ExtremeTimestampsPreservedBitwise) {
     EXPECT_EQ(loaded->at(2).mtime_nanoseconds, 0);
 }
 
-TEST(StateStorageDatabaseTest, UnknownFingerprintKindsAreIgnoredAndPreserved) {
+TEST(StateStorageDatabaseTest,
+     LegacyFingerprintsArePrunedAndFutureKindIsPreserved) {
     auto [workspace, database_path] =
         make_db("persistence-unknown-fingerprints");
 
@@ -1220,6 +1266,10 @@ TEST(StateStorageDatabaseTest, UnknownFingerprintKindsAreIgnoredAndPreserved) {
                     "', 200, 2, "
                     "'0000000000000005', '0000000000000006', "
                     "'0000000000000007', '0000000000000008')");
+
+    execute_sql(database_path,
+                "INSERT INTO file_cache VALUES ('future.txt', 'hash', 1, 99, "
+                "'0', '0', '0', '0')");
 
     execute_sql(database_path,
                 "INSERT INTO file_cache (path, hash, size, fingerprint_kind, "
@@ -1252,9 +1302,7 @@ TEST(StateStorageDatabaseTest, UnknownFingerprintKindsAreIgnoredAndPreserved) {
         query_text(database_path,
                    "SELECT path FROM file_cache WHERE fingerprint_kind != 3 "
                    "ORDER BY path");
-    EXPECT_EQ(remaining_unknown,
-              (std::vector<std::string>{"platform_kind_one.txt",
-                                        "platform_kind_two.txt"}));
+    EXPECT_EQ(remaining_unknown, (std::vector<std::string>{"future.txt"}));
 }
 
 TEST(StateStorageDatabaseTest, CorruptedCacheEntriesIgnoredFailClosed) {

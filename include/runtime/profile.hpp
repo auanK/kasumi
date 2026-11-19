@@ -40,6 +40,7 @@ std::optional<KeyStorage> parse_key_storage(std::string_view value) noexcept;
 // Accepts alphanumeric characters, '-', and '_', excluding empty, ".", and
 // "..".
 bool is_valid_profile_name(std::string_view name);
+std::string fold_profile_name(std::string_view name);
 
 // Loads a profile by name.
 std::expected<ProfileData, Error>

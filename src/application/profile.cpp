@@ -622,6 +622,16 @@ auto find_profile(std::vector<runtime::ProfileData>& profiles,
     });
 }
 
+auto find_profile_name_conflict(std::vector<runtime::ProfileData>& profiles,
+                                std::string_view name,
+                                std::string_view except = {}) {
+    const auto folded = runtime::fold_profile_name(name);
+    return std::ranges::find_if(profiles, [&](const auto& profile) {
+        return profile.name != except &&
+               runtime::fold_profile_name(profile.name) == folded;
+    });
+}
+
 std::expected<void, ProfileError>
 validate_profile_locations(const Profile& profile) {
     if (auto valid =
@@ -808,7 +818,8 @@ create_profile(const ExecutionEnvironment& environment,
         auto& profiles = loaded->profiles;
         const auto& config_path = loaded->config_path;
 
-        if (find_profile(profiles, profile.name) != profiles.end()) {
+        if (find_profile_name_conflict(profiles, profile.name) !=
+            profiles.end()) {
             return fail_profile(ProfileErrorCode::AlreadyExists,
                                 "profile already exists");
         }
@@ -1130,11 +1141,15 @@ rename_profile(const ExecutionEnvironment& environment,
         return fail_profile(ProfileErrorCode::NotFound, "profile not found");
     }
 
-    if (find_profile(loaded->profiles, new_name) != loaded->profiles.end()) {
+    if (new_name == current_name ||
+        find_profile_name_conflict(loaded->profiles, new_name, current_name) !=
+            loaded->profiles.end()) {
         return fail_profile(ProfileErrorCode::AlreadyExists,
                             "a profile with this name already exists");
     }
 
+    const bool case_only = runtime::fold_profile_name(current_name) ==
+                           runtime::fold_profile_name(new_name);
     const auto first_lock_name =
         current_name <= new_name ? current_name : new_name;
     const auto second_lock_name =
@@ -1145,7 +1160,16 @@ rename_profile(const ExecutionEnvironment& environment,
         return std::unexpected(first_lock.error());
     }
     ScopedProfileLock second_lock;
-    if (second_lock_name != first_lock_name) {
+    std::error_code ec;
+    const auto lock_path = [&](std::string_view name) {
+        return environment.app_data_dir /
+               ("profile-" + std::string{name} + ".lock");
+    };
+    const auto second_lock_path = lock_path(second_lock_name);
+    if (!case_only ||
+        platform::private_storage::is_reparse_or_symlink(second_lock_path) ||
+        !std::filesystem::equivalent(
+            lock_path(first_lock_name), second_lock_path, ec)) {
         auto second = acquire_target_profile_lock(
             environment.app_data_dir, second_lock_name);
         if (!second) {
@@ -1164,13 +1188,16 @@ rename_profile(const ExecutionEnvironment& environment,
                             "failed to resolve paths");
     }
 
-    if (query_entry(new_paths_res->profile_dir).state != EntryState::Absent) {
+    const auto destination = query_entry(new_paths_res->profile_dir);
+    if (destination.state != EntryState::Absent &&
+        !(case_only && destination.is_plain_dir() &&
+          std::filesystem::equivalent(
+              old_paths_res->profile_dir, new_paths_res->profile_dir, ec))) {
         return fail_profile(ProfileErrorCode::StorageFailure,
                             "physical destination already exists");
     }
 
     bool phys_renamed = false;
-    std::error_code ec;
     const auto old_status =
         std::filesystem::symlink_status(old_paths_res->profile_dir, ec);
     if (ec && !path_missing(ec)) {
@@ -1205,7 +1232,11 @@ rename_profile(const ExecutionEnvironment& environment,
             }
         }
     };
-    if (it_current->key_storage == runtime::KeyStorage::Vault) {
+    if (it_current->key_storage == runtime::KeyStorage::Vault
+#if defined(_WIN32)
+        && !case_only // Credential Manager keys use the same folded name.
+#endif
+    ) {
         auto vault_key = runtime::vault::read_vault(old_paths_res->key_path);
         if (vault_key) {
             KeyBytesWiper key_wiper{*vault_key};
@@ -1263,7 +1294,8 @@ clone_profile(const ExecutionEnvironment& environment,
                             "source profile not found");
     }
 
-    if (find_profile(loaded->profiles, destination_profile_name) !=
+    if (find_profile_name_conflict(loaded->profiles,
+                                   destination_profile_name) !=
         loaded->profiles.end()) {
         return fail_profile(ProfileErrorCode::AlreadyExists,
                             "a profile with this name already exists");

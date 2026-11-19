@@ -165,6 +165,19 @@ struct FileSlice {
     std::uint64_t size;
 };
 
+struct RegularFileInput {
+    PrivateHandle handle;
+    std::uint64_t size;
+
+    bool seek(std::uint64_t offset) const noexcept;
+    std::expected<std::size_t, StreamError>
+    read(std::span<std::uint8_t> buffer) const;
+    bool read_exact(std::span<std::uint8_t> buffer) const;
+};
+
+std::expected<RegularFileInput, StreamError>
+open_regular_file(const std::filesystem::path& path);
+
 // Streams a whole regular file, or exactly the requested slice if provided.
 std::expected<std::uint64_t, StreamError> stream_regular_file_raw(
     const std::filesystem::path& path,

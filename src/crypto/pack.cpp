@@ -136,6 +136,8 @@ read_regular_file_checked(const std::filesystem::path& path,
                           std::vector<std::uint8_t>& out,
                           std::optional<std::uint64_t> expected_size =
                               std::nullopt) {
+    // Wipe the old contents before shrinking or reallocating the buffer.
+    secure_memory::wipe(out.data(), out.size());
     out.clear();
     if (path.empty()) {
         return std::unexpected("input path is empty");
@@ -152,25 +154,30 @@ read_regular_file_checked(const std::filesystem::path& path,
     if (ec) {
         return std::unexpected("failed to read file size: " + ec.message());
     }
-    if (size > max_bytes || (expected_size && size != *expected_size)) {
+    if (size > max_bytes || size > out.max_size() ||
+        (expected_size && size != *expected_size)) {
         return std::unexpected("input file size exceeds bounds or mismatches");
     }
-    out.reserve(static_cast<std::size_t>(size));
+    out.resize(static_cast<std::size_t>(size));
     std::vector<std::uint8_t> scratch(256U * 1024U);
     secure_memory::WipeGuard scratch_guard{scratch};
+    std::size_t copied = 0;
     auto streamed = platform::private_storage::stream_regular_file(
         path,
         scratch,
         [&](std::span<const std::uint8_t> chunk) {
-            if (!chunk.empty()) {
-                out.insert(out.end(), chunk.begin(), chunk.end());
+            if (chunk.size() > out.size() - copied) {
+                return false;
             }
+            std::ranges::copy(chunk, out.data() + copied);
+            copied += chunk.size();
+            return true;
         },
         size);
     if (!streamed) {
         return std::unexpected(streamed.error().detail);
     }
-    if (*streamed != size || (expected_size && out.size() != *expected_size)) {
+    if (copied != out.size()) {
         return std::unexpected("input file size changed while reading");
     }
     return {};

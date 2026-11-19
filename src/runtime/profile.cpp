@@ -10,6 +10,7 @@
 #include <limits>
 #include <sstream>
 #include <toml++/toml.h>
+#include <unordered_set>
 
 namespace kasumi::runtime {
 
@@ -45,6 +46,16 @@ bool is_valid_profile_name(std::string_view name) {
     return std::ranges::all_of(name, [](unsigned char character) {
         return std::isalnum(character) || character == '_' || character == '-';
     });
+}
+
+std::string fold_profile_name(std::string_view name) {
+    std::string folded{name};
+    for (char& ch : folded) {
+        if (ch >= 'A' && ch <= 'Z') {
+            ch = static_cast<char>(ch - 'A' + 'a');
+        }
+    }
+    return folded;
 }
 
 std::string_view to_string(KeyStorage storage) noexcept {
@@ -161,10 +172,18 @@ load_profiles(const std::filesystem::path& config_path) {
     }
 
     std::vector<ProfileData> result;
+#if defined(_WIN32) || defined(__APPLE__)
+    std::unordered_set<std::string> names;
+#endif
     for (const auto& [key, value] : *profiles) {
         if (!is_valid_profile_name(key.str())) {
             return fail(ErrorCode::InvalidProfileName, "invalid profile name");
         }
+#if defined(_WIN32) || defined(__APPLE__)
+        if (!names.insert(fold_profile_name(key.str())).second) {
+            return fail(ErrorCode::ConfigInvalid, "duplicate profile name");
+        }
+#endif
         auto* prof = value.as_table();
         if (prof == nullptr) {
             return fail(ErrorCode::ProfileInvalid,
@@ -226,9 +245,13 @@ load_profiles(const std::filesystem::path& config_path) {
 std::expected<void, Error>
 save_profiles(const std::filesystem::path& config_path,
               std::span<const ProfileData> profiles) {
+    std::unordered_set<std::string> names;
     for (const auto& prof : profiles) {
         if (!is_valid_profile_name(prof.name)) {
             return fail(ErrorCode::InvalidProfileName, "invalid profile name");
+        }
+        if (!names.insert(fold_profile_name(prof.name)).second) {
+            return fail(ErrorCode::ConfigInvalid, "duplicate profile name");
         }
         if (prof.min_history_depth == 0 || prof.min_history_age_hours == 0) {
             return fail(ErrorCode::ProfileInvalid,

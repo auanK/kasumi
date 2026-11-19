@@ -39,6 +39,30 @@ TEST(CryptoFileTest, EncodedSizeIncludesEveryChunkMacAndRejectsOverflow) {
     EXPECT_FALSE(encoded_file_size(maximum - FILE_HEADER_SIZE));
 }
 
+TEST(CryptoFileTest, EncryptionAndDecryptionRejectRedirectedInputs) {
+    auto workspace = kasumi::test::make_temp_workspace("crypto-input-link");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto plaintext = root / "clear";
+    const auto ciphertext = root / "encrypted";
+    const auto alias = root / "input-link";
+    const auto destination = root / "untouched";
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    kasumi::test::write_text(plaintext, "payload");
+    kasumi::test::write_text(destination, "original");
+    std::error_code error;
+    std::filesystem::create_symlink(plaintext, alias, error);
+    if (error) {
+        GTEST_SKIP() << error.message();
+    }
+    EXPECT_FALSE(kasumi::crypto::encrypt_file(alias, destination, key));
+    ASSERT_TRUE(std::filesystem::remove(alias));
+    ASSERT_TRUE(kasumi::crypto::encrypt_file(plaintext, ciphertext, key));
+    std::filesystem::create_symlink(ciphertext, alias);
+    EXPECT_FALSE(kasumi::crypto::decrypt_file(alias, destination, key));
+    EXPECT_EQ(kasumi::test::read_text(destination), "original");
+    EXPECT_TRUE(std::filesystem::remove(alias));
+}
+
 TEST(CryptoContentTest, HashesAnEmptyFile) {
     auto workspace = kasumi::test::make_temp_workspace("content-empty");
     const auto file = kasumi::test::workspace_path(workspace, "empty.bin");

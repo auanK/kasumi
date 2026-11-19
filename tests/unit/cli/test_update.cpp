@@ -230,6 +230,9 @@ TEST(CliUpdateTest, IdentifiesRunningExecutableAndPlatformPackage) {
     EXPECT_TRUE(executable->is_absolute());
     EXPECT_TRUE(std::filesystem::is_regular_file(*executable));
     const auto package = kasumi::cli::update::package_names_for_this_platform();
+#if defined(__APPLE__)
+    EXPECT_FALSE(package);
+#else
     ASSERT_TRUE(package);
 #if defined(_WIN32)
     EXPECT_EQ(package->archive, "kasumi-windows-x86_64.zip");
@@ -237,6 +240,7 @@ TEST(CliUpdateTest, IdentifiesRunningExecutableAndPlatformPackage) {
 #else
     EXPECT_EQ(package->archive, "kasumi-linux-x86_64.tar.gz");
     EXPECT_EQ(package->executable, "kasumi");
+#endif
 #endif
 }
 
@@ -1068,6 +1072,54 @@ TEST(CliUpdateTest, WindowsDestinationIdentityRejectsAnotherKasumiExecutable) {
     }
     EXPECT_FALSE(kasumi::cli::update::windows_file_identity_matches(original,
                                                                     *identity));
+}
+
+TEST(CliUpdateTest, WindowsHelperCleanupWaitsForExecutableToExit) {
+    auto workspace = kasumi::test::make_temp_workspace("update-helper-cleanup");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto helper = root / L"kasumi-update-helper.exe";
+    std::array<wchar_t, MAX_PATH> system{};
+    const auto length = GetSystemDirectoryW(system.data(), MAX_PATH);
+    ASSERT_GT(length, 0U);
+    ASSERT_LT(length, static_cast<UINT>(system.size()));
+    ASSERT_TRUE(std::filesystem::copy_file(
+        std::filesystem::path{system.data()} / L"ping.exe", helper));
+
+    auto command = kasumi::cli::update::windows_join_arguments(
+        {helper.wstring(), L"-t", L"127.0.0.1"});
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    ASSERT_TRUE(CreateProcessW(helper.c_str(),
+                               command.data(),
+                               nullptr,
+                               nullptr,
+                               FALSE,
+                               CREATE_NO_WINDOW,
+                               nullptr,
+                               nullptr,
+                               &startup,
+                               &process));
+    CloseHandle(process.hThread);
+    struct Child {
+        HANDLE handle;
+        ~Child() {
+            TerminateProcess(handle, 1);
+            WaitForSingleObject(handle, 5000);
+            CloseHandle(handle);
+        }
+    } child{process.hProcess};
+    const auto cleanup = kasumi::cli::update::start_windows_helper_cleanup(
+        root, process.dwProcessId);
+    ASSERT_TRUE(cleanup) << cleanup.error();
+    EXPECT_TRUE(std::filesystem::exists(helper));
+    ASSERT_TRUE(TerminateProcess(child.handle, 0));
+    ASSERT_EQ(WaitForSingleObject(child.handle, 5000), WAIT_OBJECT_0);
+    for (int attempt = 0; attempt < 200 && std::filesystem::exists(root);
+         ++attempt) {
+        Sleep(50);
+    }
+    EXPECT_FALSE(std::filesystem::exists(root));
 }
 
 TEST(CliUpdateTest, WindowsInstallerRejectsDestinationChangedDuringHandoff) {

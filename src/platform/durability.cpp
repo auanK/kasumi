@@ -14,6 +14,8 @@
 #if defined(__linux__)
 #include <linux/fs.h>
 #include <sys/syscall.h>
+#elif defined(__APPLE__)
+#include <stdio.h>
 #endif
 
 #if defined(_WIN32)
@@ -87,6 +89,11 @@ std::error_code rename_no_replace(const std::filesystem::path& source,
                   AT_FDCWD,
                   destination.c_str(),
                   RENAME_NOREPLACE) == 0) {
+        return {};
+    }
+    return {errno, std::generic_category()};
+#elif defined(__APPLE__)
+    if (::renamex_np(source.c_str(), destination.c_str(), RENAME_EXCL) == 0) {
         return {};
     }
     return {errno, std::generic_category()};

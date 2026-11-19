@@ -6,6 +6,7 @@
 #include "platform/profile_lock.hpp"
 #include "platform/workspace.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -511,23 +512,30 @@ TEST(PrivateStorageTest, RemovesWorkspaceWithNestedLongPath) {
 }
 #endif
 
-TEST(PrivateStorageTest, StreamRejectsFileTruncatedAfterOpening) {
-    auto workspace = kasumi::test::make_temp_workspace("stream-truncated");
+TEST(PrivateStorageTest, StreamRejectsSizeChangesWithoutDeliveringExtraBytes) {
+    auto workspace = kasumi::test::make_temp_workspace("stream-size-changed");
     const auto path = kasumi::test::workspace_path(workspace, "data");
-    kasumi::test::write_text(path, "abcdefgh");
-    std::array<std::uint8_t, 4> scratch{};
-    const auto streamed =
-        kasumi::platform::private_storage::stream_regular_file(
-            path,
-            scratch,
-            [&](std::span<const std::uint8_t>) {
-                std::filesystem::resize_file(path, scratch.size());
-                return true;
-            },
-            8);
-    ASSERT_FALSE(streamed);
-    EXPECT_EQ(streamed.error().kind,
-              kasumi::platform::private_storage::StreamErrorKind::SizeMismatch);
+    for (const auto changed_size : {4U, 12U}) {
+        kasumi::test::write_text(path, "abcdefgh");
+        std::array<std::uint8_t, 4> scratch{};
+        std::size_t delivered = 0;
+        const auto streamed =
+            kasumi::platform::private_storage::stream_regular_file(
+                path,
+                scratch,
+                [&](std::span<const std::uint8_t> chunk) {
+                    if (delivered == 0) {
+                        std::filesystem::resize_file(path, changed_size);
+                    }
+                    delivered += chunk.size();
+                },
+                8);
+        ASSERT_FALSE(streamed);
+        EXPECT_EQ(
+            streamed.error().kind,
+            kasumi::platform::private_storage::StreamErrorKind::SizeMismatch);
+        EXPECT_EQ(delivered, (std::min)(changed_size, 8U));
+    }
 }
 
 TEST(PrivateStorageTest, AtomicWriteReplacesContentAndLeavesNoTemporaryFile) {

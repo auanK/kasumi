@@ -12,7 +12,6 @@
 #include <array>
 #include <blake3.h>
 #include <cstring>
-#include <fstream>
 #include <limits>
 #include <monocypher.h>
 #include <system_error>
@@ -78,7 +77,6 @@ struct CryptoSession {
     std::array<std::uint8_t, NONCE_SIZE> chunk_nonce{};
     std::array<std::uint8_t, MAC_SIZE> header_mac{};
     std::array<std::uint8_t, MAC_SIZE> mac{};
-    std::vector<char> read_buffer;
     std::vector<std::uint8_t> buffer_a;
     std::vector<std::uint8_t> buffer_b;
     std::vector<std::uint8_t> buffer_comp;
@@ -95,9 +93,6 @@ struct CryptoSession {
             if (!buf->empty()) {
                 crypto_wipe(buf->data(), buf->size());
             }
-        }
-        if (!read_buffer.empty()) {
-            crypto_wipe(read_buffer.data(), read_buffer.size());
         }
         if (!published && !file.published && !file.path.empty()) {
             static_cast<void>(
@@ -126,35 +121,11 @@ std::nullopt_t fail_crypto(std::string* error_detail, std::string_view msg) {
     return std::nullopt;
 }
 
-std::optional<std::pair<std::ifstream, std::uint64_t>>
-open_input_sized(const std::filesystem::path& input_path,
-                 std::vector<char>& stream_buffer,
-                 std::string* error_detail) {
-    constexpr std::size_t io_buffer_size = 256U * 1024U;
-    stream_buffer.resize(io_buffer_size);
-    std::ifstream input;
-    input.rdbuf()->pubsetbuf(
-        stream_buffer.data(),
-        static_cast<std::streamsize>(stream_buffer.size()));
-    input.open(input_path, std::ios::binary | std::ios::ate);
-    if (!input) {
-        return fail_crypto(error_detail, "opening plaintext input failed");
-    }
-    const auto end_position = input.tellg();
-    const auto stream_size = static_cast<std::streamoff>(end_position);
-    if (end_position < std::streampos{0} || stream_size < 0) {
-        return fail_crypto(error_detail, "reading plaintext size failed");
-    }
-    const auto input_size = static_cast<std::uintmax_t>(stream_size);
-    if (input_size > static_cast<std::uintmax_t>(
-                         std::numeric_limits<std::uint64_t>::max())) {
-        return fail_crypto(error_detail, "plaintext size is unsupported");
-    }
-    input.seekg(0, std::ios::beg);
-    if (!input) {
-        return fail_crypto(error_detail, "seeking plaintext input failed");
-    }
-    return std::pair{std::move(input), static_cast<std::uint64_t>(input_size)};
+bool at_end(const platform::private_storage::RegularFileInput& input) {
+    std::array<std::uint8_t, 1> trailing{};
+    secure_memory::WipeGuard guard{trailing};
+    const auto count = input.read(trailing);
+    return count && *count == 0;
 }
 
 std::optional<std::filesystem::path>
@@ -172,8 +143,9 @@ prepare_crypto_paths(const std::filesystem::path& input_path,
     }
 
     std::error_code ec;
-    const auto in_status = std::filesystem::status(input_path, ec);
-    if (ec || !std::filesystem::is_regular_file(in_status)) {
+    const auto in_status = std::filesystem::symlink_status(input_path, ec);
+    if (ec || !std::filesystem::is_regular_file(in_status) ||
+        platform::private_storage::is_reparse_or_symlink(input_path)) {
         return fail_crypto(error_detail,
                            "opening plaintext input failed: input path is not "
                            "an accessible regular file");
@@ -254,25 +226,16 @@ bool reserve_temp_output(const std::filesystem::path& target_path,
     return false;
 }
 
-bool close_and_publish_temp(std::ifstream& input,
+bool close_and_publish_temp(platform::private_storage::RegularFileInput& input,
                             CryptoSession& session,
                             const std::filesystem::path& target_path,
                             bool check_eof,
                             std::string* error_detail) {
-    if (check_eof) {
-        char trailing = 0;
-        input.read(&trailing, 1);
-        if (input.gcount() != 0 || input.bad()) {
-            fail_crypto(error_detail, "checking plaintext end failed");
-            return false;
-        }
-    }
-    input.clear();
-    input.close();
-    if (input.fail()) {
-        fail_crypto(error_detail, "closing plaintext input failed");
+    if (check_eof && !at_end(input)) {
+        fail_crypto(error_detail, "checking input end failed");
         return false;
     }
+    input.handle.close();
     if (!session.file.identity.valid) {
         fail_crypto(error_detail, "temporary file identity is invalid");
         return false;
@@ -685,27 +648,23 @@ encrypt_file_range(const std::filesystem::path& input_path,
             CryptoSession session;
 
             try {
-                auto opened = open_input_sized(
-                    input_path, session.read_buffer, error_detail);
+                auto opened =
+                    platform::private_storage::open_regular_file(input_path);
                 if (!opened) {
-                    return std::nullopt;
+                    return fail_crypto(error_detail, opened.error().detail);
                 }
-                auto& [input, file_size] = *opened;
+                auto& input = *opened;
+                const auto file_size = input.size;
                 std::uint64_t plaintext_size = file_size;
                 if (slice_length) {
                     if (offset > file_size ||
-                        *slice_length > file_size - offset ||
-                        offset > static_cast<std::uint64_t>(
-                                     std::numeric_limits<std::streamoff>::max())) {
+                        *slice_length > file_size - offset) {
                         return fail_crypto(
                             error_detail, "slice range is outside file bounds");
                     }
-                    input.seekg(static_cast<std::streamoff>(offset),
-                                std::ios::beg);
-                    if (!input) {
-                        return fail_crypto(
-                            error_detail,
-                            "failed to seek to slice offset");
+                    if (!input.seek(offset)) {
+                        return fail_crypto(error_detail,
+                                           "failed to seek to slice offset");
                     }
                     plaintext_size = *slice_length;
                 }
@@ -766,11 +725,8 @@ encrypt_file_range(const std::filesystem::path& input_path,
                         static_cast<std::size_t>(std::min<std::uint64_t>(
                             CHUNK_SIZE, plaintext_size - total_read));
 
-                    input.read(reinterpret_cast<char*>(session.buffer_a.data()),
-                               static_cast<std::streamsize>(chunk_size));
-                    if (input.gcount() !=
-                            static_cast<std::streamsize>(chunk_size) ||
-                        input.bad()) {
+                    if (!input.read_exact(
+                            std::span{session.buffer_a}.first(chunk_size))) {
                         return fail_crypto(error_detail,
                                            "reading plaintext chunk failed");
                     }
@@ -906,16 +862,14 @@ bool decrypt_file(const std::filesystem::path& input_path,
 
         try {
             auto opened =
-                open_input_sized(input_path, session.read_buffer, nullptr);
+                platform::private_storage::open_regular_file(input_path);
             if (!opened) {
                 return false;
             }
-            auto& [input, input_size] = *opened;
+            auto& input = *opened;
 
             std::array<std::uint8_t, FILE_MAGIC_SIZE> magic{};
-            input.read(reinterpret_cast<char*>(magic.data()),
-                       static_cast<std::streamsize>(magic.size()));
-            if (input.gcount() != static_cast<std::streamsize>(magic.size())) {
+            if (!input.read_exact(magic)) {
                 return false;
             }
 
@@ -924,13 +878,7 @@ bool decrypt_file(const std::filesystem::path& input_path,
             }
 
             const auto read_exact = [&](std::uint8_t* dst, std::size_t count) {
-                if (count == 0) {
-                    return true;
-                }
-                input.read(reinterpret_cast<char*>(dst),
-                           static_cast<std::streamsize>(count));
-                return input.gcount() == static_cast<std::streamsize>(count) &&
-                       !input.bad();
+                return input.read_exact({dst, count});
             };
             const auto write_exact = [&](const std::uint8_t* src,
                                          std::size_t count) {
@@ -939,19 +887,17 @@ bool decrypt_file(const std::filesystem::path& input_path,
                            session.file, src, count);
             };
             const auto at_eof = [&]() {
-                char trailing = 0;
-                input.read(&trailing, 1);
-                return input.gcount() == 0 && !input.bad();
+                return at_end(input);
             };
 
-            const bool ok = magic == format_magic_v3 &&
-                            decode_v3_stream(session,
-                                             key,
-                                             purpose,
-                                             input_size,
-                                             read_exact,
-                                             write_exact,
-                                             at_eof);
+            const bool ok =
+                magic == format_magic_v3 && decode_v3_stream(session,
+                                                             key,
+                                                             purpose,
+                                                             input.size,
+                                                             read_exact,
+                                                             write_exact,
+                                                             at_eof);
             if (!ok) {
                 return false;
             }

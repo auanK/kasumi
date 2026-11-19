@@ -2064,3 +2064,15 @@ TEST(CliPresenterTest, SanitizesTerminalControlAndEscapeSequences) {
     EXPECT_EQ(cleaned.find("\xc2\x9b"), std::string::npos);
     EXPECT_EQ(cleaned, "bad?[31mpath??\nnext\t??ok");
 }
+
+TEST(CliPresenterTest, RemoteObjectsRenderExternalFieldsAsSingleSafeLines) {
+    using namespace kasumi::application;
+    const auto output = present_out(InspectionResponse{
+        .operation = InspectionOperation::RemoteObjects,
+        .payload = RemoteObjectsReport{
+            .objects = {{.identifier = "relatório/\x1b[2J\x9b"
+                                       "2J",
+                         .relation = "reason\nforged\tline"}}}});
+    EXPECT_TRUE(output.contains("relatório/?[2J?2J"));
+    EXPECT_TRUE(output.contains("reason?forged?line"));
+}

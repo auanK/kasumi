@@ -426,6 +426,12 @@ TEST(ApplicationProfileTest, RejectsDuplicateNames) {
         kasumi::application::create_profile(environment, profile, key());
     ASSERT_FALSE(duplicate.has_value());
     EXPECT_EQ(duplicate.error().code, ProfileErrorCode::AlreadyExists);
+    auto case_duplicate = profile;
+    case_duplicate.name = "Main";
+    const auto same_name =
+        kasumi::application::create_profile(environment, case_duplicate, key());
+    ASSERT_FALSE(same_name);
+    EXPECT_EQ(same_name.error().code, ProfileErrorCode::AlreadyExists);
     const Profile invalid{
         "../escape",
         kasumi::test::workspace_path(workspace, "local"),
@@ -556,7 +562,14 @@ TEST(ApplicationProfileTest,
     const auto collision =
         kasumi::application::rename_profile(environment, "new", "new");
     EXPECT_FALSE(collision.has_value());
-    ASSERT_TRUE(kasumi::application::delete_profile(environment, "new"));
+    const auto renamed =
+        kasumi::application::rename_profile(environment, "new", "New");
+    ASSERT_TRUE(renamed) << renamed.error().detail;
+    ASSERT_EQ(kasumi::application::list_profiles(environment)->front().name,
+              "New");
+    EXPECT_TRUE(std::filesystem::exists(
+        kasumi::test::workspace_path(workspace, "app/profiles/New/db.sqlite")));
+    ASSERT_TRUE(kasumi::application::delete_profile(environment, "New"));
     EXPECT_FALSE(std::filesystem::exists(
         kasumi::test::workspace_path(workspace, "app/profiles/new")));
     EXPECT_TRUE(kasumi::application::list_profiles(environment)->empty());
