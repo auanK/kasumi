@@ -248,8 +248,15 @@ save_profiles(const std::filesystem::path& config_path,
     }
     config.insert("profiles", profiles_table);
 
-    auto parent =
-        platform::private_storage::ensure_directory(config_path.parent_path());
+    const auto app_dir = config_path.parent_path();
+    if (const auto app_parent = app_dir.parent_path(); !app_parent.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(app_parent, ec);
+        if (ec) {
+            return fail(ErrorCode::IoFailure, ec.message());
+        }
+    }
+    auto parent = platform::private_storage::ensure_directory(app_dir);
     if (!parent) {
         return fail(ErrorCode::IoFailure, parent.error());
     }

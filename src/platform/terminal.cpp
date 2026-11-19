@@ -13,17 +13,27 @@
 
 namespace kasumi::platform {
 
+#if defined(_WIN32)
+namespace {
+HANDLE stdout_handle() noexcept {
+    const int descriptor = ::_fileno(stdout);
+    return descriptor >= 0
+               ? reinterpret_cast<HANDLE>(::_get_osfhandle(descriptor))
+               : INVALID_HANDLE_VALUE;
+}
+} // namespace
+#endif
+
 Terminal stdout_terminal() noexcept {
 #if defined(_WIN32)
-    if (::_isatty(::_fileno(stdout)) == 0) {
+    const auto output = stdout_handle();
+    DWORD mode = 0;
+    if (!GetConsoleMode(output, &mode)) {
         return {};
     }
-    const auto output = GetStdHandle(STD_OUTPUT_HANDLE);
-    DWORD mode = 0;
     const bool ansi =
-        GetConsoleMode(output, &mode) &&
-        ((mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0 ||
-         SetConsoleMode(output, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING));
+        (mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0 ||
+        SetConsoleMode(output, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
     return {.interactive = true, .ansi = ansi};
 #else
     const bool tty = ::isatty(STDOUT_FILENO) != 0;
@@ -37,7 +47,8 @@ std::size_t terminal_width(Terminal terminal) noexcept {
     }
 #if defined(_WIN32)
     CONSOLE_SCREEN_BUFFER_INFO buffer{};
-    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &buffer)) {
+    if (GetConsoleScreenBufferInfo(stdout_handle(), &buffer) &&
+        buffer.srWindow.Right >= buffer.srWindow.Left) {
         return static_cast<std::size_t>(buffer.srWindow.Right -
                                         buffer.srWindow.Left + 1);
     }

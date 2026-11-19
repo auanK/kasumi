@@ -15,7 +15,6 @@
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
-#include <conio.h>
 #include <windows.h>
 #else
 #include <cerrno>
@@ -73,6 +72,7 @@ std::string utf8(std::wstring_view text) {
 }
 
 std::string read_console_secret() {
+    const auto input = GetStdHandle(STD_INPUT_HANDLE);
     std::wstring secret;
     secret.reserve(maximum_secret_size);
     struct SecretGuard {
@@ -82,11 +82,24 @@ std::string read_console_secret() {
         }
     } secret_guard{secret};
     while (!platform::cancellation::requested()) {
-        if (_kbhit() == 0) {
-            Sleep(25);
+        const auto ready = WaitForSingleObject(input, 25);
+        if (ready == WAIT_TIMEOUT) {
             continue;
         }
-        const auto character = _getwch();
+        INPUT_RECORD record{};
+        crypto::secure_memory::WipeGuard record_guard{record};
+        DWORD read = 0;
+        if (ready != WAIT_OBJECT_0 ||
+            !ReadConsoleInputW(input, &record, 1, &read)) {
+            platform::cancellation::request();
+            break;
+        }
+        if (read == 0 || record.EventType != KEY_EVENT ||
+            !record.Event.KeyEvent.bKeyDown) {
+            continue;
+        }
+        const auto& key = record.Event.KeyEvent;
+        const auto character = key.uChar.UnicodeChar;
         if (character == L'\r' || character == L'\n') {
             break;
         }
@@ -95,7 +108,8 @@ std::string read_console_secret() {
             break;
         }
         if (character == L'\b') {
-            if (!secret.empty()) {
+            for (WORD repeat = 0; repeat < key.wRepeatCount && !secret.empty();
+                 ++repeat) {
                 const auto last = secret.back();
                 secret.pop_back();
                 if (last >= 0xDC00 && last <= 0xDFFF && !secret.empty() &&
@@ -105,12 +119,11 @@ std::string read_console_secret() {
             }
             continue;
         }
-        if (character == 0 || character == 0xE0) {
-            static_cast<void>(_getwch());
-            continue;
-        }
-        if (secret.size() < maximum_secret_size) {
-            secret.push_back(static_cast<wchar_t>(character));
+        if (character != L'\0') {
+            secret.append(
+                std::min<std::size_t>(key.wRepeatCount,
+                                      maximum_secret_size - secret.size()),
+                character);
         }
     }
     return platform::cancellation::requested() ? std::string{} : utf8(secret);
@@ -133,14 +146,13 @@ void restore_echo(const termios& original) noexcept {
 }
 
 std::string read_console_secret() {
+    std::string secret;
+    secret.reserve(maximum_secret_size);
     termios original{};
     if (!hide_echo(original)) {
         platform::cancellation::request();
         return {};
     }
-
-    std::string secret;
-    secret.reserve(maximum_secret_size);
     try {
         while (!platform::cancellation::requested()) {
             pollfd input{.fd = STDIN_FILENO, .events = POLLIN, .revents = 0};
@@ -162,6 +174,9 @@ std::string read_console_secret() {
             char buffer[512]{};
             crypto::secure_memory::WipeGuard buffer_guard{buffer};
             const auto count = ::read(STDIN_FILENO, buffer, sizeof(buffer));
+            if (count < 0 && errno == EINTR) {
+                continue;
+            }
             if (count <= 0) {
                 platform::cancellation::request();
                 break;

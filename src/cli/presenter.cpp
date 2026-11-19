@@ -992,8 +992,9 @@ void ProgressDisplay::clear_line() noexcept {
         std::fputs("\r\x1b[2K", stdout);
     } else {
         std::fputc('\r', stdout);
+        const auto columns = platform::terminal_width(terminal_);
         const auto width =
-            std::min(rendered_width_, platform::terminal_width(terminal_) - 1);
+            std::min(rendered_width_, columns > 0 ? columns - 1 : 0);
         for (std::size_t i = 0; i < width; ++i) {
             std::fputc(' ', stdout);
         }
@@ -1002,7 +1003,7 @@ void ProgressDisplay::clear_line() noexcept {
     rendered_width_ = 0;
 }
 
-void ProgressDisplay::flush_transfer(TransferMetricsState& state) noexcept {
+void ProgressDisplay::flush_transfer(TransferMetricsState& state) noexcept try {
     if (!terminal_.interactive || !state.active || state.completed_reported ||
         !state.last_event ||
         (state.last_event->bytes == 0 && state.last_event->objects == 0)) {
@@ -1035,9 +1036,12 @@ void ProgressDisplay::flush_transfer(TransferMetricsState& state) noexcept {
     }
     std::fflush(stdout);
     state.completed_reported = true;
+} catch (...) {
+    state = {};
+    clear_line();
 }
 
-void ProgressDisplay::finish(bool keep) noexcept {
+void ProgressDisplay::finish(bool keep) noexcept try {
     if (!keep) {
         upload_state_ = {};
         download_state_ = {};
@@ -1100,6 +1104,13 @@ void ProgressDisplay::finish(bool keep) noexcept {
     last_extra_.clear();
     rendered_last_ = true;
     std::fflush(stdout);
+} catch (...) {
+    upload_state_ = {};
+    download_state_ = {};
+    last_event_.reset();
+    last_extra_.clear();
+    rendered_last_ = true;
+    clear_line();
 }
 
 void ProgressDisplay::render_event(const application::ActivityProgress& event,
