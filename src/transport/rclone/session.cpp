@@ -461,10 +461,18 @@ void clear_secrets(State& state) noexcept {
 }
 
 bool shutdown_state(State& state) noexcept {
-    (void)request_core_quit_best_effort(state);
+    const bool quit_acknowledged = request_core_quit_best_effort(state);
     state.stop_drain.store(true);
     wait_for_drain(state);
     stop_rc_runtime(state);
+    if (quit_acknowledged && state.process_started) {
+        // rclone can linger after core/quit ack; kill now to avoid 2s wait.
+        try {
+            std::lock_guard process_lock(state.process_mutex);
+            (void)state.process.kill();
+        } catch (...) {
+        }
+    }
     const bool stopped = stop_process(state);
     close_job_handle(state);
 #if defined(_WIN32)
