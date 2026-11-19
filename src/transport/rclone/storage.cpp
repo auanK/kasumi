@@ -2,6 +2,8 @@
 #include "detail.hpp"
 #include "platform/cancellation.hpp"
 #include "platform/path.hpp"
+#include "platform/random.hpp"
+#include "platform/workspace.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -217,8 +219,16 @@ bool unsupported_endpoint(const Error& error,
                           std::string_view endpoint) noexcept {
     return error.code == ErrorCode::ProtocolFailure &&
            error.native_code == 404 &&
-           (error.message.find(endpoint) != std::string::npos ||
-            error.message.find("method not found") != std::string::npos);
+           (error.message.contains("method not found") ||
+            (error.message.contains("couldn't find method") &&
+             error.message.contains(endpoint)));
+}
+
+bool unsupported_hash(const Error& error) noexcept {
+    return error.message.contains("hash type not supported") ||
+           error.message.contains("hash type is not supported") ||
+           error.message.contains("unsupported hash type") ||
+           error.message.contains("unknown hash type");
 }
 
 std::expected<nlohmann::json, Error>
@@ -241,7 +251,12 @@ run_job_batch(State& state,
                            "rclone does not support job/batch",
                            response.error().native_code));
         }
-        return std::unexpected(response.error());
+        auto error = response.error();
+        if (!read_only && error.code == ErrorCode::ProtocolFailure &&
+            error.native_code == 0) {
+            error.code = ErrorCode::BackendUnavailable;
+        }
+        return std::unexpected(std::move(error));
     }
     return response;
 }
@@ -327,10 +342,19 @@ stat_remote(State& state, std::string_view remote, bool files_only = true) {
                              control_read_deadline);
 }
 
+bool missing_object(std::string_view message) noexcept {
+    return message == "object not found" || message == "directory not found" ||
+           message.ends_with(": object not found") ||
+           message.ends_with(": directory not found");
+}
+
 bool not_found(const Error& error) noexcept {
-    return error.code == ErrorCode::ProtocolFailure &&
-           (error.native_code == 404 ||
-            error.message.find("not found") != std::string::npos);
+    return error.code == ErrorCode::ObjectNotFound ||
+           (error.code == ErrorCode::ProtocolFailure &&
+            (error.native_code == 404 ||
+             error.message.contains("not found"))) ||
+           (error.code == ErrorCode::BackendUnavailable &&
+            error.native_code == 500 && missing_object(error.message));
 }
 
 struct SplitLocalPath {
@@ -388,24 +412,26 @@ std::optional<double> transfer_speed(const nlohmann::json& object) {
     return std::nullopt;
 }
 
-Result validate_finished_job(const nlohmann::json& result) {
+Result validate_finished_job(const State& state, const nlohmann::json& result) {
     const auto success = result.find("success");
     const auto error = result.find("error");
     if (success == result.end() || !success->is_boolean() ||
         (error != result.end() && !error->is_string())) {
-        return std::unexpected(make_error(ErrorCode::ProtocolFailure,
+        return std::unexpected(make_error(ErrorCode::BackendUnavailable,
                                           "invalid job/status result"));
     }
     if (!success->get<bool>() ||
         (error != result.end() &&
          !error->get_ref<const std::string&>().empty())) {
-        const bool missing =
-            error != result.end() &&
-            ascii_lower(error->get<std::string>()).find("not found") !=
-                std::string::npos;
-        return std::unexpected(make_error(ErrorCode::ProtocolFailure,
-                                          "rclone transfer job failed",
-                                          missing ? 404 : 0));
+        const std::string_view message =
+            error != result.end()
+                ? std::string_view{error->get_ref<const std::string&>()}
+                : std::string_view{};
+        const bool missing = missing_object(message);
+        return std::unexpected(make_error(
+            missing ? ErrorCode::ObjectNotFound : ErrorCode::BackendUnavailable,
+            rc_error_detail(state, message, "rclone transfer job failed"),
+            missing ? 404 : 0));
     }
     return {};
 }
@@ -422,7 +448,15 @@ Result run_copy(State& state,
                                          maximum_response_size,
                                          transfer_timeout,
                                          read_only);
-        return copied ? Result{} : std::unexpected(copied.error());
+        if (!copied) {
+            auto error = copied.error();
+            if (error.code == ErrorCode::ProtocolFailure &&
+                error.native_code == 0) {
+                error.code = ErrorCode::BackendUnavailable;
+            }
+            return std::unexpected(std::move(error));
+        }
+        return {};
     }
 
     if (platform::cancellation::requested()) {
@@ -439,12 +473,17 @@ Result run_copy(State& state,
     const auto submitted = request_json(
         state, endpoint, payload, maximum_response_size, 5s, false, false);
     if (!submitted) {
-        return std::unexpected(submitted.error());
+        auto error = submitted.error();
+        if (error.code == ErrorCode::ProtocolFailure &&
+            error.native_code == 0) {
+            error.code = ErrorCode::BackendUnavailable;
+        }
+        return std::unexpected(std::move(error));
     }
     if (submitted->is_object() && !submitted->contains("jobid")) {
         // A synchronous RC response is already the completion of this copy.
         if (submitted->contains("success")) {
-            return validate_finished_job(*submitted);
+            return validate_finished_job(state, *submitted);
         }
         if (submitted->empty()) {
             return {};
@@ -453,54 +492,112 @@ Result run_copy(State& state,
     const auto job_id = nonnegative_integer(*submitted, "jobid");
     if (!job_id) {
         return std::unexpected(
-            make_error(ErrorCode::ProtocolFailure, "invalid async job id"));
+            make_error(ErrorCode::BackendUnavailable, "invalid async job id"));
     }
 
     const nlohmann::json job{{"jobid", *job_id}};
-    struct StopJob {
+    struct JobCleanup {
         State& state;
         const nlohmann::json& job;
-        bool active = true;
-        ~StopJob() {
-            if (active) {
-                try {
+        std::string_view group;
+        bool running = true;
+        bool cleanup_needed = true;
+
+        bool finish() noexcept {
+            if (!std::exchange(cleanup_needed, false)) {
+                return !running;
+            }
+            try {
+                if (running) {
                     (void)post_rc(state,
                                   "job/stop",
                                   job.dump(),
                                   maximum_response_size,
-                                  std::chrono::seconds{2},
+                                  1s,
                                   false);
-                } catch (...) {
+                    const auto deadline = std::chrono::steady_clock::now() + 2s;
+                    while (std::chrono::steady_clock::now() < deadline) {
+                        const auto status = request_json(state,
+                                                         "job/status",
+                                                         job,
+                                                         maximum_response_size,
+                                                         500ms,
+                                                         false,
+                                                         false);
+                        if (status) {
+                            const auto finished = status->find("finished");
+                            if (finished != status->end() &&
+                                finished->is_boolean() &&
+                                finished->get<bool>()) {
+                                running = false;
+                                break;
+                            }
+                        } else if (status.error().message.ends_with(
+                                       ": job not found")) {
+                            running = false;
+                            break;
+                        }
+                        std::this_thread::sleep_for(50ms);
+                    }
                 }
+                if (!running) {
+                    (void)post_rc(state,
+                                  "core/stats-delete",
+                                  nlohmann::json{{"group", group}}.dump(),
+                                  maximum_response_size,
+                                  1s,
+                                  false);
+                }
+            } catch (...) {
             }
+            return !running;
         }
-    } stop{state, job};
+        ~JobCleanup() noexcept {
+            static_cast<void>(finish());
+        }
+    } cleanup{state, job, group};
+
+    const auto fail = [&](Error error) -> Result {
+        if (!cleanup.finish()) {
+            error.message += "; rclone job termination could not be confirmed";
+        }
+        return std::unexpected(std::move(error));
+    };
 
     TransferProgress latest;
     const auto deadline = std::chrono::steady_clock::now() + transfer_timeout;
     for (;;) {
         if (platform::cancellation::requested()) {
-            return std::unexpected(
-                make_error(ErrorCode::Cancelled, "transfer cancelled"));
+            return fail(make_error(ErrorCode::Cancelled, "transfer cancelled"));
         }
-        if (std::chrono::steady_clock::now() >= deadline) {
-            return std::unexpected(
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+        if (remaining <= 0ms) {
+            return fail(
                 make_error(ErrorCode::Timeout, "transfer job timed out"));
         }
-        const auto status =
-            request_json(state, "job/status", job, maximum_response_size, 5s);
+        const auto status = request_read_json(state,
+                                              "job/status",
+                                              job,
+                                              maximum_response_size,
+                                              std::min(remaining, 5000ms));
         if (!status) {
-            return std::unexpected(status.error());
+            auto error = status.error();
+            if (!mutation_result_is_ambiguous(error)) {
+                error.code = ErrorCode::BackendUnavailable;
+            }
+            return fail(std::move(error));
         }
         const auto finished = status->find("finished");
         if (finished == status->end() || !finished->is_boolean()) {
-            return std::unexpected(make_error(ErrorCode::ProtocolFailure,
-                                              "invalid job/status response"));
+            return fail(make_error(ErrorCode::BackendUnavailable,
+                                   "invalid job/status response"));
         }
         const bool done = finished->get<bool>();
         if (done) {
-            stop.active = false;
-            if (auto valid = validate_finished_job(*status); !valid) {
+            cleanup.running = false;
+            if (auto valid = validate_finished_job(state, *status); !valid) {
                 return valid;
             }
         }
@@ -567,9 +664,9 @@ Result copyfile_object(State& state,
                            {"srcRemote", std::string{src_remote}},
                            {"dstFs", std::string{dst_fs}},
                            {"dstRemote", std::string{dst_remote}}};
-    if (no_check_destination) {
-        payload["_config"] = {{"NoCheckDest", true}};
-    }
+    // Downloads must replace stale bytes even when size and mtime match.
+    payload["_config"] = {
+        {no_check_destination ? "NoCheckDest" : "IgnoreTimes", true}};
     const auto copied =
         run_copy(state, "operations/copyfile", std::move(payload), callback);
     if (!copied) {
@@ -761,7 +858,63 @@ Result rclone_get_batch(void* context, const GetBatch& batch) {
     if (!absolute_destination) {
         return std::unexpected(absolute_destination.error());
     }
-    return sync_copy_batch(
+    const auto check_destination = [&](std::string_view id) -> PresenceResult {
+        auto current = *absolute_destination;
+        const auto relative = platform::path::from_utf8(id);
+        for (auto component = relative.begin();; ++component) {
+            const bool last = component == relative.end();
+            std::error_code error;
+            const auto status = std::filesystem::symlink_status(current, error);
+            if (error == std::errc::no_such_file_or_directory ||
+                (!error &&
+                 status.type() == std::filesystem::file_type::not_found)) {
+                return Presence::Absent;
+            }
+            if (error) {
+                return std::unexpected(filesystem_error(error));
+            }
+            if (platform::private_storage::is_reparse_or_symlink(current) ||
+                !(last ? std::filesystem::is_regular_file(status)
+                       : std::filesystem::is_directory(status))) {
+                return std::unexpected(
+                    make_error(ErrorCode::InvalidContext,
+                               "batch destination has an invalid entry"));
+            }
+            if (last) {
+                return Presence::Present;
+            }
+            current /= *component;
+        }
+    };
+
+    bool contains_existing = false;
+    for (const auto& id : batch.identifiers) {
+        if (!valid_identifier(id) || id.find_first_of("*?[]{}") != id.npos) {
+            return std::unexpected(invalid_identifier_error());
+        }
+        const auto present = check_destination(id);
+        if (!present) {
+            return std::unexpected(present.error());
+        }
+        contains_existing |= *present == Presence::Present;
+    }
+    if (contains_existing) {
+        // A preexisting file cannot prove that an IncludeRule matched remotely.
+        for (const auto& id : batch.identifiers) {
+            const auto source = join_remote_path(batch.source_prefix, id);
+            if (auto copied = rclone_get_progress(
+                    context,
+                    source,
+                    *absolute_destination / platform::path::from_utf8(id),
+                    {});
+                !copied) {
+                return copied;
+            }
+        }
+        return {};
+    }
+
+    auto copied = sync_copy_batch(
         **state,
         batch.source_prefix.empty()
             ? rooted_remote_fs(**state)
@@ -772,6 +925,21 @@ Result rclone_get_batch(void* context, const GetBatch& batch) {
         nlohmann::json::object(),
         true,
         batch.on_progress);
+    if (!copied) {
+        return copied;
+    }
+    for (const auto& id : batch.identifiers) {
+        const auto present = check_destination(id);
+        if (!present) {
+            return std::unexpected(present.error());
+        }
+        if (*present == Presence::Absent) {
+            return std::unexpected(
+                make_error(ErrorCode::ObjectNotFound,
+                           "rclone did not download requested object: " + id));
+        }
+    }
+    return {};
 }
 
 Result rclone_put(void* context,
@@ -928,12 +1096,13 @@ std::expected<std::string, Error> rclone_physical_hash(
             return std::unexpected(make_error(ErrorCode::ObjectNotFound,
                                               "remote object does not exist"));
         }
-        if (response.error().code == ErrorCode::Unsupported ||
-            response.error().native_code == 400 ||
-            response.error().native_code == 501 ||
-            response.error().message.find("hash type not supported") !=
-                std::string::npos) {
-            (*state)->sha256_unsupported.store(true, std::memory_order_relaxed);
+        const bool hash_missing = unsupported_hash(response.error());
+        if (hash_missing || response.error().code == ErrorCode::Unsupported ||
+            response.error().native_code == 501) {
+            if (hash_missing) {
+                (*state)->sha256_unsupported.store(true,
+                                                   std::memory_order_relaxed);
+            }
             return std::unexpected(
                 make_error(ErrorCode::Unsupported,
                            "rclone backend does not expose algorithm",
@@ -1054,28 +1223,31 @@ rclone_physical_hash_batch(void* context,
     std::error_code status_error;
     const auto root_status =
         std::filesystem::symlink_status(*root, status_error);
-    if (status_error || std::filesystem::is_symlink(root_status) ||
-        !std::filesystem::is_directory(root_status)) {
+    if (status_error || !std::filesystem::is_directory(root_status) ||
+        platform::private_storage::is_reparse_or_symlink(*root)) {
         return std::unexpected(
             make_error(ErrorCode::InvalidContext,
                        "scratch_root is not a real local directory"));
     }
 
     std::ranges::sort(expectations, {}, &PhysicalHashExpectation::identifier);
-    const auto manifest = *root / ".kasumi-batch-verify.sha256";
-    const auto files = *root / ".kasumi-batch-verify.files";
-    for (const auto& path : {manifest, files}) {
-        const auto status = std::filesystem::symlink_status(path, status_error);
-        if (status_error &&
-            status_error != std::errc::no_such_file_or_directory) {
-            return std::unexpected(filesystem_error(status_error));
-        }
-        if (!status_error && std::filesystem::exists(status)) {
-            return std::unexpected(make_error(
-                ErrorCode::InvalidContext,
-                "verification manifest or file list already exists"));
-        }
+    const auto nonce = platform::random::hex_id(8);
+    if (!nonce) {
+        return std::unexpected(make_error(ErrorCode::Io, nonce.error()));
     }
+    auto scratch = platform::create_workspace_at(
+        *root / (".kasumi-batch-verify-" + *nonce));
+    if (!scratch) {
+        return std::unexpected(make_error(ErrorCode::Io, scratch.error()));
+    }
+    struct ScratchCleanup {
+        const platform::Workspace& workspace;
+        ~ScratchCleanup() {
+            platform::cleanup_workspace(workspace);
+        }
+    } cleanup{*scratch};
+    const auto manifest = scratch->root / "manifest.sha256";
+    const auto files = scratch->root / "files";
 
     {
         std::ofstream output(manifest, std::ios::binary);
@@ -1085,9 +1257,6 @@ rclone_physical_hash_batch(void* context,
         }
         std::ofstream file_list(files, std::ios::binary);
         if (!file_list) {
-            output.close();
-            std::error_code ignored;
-            std::filesystem::remove(manifest, ignored);
             return std::unexpected(make_error(
                 ErrorCode::Io, "failed to create verification file list"));
         }
@@ -1098,16 +1267,13 @@ rclone_physical_hash_batch(void* context,
         output.close();
         file_list.close();
         if (!output || !file_list) {
-            std::error_code ignored;
-            std::filesystem::remove(manifest, ignored);
-            std::filesystem::remove(files, ignored);
             return std::unexpected(make_error(
                 ErrorCode::Io,
                 "failed to write verification manifest or file list"));
         }
     }
 
-    const auto manifest_parent = platform::path::to_utf8(*root);
+    const auto manifest_parent = platform::path::to_utf8(scratch->root);
     const auto response = request_read_json(
         **state,
         "operations/check",
@@ -1128,24 +1294,15 @@ rclone_physical_hash_batch(void* context,
         },
         maximum_check_response_size,
         transfer_timeout);
-    bool cleanup_failed = false;
-    for (const auto& path : {manifest, files}) {
-        std::error_code cleanup_error;
-        if (!std::filesystem::remove(path, cleanup_error) || cleanup_error) {
-            cleanup_failed = true;
-        }
-    }
-    if (cleanup_failed) {
-        return std::unexpected(
-            make_error(ErrorCode::Io,
-                       "failed to remove verification manifest or file list"));
-    }
     if (!response) {
+        const bool hash_missing = unsupported_hash(response.error());
         if (unsupported_endpoint(response.error(), "operations/check") ||
-            response.error().code == ErrorCode::Unsupported ||
-            response.error().native_code == 400 ||
+            hash_missing || response.error().code == ErrorCode::Unsupported ||
             response.error().native_code == 501) {
-            (*state)->sha256_unsupported.store(true, std::memory_order_relaxed);
+            if (hash_missing) {
+                (*state)->sha256_unsupported.store(true,
+                                                   std::memory_order_relaxed);
+            }
             return std::unexpected(
                 make_error(ErrorCode::Unsupported,
                            "rclone does not support operations/check",
@@ -1153,6 +1310,11 @@ rclone_physical_hash_batch(void* context,
         }
         return std::unexpected(response.error());
     }
+
+    if (auto removed = platform::remove_workspace(*scratch); !removed) {
+        return std::unexpected(make_error(ErrorCode::Io, removed.error()));
+    }
+    scratch->root.clear();
 
     return parse_physical_hash_batch_response_json(*response, request);
 }
@@ -1163,8 +1325,8 @@ struct JobBatchItemStatus {
     std::string error_message;
 
     bool is_not_found() const noexcept {
-        return status == 404 || (has_error && error_message.find("not found") !=
-                                                  std::string::npos);
+        return status == 404 ||
+               (status == 500 && missing_object(error_message));
     }
 };
 
@@ -1222,6 +1384,11 @@ parse_control_read_batch_response_json(const nlohmann::json& response,
         const auto parsed = parse_job_batch_item_status(item, "control", true);
         if (!parsed) {
             return std::unexpected(parsed.error());
+        }
+        if (parsed->status >= 500) {
+            return std::unexpected(make_error(ErrorCode::BackendUnavailable,
+                                              "job/batch subcommand failed",
+                                              parsed->status));
         }
         if (parsed->has_error) {
             if (parsed->status == 404) {
@@ -1453,7 +1620,17 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
         });
     }
 
-    constexpr std::size_t kMaxRemoveChunkBytes = 16U * 1024U * 1024U;
+    constexpr std::size_t maximum_remove_response_size = 1024U * 1024U;
+    std::vector<std::size_t> response_cost;
+    response_cost.reserve(all_inputs.size());
+    for (const auto& entry : all_inputs) {
+        // rclone echoes the whole input and adds the result and error fields.
+        const auto bytes = entry.dump().size() + 512U;
+        if (bytes > maximum_remove_response_size - 64U) {
+            return std::unexpected(invalid_identifier_error());
+        }
+        response_cost.push_back(bytes);
+    }
     RemoveBatchReport report;
     report.items.resize(batch.items.size());
     for (std::size_t index = 0; index < batch.items.size(); ++index) {
@@ -1461,6 +1638,10 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
     }
 
     std::vector<bool> matched(batch.items.size(), false);
+    const auto uncertain_report = [](std::string message) {
+        return std::unexpected(
+            make_error(ErrorCode::BackendUnavailable, std::move(message)));
+    };
     std::size_t chunk_begin = 0;
     while (chunk_begin < batch.items.size()) {
         nlohmann::json chunk_inputs = nlohmann::json::array();
@@ -1468,10 +1649,9 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
         std::size_t chunk_end = chunk_begin;
         while (chunk_end < batch.items.size()) {
             const auto& entry = all_inputs[chunk_end];
-            const std::size_t entry_bytes =
-                entry.at("remote").get_ref<const std::string&>().size() + 96;
+            const auto entry_bytes = response_cost[chunk_end];
             if (!chunk_inputs.empty() &&
-                chunk_bytes + entry_bytes > kMaxRemoveChunkBytes) {
+                chunk_bytes + entry_bytes > maximum_response_size) {
                 break;
             }
             chunk_inputs.push_back(entry);
@@ -1482,34 +1662,34 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
         const auto response = run_job_batch(**state,
                                             chunk_inputs,
                                             batch.concurrency,
-                                            maximum_response_size,
+                                            maximum_remove_response_size,
                                             transfer_timeout,
                                             false);
         if (!response) {
+            if (chunk_begin != 0 &&
+                !mutation_result_is_ambiguous(response.error())) {
+                return uncertain_report(response.error().message);
+            }
             return std::unexpected(response.error());
         }
         if (!response->is_object() || response->contains("error") ||
             !response->contains("results") ||
             !response->at("results").is_array() ||
             response->at("results").size() != chunk_count) {
-            return std::unexpected(
-                make_error(ErrorCode::ProtocolFailure,
-                           "invalid or incomplete remove job/batch response"));
+            return uncertain_report(
+                "invalid or incomplete remove job/batch response");
         }
 
         for (std::size_t local_idx = 0; local_idx < chunk_count; ++local_idx) {
             const auto& result = response->at("results").at(local_idx);
             if (!result.is_object()) {
-                return std::unexpected(
-                    make_error(ErrorCode::ProtocolFailure,
-                               "invalid remove job/batch subresult"));
+                return uncertain_report("invalid remove job/batch subresult");
             }
             if (result.contains("path") &&
                 (!result.at("path").is_string() ||
                  result.at("path") != "operations/deletefile")) {
-                return std::unexpected(make_error(
-                    ErrorCode::ProtocolFailure,
-                    "remove job/batch result path does not match input"));
+                return uncertain_report(
+                    "remove job/batch result path does not match input");
             }
 
             std::size_t target_index = chunk_begin + local_idx;
@@ -1518,32 +1698,30 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
                 if (!input_echo.is_object() ||
                     !input_echo.contains("remote") ||
                     !input_echo.at("remote").is_string()) {
-                    return std::unexpected(make_error(
-                        ErrorCode::ProtocolFailure,
-                        "remove job/batch result input does not match request"));
+                    return uncertain_report(
+                        "remove job/batch result input does not match request");
                 }
                 const auto remote_echo =
                     input_echo.at("remote").get<std::string>();
                 auto it = remote_to_index.find(remote_echo);
-                if (it == remote_to_index.end()) {
-                    return std::unexpected(make_error(
-                        ErrorCode::ProtocolFailure,
-                        "unknown identifier in remove job/batch result"));
+                if (it == remote_to_index.end() || it->second < chunk_begin ||
+                    it->second >= chunk_end) {
+                    return uncertain_report(
+                        "unknown identifier in remove job/batch result");
                 }
                 target_index = it->second;
             }
 
             if (matched[target_index]) {
-                return std::unexpected(
-                    make_error(ErrorCode::ProtocolFailure,
-                               "duplicate item in remove job/batch response"));
+                return uncertain_report(
+                    "duplicate item in remove job/batch response");
             }
             matched[target_index] = true;
 
             const auto parsed =
                 parse_job_batch_item_status(result, "remove", false);
             if (!parsed) {
-                return std::unexpected(parsed.error());
+                return uncertain_report(parsed.error().message);
             }
             if (parsed->is_not_found()) {
                 report.items[target_index].result = Removal::AlreadyAbsent;
@@ -1552,9 +1730,10 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
                 report.items[target_index].result = Removal::Removed;
             } else {
                 report.items[target_index].result = std::unexpected(make_error(
-                    ErrorCode::ProtocolFailure,
-                    parsed->error_message.empty() ? "remote remove failed"
-                                                  : parsed->error_message,
+                    parsed->status >= 500 ? ErrorCode::BackendUnavailable
+                                          : ErrorCode::ProtocolFailure,
+                    rc_error_detail(
+                        **state, parsed->error_message, "remote remove failed"),
                     parsed->status));
             }
         }
@@ -1563,9 +1742,8 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
 
     for (bool m : matched) {
         if (!m) {
-            return std::unexpected(
-                make_error(ErrorCode::ProtocolFailure,
-                           "missing item in remove job/batch response"));
+            return uncertain_report(
+                "missing item in remove job/batch response");
         }
     }
 
