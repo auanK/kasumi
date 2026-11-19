@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.4]
+
+### Fixed
+
+- Project the observed local tree against the persisted base tree before triggering speculative writer registration during sync observation, avoiding unnecessary remote writer marker creation and cleanup on no-op syncs when local directories contain only ignored files.
+- Sort `file_cache` rows loaded from SQLite using segment-wise `path_less` order to match the local scanner, preventing false dirty-cache writes on no-op syncs when paths trigger ASCII vs. path-segment ordering inversions (such as `.` vs. `/`).
+
 ## [0.17.3]
 
 ### Changed
