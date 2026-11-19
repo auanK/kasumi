@@ -713,9 +713,8 @@ rollback_file_operation(const Operation& operation,
         if (!candidate_status)
             return std::unexpected(candidate_status.error());
         if (!missing(*candidate_status)) {
-            if (!recorded_identity->has_value() ||
-                !std::filesystem::is_regular_file(*candidate_status) ||
-                std::filesystem::is_symlink(*candidate_status)) {
+            if (!std::filesystem::is_regular_file(*candidate_status) ||
+                platform::private_storage::is_reparse_or_symlink(candidate)) {
                 return std::unexpected(
                     make_error(MutationErrorCode::DestinationConflict,
                                "copy candidate ownership cannot be verified "
@@ -723,10 +722,25 @@ rollback_file_operation(const Operation& operation,
                                candidate,
                                operation_index));
             }
-            auto removed = remove_owned_file(
-                candidate, **recorded_identity, operation_index);
-            if (!removed)
-                return removed;
+            if (recorded_identity->has_value()) {
+                auto removed = remove_owned_file(
+                    candidate, **recorded_identity, operation_index);
+                if (!removed)
+                    return removed;
+            } else {
+                // Before recording ownership, the candidate has no bytes.
+                std::error_code error;
+                const auto size = std::filesystem::file_size(candidate, error);
+                if (error || size != 0 ||
+                    progress.state != transaction::OperationState::Prepared) {
+                    return std::unexpected(
+                        make_error(MutationErrorCode::DestinationConflict,
+                                   "copy candidate ownership cannot be "
+                                   "verified during rollback",
+                                   candidate,
+                                   operation_index));
+                }
+            }
         }
 
         const auto dest_status = read_status(*destination, operation_index);

@@ -164,6 +164,17 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
     }
 
     history_storage::maintenance_protocol::RegistrationState writer;
+    struct WriterGuard {
+        history_storage::maintenance_protocol::RegistrationState& state;
+        ~WriterGuard() noexcept {
+            try {
+                static_cast<void>(
+                    history_storage::maintenance_protocol::release_registration(
+                        state));
+            } catch (...) {
+            }
+        }
+    } writer_guard{writer};
     if (stable->result.requires_publication) {
         const auto layout = history_storage::derive_remote_layout(context.key);
         auto registered =

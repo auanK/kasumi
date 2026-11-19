@@ -46,7 +46,9 @@
 #include <future>
 #include <limits>
 #include <mutex>
+#include <numeric>
 #include <optional>
+#include <ranges>
 #include <system_error>
 #include <thread>
 #include <unordered_map>
@@ -1179,6 +1181,98 @@ bool has_local_rollback_work(const transaction::Record& record) noexcept {
     return false;
 }
 
+std::vector<TypeChangeStep>
+local_type_changes(std::span<const transaction::Operation> operations) {
+    std::unordered_set<std::filesystem::path> deleted_files;
+    std::unordered_set<std::filesystem::path> deleted_directories;
+    for (const auto& operation : operations) {
+        if (operation.action == Action::DeleteLocal) {
+            deleted_files.insert(operation.path);
+        } else if (operation.action == Action::DeleteLocalDirectory) {
+            deleted_directories.insert(operation.path);
+        }
+    }
+    std::unordered_set<std::filesystem::path> to_file;
+    std::unordered_set<std::filesystem::path> to_directory;
+    for (const auto& operation : operations) {
+        if (operation.action == Action::Download &&
+            deleted_directories.contains(operation.path)) {
+            to_file.insert(operation.path);
+        } else if (operation.action == Action::CreateLocalDirectory &&
+                   deleted_files.contains(operation.path)) {
+            to_directory.insert(operation.path);
+        }
+    }
+    std::vector<TypeChangeStep> steps(operations.size(),
+                                      TypeChangeStep::Unrelated);
+    if (to_file.empty() && to_directory.empty()) {
+        return steps;
+    }
+    const auto inside = [](const auto& roots, std::filesystem::path path) {
+        for (; !path.empty(); path = path.parent_path()) {
+            if (roots.contains(path)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (std::size_t index = 0; index < operations.size(); ++index) {
+        const auto& operation = operations[index];
+        const auto& path = operation.path;
+        if ((operation.action == Action::DeleteLocal ||
+             operation.action == Action::DeleteIgnoredLocalFile) &&
+            (to_directory.contains(path) || inside(to_file, path))) {
+            steps[index] = TypeChangeStep::RemoveFile;
+        } else if (operation.action == Action::DeleteLocalDirectory &&
+                   inside(to_file, path)) {
+            steps[index] = TypeChangeStep::RemoveDirectory;
+        } else if ((operation.action == Action::Download ||
+                    operation.action == Action::CreateLocalDirectory) &&
+                   (to_file.contains(path) || inside(to_directory, path))) {
+            steps[index] = TypeChangeStep::Install;
+        }
+    }
+    return steps;
+}
+
+void order_local_type_changes(std::span<const TypeChangeStep> steps,
+                              std::vector<std::size_t>& order) {
+    const auto first = std::stable_partition(
+        order.begin(), order.end(), [&](std::size_t index) {
+            return steps[index] == TypeChangeStep::Unrelated;
+        });
+    const auto first_directory =
+        std::stable_partition(first, order.end(), [&](std::size_t index) {
+            return steps[index] == TypeChangeStep::RemoveFile;
+        });
+    std::stable_partition(first_directory, order.end(), [&](std::size_t index) {
+        return steps[index] == TypeChangeStep::RemoveDirectory;
+    });
+}
+
+std::expected<void, Error>
+prepare_type_change_install(transaction::Record& record,
+                            std::size_t index,
+                            const std::filesystem::path& root,
+                            const platform::Workspace& workspace) {
+    auto& progress = record.progress[index];
+    auto prepared = mutation::prepare_operation(
+        record.plan.operations[index], index, root, workspace, progress);
+    if (!prepared) {
+        return std::unexpected(make_error(ErrorCode::MutationFailure,
+                                          mutation::describe(prepared.error()),
+                                          index));
+    }
+    if (prepared->had_original) {
+        return std::unexpected(
+            make_error(ErrorCode::ConcurrentModification,
+                       "replacement destination appeared during sync",
+                       index));
+    }
+    progress = std::move(*prepared);
+    return {};
+}
+
 std::vector<std::size_t>
 next_upload_batch_chunk(std::span<const std::size_t> pending_uploads,
                         std::size_t& cursor,
@@ -1214,9 +1308,10 @@ std::expected<void, Error> rollback_operations_in_workspace(
     }
     const auto dependencies =
         mutation::detail::destination_dependencies(record.plan.operations);
-    for (std::size_t index = record.plan.operations.size(); index > 0;
-         --index) {
-        const auto operation_index = index - 1;
+    std::vector<std::size_t> order(record.plan.operations.size());
+    std::iota(order.begin(), order.end(), std::size_t{0});
+    order_local_type_changes(local_type_changes(record.plan.operations), order);
+    for (const auto operation_index : order | std::views::reverse) {
         const auto& operation = record.plan.operations[operation_index];
         auto& progress = record.progress[operation_index];
         if ((local_mutations_only && !is_local_mutation(operation.action)) ||
@@ -1712,6 +1807,11 @@ struct PlannedPack {
     std::vector<PlannedSmallUpload> blobs;
     std::vector<std::size_t> operation_indices;
 };
+
+constexpr std::size_t pack_upload_window_size = std::min(
+    detail::upload_batch_max_items,
+    static_cast<std::size_t>(detail::upload_batch_max_bytes /
+                             crypto::pack::MAXIMUM_PACK_PLAINTEXT_SIZE));
 
 struct PlannedChunkUpload {
     Hash file_hash{};
@@ -2544,16 +2644,31 @@ std::expected<void, Error> detail::resume_manifest_repairs(
         }
     }
     const auto parallelism = application::content_concurrency();
-    if (auto result = execute_packed_upload_batch(packs,
-                                                  record,
-                                                  local_root,
-                                                  storage,
-                                                  key,
-                                                  workspace,
-                                                  parallelism,
-                                                  nullptr);
-        !result) {
-        return std::unexpected(mutation_error(result.error().mutation));
+    for (std::span<const PlannedPack* const> remaining{packs};
+         !remaining.empty();) {
+        const auto window = remaining.first(
+            std::min(remaining.size(), pack_upload_window_size));
+        if (auto result = execute_packed_upload_batch(window,
+                                                      record,
+                                                      local_root,
+                                                      storage,
+                                                      key,
+                                                      workspace,
+                                                      parallelism,
+                                                      nullptr);
+            !result) {
+            return std::unexpected(mutation_error(result.error().mutation));
+        }
+        for (const auto* pack : window) {
+            for (const auto index : pack->operation_indices) {
+                record.progress[index].state =
+                    transaction::OperationState::Applied;
+            }
+        }
+        if (auto checkpoint = save_record(paths, record, key); !checkpoint) {
+            return checkpoint;
+        }
+        remaining = remaining.subspan(window.size());
     }
 
     std::vector<const PlannedChunkUpload*> chunks;
@@ -2712,8 +2827,14 @@ detail::prefetch_manifest_downloads(
             [&](std::size_t i) {
                 const auto& job = pack_jobs[i];
                 const auto enc_path = dl_dir / job.identifier;
-                if (!batch_ok &&
-                    !std::filesystem::is_regular_file(enc_path)) {
+                std::error_code status_error;
+                const auto status =
+                    std::filesystem::symlink_status(enc_path, status_error);
+                const bool absent =
+                    status_error == std::errc::no_such_file_or_directory ||
+                    (!status_error &&
+                     status.type() == std::filesystem::file_type::not_found);
+                if (absent) {
                     auto fetched =
                         transport::get(storage, job.identifier, enc_path);
                     if (!fetched) {
@@ -2729,9 +2850,21 @@ detail::prefetch_manifest_downloads(
                             job.first_op_index);
                         return;
                     }
+                } else if (status_error ||
+                           !std::filesystem::is_regular_file(status) ||
+                           platform::private_storage::is_reparse_or_symlink(
+                               enc_path)) {
+                    errors[i] = mutation::detail::make_error(
+                        mutation::MutationErrorCode::LocalIo,
+                        status_error ? status_error.message()
+                                     : "downloaded pack is not a regular file",
+                        enc_path,
+                        job.first_op_index);
+                    return;
                 }
+                const auto pack_dir = extract_dir / hash_hex(job.pack_hash);
                 auto extracted = crypto::pack::decrypt_and_verify_pack(
-                    enc_path, key, job.pack_hash, &extract_dir);
+                    enc_path, key, job.pack_hash, &pack_dir);
                 std::error_code ignored;
                 std::filesystem::remove(enc_path, ignored);
                 if (!extracted) {
@@ -2762,9 +2895,13 @@ detail::prefetch_manifest_downloads(
             if (op.action != Action::Download) {
                 continue;
             }
-            if (const auto h = hash_from_hex(op.hash);
-                h && history::find_packed_blob(manifest, *h) != nullptr) {
-                ready.emplace(op.hash, extract_dir / (op.hash + ".plain"));
+            if (const auto h = hash_from_hex(op.hash)) {
+                if (const auto* pack =
+                        history::find_packed_blob(manifest, *h)) {
+                    ready.emplace(op.hash,
+                                  extract_dir / hash_hex(pack->pack_hash) /
+                                      (op.hash + ".plain"));
+                }
             }
         }
     }
@@ -3461,10 +3598,33 @@ execute(const runtime::RuntimeData& runtime_data,
                                same_operation)) {
             record_storage = std::move(**existing);
         } else {
-            return std::unexpected(detail::make_error(
-                ErrorCode::RecoveryRequired, "pending transaction exists"));
+            auto& stale = **existing;
+            if (!stale.publication_required ||
+                stale.phase >= transaction::Phase::CommitPrepared ||
+                detail::has_local_rollback_work(stale)) {
+                return std::unexpected(detail::make_error(
+                    ErrorCode::RecoveryRequired, "pending transaction exists"));
+            }
+            auto stale_workspace = detail::open_transaction_workspace(
+                *profile, stale.operation_id, key);
+            if (!stale_workspace) {
+                return std::unexpected(stale_workspace.error());
+            }
+            // The new plan was observed before any mutation from this record.
+            if (auto discarded =
+                    detail::rollback_transaction(*paths,
+                                                 stale,
+                                                 *stale_workspace,
+                                                 runtime_data.local_dir,
+                                                 key);
+                !discarded) {
+                return discarded;
+            }
+            journal_session.invalidate();
+            existing->reset();
         }
-    } else {
+    }
+    if (!record_storage) {
         auto record =
             journal::create_record(observed_input.local_generation,
                                    observed_input.storage.generation,
@@ -3552,11 +3712,17 @@ execute(const runtime::RuntimeData& runtime_data,
 
     const bool use_handoff_progress =
         handoff_progress.size() == record->plan.operations.size();
+    const auto type_changes =
+        detail::local_type_changes(record->plan.operations);
     for (std::size_t index = 0; index < record->plan.operations.size();
          ++index) {
         const auto& current_progress =
             use_handoff_progress ? handoff_progress[index]
                                  : record->progress[index];
+        if (type_changes[index] == detail::TypeChangeStep::Install &&
+            current_progress.state == transaction::OperationState::Pending) {
+            continue;
+        }
         auto prepared =
             mutation::prepare_operation(record->plan.operations[index],
                                         index,
@@ -3718,6 +3884,7 @@ execute(const runtime::RuntimeData& runtime_data,
                               return record->plan.operations[index].action !=
                                      Action::DeleteLocalDirectory;
                           });
+    detail::order_local_type_changes(type_changes, remaining_operations);
     for (const auto index : remaining_operations) {
         apply_order.push_back(index);
     }
@@ -3816,6 +3983,18 @@ execute(const runtime::RuntimeData& runtime_data,
         record->plan.operations.size());
     const auto prepare_destination =
         [&](std::size_t index) -> std::expected<void, Error> {
+        if (type_changes[index] == detail::TypeChangeStep::Install &&
+            record->progress[index].state ==
+                transaction::OperationState::Pending) {
+            auto prepared = detail::prepare_type_change_install(
+                *record, index, runtime_data.local_dir, *workspace);
+            if (!prepared) {
+                return fail_terminal(prepared.error());
+            }
+            if (auto checkpoint = save_active_record(); !checkpoint) {
+                return checkpoint;
+            }
+        }
         auto condition = mutation::detail::effective_destination(
             *record, index, dependencies);
         if (!condition)
@@ -4049,9 +4228,13 @@ execute(const runtime::RuntimeData& runtime_data,
             loose_pending_uploads.push_back(op_index);
         }
 
-        if (!planned_packs_pending.empty()) {
+        for (std::span<const PlannedPack* const> remaining{
+                 planned_packs_pending};
+             !remaining.empty();) {
+            const auto window = remaining.first(
+                std::min(remaining.size(), pack_upload_window_size));
             if (auto pack_ok =
-                    execute_packed_upload_batch(planned_packs_pending,
+                    execute_packed_upload_batch(window,
                                                 *record,
                                                 runtime_data.local_dir,
                                                 storage,
@@ -4067,7 +4250,7 @@ execute(const runtime::RuntimeData& runtime_data,
                 return fail_mutation(pack_ok.error().mutation.operation_index,
                                      pack_ok.error().mutation);
             }
-            for (const auto* pack : planned_packs_pending) {
+            for (const auto* pack : window) {
                 for (const auto op_idx : pack->operation_indices) {
                     record->progress[op_idx].state =
                         transaction::OperationState::Applied;
@@ -4076,6 +4259,7 @@ execute(const runtime::RuntimeData& runtime_data,
             if (auto saved_pack = save_active_record(); !saved_pack) {
                 return std::unexpected(saved_pack.error());
             }
+            remaining = remaining.subspan(window.size());
         }
 
         if (!planned_chunks_pending.empty()) {

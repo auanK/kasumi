@@ -751,7 +751,7 @@ TEST(H3LocalSyncTest, DeletesEmptyNestedDeepAndMixedDirectories) {
     expect_fixed_point(scenario, a);
 }
 
-TEST(H3LocalSyncTest, StructuralChangesFailClosedAtTypeBoundary) {
+TEST(H3LocalSyncTest, UnilateralFileAndDirectoryReplacementsConverge) {
     auto scenario = make_scenario();
     const auto [a, b] = make_client_pair(scenario);
 
@@ -763,12 +763,7 @@ TEST(H3LocalSyncTest, StructuralChangesFailClosedAtTypeBoundary) {
     kasumi::test::write_text(client_local_dir(a) / "node/child.txt", "child");
     ASSERT_TRUE(sync(a));
     auto receive_directory = sync(b);
-    ASSERT_FALSE(receive_directory.has_value());
-    expect_file(b, "node", "file");
-
-    remove_file(b, "node");
-    auto retry_directory = sync(b);
-    ASSERT_TRUE(retry_directory.has_value()) << retry_directory.error();
+    ASSERT_TRUE(receive_directory.has_value()) << receive_directory.error();
     EXPECT_TRUE(std::filesystem::is_directory(client_local_dir(b) / "node"));
     expect_file(b, "node/child.txt", "child");
 
@@ -776,12 +771,34 @@ TEST(H3LocalSyncTest, StructuralChangesFailClosedAtTypeBoundary) {
     remove_directory(b, "node");
     kasumi::test::write_text(client_local_dir(b) / "node", "file again");
     auto publish_file = sync(b);
-    ASSERT_FALSE(publish_file.has_value());
+    ASSERT_TRUE(publish_file.has_value()) << publish_file.error();
     expect_file(b, "node", "file again");
-    auto observed_remote = remote(scenario);
-    ASSERT_TRUE(observed_remote.has_value()) << observed_remote.error();
-    EXPECT_TRUE(std::filesystem::is_directory(client_local_dir(a) / "node"));
-    expect_remote_present(*observed_remote, "node/child.txt");
+    auto receive_file = sync(a);
+    ASSERT_TRUE(receive_file.has_value()) << receive_file.error();
+    expect_file(a, "node", "file again");
+    expect_converged(scenario, {&a, &b});
+    expect_fixed_point(scenario, a);
+}
+
+TEST(H3LocalSyncTest, ConcurrentTypeChangePreservesEditedFileAndDirectory) {
+    auto scenario = make_scenario();
+    const auto [a, b] = make_client_pair(scenario);
+    kasumi::test::write_text(client_local_dir(a) / "node", "original");
+    ASSERT_TRUE(sync_succeeds(a));
+    ASSERT_TRUE(sync_succeeds(b));
+
+    remove_file(a, "node");
+    kasumi::test::write_text(client_local_dir(a) / "node/child",
+                             "directory branch");
+    kasumi::test::write_text(client_local_dir(b) / "node",
+                             "edited file branch");
+    ASSERT_TRUE(sync_succeeds(a));
+    ASSERT_TRUE(sync_succeeds(b));
+    ASSERT_TRUE(sync_succeeds(a));
+    expect_file(a, "node/child", "directory branch");
+    expect_file(a, "node.kasumiconflict_local", "edited file branch");
+    expect_converged(scenario, {&a, &b});
+    expect_fixed_point(scenario, a);
 }
 
 TEST(H3LocalSyncTest, IgnoreFilesStayLocalAcrossRemoteDeletes) {

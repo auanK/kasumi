@@ -470,8 +470,13 @@ stage_attempt(const runtime::RuntimeData& runtime_data,
     }
     workspace = *created;
 
+    const auto type_changes =
+        detail::local_type_changes(record->plan.operations);
     for (std::size_t index = 0; index < record->plan.operations.size();
          ++index) {
+        if (type_changes[index] == detail::TypeChangeStep::Install) {
+            continue;
+        }
         auto prepared =
             mutation::prepare_operation(record->plan.operations[index],
                                         index,
@@ -522,7 +527,13 @@ std::expected<bool, coordinator::Error> verify_destructive_local_operations(
     const reconciliation::Result& result,
     observation::LocalObservationSession* session) {
     bool modified = false;
-    for (const auto& op : sync_plan_operations(result.plan)) {
+    const auto operations = sync_plan_operations(result.plan);
+    const auto type_changes = detail::local_type_changes(operations);
+    for (std::size_t index = 0; index < operations.size(); ++index) {
+        const auto& op = operations[index];
+        if (type_changes[index] == detail::TypeChangeStep::Install) {
+            continue;
+        }
         if (op.action != Action::DeleteLocal && op.action != Action::Download &&
             op.action != Action::RenameLocal &&
             op.action != Action::MoveLocal && op.action != Action::CopyLocal) {

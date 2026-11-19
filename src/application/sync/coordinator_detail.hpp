@@ -36,6 +36,25 @@ inline constexpr std::uint64_t upload_batch_max_bytes =
     256 * 1024 * 1024; // 256 MiB
 inline constexpr auto transaction_resumption_ttl = std::chrono::hours(24);
 
+enum class TypeChangeStep {
+    Unrelated,
+    RemoveFile,
+    RemoveDirectory,
+    Install
+};
+
+std::vector<TypeChangeStep>
+local_type_changes(std::span<const transaction::Operation> operations);
+
+void order_local_type_changes(std::span<const TypeChangeStep> steps,
+                              std::vector<std::size_t>& order);
+
+std::expected<void, Error>
+prepare_type_change_install(transaction::Record& record,
+                            std::size_t index,
+                            const std::filesystem::path& root,
+                            const platform::Workspace& workspace);
+
 inline void
 order_local_copies(std::span<const transaction::Operation> operations,
                    std::vector<std::size_t>& order) {

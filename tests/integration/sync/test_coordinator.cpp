@@ -12724,6 +12724,48 @@ TEST(SyncCoordinatorTest, NonGenesisUploadSubBatchResumesSafely) {
         recover_expect(runtime_data, storage, key, RecoveryResult::NoJournal));
 }
 
+TEST(SyncCoordinatorTest, EditedUploadReplacesAnUnpublishedCheckpoint) {
+    auto [workspace, profile, local, storage_path, runtime_data, key] =
+        make_coordinator_env("stale-upload-checkpoint");
+    AmbiguousPublicationState* state = nullptr;
+    auto storage = make_initialized_ambiguous_storage(state);
+    kasumi::test::write_text(local / "file", "original");
+    auto input = empty_publication_input();
+    const auto original = app_obs::collect_local_tree(local);
+    ASSERT_TRUE(original);
+    input.local_tree = *original;
+    const auto before = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(before);
+    auto record = sync_journal::create_record(0, 0, before->plan);
+    ASSERT_TRUE(record);
+    ASSERT_EQ(record->progress.size(), 1U);
+    const auto staged = coord::detail::create_transaction_workspace(
+        profile, record->operation_id, key);
+    ASSERT_TRUE(staged);
+    record->phase = kasumi::transaction::Phase::FilesStaged;
+    record->progress.front().state =
+        kasumi::transaction::OperationState::Applied;
+    const auto paths = sync_journal::make_paths(profile);
+    ASSERT_TRUE(paths);
+    ASSERT_TRUE(sync_journal::save(*paths, *record, key));
+
+    // A same-size edit passes the cheap resume probe but changes the plan.
+    kasumi::test::write_text(local / "file", "modified");
+    ASSERT_TRUE(recover_expect(
+        runtime_data, storage, key, RecoveryResult::ResumableTransaction));
+    const auto edited = app_obs::collect_local_tree(local);
+    ASSERT_TRUE(edited);
+    input.local_tree = *edited;
+    const auto after = kasumi::reconciliation::reconcile(input);
+    ASSERT_TRUE(after);
+    const auto synced =
+        coord::execute(runtime_data, storage, key, input, *after);
+    ASSERT_TRUE(synced) << synced.error().detail;
+    EXPECT_FALSE(std::filesystem::exists(staged->root));
+    ASSERT_TRUE(
+        recover_expect(runtime_data, storage, key, RecoveryResult::NoJournal));
+}
+
 TEST(SyncCoordinatorTest,
      ResolveMissingPublicationFailurePreservesAllPendingMaterializations) {
     auto [workspace, profile, local, storage_path, runtime_data, key] =

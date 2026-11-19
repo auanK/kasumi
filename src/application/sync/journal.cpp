@@ -13,6 +13,7 @@
 #include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
+#include "platform/workspace.hpp"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -1595,18 +1596,38 @@ save(const Paths& paths,
         if (fresh && mode == SaveMode::Rollback)
             return std::unexpected("rollback requires active authority");
         if (fresh) {
-            auto created = platform::private_storage::create_directory(
-                paths.final_path.parent_path());
-            if (!created)
-                return created;
-        }
-        auto validation = validate_save_paths(paths);
-        if (!validation)
-            return validation;
-        if (fresh) {
-            auto tip = save_snapshot(paths, record, journal_key.value);
+            auto name = platform::random::hex_id();
+            if (!name)
+                return std::unexpected(name.error());
+            const auto active = paths.final_path.parent_path();
+            auto stage = platform::create_workspace_at(
+                active.parent_path() / (".journal-init-" + *name));
+            if (!stage)
+                return std::unexpected(stage.error());
+            struct StagingGuard {
+                const platform::Workspace& stage;
+                ~StagingGuard() noexcept {
+                    try {
+                        static_cast<void>(platform::remove_workspace(stage));
+                    } catch (...) {
+                    }
+                }
+            } staging_guard{*stage};
+            const Paths staging_paths{stage->root / paths.final_path.filename(),
+                                      stage->root /
+                                          paths.temporary_path.filename(),
+                                      stage->root / paths.log_path.filename()};
+            auto tip = save_snapshot(staging_paths, record, journal_key.value);
             if (!tip)
                 return std::unexpected(tip.error());
+            if (auto installed =
+                    platform::durability::retire_directory(stage->root, active);
+                !installed)
+                return installed;
+            if (auto synced =
+                    platform::durability::sync_parent_directory(active);
+                !synced)
+                return synced;
             if (auto bound = bind_session(
                     [&] {
                         return transaction::Record{record};
@@ -1617,6 +1638,9 @@ save(const Paths& paths,
             guard.keep = true;
             return {};
         }
+        auto validation = validate_save_paths(paths);
+        if (!validation)
+            return validation;
         auto previous = replay(paths, journal_key.value);
         if (!previous)
             return std::unexpected(previous.error());
@@ -1657,7 +1681,11 @@ load(const Paths& paths,
         if (!cleared)
             return std::unexpected(cleared.error());
         if (session) {
-            session->state = SessionState::Retired;
+            const bool bound = !session->operation().empty();
+            session->invalidate();
+            session->state =
+                bound ? SessionState::Retired : SessionState::Uninitialized;
+            guard.keep = true;
         }
         return std::optional<transaction::Record>{};
     };
@@ -1807,12 +1835,16 @@ InspectionResult inspect(const Paths& paths,
         };
 
         if (!missing(*retired_status)) {
-            std::error_code ec;
             auto has_retired_file =
                 validate_artifact_directory(retired, "journal artifact");
-            if (std::filesystem::is_empty(retired, ec) || !has_retired_file ||
-                !*has_retired_file) {
+            if (!has_retired_file) {
                 return InspectionResult::Corrupted;
+            }
+            if (!*has_retired_file) {
+                std::error_code error;
+                return std::filesystem::is_empty(retired, error) && !error
+                           ? InspectionResult::Retired
+                           : InspectionResult::Corrupted;
             }
             const Paths root_paths{retired / "snapshot.enc",
                                    retired / "snapshot.enc.new",

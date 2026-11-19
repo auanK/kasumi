@@ -463,6 +463,7 @@ collect_reconciliation_input(
             input.base_commit_id.clear();
             input.base_ciphertext_id.clear();
             input.base_state_present = false;
+            input.pending_materializations.clear();
             input.local_generation = 0;
         } else if (found->commit.height != input.local_generation ||
                    found->commit.tree != input.base_tree) {

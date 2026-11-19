@@ -469,6 +469,24 @@ candidate_shared_tree(const Input& input,
     };
 
     for (const auto& operation : sync_plan_operations(plan)) {
+        if (operation.action != Action::DeleteRemote &&
+            operation.action != Action::DeleteRemoteDirectory) {
+            continue;
+        }
+        const auto path = platform::path::to_logical_utf8(operation.path);
+        if (find_row(result.tree, path) == nullptr) {
+            return unsafe_error("remote removal does not match tree",
+                                {operation.path});
+        }
+        erase_subtree(result.tree, path);
+        if (auto ancestors = synchronize_ancestor_rows(
+                result.tree, local_tree, path, false, &input.storage.tree);
+            !ancestors) {
+            return std::unexpected(std::move(ancestors.error()));
+        }
+    }
+
+    for (const auto& operation : sync_plan_operations(plan)) {
         switch (operation.action) {
             case Action::Upload: {
                 if (is_repair_upload(
@@ -576,26 +594,6 @@ candidate_shared_tree(const Input& input,
                         result.tree, local_tree, path, true);
                     !parents) {
                     return std::unexpected(std::move(parents.error()));
-                }
-                break;
-            }
-            case Action::DeleteRemote:
-            case Action::DeleteRemoteDirectory: {
-                const auto path =
-                    platform::path::to_logical_utf8(operation.path);
-                if (find_row(result.tree, path) == nullptr) {
-                    return unsafe_error("remote removal does not match tree",
-                                        {operation.path});
-                }
-                erase_subtree(result.tree, path);
-                if (auto ancestors =
-                        synchronize_ancestor_rows(result.tree,
-                                                  local_tree,
-                                                  path,
-                                                  false,
-                                                  &input.storage.tree);
-                    !ancestors) {
-                    return std::unexpected(std::move(ancestors.error()));
                 }
                 break;
             }

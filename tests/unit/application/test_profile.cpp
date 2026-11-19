@@ -2441,11 +2441,13 @@ TEST(ApplicationProfileTest,
     EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
 }
 
-TEST(ApplicationProfileTest, InspectLocalStateEmptyRetiredDirectoryIsProblem) {
+TEST(ApplicationProfileTest,
+     InspectLocalStateAfterRetirementProofRemovalIsReady) {
     ProfileFixture fixture{"app-profile-state-empty-retired"};
+    ASSERT_TRUE(save_height(fixture.database_path(), 1));
     std::filesystem::create_directories(fixture.profile_dir() /
                                         "transaction.bin.enc.cleared");
-    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
+    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Ready);
 }
 
 TEST(ApplicationProfileTest,

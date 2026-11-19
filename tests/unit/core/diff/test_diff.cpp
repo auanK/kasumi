@@ -455,10 +455,11 @@ TEST(DiffThreeWayTest, UnicodeConflictPathsPreserveAllConflictBranches) {
     expect_operations(
         kasumi::diff::compare_trees(
             tree({directory("高松灯"), local_directory}), base, cloud),
-        {signature(Action::Download,
+        {signature(Action::CreateRemoteDirectory, logical_path),
+         signature(Action::Download,
                    logical_path + ".kasumiconflict_remote",
                    kasumi::hash_hex(cloud_file.hash),
-                   {},
+                   logical_path,
                    cloud_file.size,
                    true)});
 }

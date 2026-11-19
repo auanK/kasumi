@@ -274,32 +274,6 @@ ReachabilityResult inventory_impl(
         }
     }
 
-    for (auto& commit : commits) {
-        std::ranges::sort(commit.variants, {}, &ReachabilityVariant::reference);
-        if (commit.valid) {
-            for (const auto& parent : commit.parents) {
-                if (!history::valid_commit_id(parent)) {
-                    result.invalid_parent_ids.push_back(parent);
-                    continue;
-                }
-                if (epoch_anchors.contains(parent)) {
-                    continue;
-                }
-                const auto* found = find_commit(commits, parent);
-                switch (classify_parent(found)) {
-                    case ParentAvailability::Valid:
-                        break;
-                    case ParentAvailability::Missing:
-                        result.missing_parent_ids.push_back(parent);
-                        break;
-                    case ParentAvailability::Invalid:
-                        result.invalid_parent_ids.push_back(parent);
-                        break;
-                }
-            }
-        }
-    }
-
     std::vector<std::pair<std::string, std::size_t>> pending;
     for (const auto& root : result.logical_heads) {
         pending.emplace_back(root, 0);
@@ -320,7 +294,21 @@ ReachabilityResult inventory_impl(
             continue;
         }
         for (const auto& parent : found->parents) {
-            pending.emplace_back(parent, depth + 1);
+            if (!history::valid_commit_id(parent)) {
+                result.invalid_parent_ids.push_back(parent);
+                continue;
+            }
+            switch (classify_parent(find_commit(commits, parent))) {
+                case ParentAvailability::Valid:
+                    pending.emplace_back(parent, depth + 1);
+                    break;
+                case ParentAvailability::Missing:
+                    result.missing_parent_ids.push_back(parent);
+                    break;
+                case ParentAvailability::Invalid:
+                    result.invalid_parent_ids.push_back(parent);
+                    break;
+            }
         }
     }
 
@@ -340,6 +328,7 @@ ReachabilityResult inventory_impl(
     detail::sort_unique(result.invalid_parent_ids);
     detail::sort_unique(result.unknown_history_objects);
     for (auto& commit : commits) {
+        std::ranges::sort(commit.variants, {}, &ReachabilityVariant::reference);
         if (commit.reachable) {
             result.reachable_commits.push_back(commit.commit_id);
         } else if (commit.valid) {

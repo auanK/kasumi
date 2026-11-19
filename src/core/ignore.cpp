@@ -93,6 +93,7 @@ bool generated_internal_name(std::string_view name) noexcept {
         std::string_view{"rollback-candidate"},
         std::string_view{"rollback-custody"},
         std::string_view{"custody"},
+        std::string_view{"copy"},
         std::string_view{"new"},
     };
     bool known_kind = false;

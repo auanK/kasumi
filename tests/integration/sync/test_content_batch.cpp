@@ -2005,4 +2005,77 @@ TEST(SyncContentBatchTest,
     EXPECT_FALSE(std::filesystem::exists(paths->final_path));
 }
 
+TEST(SyncContentBatchTest,
+     PackBatchRetriesOmittedObjectsAndAuthenticatesSharedMembers) {
+    auto fixture = make_fixture("pack-partial-batch");
+    const auto shared_path = fixture->local / "shared";
+    kasumi::test::write_text(shared_path, "shared");
+    const auto shared = kasumi::hasher::hash_string("shared");
+    kasumi::history::StorageManifest manifest;
+    std::vector<kasumi::Operation> operations;
+    std::string last_identifier;
+    for (std::string_view bytes : {"alpha", "bravo"}) {
+        const auto source = fixture->local / bytes;
+        kasumi::test::write_text(source, bytes);
+        const auto hash = kasumi::hasher::hash_string(bytes);
+        const std::array<kasumi::crypto::pack::PackMemberSource, 2> members{{
+            {shared, 6, shared_path},
+            {hash, 5, source},
+        }};
+        const auto encoded =
+            fixture->workspace->root / (std::string{bytes} + ".pack");
+        const auto pack = kasumi::crypto::pack::write_encrypted_pack(
+            members, encoded, fixture->key);
+        ASSERT_TRUE(pack) << pack.error();
+        last_identifier =
+            kasumi::crypto::pack_identifier(fixture->key, pack->pack_hash);
+        ASSERT_TRUE(
+            kasumi::transport::put(fixture->base, encoded, last_identifier));
+        manifest.packed_blobs.push_back({hash, 5, pack->pack_hash});
+        operations.push_back({.action = kasumi::Action::Download,
+                              .path = std::string{bytes},
+                              .hash = kasumi::hash_hex(hash),
+                              .size = 5});
+    }
+    std::ranges::sort(manifest.packed_blobs,
+                      {},
+                      &kasumi::history::PackedBlobEntry::blob_hash);
+    const auto record = sync::journal::create_record(
+        0, 0, kasumi::make_sync_plan(std::move(operations), 0));
+    ASSERT_TRUE(record);
+    const auto workspace =
+        sync::coordinator::detail::create_transaction_workspace(
+            fixture->profile, record->operation_id, fixture->key);
+    ASSERT_TRUE(workspace) << workspace.error().detail;
+    fixture->storage.storage.get_batch =
+        [](void*,
+           const kasumi::transport::GetBatch&) -> kasumi::transport::Result {
+        return {};
+    };
+    constexpr std::array<std::size_t, 2> indices{0, 1};
+    const auto prefetch = [&] {
+        return sync::coordinator::detail::prefetch_manifest_downloads(
+            manifest,
+            indices,
+            *record,
+            fixture->local,
+            fixture->storage,
+            fixture->key,
+            *workspace,
+            2);
+    };
+    const auto downloaded = prefetch();
+    ASSERT_TRUE(downloaded) << downloaded.error().detail;
+    for (const auto& op : record->plan.operations) {
+        ASSERT_TRUE(downloaded->contains(op.hash));
+        EXPECT_EQ(kasumi::test::read_text(downloaded->at(op.hash)),
+                  op.path.string());
+    }
+    ASSERT_TRUE(kasumi::transport::remove(fixture->base, last_identifier));
+    const auto missing = prefetch();
+    ASSERT_FALSE(missing);
+    EXPECT_EQ(missing.error().code,
+              sync::mutation::MutationErrorCode::RemoteContentMissing);
+}
+
 } // namespace

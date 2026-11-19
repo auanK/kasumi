@@ -503,21 +503,14 @@ std::expected<void, MutationError> record_copy_installed_identity(
     wire::write<std::uint64_t>(writer, identity.file_id_high);
     wire::write<std::uint32_t>(writer, 1);
 
-    std::ofstream out(marker_path, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        return std::unexpected(
-            make_error(MutationErrorCode::LocalIo,
-                       "failed to create copy identity marker",
-                       marker_path,
-                       operation_index));
-    }
-    out.write(reinterpret_cast<const char*>(writer.buffer.data()),
-              static_cast<std::streamsize>(writer.buffer.size()));
-    out.flush();
-    out.close();
-    if (out.fail()) {
+    const auto bytes =
+        std::string_view{reinterpret_cast<const char*>(writer.buffer.data()),
+                         writer.buffer.size()};
+    if (auto written =
+            platform::private_storage::write_atomically(marker_path, bytes);
+        !written) {
         return std::unexpected(make_error(MutationErrorCode::LocalIo,
-                                          "failed writing copy identity marker",
+                                          written.error(),
                                           marker_path,
                                           operation_index));
     }

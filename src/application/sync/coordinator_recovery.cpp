@@ -376,6 +376,8 @@ std::expected<void, Error> resume_pending_local_mutations(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
     const auto dependencies =
         mutation::detail::destination_dependencies(record.plan.operations);
+    const auto type_changes =
+        detail::local_type_changes(record.plan.operations);
     std::vector<std::size_t> replay_order;
     replay_order.reserve(record.plan.operations.size());
     for (std::size_t index = 0; index < record.plan.operations.size();
@@ -393,7 +395,8 @@ std::expected<void, Error> resume_pending_local_mutations(
                 index));
         }
         if (record.progress[index].state ==
-            transaction::OperationState::Pending) {
+                transaction::OperationState::Pending &&
+            type_changes[index] != detail::TypeChangeStep::Install) {
             if (operation.action == Action::Download ||
                 operation.action == Action::DeleteLocal ||
                 operation.action == Action::MoveLocal ||
@@ -424,6 +427,7 @@ std::expected<void, Error> resume_pending_local_mutations(
         replay_order.push_back(index);
     }
     detail::order_local_copies(record.plan.operations, replay_order);
+    detail::order_local_type_changes(type_changes, replay_order);
     std::unordered_map<std::string, std::filesystem::path> prefetched;
     if (!replay_order.empty()) {
         auto staged = detail::prefetch_manifest_downloads(
@@ -445,6 +449,19 @@ std::expected<void, Error> resume_pending_local_mutations(
     }
     for (const auto index : replay_order) {
         const auto& operation = record.plan.operations[index];
+        if (type_changes[index] == detail::TypeChangeStep::Install &&
+            record.progress[index].state ==
+                transaction::OperationState::Pending) {
+            auto prepared = detail::prepare_type_change_install(
+                record, index, runtime_data.local_dir, *workspace);
+            if (!prepared) {
+                return prepared;
+            }
+            if (auto checkpoint = detail::save_record(paths, record, key);
+                !checkpoint) {
+                return checkpoint;
+            }
+        }
         auto condition = mutation::detail::effective_destination(
             record, index, dependencies);
         if (!condition)
