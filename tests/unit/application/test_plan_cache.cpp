@@ -1,8 +1,10 @@
 #include "application/execute.hpp"
 #include "application/profile.hpp"
 #include "application/observation/state.hpp"
+#include "core/reconciliation/plan.hpp"
 #include "platform/metadata.hpp"
 #include "platform/perf_trace.hpp"
+#include "runtime/resolver.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
 #include "kasumi/test/filesystem.hpp"
@@ -464,6 +466,105 @@ TEST(PlanCacheObservationTest, TimestampModificationForcesRehash) {
     EXPECT_EQ(kasumi::platform::perf_trace::get_count("local hash file calls"), 1U);
 
     kasumi::platform::perf_trace::force_enable(false);
+}
+
+TEST(PlanCacheObservationTest,
+     IgnoredOnlyDirectoryAndPathOrderInversionStayNoOpWithoutEagerWriterOrDirtyCache) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("plan-cache-ignored-dir-noop");
+    const auto app = kasumi::test::workspace_path(workspace, "app");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto remote = kasumi::test::workspace_path(workspace, "remote");
+
+    std::filesystem::create_directories(app);
+    std::filesystem::create_directories(local / "docs");
+    std::filesystem::create_directories(local / "__history");
+    std::filesystem::create_directories(remote);
+
+    kasumi::test::write_text(
+        app / "config.toml",
+        "[profiles.demo]\nlocal_dir = '" + local.string() + "'\n"
+        "remote_dir = '" + remote.string() + "'\n"
+        "min_history_depth = 5\nmin_history_age_hours = 6\n"
+        "key_storage = 'file'\n");
+    std::filesystem::create_directories(app / "profiles" / "demo");
+    ASSERT_TRUE(kasumi::state_storage::initialize(
+        app / "profiles" / "demo" / "db.sqlite"));
+
+    const auto mtime =
+        std::filesystem::file_time_type::clock::now() - std::chrono::seconds{2};
+    for (const auto& [rel, body] :
+         std::vector<std::pair<std::string, std::string>>{
+             {".kasumiignore", "*~\n"},
+             {"docs.md", "top-level doc"},
+             {"docs/sub.md", "nested doc"},
+             {"__history/backup.1~", "ignored backup"},
+         }) {
+        const auto file = local / rel;
+        kasumi::test::write_text(file, body);
+        ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(file, mtime));
+    }
+
+    init_transport(workspace);
+    const ExecutionEnvironment env{app};
+    const Credentials creds{test_key()};
+    ASSERT_TRUE(
+        kasumi::application::execute({Request{Operation::Sync, "demo"}, creds, env})
+            .has_value());
+
+    auto runtime_data = kasumi::runtime::resolve(
+        app, "demo", kasumi::runtime::AccessMode::ReadOnly);
+    ASSERT_TRUE(runtime_data.has_value());
+    auto storage = kasumi::transport::open_transport(
+        runtime_data->storage_location, runtime_data->local_dir);
+    ASSERT_TRUE(storage.has_value());
+    std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    key.fill(0x44);
+
+    // On a no-op with an ignored-only directory and SQLite-vs-path_less
+    // ordering inversion ("docs.md" vs "docs/sub.md"), eager writer must not
+    // trigger and file_cache must not be marked dirty.
+    kasumi::application::observation::LocalObservationSession session;
+    session.database_path = runtime_data->database_path;
+    bool proven_local_change = false;
+    auto collected = kasumi::application::observation::collect_reconciliation_input(
+        *runtime_data,
+        *storage,
+        key,
+        false,
+        {},
+        &session,
+        [&] { proven_local_change = true; });
+    ASSERT_TRUE(collected.has_value()) << collected.error().detail;
+    EXPECT_FALSE(proven_local_change);
+    EXPECT_FALSE(session.cache_dirty);
+
+    auto reconciled = kasumi::reconciliation::reconcile(*collected);
+    ASSERT_TRUE(reconciled.has_value());
+    EXPECT_FALSE(reconciled->requires_publication);
+    EXPECT_FALSE(reconciled->requires_local_mutation);
+    EXPECT_FALSE(reconciled->requires_storage_repair);
+    EXPECT_FALSE(reconciled->requires_state_commit);
+
+    // Modifying a managed file still triggers eager writer detection.
+    const auto edited = local / "docs.md";
+    kasumi::test::write_text(edited, "edited doc");
+    ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(
+        edited, mtime + std::chrono::seconds{1}));
+    kasumi::application::observation::LocalObservationSession edited_session;
+    edited_session.database_path = runtime_data->database_path;
+    bool edited_proven_change = false;
+    auto edited_collected =
+        kasumi::application::observation::collect_reconciliation_input(
+            *runtime_data,
+            *storage,
+            key,
+            false,
+            {},
+            &edited_session,
+            [&] { edited_proven_change = true; });
+    ASSERT_TRUE(edited_collected.has_value());
+    EXPECT_TRUE(edited_proven_change);
 }
 
 } // namespace

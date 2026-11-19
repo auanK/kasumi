@@ -642,75 +642,6 @@ find_directory_evidence(const LocalPhysicalEvidence& evidence,
                                                                       : nullptr;
 }
 
-std::expected<Snapshot, Error>
-project_local_tree(Snapshot local_tree,
-                   const LocalPhysicalEvidence& physical_evidence,
-                   const Snapshot& desired_tree,
-                   ErrorCode error_code) {
-    if (!kasumi::valid_snapshot(local_tree, false)) {
-        return std::unexpected(fail_error(
-            error_code, "invalid local tree for managed projection"));
-    }
-    if (!kasumi::valid_snapshot(desired_tree, true)) {
-        return std::unexpected(
-            fail_error(ErrorCode::InvalidStorageTree,
-                       "invalid desired tree for managed projection"));
-    }
-
-    std::unordered_set<std::string> retained_directories;
-    std::vector<std::uint8_t> retained(local_tree.rows.size(), 0);
-    for (std::size_t index = local_tree.rows.size(); index > 0; --index) {
-        const auto row_index = index - 1;
-        const auto& row = local_tree.rows[row_index];
-        bool keep = !row.is_directory;
-        if (row.is_directory) {
-            const auto* evidence =
-                find_directory_evidence(physical_evidence, row.path);
-            const auto* desired = find_row(desired_tree, row.path);
-            if (!row.path.empty() && evidence != nullptr &&
-                evidence->has_unexpected_descendants &&
-                (desired == nullptr || !desired->is_directory) &&
-                !evidence->has_managed_descendants) {
-                return std::unexpected(Error{
-                    .code = error_code,
-                    .detail =
-                        "unexpected local entries prevent directory projection",
-                    .paths = {platform::path::from_utf8(row.path)},
-                });
-            }
-            keep =
-                row.path.empty() || retained_directories.contains(row.path) ||
-                (desired != nullptr && desired->is_directory) ||
-                evidence == nullptr || !evidence->has_ignored_descendants ||
-                evidence->has_managed_descendants || evidence->physically_empty;
-        }
-        if (!keep) {
-            continue;
-        }
-        retained[row_index] = 1;
-        if (row.is_directory) {
-            retained_directories.emplace(row.path);
-        }
-        if (!row.path.empty()) {
-            retained_directories.emplace(row_parent(row.path));
-        }
-    }
-
-    Snapshot projected;
-    projected.rows.reserve(local_tree.rows.size());
-    for (std::size_t index = 0; index < local_tree.rows.size(); ++index) {
-        if (retained[index] != 0) {
-            projected.rows.push_back(std::move(local_tree.rows[index]));
-        }
-    }
-    finalize_snapshot(projected);
-    if (!kasumi::valid_snapshot(projected, false)) {
-        return std::unexpected(
-            fail_error(error_code, "managed local projection is invalid"));
-    }
-    return projected;
-}
-
 void suppress_protected_directory_deletions(
     std::vector<Operation>& operations,
     const LocalPhysicalEvidence& physical_evidence) {
@@ -1203,6 +1134,75 @@ bool has_safe_paths(const SyncPlan& plan) {
         }
     }
     return true;
+}
+
+std::expected<Snapshot, Error>
+project_local_tree(Snapshot local_tree,
+                   const LocalPhysicalEvidence& physical_evidence,
+                   const Snapshot& desired_tree,
+                   ErrorCode error_code) {
+    if (!kasumi::valid_snapshot(local_tree, false)) {
+        return std::unexpected(fail_error(
+            error_code, "invalid local tree for managed projection"));
+    }
+    if (!kasumi::valid_snapshot(desired_tree, true)) {
+        return std::unexpected(
+            fail_error(ErrorCode::InvalidStorageTree,
+                       "invalid desired tree for managed projection"));
+    }
+
+    std::unordered_set<std::string> retained_directories;
+    std::vector<std::uint8_t> retained(local_tree.rows.size(), 0);
+    for (std::size_t index = local_tree.rows.size(); index > 0; --index) {
+        const auto row_index = index - 1;
+        const auto& row = local_tree.rows[row_index];
+        bool keep = !row.is_directory;
+        if (row.is_directory) {
+            const auto* evidence =
+                find_directory_evidence(physical_evidence, row.path);
+            const auto* desired = find_row(desired_tree, row.path);
+            if (!row.path.empty() && evidence != nullptr &&
+                evidence->has_unexpected_descendants &&
+                (desired == nullptr || !desired->is_directory) &&
+                !evidence->has_managed_descendants) {
+                return std::unexpected(Error{
+                    .code = error_code,
+                    .detail =
+                        "unexpected local entries prevent directory projection",
+                    .paths = {platform::path::from_utf8(row.path)},
+                });
+            }
+            keep =
+                row.path.empty() || retained_directories.contains(row.path) ||
+                (desired != nullptr && desired->is_directory) ||
+                evidence == nullptr || !evidence->has_ignored_descendants ||
+                evidence->has_managed_descendants || evidence->physically_empty;
+        }
+        if (!keep) {
+            continue;
+        }
+        retained[row_index] = 1;
+        if (row.is_directory) {
+            retained_directories.emplace(row.path);
+        }
+        if (!row.path.empty()) {
+            retained_directories.emplace(row_parent(row.path));
+        }
+    }
+
+    Snapshot projected;
+    projected.rows.reserve(local_tree.rows.size());
+    for (std::size_t index = 0; index < local_tree.rows.size(); ++index) {
+        if (retained[index] != 0) {
+            projected.rows.push_back(std::move(local_tree.rows[index]));
+        }
+    }
+    finalize_snapshot(projected);
+    if (!kasumi::valid_snapshot(projected, false)) {
+        return std::unexpected(
+            fail_error(error_code, "managed local projection is invalid"));
+    }
+    return projected;
 }
 
 std::expected<Snapshot, Error>

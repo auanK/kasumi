@@ -542,6 +542,7 @@ std::vector<FileCacheRow> read_cache_rows(sqlite3* database) {
                                     .file_low = *words[1],
                                     .file_high = *words[2]});
     }
+    std::ranges::sort(rows, path_less, &FileCacheRow::path);
     return rows;
 }
 

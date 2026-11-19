@@ -339,12 +339,27 @@ collect_reconciliation_input(
         local_observation =
             collect_local_observation(runtime_data.local_dir, session);
         if (local_observation && input.base_state_present &&
+            input.pending_materializations.empty() &&
             !local_observation->snapshot.rows.empty() &&
             !input.base_tree.rows.empty() &&
-            local_observation->snapshot.rows.front().hash !=
-                input.base_tree.rows.front().hash &&
             on_proven_local_change) {
-            on_proven_local_change();
+            bool changed = local_observation->snapshot.rows.front().hash !=
+                           input.base_tree.rows.front().hash;
+            if (changed) {
+                if (auto projected = reconciliation::project_local_tree(
+                        local_observation->snapshot,
+                        local_observation->physical_evidence,
+                        input.base_tree);
+                    projected && !projected->rows.empty()) {
+                    changed = projected->rows.front().hash !=
+                              input.base_tree.rows.front().hash;
+                } else {
+                    changed = false;
+                }
+            }
+            if (changed) {
+                on_proven_local_change();
+            }
         }
     });
 
