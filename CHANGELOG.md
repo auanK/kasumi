@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.18.1]
+
+### Fixed
+
+- Print the `:back` navigation hint once per action in `kasumi config` instead of repeating it on every subsequent field prompt and validation retry.
+
 ## [0.18.0]
 
 ### Added
