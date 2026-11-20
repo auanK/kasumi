@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.18.0]
+
+### Added
+
+- Add `kasumi repack <profile> [--dry-run] [--reclaim-dirty] [--full]` (`Operation::Repack`, `RepackCompleted`, `ErrorCode::RepackFailure`) to consolidate loose small files (`<= 256 KiB`) and fragmented `KPAK\x01` Micro-Packs directly from verified local files without downloading remote payloads or deleting remote objects.
+- Add a deterministic Micro-Pack repack planner (`repack::plan`) that detects dead blobs inside existing packs by recomputing the canonical live-member pack hash with zero I/O, consolidates loose small blobs and underfilled packs (`< 2 MiB`) into `4 MiB` target packs by default, and reclaims large dirty packs (`>= 2 MiB` live bytes with dead blobs) when `--reclaim-dirty` is passed.
+- Stage, upload, verify, and clean up consolidated Micro-Packs in bounded 16-pack windows (`~64 MiB` per window) under cooperative writer registration before publishing a single tree-preserving `KCOM` v3 Commit with the updated `StorageManifest`.
+
+### Fixed
+
+- Poll interactive POSIX terminal input before reading lines in `kasumi config` so a `SIGINT` delivered between flushing the prompt and entering input read is observed promptly instead of blocking in `getline`.
+
 ## [0.17.4]
 
 ### Fixed
