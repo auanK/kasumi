@@ -647,6 +647,52 @@ class CliProcessTest(unittest.TestCase):
 
         self.invoke("fsck", "demo")
 
+    def test_repack_reclaim_dirty_in_real_processes(self):
+        import time
+
+        local, remote = self.root / "local", self.root / "remote"
+        local.mkdir()
+        self.invoke("config", input=f"n\ndemo\n{local}\n{remote}\n\nq\n".encode())
+
+        def write_settled(path: Path, payload: bytes):
+            path.write_bytes(payload)
+            settled = time.time() - 5.0
+            os.utime(path, (settled, settled))
+
+        for index in range(16):
+            write_settled(local / f"f{index:02d}.bin", bytes([index + 1]) * 184320)
+        self.invoke("sync", "demo")
+
+        (local / "f00.bin").unlink()
+        self.invoke("sync", "demo")
+
+        default_repack = self.invoke("repack", "demo", "--full")
+        self.assertIn(b"Nothing to repack", default_repack)
+        self.assertIn(b"1 dirty pack(s) detected; use --reclaim-dirty", default_repack)
+        self.assertIn(b"Inventory: 1 existing pack(s)", default_repack)
+        self.assertIn(b"1 dirty detected", default_repack)
+
+        dry = self.invoke("repack", "demo", "--reclaim-dirty", "--dry-run")
+        self.assertIn(b"Repack plan: 15 blob(s)", dry)
+        self.assertIn(b"-> 1 new Micro-Pack(s).", dry)
+        self.assertIn(b"Sources: 0 loose blob(s), 0 underfilled pack(s), 1 dirty pack(s).", dry)
+        self.assertIn(b"Repack dry-run completed", dry)
+
+        reclaimed = self.invoke("repack", "demo", "--reclaim-dirty", "--full")
+        self.assertIn(b"[OK] Repack completed.", reclaimed)
+        self.assertIn(b"Repacked 15 blob(s)", reclaimed)
+        self.assertIn(b"into 1 new Micro-Pack(s).", reclaimed)
+        self.assertIn(b"Sources: 0 loose blob(s), 0 underfilled pack(s), 1 dirty pack(s).", reclaimed)
+        self.assertIn(b"Wire upload", reclaimed)
+        self.assertIn(b"Published commit:", reclaimed)
+        self.assertIn(b"kasumi gc", reclaimed)
+
+        noop = self.invoke("repack", "demo", "--reclaim-dirty")
+        self.assertIn(b"Nothing to repack", noop)
+        self.assertNotIn(b"--reclaim-dirty", noop)
+
+        self.invoke("fsck", "demo")
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)
