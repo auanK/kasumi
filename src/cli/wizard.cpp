@@ -197,11 +197,17 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         }
         return !platform::cancellation::requested();
     };
+    bool back_hint_shown = false;
     const auto prompt_form_line = [&](std::string_view label,
                                       std::string& value) {
-        return prompt_line(i18n::format(i18n::Key::WizardPromptWithBack, label),
-                           value) &&
-               value != ":back";
+        if (!back_hint_shown) {
+            back_hint_shown = true;
+            return prompt_line(
+                       i18n::format(i18n::Key::WizardPromptWithBack, label),
+                       value) &&
+                   value != ":back";
+        }
+        return prompt_line(label, value) && value != ":back";
     };
     const auto confirm_change = [&](std::string_view message) {
         std::string confirmation;
@@ -308,6 +314,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             break;
         }
         std::println();
+        back_hint_shown = false;
 
         const auto prompt_field = [&](std::string_view label,
                                       application::ProfileField field,
