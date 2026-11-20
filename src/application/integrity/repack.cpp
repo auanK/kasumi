@@ -477,113 +477,132 @@ execute(const runtime::RuntimeData& runtime_data,
     }
     WorkspaceGuard workspace_guard{.workspace = std::move(*workspace)};
 
-    sync::mutation::StagedUploadBatch batch;
-    batch.root = workspace_guard.workspace->root / "packs";
-    if (auto dir_ok = platform::private_storage::ensure_directory(batch.root);
-        !dir_ok) {
-        return std::unexpected(
-            make_error(integrity::ErrorCode::WorkspaceFailure, dir_ok.error()));
-    }
-    UploadBatchGuard batch_guard{batch};
-
     const std::size_t parallelism = std::max<std::size_t>(
         1U,
         options.max_parallelism > 0 ? options.max_parallelism
                                     : application::content_concurrency());
-    batch.objects.resize(planned->new_packs.size());
+    const std::size_t window_packs =
+        options.upload_window_packs > 0 ? options.upload_window_packs
+                                        : DEFAULT_UPLOAD_WINDOW_PACKS;
+    const std::size_t total_packs = planned->new_packs.size();
 
-    if (meter) {
-        meter->phase(Activity::Staging, planned->new_packs.size());
-    }
-    std::vector<std::optional<integrity::Error>> stage_errors(
-        planned->new_packs.size());
-    application::parallel_for_indexed(
-        planned->new_packs.size(),
-        std::min(parallelism, planned->new_packs.size()),
-        [&](std::size_t idx) {
-            if (platform::cancellation::requested()) {
-                stage_errors[idx] = cancelled_error();
-                return;
-            }
-            const auto& planned_pack = planned->new_packs[idx];
-            const auto pack_id =
-                crypto::pack_identifier(key, planned_pack.pack_hash);
-            const auto dest =
-                batch.root / platform::path::from_utf8(pack_id);
-            auto res = crypto::pack::write_encrypted_pack(
-                (*pack_sources)[idx], dest, key);
-            if (!res) {
-                const bool local_changed =
-                    res.error().find("changed") != std::string::npos ||
-                    res.error().find("mismatch") != std::string::npos ||
-                    res.error().find("missing") != std::string::npos;
-                stage_errors[idx] = make_error(
-                    local_changed ? integrity::ErrorCode::ConcurrentChange
-                                  : integrity::ErrorCode::CryptoFailure,
-                    res.error());
-                return;
-            }
-            if (res->pack_hash != planned_pack.pack_hash) {
-                stage_errors[idx] =
-                    make_error(integrity::ErrorCode::IntegrityFailure,
-                               "staged pack identifier mismatch");
-                return;
-            }
-            if (meter) {
-                meter->record_staged(dest, res->pack_plaintext_size);
-            }
-            batch.objects[idx] = sync::mutation::StagedUploadObject{
-                .identifier = pack_id,
-                .plaintext_hash = hash_hex(res->pack_hash),
-                .plaintext_size = res->pack_plaintext_size,
-                .ciphertext_sha256 = std::move(res->ciphertext_sha256),
-                .operation_indices = {idx},
-                .is_pack = true,
-            };
-        });
-
-    for (const auto& err : stage_errors) {
-        if (err) {
-            return std::unexpected(*err);
+    for (std::size_t offset = 0; offset < total_packs;) {
+        if (platform::cancellation::requested()) {
+            return std::unexpected(cancelled_error());
         }
-    }
-    if (platform::cancellation::requested()) {
-        return std::unexpected(cancelled_error());
-    }
+        const std::size_t count = std::min(window_packs, total_packs - offset);
 
-    if (auto admission =
-            protocol::verify_writer_admission(writer_guard.state, layout);
-        !admission) {
-        return std::unexpected(map_protocol_error(admission.error()));
-    }
+        sync::mutation::StagedUploadBatch batch;
+        batch.root = workspace_guard.workspace->root / "packs";
+        if (auto dir_ok =
+                platform::private_storage::ensure_directory(batch.root);
+            !dir_ok) {
+            return std::unexpected(make_error(
+                integrity::ErrorCode::WorkspaceFailure, dir_ok.error()));
+        }
+        UploadBatchGuard batch_guard{batch};
+        batch.objects.resize(count);
 
-    if (meter) {
-        meter->phase(Activity::Uploading, batch.objects.size());
-    }
-    auto transferred =
-        sync::mutation::transfer_upload_batch(batch, storage, parallelism);
-    const bool transfer_unknown =
-        !transferred &&
-        transferred.error().code ==
-            sync::mutation::MutationErrorCode::RemoteResultUnknown;
-    if (!transferred && !transfer_unknown) {
-        return std::unexpected(map_mutation_error(transferred.error()));
-    }
-    if (platform::cancellation::requested()) {
-        return std::unexpected(cancelled_error());
-    }
+        if (meter) {
+            meter->phase(Activity::Staging, count);
+        }
+        std::vector<std::optional<integrity::Error>> stage_errors(count);
+        application::parallel_for_indexed(
+            count, std::min(parallelism, count), [&](std::size_t slot) {
+                if (platform::cancellation::requested()) {
+                    stage_errors[slot] = cancelled_error();
+                    return;
+                }
+                const std::size_t idx = offset + slot;
+                const auto& planned_pack = planned->new_packs[idx];
+                const auto pack_id =
+                    crypto::pack_identifier(key, planned_pack.pack_hash);
+                const auto dest =
+                    batch.root / platform::path::from_utf8(pack_id);
+                auto res = crypto::pack::write_encrypted_pack(
+                    (*pack_sources)[idx], dest, key);
+                if (!res) {
+                    const bool local_changed =
+                        res.error().find("changed") != std::string::npos ||
+                        res.error().find("mismatch") != std::string::npos ||
+                        res.error().find("missing") != std::string::npos;
+                    stage_errors[slot] = make_error(
+                        local_changed ? integrity::ErrorCode::ConcurrentChange
+                                      : integrity::ErrorCode::CryptoFailure,
+                        res.error());
+                    return;
+                }
+                if (res->pack_hash != planned_pack.pack_hash) {
+                    stage_errors[slot] =
+                        make_error(integrity::ErrorCode::IntegrityFailure,
+                                   "staged pack identifier mismatch");
+                    return;
+                }
+                if (meter) {
+                    meter->record_staged(dest, res->pack_plaintext_size);
+                }
+                batch.objects[slot] = sync::mutation::StagedUploadObject{
+                    .identifier = pack_id,
+                    .plaintext_hash = hash_hex(res->pack_hash),
+                    .plaintext_size = res->pack_plaintext_size,
+                    .ciphertext_sha256 = std::move(res->ciphertext_sha256),
+                    .operation_indices = {idx},
+                    .is_pack = true,
+                };
+            });
 
-    if (meter) {
-        meter->phase(Activity::Verifying, batch.objects.size());
-    }
-    if (auto verified = sync::mutation::verify_upload_batch(
-            batch, storage, key, *workspace_guard.workspace, parallelism, meter);
-        !verified) {
-        return std::unexpected(map_mutation_error(verified.error()));
-    }
+        for (const auto& err : stage_errors) {
+            if (err) {
+                return std::unexpected(*err);
+            }
+        }
+        if (platform::cancellation::requested()) {
+            return std::unexpected(cancelled_error());
+        }
 
-    static_cast<void>(sync::mutation::cleanup_upload_batch(batch));
-    batch.root.clear();
+        if (auto admission =
+                protocol::verify_writer_admission(writer_guard.state, layout);
+            !admission) {
+            return std::unexpected(map_protocol_error(admission.error()));
+        }
+
+        if (meter) {
+            meter->phase(Activity::Uploading, batch.objects.size());
+        }
+        auto transferred =
+            sync::mutation::transfer_upload_batch(batch, storage, parallelism);
+        const bool transfer_unknown =
+            !transferred &&
+            transferred.error().code ==
+                sync::mutation::MutationErrorCode::RemoteResultUnknown;
+        if (!transferred && !transfer_unknown) {
+            return std::unexpected(map_mutation_error(transferred.error()));
+        }
+        if (platform::cancellation::requested()) {
+            return std::unexpected(cancelled_error());
+        }
+
+        if (meter) {
+            meter->phase(Activity::Verifying, batch.objects.size());
+        }
+        if (auto verified = sync::mutation::verify_upload_batch(
+                batch,
+                storage,
+                key,
+                *workspace_guard.workspace,
+                parallelism,
+                meter);
+            !verified) {
+            return std::unexpected(map_mutation_error(verified.error()));
+        }
+
+        if (auto cleaned = sync::mutation::cleanup_upload_batch(batch);
+            !cleaned) {
+            return std::unexpected(map_mutation_error(cleaned.error()));
+        }
+        batch.root.clear();
+        offset += count;
+    }
 
     if (platform::cancellation::requested()) {
         return std::unexpected(cancelled_error());

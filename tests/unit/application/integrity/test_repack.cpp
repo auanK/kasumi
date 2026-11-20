@@ -141,6 +141,7 @@ struct WrappedStorageContext {
     kasumi::transport::Transport inner;
     std::string target_put_identifier;
     std::function<void()> on_target_put;
+    std::function<void(const std::filesystem::path&, std::string_view)> on_put;
     bool fired = false;
 };
 
@@ -153,6 +154,9 @@ kasumi::transport::Result wrapped_put(void* ctx,
                                       const std::filesystem::path& source,
                                       std::string_view identifier) {
     auto* state = static_cast<WrappedStorageContext*>(ctx);
+    if (state->on_put) {
+        state->on_put(source, identifier);
+    }
     auto res = kasumi::transport::put(state->inner, source, identifier);
     if (res && !state->fired && identifier == state->target_put_identifier) {
         state->fired = true;
@@ -208,11 +212,14 @@ void destroy_wrapped(void* raw) noexcept {
 kasumi::transport::Transport make_wrapped_transport(
     kasumi::transport::Transport inner,
     std::string target_put_identifier,
-    std::function<void()> on_target_put) {
+    std::function<void()> on_target_put,
+    std::function<void(const std::filesystem::path&, std::string_view)> on_put =
+        {}) {
     auto* ctx = new WrappedStorageContext{
         .inner = std::move(inner),
         .target_put_identifier = std::move(target_put_identifier),
         .on_target_put = std::move(on_target_put),
+        .on_put = std::move(on_put),
     };
     return kasumi::transport::Transport{
         .state = kasumi::transport::TransportStateHandle{ctx, &destroy_wrapped},
@@ -659,6 +666,70 @@ TEST(RepackTest, OldDirtyPackIsCollectedByGcAfterEpochAdvances) {
               kasumi::transport::Presence::Present);
 
     const auto audited = integrity::fsck(runtime, *storage, key, 1);
+    ASSERT_TRUE(audited.has_value()) << audited.error().detail;
+}
+
+TEST(RepackTest, BoundedWindowsCleanStagingBetweenBatchesAndPublishSingleCommit) {
+    const auto ws = kasumi::test::make_temp_workspace("repack-windows");
+    const auto remote = kasumi::test::workspace_path(ws, "remote");
+    init_remote(remote);
+    const auto machine = create_machine(ws, "a", remote);
+    const auto key = test_key();
+
+    // Sync 6 loose 220 KiB files one by one so local transport keeps them loose.
+    for (int i = 0; i < 6; ++i) {
+        write_settled_file(
+            machine.local_dir / ("win_" + std::to_string(i) + ".bin"),
+            std::string(220U * 1024U, static_cast<char>('0' + i)));
+        run_sync(machine);
+    }
+
+    const auto runtime = machine.resolve();
+    const auto before_state =
+        kasumi::state_storage::load_state(runtime.database_path);
+    ASSERT_TRUE(before_state.has_value() && before_state->has_value());
+
+    auto raw_storage = kasumi::transport::open_transport(
+        runtime.storage_location, runtime.local_dir);
+    ASSERT_TRUE(raw_storage.has_value());
+
+    std::size_t max_staged_files = 0;
+    std::size_t pack_puts_seen = 0;
+    auto wrapped = make_wrapped_transport(
+        std::move(*raw_storage),
+        {},
+        {},
+        [&](const std::filesystem::path& source, std::string_view identifier) {
+            static_cast<void>(identifier);
+            if (source.parent_path().filename() != "packs") {
+                return;
+            }
+            ++pack_puts_seen;
+            std::size_t staged_now = 0;
+            std::error_code ec;
+            for (const auto& entry :
+                 std::filesystem::directory_iterator(source.parent_path(), ec)) {
+                static_cast<void>(entry);
+                ++staged_now;
+            }
+            max_staged_files = std::max(max_staged_files, staged_now);
+        });
+
+    repack::Options opts;
+    opts.policy.target_pack_size = 500ULL * 1024ULL;
+    opts.policy.underfilled_pack_threshold = 450ULL * 1024ULL;
+    opts.upload_window_packs = 2U;
+
+    const auto exec = repack::execute(runtime, wrapped, key, opts);
+    ASSERT_TRUE(exec.has_value()) << exec.error().detail;
+    EXPECT_TRUE(exec->published);
+    EXPECT_EQ(exec->plan.new_packs.size(), 3U);
+    EXPECT_EQ(pack_puts_seen, 3U);
+    EXPECT_GT(max_staged_files, 0U);
+    EXPECT_LE(max_staged_files, 2U);
+    EXPECT_EQ(exec->published_height, (*before_state)->height + 1U);
+
+    const auto audited = integrity::fsck(runtime, wrapped, key, 1);
     ASSERT_TRUE(audited.has_value()) << audited.error().detail;
 }
 

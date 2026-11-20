@@ -20,12 +20,16 @@ class ProgressMeter;
 
 namespace kasumi::application::integrity::repack {
 
+inline constexpr std::size_t DEFAULT_UPLOAD_WINDOW_PACKS = 16U;
+
 // Execution options controlling Micro-Pack consolidation.
 struct Options {
     Policy policy{};
     bool dry_run = false;
     // Zero selects application::content_concurrency().
     std::size_t max_parallelism = 0;
+    // Zero selects DEFAULT_UPLOAD_WINDOW_PACKS.
+    std::size_t upload_window_packs = 0;
 };
 
 // Outcome and metrics of one repack execution or dry-run.
