@@ -1675,4 +1675,105 @@ TEST(RcloneSystemTest, BulkPhysicalHashUsesOneCheckManifest) {
     EXPECT_TRUE(damaged->errors.empty());
 }
 
+TEST(RcloneSystemTest,
+     RepackConsolidatesLooseFilesOverRealRcloneAndSupportsEnroll) {
+    auto harness = make_rclone_harness();
+    auto client_a = make_test_client(harness, "client-a");
+    auto client_b = make_test_client(harness, "client-b");
+    auto client_c = make_test_client(harness, "client-c");
+    create_profile(harness, client_a);
+    create_profile(harness, client_b);
+    create_profile(harness, client_c);
+
+    const auto write_settled = [](const std::filesystem::path& path,
+                                  std::string_view text) {
+        kasumi::test::write_text(path, text);
+        const auto settled = std::filesystem::file_time_type::clock::now() -
+                             std::chrono::seconds{2};
+        ASSERT_TRUE(
+            kasumi::platform::metadata::set_last_write_time(path, settled));
+    };
+
+    const std::string payload_one = "first small payload over rclone";
+    const std::string payload_two = "second small payload over rclone";
+    write_settled(client_a.local_dir / "one.txt", payload_one);
+    ASSERT_TRUE(sync_client(client_a));
+    write_settled(client_a.local_dir / "two.txt", payload_two);
+    ASSERT_TRUE(sync_client(client_a));
+
+    ASSERT_TRUE(sync_client(client_b));
+    EXPECT_EQ(kasumi::test::read_text(client_b.local_dir / "one.txt"),
+              payload_one);
+    EXPECT_EQ(kasumi::test::read_text(client_b.local_dir / "two.txt"),
+              payload_two);
+
+    const auto dry_run = kasumi::application::execute(
+        {Request{.operation = Operation::Repack,
+                 .profile_name = std::string{profile_name},
+                 .dry_run = true},
+         Credentials{NoCredentials{}},
+         client_a.environment});
+    ASSERT_TRUE(dry_run.has_value()) << dry_run.error().detail;
+    const auto* dry_data =
+        std::get_if<kasumi::application::RepackCompleted>(&dry_run->data);
+    ASSERT_NE(dry_data, nullptr);
+    EXPECT_TRUE(dry_data->dry_run);
+    EXPECT_TRUE(dry_data->actionable);
+    EXPECT_FALSE(dry_data->published);
+    EXPECT_EQ(dry_data->source_loose_blobs, 2U);
+    EXPECT_EQ(dry_data->new_packs, 1U);
+    EXPECT_EQ(dry_data->wire_upload_bytes, 0U);
+    EXPECT_EQ(dry_data->physical_objects_uploaded, 0U);
+
+    const auto repacked = kasumi::application::execute(
+        {Request{.operation = Operation::Repack,
+                 .profile_name = std::string{profile_name}},
+         Credentials{NoCredentials{}},
+         client_a.environment});
+    ASSERT_TRUE(repacked.has_value()) << repacked.error().detail;
+    const auto* repack_data =
+        std::get_if<kasumi::application::RepackCompleted>(&repacked->data);
+    ASSERT_NE(repack_data, nullptr);
+    EXPECT_FALSE(repack_data->dry_run);
+    EXPECT_TRUE(repack_data->actionable);
+    EXPECT_TRUE(repack_data->published);
+    EXPECT_EQ(repack_data->source_loose_blobs, 2U);
+    EXPECT_EQ(repack_data->new_packs, 1U);
+    EXPECT_EQ(repack_data->repacked_blobs, 2U);
+    EXPECT_GT(repack_data->wire_upload_bytes, 0U);
+    EXPECT_GT(repack_data->physical_objects_uploaded, 0U);
+    EXPECT_FALSE(repack_data->published_commit_id.empty());
+
+    const auto noop = kasumi::application::execute(
+        {Request{.operation = Operation::Repack,
+                 .profile_name = std::string{profile_name}},
+         Credentials{NoCredentials{}},
+         client_a.environment});
+    ASSERT_TRUE(noop.has_value()) << noop.error().detail;
+    const auto* noop_data =
+        std::get_if<kasumi::application::RepackCompleted>(&noop->data);
+    ASSERT_NE(noop_data, nullptr);
+    EXPECT_FALSE(noop_data->actionable);
+    EXPECT_FALSE(noop_data->published);
+
+    ASSERT_TRUE(sync_client(client_b));
+    EXPECT_EQ(kasumi::test::read_text(client_b.local_dir / "one.txt"),
+              payload_one);
+    EXPECT_EQ(kasumi::test::read_text(client_b.local_dir / "two.txt"),
+              payload_two);
+
+    ASSERT_TRUE(sync_client(client_c));
+    EXPECT_EQ(kasumi::test::read_text(client_c.local_dir / "one.txt"),
+              payload_one);
+    EXPECT_EQ(kasumi::test::read_text(client_c.local_dir / "two.txt"),
+              payload_two);
+
+    const auto audited = kasumi::application::execute(
+        {Request{.operation = Operation::Fsck,
+                 .profile_name = std::string{profile_name}},
+         Credentials{NoCredentials{}},
+         client_a.environment});
+    ASSERT_TRUE(audited.has_value()) << audited.error().detail;
+}
+
 } // namespace

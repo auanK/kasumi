@@ -24,7 +24,9 @@ enum class Operation {
     // Explicit manual removal of one remote writer marker.
     RemoveWriter,
     // Explicit manual removal of an abandoned remote maintenance barrier.
-    RemoveBarrier
+    RemoveBarrier,
+    // Consolidates fragmented Micro-Packs and loose small files.
+    Repack
 };
 
 // Request structure defining action to perform and target profile.
@@ -36,6 +38,8 @@ struct Request {
     bool audit_inventory = false;
     bool trust_existing_content = false;
     bool confirm_abandoned = false;
+    bool dry_run = false;
+    bool reclaim_dirty = false;
 };
 
 } // namespace kasumi::application

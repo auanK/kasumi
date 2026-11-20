@@ -30,6 +30,8 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     output.initial_sync = input.request.initial;
     output.audit_inventory = input.request.audit_inventory;
     output.trust_existing_content = input.request.trust_existing_content;
+    output.dry_run = input.request.dry_run;
+    output.reclaim_dirty = input.request.reclaim_dirty;
     output.writer_identifier = input.request.writer_identifier;
     output.on_progress = input.on_progress;
     const auto invalid_request = [&](std::string_view detail) {
@@ -55,6 +57,12 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     if (input.request.audit_inventory && input.request.initial) {
         return invalid_request(
             "--audit-inventory cannot be combined with --initial");
+    }
+    if (input.request.dry_run && operation != Operation::Repack) {
+        return invalid_request("--dry-run is only valid for repack");
+    }
+    if (input.request.reclaim_dirty && operation != Operation::Repack) {
+        return invalid_request("--reclaim-dirty is only valid for repack");
     }
     if (operation == Operation::RemoveBarrier &&
         !input.request.confirm_abandoned) {

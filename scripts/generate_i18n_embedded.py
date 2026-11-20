@@ -38,6 +38,7 @@ PREFIXES = sorted(
         ("Status", "sync.status_"),
         ("Fsck", "fsck."),
         ("Gc", "gc."),
+        ("Repack", "repack."),
         ("ManualWriterRemoval", "manual_writer_removal."),
         ("ManualBarrierRemoval", "manual_barrier_removal."),
         ("BarrierRemovalStage", "manual_barrier_removal.stage_"),

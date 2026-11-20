@@ -20,6 +20,7 @@ inline constexpr auto help_topics = std::to_array<HelpTopic>({
     {"gc", i18n::Key::HelpGc},
     {"gc remove-writer", i18n::Key::HelpGcRemoveWriter},
     {"gc remove-barrier", i18n::Key::HelpGcRemoveBarrier},
+    {"repack", i18n::Key::HelpRepack},
     {"resolve-missing", i18n::Key::HelpResolveMissing},
     {"remote", i18n::Key::HelpRemote},
     {"config", i18n::Key::HelpConfig},

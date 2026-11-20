@@ -17,7 +17,69 @@
 #include <print>
 #include <string>
 
+#if !defined(_WIN32)
+#include <cerrno>
+#include <poll.h>
+#include <unistd.h>
+#endif
+
 namespace kasumi::cli {
+namespace {
+
+#if !defined(_WIN32)
+const std::streambuf* const default_cin_buffer = std::cin.rdbuf();
+
+bool read_tty_line(std::string& value) {
+    value.clear();
+    while (!platform::cancellation::requested()) {
+        pollfd input{.fd = STDIN_FILENO, .events = POLLIN, .revents = 0};
+        const auto ready = ::poll(&input, 1, 50);
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            platform::cancellation::request();
+            return false;
+        }
+        if (ready == 0) {
+            continue;
+        }
+        if ((input.revents & (POLLERR | POLLNVAL)) != 0) {
+            platform::cancellation::request();
+            return false;
+        }
+        char ch = '\0';
+        const auto count = ::read(STDIN_FILENO, &ch, 1);
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            platform::cancellation::request();
+            return false;
+        }
+        if (count == 0) {
+            if (value.empty()) {
+                platform::cancellation::request();
+                return false;
+            }
+            if (!value.empty() && value.back() == '\r') {
+                value.pop_back();
+            }
+            return !platform::cancellation::requested();
+        }
+        if (ch == '\n') {
+            if (!value.empty() && value.back() == '\r') {
+                value.pop_back();
+            }
+            return !platform::cancellation::requested();
+        }
+        value.push_back(ch);
+    }
+    return false;
+}
+#endif
+
+} // namespace
 
 int run_profile_query(const application::ExecutionEnvironment& environment,
                       std::string_view profile_name) {
@@ -123,6 +185,12 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         if (platform::cancellation::requested()) {
             return false;
         }
+#if !defined(_WIN32)
+        if (std::cin.rdbuf() == default_cin_buffer &&
+            ::isatty(STDIN_FILENO) != 0) {
+            return read_tty_line(value);
+        }
+#endif
         if (!std::getline(std::cin, value)) {
             platform::cancellation::request();
             return false;

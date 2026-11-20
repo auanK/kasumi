@@ -155,7 +155,8 @@ int run(int argc, char* argv[]) {
     const bool supports_full =
         sanitized.size() > 2 && !sanitized[2].empty() &&
         sanitized[2].front() != '-' &&
-        (sanitized[1] == "sync" || sanitized[1] == "status");
+        (sanitized[1] == "sync" || sanitized[1] == "status" ||
+         sanitized[1] == "repack");
     bool full = false;
     bool invalid_options = false;
     std::vector<std::string> without_full;
@@ -292,7 +293,7 @@ int run(int argc, char* argv[]) {
                          : i18n::Key::ManualBarrierRemovalWarning));
     }
 
-    constexpr std::array<std::pair<application::Operation, i18n::Key>, 6>
+    constexpr std::array<std::pair<application::Operation, i18n::Key>, 7>
         starting_keys{{
             {application::Operation::Sync, i18n::Key::SyncStarting},
             {application::Operation::Preview, i18n::Key::PreviewStarting},
@@ -300,13 +301,18 @@ int run(int argc, char* argv[]) {
             {application::Operation::Fsck, i18n::Key::FsckStarting},
             {application::Operation::GarbageCollect, i18n::Key::GcStarting},
             {application::Operation::ResolveMissing, i18n::Key::SyncStarting},
+            {application::Operation::Repack, i18n::Key::RepackStarting},
         }};
     bool reports_progress = false;
     for (const auto& [op, key] : starting_keys) {
         if (op != request.operation) {
             continue;
         }
-        std::println("{}", i18n::format(key, request.profile_name));
+        const auto display_key =
+            (op == application::Operation::Repack && request.dry_run)
+                ? i18n::Key::RepackDryRunStarting
+                : key;
+        std::println("{}", i18n::format(display_key, request.profile_name));
         reports_progress = true;
         break;
     }

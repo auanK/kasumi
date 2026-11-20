@@ -4,6 +4,8 @@
 #include "application/detail.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/remote_layout.hpp"
+#include "application/integrity/repack.hpp"
+#include "application/progress.hpp"
 #include "application/sync/coordinator.hpp"
 #include "application/use_cases/context.hpp"
 
@@ -178,6 +180,45 @@ std::expected<Response, Error> run_remove_writer(OperationContext& context) {
     return make_response(
         context,
         ManualWriterRemovalCompleted{.identifier = context.writer_identifier});
+}
+
+std::expected<Response, Error> run_repack(OperationContext& context) {
+    ProgressMeter meter(context.on_progress, context.storage);
+    integrity::repack::Options options{};
+    options.policy.reclaim_large_dirty_packs = context.reclaim_dirty;
+    options.dry_run = context.dry_run;
+    options.max_parallelism = content_concurrency();
+
+    auto res = integrity::repack::execute(
+        context.runtime, context.storage, context.key, options, &meter);
+    if (!res) {
+        return fail_app(
+            context, ErrorCode::RepackFailure, integrity::describe(res.error()));
+    }
+    return make_response(
+        context,
+        RepackCompleted{
+            .dry_run = res->dry_run,
+            .actionable = res->plan.actionable,
+            .published = res->published,
+            .live_small_blobs = res->plan.live_small_blobs,
+            .existing_packs = res->plan.existing_packs,
+            .healthy_packs_kept = res->plan.healthy_packs_kept,
+            .dirty_packs_detected = res->plan.dirty_packs_detected,
+            .loose_small_blobs_detected = res->plan.loose_small_blobs_detected,
+            .source_loose_blobs = res->plan.source_loose_blobs,
+            .source_clean_packs = res->plan.source_clean_packs,
+            .source_dirty_packs = res->plan.source_dirty_packs,
+            .new_packs = res->plan.new_packs.size(),
+            .repacked_blobs = res->plan.repacked_blobs,
+            .repacked_plaintext_bytes = res->plan.repacked_plaintext_bytes,
+            .published_commit_id = std::move(res->published_commit_id),
+            .published_height = res->published_height,
+            .pruned_markers = res->pruned_markers,
+            .wire_upload_bytes = res->wire_upload_bytes,
+            .physical_objects_uploaded = res->physical_objects_uploaded,
+            .duration = res->duration,
+        });
 }
 
 } // namespace kasumi::application::detail

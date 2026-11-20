@@ -74,6 +74,29 @@ See [Garbage Collection Architecture](architecture/garbage-collection.md#operati
 for the protocol, backend assumptions, and maintenance procedure. Use the
 integrity tools below to audit payloads.
 
+## Micro-Pack Consolidation (Repack)
+
+Over time, deleting or editing packed small files leaves dead bytes inside
+immutable `KPAK\x01` Micro-Packs, and incremental small syncs can leave loose
+small blobs or underfilled packs. `kasumi repack <profile>` consolidates them
+from verified local files **without downloading payloads or deleting remote objects**:
+
+* **Require a Clean Synchronized State**: Run `kasumi sync <profile>` first if
+  local or remote changes are pending, stop Sync on every client, and serialize
+  maintenance across the vault.
+* **Preview First**: Run `kasumi repack <profile> --dry-run --full` to inspect
+  how many loose blobs and underfilled/dirty packs would be packed and how much
+  plaintext would be uploaded.
+* **Reclaiming Large Dirty Packs**: Large fragmented packs (`>= 2 MiB` live
+  bytes with dead blobs) are skipped by default to avoid upload amplification.
+  Pass `--reclaim-dirty` when dead space justifies rewriting them.
+* **Two-Step Space Reclamation**: Old packs remain referenced by retained commits
+  until `min_history_depth` and `min_history_age_hours` allow Epoch retention
+  to advance; run `kasumi gc <profile>` afterward to delete superseded packs.
+
+See [Micro-Pack Repack Architecture](architecture/repack.md) for planning
+thresholds, publication invariants, and cooperative writer controls.
+
 ## Integrity Checks
 
 Kasumi provides distinct tools for auditing vault integrity and remote storage health:
@@ -87,6 +110,7 @@ Kasumi provides distinct tools for auditing vault integrity and remote storage h
 | `kasumi fsck` | Yes (full download & verify) | No | Yes | No during audit; preceding recovery may publish |
 | `kasumi remote health` | No payload audit | No | No | No |
 | `kasumi remote contents <profile> --audit` | Yes (full download & verify) | Yes | No | No |
+| `kasumi repack` | No payload audit; verifies local sources before staging | No | Yes (`--dry-run` inspects read-only) | `--dry-run`: No. Real run: uploads consolidated packs and publishes Commit/HEAD; zero deletions |
 | `kasumi gc` | No Fsck-style payload audit | No | Yes | Yes: authorized direct deletions and control cleanup; preceding recovery may publish |
 
 Fsck and GC run pending Sync transaction recovery first. Recovery may change local files or complete remote publication; Fsck's audit itself does not intentionally modify the remote vault.
@@ -138,7 +162,7 @@ For managed installations, use the package manager that installed Kasumi.
 When running Kasumi in automated scripts, cron jobs, or task schedulers:
 
 * **Process Exit Codes**: Handle every [documented exit code](configuration-and-usage.md#exit-codes). Code `2` means partial synchronization with pending materializations, not full success; retry once the missing content is restored. Never automatically accept those files as deletions.
-* **Single-Process Profile Lock**: `status`, `sync --dry-run`, `sync`, `fsck`, and `gc` use an OS file lock (`profile-<name>.lock`). If an automated script attempts one of these operations while another holds that profile lock, it exits with code `1`. Remote inspection uses a separate path without this lock. Ensure scheduled jobs do not overlap.
+* **Single-Process Profile Lock**: `status`, `sync --dry-run`, `sync`, `fsck`, `repack`, and `gc` use an OS file lock (`profile-<name>.lock`). If an automated script attempts one of these operations while another holds that profile lock, it exits with code `1`. Remote inspection uses a separate path without this lock. Ensure scheduled jobs do not overlap.
 * **External Scheduling**: Kasumi does not contain an internal background daemon. Use system scheduling tools:
   * **Linux**: `cron` or `systemd` timers.
   * **Windows**: Task Scheduler.
