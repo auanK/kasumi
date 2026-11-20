@@ -2,9 +2,10 @@
 
 The CLI handles profile management, application operations, and remote
 inspection. Application operations include Sync, Preview, Status, Fsck, Garbage
-Collection, Resolve Missing, and manual writer/barrier removal. Preview and
-Status share a planner; remote inspection has a separate flow. The CLI selects language from a global `--lang <code>` prefix, recognizes
-`--full` only in Sync/Status command options,
+Collection, Repack, Resolve Missing, and manual writer/barrier removal. Preview
+and Status share a planner; remote inspection has a separate flow. The CLI
+selects language from a global `--lang <code>` prefix, recognizes `--full`
+only in Sync, Status, and Repack command options,
 installs interruption handlers, obtains environment credentials, and presents
 results and errors. Syntax and environment variables are in
 [Configuration and Usage](../configuration-and-usage.md).
@@ -21,7 +22,7 @@ Before an application operation, runtime resolution validates the profile and pa
 
 The private profile directory contains distinct credential, accepted-state, cache, and recovery artifacts. [Local Persistent State](local-state.md) owns their exact roles, failure/fallback rules, and write ordering; [Security](../security.md) owns filesystem and cryptographic protection limits. In particular, SQLite `StoredState` is the accepted **local reconciliation base**, not remote truth, while the [transaction journal](transactions-and-recovery.md) governs an unfinished Sync.
 
-`sync` alone owns normal file-hash cache updates and accepted-state commits. [Preview and Status](planning-and-status.md) report a plan without execution or recovery. [Fsck](fsck.md) and [Garbage Collection](garbage-collection.md) first run transaction recovery, which may have local or remote effects; GC then deletes only stable authenticated candidates. [Remote Inspection](remote-inspection.md) reads authenticated remote state without modifying accepted history or the local workspace, and `remote get` writes the chosen destination.
+`sync` alone owns normal file-hash cache updates and accepted-state commits. [Preview and Status](planning-and-status.md) report a plan without execution or recovery. [Fsck](fsck.md) and [Garbage Collection](garbage-collection.md) first run transaction recovery, which may have local or remote effects; GC then deletes only stable authenticated candidates. [Micro-Pack Repack](repack.md) (`repack`) requires a clean synchronized workspace: `--dry-run` inspects the journal read-only without mutating local or remote state, whereas a real run runs preceding recovery (refusing resumable uploads) and, when publishing consolidated packs, updates SQLite `StoredState` (`StorageManifest` + commit ID) and cache deltas without modifying synchronized files. [Remote Inspection](remote-inspection.md) reads authenticated remote state without modifying accepted history or the local workspace, and `remote get` writes the chosen destination.
 
 `resolve-missing` also runs recovery, then uses the synchronization coordinator
 to publish validated logical deletions and accept their state. It is an explicit

@@ -85,14 +85,16 @@ Use `kasumi <command> --help` for the complete arguments, options and examples.
 | Inspect the current plan | `kasumi status <profile>` or `kasumi sync <profile> --dry-run` |
 | Synchronize | `kasumi sync <profile>` |
 | Audit referenced payloads | `kasumi fsck <profile>` |
+| Consolidate fragmented Micro-Packs | `kasumi repack <profile> [--dry-run] [--reclaim-dirty] [--full]` |
 | Reclaim eligible remote storage | `kasumi gc <profile>` |
 | Resolve permanently missing content as logical deletion | `kasumi resolve-missing <profile>` |
 
-`--full` belongs only to Sync and Status, after the profile. It displays every
-plan and pending-path item (otherwise lists longer than ten items show the first
-and last five) and keeps the detailed progress lines for each activity.
-Preview and Status do not
-execute the plan, recover transactions or persist file-hash cache changes. See
+`--full` applies only to Sync, Status, and Repack, after the profile. In Sync
+and Status it displays every plan and pending-path item (otherwise lists longer
+than ten items show the first and last five) and keeps detailed progress lines
+for each activity; in Repack it displays the full pack inventory summary and
+published Commit/height details. Preview and Status do not execute the plan,
+recover transactions, or persist file-hash cache changes. See
 [Preview and Status](architecture/planning-and-status.md).
 
 `sync --initial` requires no SQLite sidecars or unfinished transaction evidence.
@@ -111,6 +113,16 @@ serialize maintenance across the vault. Manual `gc remove-writer` requires an
 exact marker whose process is verified inactive. `gc remove-barrier` requires
 `--confirm-abandoned` after verifying no Sync or maintenance is active; barrier
 age alone is insufficient. See the [GC operational contract](architecture/garbage-collection.md#operational-contract).
+
+`kasumi repack <profile>` consolidates loose small files and fragmented
+`KPAK\x01` Micro-Packs from live local files **without downloading payloads or
+deleting remote objects**. Stop Sync on every client and ensure the workspace
+has zero pending local, remote, or journal changes before running `repack`.
+Use `--dry-run` to preview the plan without mutating remote state, `--reclaim-dirty`
+to also rewrite large packs (`>= 2 MiB`) containing dead blobs, and `--full` to
+display the pack inventory breakdown and published Commit/height details.
+Replaced packs stay protected by history retention until removed later by
+`kasumi gc <profile>`. See [Micro-Pack Repack](architecture/repack.md).
 
 Fsck audits referenced payloads; transaction recovery before Fsck or GC can
 have local and remote effects. Ordinary Sync only probes Content required by
@@ -143,7 +155,7 @@ and backups; these workspace files are not uniformly encrypted. Preserve both
 directories when recovery fails. See the [journal format](architecture/transaction-journal.md).
 
 If synchronization is interrupted:
-* Sync, Fsck, `resolve-missing`, and GC inspect the existing local transaction journal before their own work. Preview, Status, remote inspection, and manual writer maintenance do not run this recovery path.
+* Sync, Fsck, `resolve-missing`, `repack` (non-`--dry-run`), and GC inspect the existing local transaction journal before their own work; both GC and `repack` refuse an interrupted upload (`ResumableTransaction`) so Sync finishes it first. Preview, Status, `repack --dry-run`, remote inspection, and manual writer/barrier maintenance do not execute journal recovery (`repack --dry-run` inspects the journal read-only and refuses pending transactions).
 * Depending on the persisted phase and observed state, recovery may resume, rollback, or roll forward the transaction.
 * Conflicting or indeterminate publication states are reported as recovery errors rather than assumed successful.
 * Already present content objects may be reused when their identifiers and verification checks match the required content.
@@ -187,8 +199,8 @@ kasumi [--lang <code>] <command> [subcommand] [arguments] [options]
 ```
 
 `--lang <code>` is the optional global prefix, before the command. Command
-options follow required arguments; `--full` is available only to Sync and Status.
-`config` and `list` take no profile.
+options follow required arguments; `--full` is available to Sync, Status, and
+Repack. `config` and `list` take no profile.
 
 `kasumi --help` (`-h`) shows global Help. Add `--help` or `-h` after a command,
 subcommand or otherwise valid invocation for contextual Help. Help returns 0

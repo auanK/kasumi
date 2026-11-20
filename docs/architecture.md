@@ -24,6 +24,7 @@ CLI/profile → local observation + authenticated remote history + StoredState
 | What do transaction phases mean, and how does interruption recovery decide? | [Transactions and Recovery](architecture/transactions-and-recovery.md) |
 | Which journal bytes are confirmed, cached, replayed, or retired? | [Incremental Transaction Journal](architecture/transaction-journal.md) |
 | How does `fsck` audit structure and every referenced payload? | [Fsck](architecture/fsck.md) |
+| How does `repack` consolidate Micro-Packs without downloading or deleting remote objects? | [Micro-Pack Repack](architecture/repack.md) |
 | How does GC authorize direct deletion and preserve partial results? | [Garbage Collection](architecture/garbage-collection.md) |
 | How are Commit DAGs, logical heads, merge bases, Epochs, and retention resolved? | [History and Concurrency](architecture/history-and-concurrency.md) |
 | What is the actual remote namespace and publication order? | [Remote Layout and Publication](architecture/remote-layout.md) |
@@ -40,6 +41,7 @@ CLI/profile → local observation + authenticated remote history + StoredState
 | Preview (`sync --dry-run`), Status | Reads local/SQLite state; profile lock and permission normalization are possible | Observation only; no recovery or publication |
 | Sync | May change synchronized files, file-hash cache, transaction journal, and accepted `StoredState` | May upload content and publish/prune history; registers a writer for active work |
 | Fsck | Workspace; preceding recovery can change local state | Audit reads only, **except** effects of preceding transaction recovery |
+| Repack | `--dry-run`: read-only observation (refuses pending journal). Real run: preceding recovery if applicable, file-hash cache delta, and updated `StoredState` + `StorageManifest`; zero synchronized-file mutations | `--dry-run`: observation only. Real run: registers writer, uploads consolidated `KPAK\x01` packs, publishes tree-preserving Commit/HEAD, prunes superseded HEAD markers; zero remote deletions |
 | GC | Workspace; preceding recovery can change local state | Direct deletion of eligible orphan Content and redundant CommitVariants under cooperative maintenance controls and a globally validated plan; preceding recovery may publish |
 | `remote ...` | Temporary workspace; `remote get` writes its chosen destination | Inspection reads only; no normal transaction recovery |
 

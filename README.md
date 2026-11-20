@@ -27,7 +27,7 @@ Interactive runs show live progress on one terminal line. Sync reports physical 
 - **Immutable history and conflict handling** that preserve divergent file versions.
 - **Interrupted-operation recovery** through an authenticated transaction journal.
 - **Persistent BLAKE3 hash cache** shared by sync and read-only plan observation.
-- **Integrity and maintenance tools** to audit referenced content, packs, and chunks and directly remove authenticated orphan physical objects and redundant CommitVariants.
+- **Integrity and maintenance tools** to audit referenced content, packs, and chunks (`fsck`), consolidate fragmented Micro-Packs locally without remote downloads or deletions (`repack`), and directly remove authenticated orphan physical objects and redundant CommitVariants (`gc`).
 
 ## Quick Start
 
