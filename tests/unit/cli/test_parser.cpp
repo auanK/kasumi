@@ -39,6 +39,8 @@ TEST_P(ApplicationGrammarTest, ParsesOperationAndArguments) {
               test.expected.trust_existing_content);
     EXPECT_EQ(actual.writer_identifier, test.expected.writer_identifier);
     EXPECT_EQ(actual.confirm_abandoned, test.expected.confirm_abandoned);
+    EXPECT_EQ(actual.dry_run, test.expected.dry_run);
+    EXPECT_EQ(actual.reclaim_dirty, test.expected.reclaim_dirty);
 }
 INSTANTIATE_TEST_SUITE_P(
     Canonical,
@@ -89,6 +91,26 @@ INSTANTIATE_TEST_SUITE_P(
                         {.operation = Operation::RemoveBarrier,
                          .profile_name = "demo",
                          .confirm_abandoned = true}},
+        ApplicationCase{
+            "Repack",
+            {"repack", "demo"},
+            {.operation = Operation::Repack, .profile_name = "demo"}},
+        ApplicationCase{"RepackDryRun",
+                        {"repack", "demo", "--dry-run"},
+                        {.operation = Operation::Repack,
+                         .profile_name = "demo",
+                         .dry_run = true}},
+        ApplicationCase{"RepackReclaimDirty",
+                        {"repack", "demo", "--reclaim-dirty"},
+                        {.operation = Operation::Repack,
+                         .profile_name = "demo",
+                         .reclaim_dirty = true}},
+        ApplicationCase{"RepackDryRunAndReclaimDirty",
+                        {"repack", "demo", "--reclaim-dirty", "--dry-run"},
+                        {.operation = Operation::Repack,
+                         .profile_name = "demo",
+                         .dry_run = true,
+                         .reclaim_dirty = true}},
         ApplicationCase{
             "ResolveMissing",
             {"resolve-missing", "demo"},
@@ -318,7 +340,14 @@ INSTANTIATE_TEST_SUITE_P(
                     {"sync", "demo", "--trust-existing-content"}},
         InvalidCase{"RequiredConfirmation", {"gc", "remove-barrier", "demo"}},
         InvalidCase{"InvalidWriterIdentity",
-                    {"gc", "remove-writer", "demo", "../writer"}}),
+                    {"gc", "remove-writer", "demo", "../writer"}},
+        InvalidCase{"RepackMissingProfile", {"repack"}},
+        InvalidCase{"RepackDuplicateDryRun",
+                    {"repack", "demo", "--dry-run", "--dry-run"}},
+        InvalidCase{"RepackDuplicateReclaimDirty",
+                    {"repack", "demo", "--reclaim-dirty", "--reclaim-dirty"}},
+        InvalidCase{"RepackUnknownOption", {"repack", "demo", "--initial"}},
+        InvalidCase{"RepackExtraOperand", {"repack", "demo", "extra"}}),
     [](const auto& case_info) {
         return case_info.param.name;
     });
@@ -340,5 +369,19 @@ TEST(CliParserTest, ParsesInteractiveConfiguration) {
     ASSERT_TRUE(result.has_value());
     EXPECT_TRUE(
         std::holds_alternative<kasumi::cli::ConfigureInvocation>(*result));
+}
+
+TEST(CliParserTest, ParsesRepackHelpTopic) {
+    for (const auto& args : std::vector<std::vector<std::string>>{
+             {"repack", "--help"},
+             {"repack", "demo", "--dry-run", "--help"},
+         }) {
+        const auto result = parse(args);
+        ASSERT_TRUE(result.has_value());
+        ASSERT_TRUE(
+            std::holds_alternative<kasumi::cli::HelpInvocation>(*result));
+        EXPECT_EQ(std::get<kasumi::cli::HelpInvocation>(*result).topic,
+                  "repack");
+    }
 }
 } // namespace

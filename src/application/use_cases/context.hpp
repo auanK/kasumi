@@ -24,6 +24,8 @@ struct OperationContext {
     bool initial_sync = false;
     bool audit_inventory = false;
     bool trust_existing_content = false;
+    bool dry_run = false;
+    bool reclaim_dirty = false;
     bool has_remote_history_objects = false;
     std::intptr_t profile_lock = platform::invalid_profile_lock;
     runtime::vault::KeyBytes key{};

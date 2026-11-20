@@ -211,6 +211,30 @@ struct BarrierRemovalFailure {
     std::optional<transport::Error> transport_error;
 };
 
+// Summary of a completed Micro-Pack repack execution or dry-run.
+struct RepackCompleted {
+    bool dry_run = false;
+    bool actionable = false;
+    bool published = false;
+    std::size_t live_small_blobs = 0;
+    std::size_t existing_packs = 0;
+    std::size_t healthy_packs_kept = 0;
+    std::size_t dirty_packs_detected = 0;
+    std::size_t loose_small_blobs_detected = 0;
+    std::size_t source_loose_blobs = 0;
+    std::size_t source_clean_packs = 0;
+    std::size_t source_dirty_packs = 0;
+    std::size_t new_packs = 0;
+    std::size_t repacked_blobs = 0;
+    std::uint64_t repacked_plaintext_bytes = 0;
+    std::string published_commit_id;
+    std::uint64_t published_height = 0;
+    std::size_t pruned_markers = 0;
+    std::uint64_t wire_upload_bytes = 0;
+    std::uint64_t physical_objects_uploaded = 0;
+    std::chrono::nanoseconds duration{};
+};
+
 // Possible payload variants for a successful response.
 using ResponseData = std::variant<SyncCompleted,
                                   PlanReport,
@@ -218,7 +242,8 @@ using ResponseData = std::variant<SyncCompleted,
                                   GarbageCollectCompleted,
                                   ResolveMissingCompleted,
                                   ManualWriterRemovalCompleted,
-                                  ManualBarrierRemovalCompleted>;
+                                  ManualBarrierRemovalCompleted,
+                                  RepackCompleted>;
 
 // Successful operation response.
 struct Response {
@@ -244,7 +269,8 @@ enum class ErrorCode {
     BarrierRemovalFailure,
     SynchronizationFailure,
     RecoveryFailure,
-    InventoryAuditFailure
+    InventoryAuditFailure,
+    RepackFailure
 };
 
 // Error returned by the application.

@@ -29,6 +29,8 @@ TEST(CliI18nTest, DefaultLanguageIsEnglish) {
               "1 file is waiting for unavailable remote content.");
     EXPECT_NE(tr(Key::HelpText).find("sync <profile> --initial"),
               std::string_view::npos);
+    EXPECT_NE(tr(Key::HelpText).find("repack <profile>"),
+              std::string_view::npos);
 }
 
 TEST(CliI18nTest, SwitchingToPortugueseUpdatesStrings) {
@@ -53,6 +55,8 @@ TEST(CliI18nTest, SwitchingToPortugueseUpdatesStrings) {
     EXPECT_EQ(format(Key::SyncPendingPlural, 2),
               "2 arquivos aguardam conteúdo remoto indisponível.");
     EXPECT_NE(tr(Key::HelpText).find("sync <perfil> --initial"),
+              std::string_view::npos);
+    EXPECT_NE(tr(Key::HelpText).find("repack <perfil>"),
               std::string_view::npos);
     set_language(Language::English);
 }

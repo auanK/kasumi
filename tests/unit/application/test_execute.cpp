@@ -11,6 +11,7 @@
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/profile_lock.hpp"
+#include "platform/metadata.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
 
@@ -34,6 +35,7 @@ using kasumi::application::MasterKeyHex;
 using kasumi::application::NoCredentials;
 using kasumi::application::Operation;
 using kasumi::application::Profile;
+using kasumi::application::RepackCompleted;
 using kasumi::application::Request;
 using kasumi::application::RuntimeSummary;
 using kasumi::test::TempWorkspace;
@@ -1453,5 +1455,123 @@ TEST(ApplicationExecuteTest,
          env});
     ASSERT_TRUE(restored.has_value())
         << (restored ? "" : restored.error().detail);
+}
+
+TEST(ApplicationExecuteTest, RepackRejectsInvalidFlagsOnOtherOperations) {
+    auto workspace = kasumi::test::make_temp_workspace("exec-repack-flags");
+    const ExecutionEnvironment env{
+        kasumi::test::workspace_path(workspace, "app")};
+
+    for (const auto& req : {
+             Request{.operation = Operation::Sync,
+                     .profile_name = "demo",
+                     .dry_run = true},
+             Request{.operation = Operation::Sync,
+                     .profile_name = "demo",
+                     .reclaim_dirty = true},
+         }) {
+        const auto res = kasumi::application::execute(
+            {req, Credentials{NoCredentials{}}, env});
+        ASSERT_FALSE(res.has_value());
+        EXPECT_EQ(res.error().code, ErrorCode::RuntimeFailure);
+    }
+}
+
+TEST(ApplicationExecuteTest, RepackRunsDryRunAndPublishThroughPublicBoundary) {
+    auto workspace = kasumi::test::make_temp_workspace("exec-repack-public");
+    const auto app = kasumi::test::workspace_path(workspace, "app");
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto remote = kasumi::test::workspace_path(workspace, "remote");
+    const ExecutionEnvironment env{app};
+    const Profile profile{.name = "demo",
+                          .local_dir = local,
+                          .remote_dir = remote.string(),
+                          .key_storage =
+                              kasumi::application::KeyStorage::File};
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    ASSERT_TRUE(std::filesystem::create_directories(remote));
+    ASSERT_TRUE(kasumi::application::create_profile(env, profile, key()));
+
+    const auto write_settled = [](const std::filesystem::path& path,
+                                  std::string_view text) {
+        kasumi::test::write_text(path, text);
+        const auto settled = std::filesystem::file_time_type::clock::now() -
+                             std::chrono::seconds{2};
+        ASSERT_TRUE(
+            kasumi::platform::metadata::set_last_write_time(path, settled));
+    };
+
+    write_settled(local / "alpha.txt", "first loose small file payload");
+    const auto sync1 = kasumi::application::execute(
+        {Request{.operation = Operation::Sync, .profile_name = "demo"},
+         Credentials{NoCredentials{}},
+         env});
+    ASSERT_TRUE(sync1.has_value()) << sync1.error().detail;
+
+    write_settled(local / "beta.txt", "second loose small file payload");
+    const auto sync2 = kasumi::application::execute(
+        {Request{.operation = Operation::Sync, .profile_name = "demo"},
+         Credentials{NoCredentials{}},
+         env});
+    ASSERT_TRUE(sync2.has_value()) << sync2.error().detail;
+
+    const auto dry = kasumi::application::execute(
+        {Request{.operation = Operation::Repack,
+                 .profile_name = "demo",
+                 .dry_run = true},
+         Credentials{NoCredentials{}},
+         env});
+    ASSERT_TRUE(dry.has_value()) << dry.error().detail;
+    const auto* dry_data = std::get_if<RepackCompleted>(&dry->data);
+    ASSERT_NE(dry_data, nullptr);
+    EXPECT_TRUE(dry_data->dry_run);
+    EXPECT_TRUE(dry_data->actionable);
+    EXPECT_FALSE(dry_data->published);
+    EXPECT_EQ(dry_data->source_loose_blobs, 2U);
+    EXPECT_EQ(dry_data->new_packs, 1U);
+    EXPECT_EQ(dry_data->repacked_blobs, 2U);
+    EXPECT_EQ(dry_data->wire_upload_bytes, 0U);
+    EXPECT_EQ(dry_data->physical_objects_uploaded, 0U);
+
+    bool saw_activity = false;
+    const auto run = kasumi::application::execute(
+        {Request{.operation = Operation::Repack, .profile_name = "demo"},
+         Credentials{NoCredentials{}},
+         env,
+         [&](const kasumi::application::ExecutionProgress& event) {
+             if (std::holds_alternative<kasumi::application::ActivityProgress>(
+                     event)) {
+                 saw_activity = true;
+             }
+         }});
+    ASSERT_TRUE(run.has_value()) << run.error().detail;
+    const auto* run_data = std::get_if<RepackCompleted>(&run->data);
+    ASSERT_NE(run_data, nullptr);
+    EXPECT_FALSE(run_data->dry_run);
+    EXPECT_TRUE(run_data->actionable);
+    EXPECT_TRUE(run_data->published);
+    EXPECT_EQ(run_data->new_packs, 1U);
+    EXPECT_EQ(run_data->repacked_blobs, 2U);
+    EXPECT_GT(run_data->wire_upload_bytes, 0U);
+    EXPECT_GT(run_data->physical_objects_uploaded, 0U);
+    EXPECT_FALSE(run_data->published_commit_id.empty());
+    EXPECT_GE(run_data->published_height, 2U);
+    EXPECT_TRUE(saw_activity);
+
+    const auto noop = kasumi::application::execute(
+        {Request{.operation = Operation::Repack, .profile_name = "demo"},
+         Credentials{NoCredentials{}},
+         env});
+    ASSERT_TRUE(noop.has_value()) << noop.error().detail;
+    const auto* noop_data = std::get_if<RepackCompleted>(&noop->data);
+    ASSERT_NE(noop_data, nullptr);
+    EXPECT_FALSE(noop_data->actionable);
+    EXPECT_FALSE(noop_data->published);
+
+    const auto checked = kasumi::application::execute(
+        {Request{.operation = Operation::Fsck, .profile_name = "demo"},
+         Credentials{NoCredentials{}},
+         env});
+    ASSERT_TRUE(checked.has_value()) << checked.error().detail;
 }
 } // namespace

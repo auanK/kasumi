@@ -1891,6 +1891,70 @@ int present(const application::Response& response, bool full) {
                     i18n::println(i18n::Key::ResolveMissingNone);
                 }
                 return 0;
+            } else if constexpr (std::is_same_v<T,
+                                                application::RepackCompleted>) {
+                if (op != Op::Repack) {
+                    return 1;
+                }
+                const auto print_inventory = [&] {
+                    if (full) {
+                        i18n::println(i18n::Key::RepackInventorySummary,
+                                      data.existing_packs,
+                                      data.healthy_packs_kept,
+                                      data.dirty_packs_detected,
+                                      data.loose_small_blobs_detected);
+                    }
+                };
+                if (!data.actionable) {
+                    print_ok_line(i18n::tr(i18n::Key::RepackNothingToDo));
+                    if (data.dirty_packs_detected > 0) {
+                        i18n::println(i18n::Key::RepackDirtyHint,
+                                      data.dirty_packs_detected);
+                    }
+                    print_inventory();
+                    return 0;
+                }
+                if (data.dry_run) {
+                    i18n::println(i18n::Key::RepackPlanSummary,
+                                  data.repacked_blobs,
+                                  format_size(data.repacked_plaintext_bytes),
+                                  data.new_packs);
+                    i18n::println(i18n::Key::RepackSourcesSummary,
+                                  data.source_loose_blobs,
+                                  data.source_clean_packs,
+                                  data.source_dirty_packs);
+                    print_inventory();
+                    i18n::println(i18n::Key::RepackDryRunCompleted);
+                    return 0;
+                }
+                print_ok_line(i18n::tr(i18n::Key::RepackCompleted));
+                i18n::println(i18n::Key::RepackCompletedSummary,
+                              data.repacked_blobs,
+                              format_size(data.repacked_plaintext_bytes),
+                              data.new_packs);
+                i18n::println(i18n::Key::RepackSourcesSummary,
+                              data.source_loose_blobs,
+                              data.source_clean_packs,
+                              data.source_dirty_packs);
+                if (data.wire_upload_bytes || data.physical_objects_uploaded) {
+                    i18n::println(
+                        i18n::Key::RepackWireSummary,
+                        format_size(data.wire_upload_bytes),
+                        format_plural(data.physical_objects_uploaded,
+                                      i18n::Key::ProgressObject,
+                                      i18n::Key::ProgressObjects));
+                }
+                print_inventory();
+                if (full && !data.published_commit_id.empty()) {
+                    i18n::println(
+                        i18n::Key::RepackPublishedCommit,
+                        sanitize_terminal_text(data.published_commit_id),
+                        data.published_height);
+                }
+                if (data.source_clean_packs + data.source_dirty_packs > 0) {
+                    i18n::println(i18n::Key::RepackRetentionHint);
+                }
+                return 0;
             } else {
                 return 1;
             }
@@ -1968,10 +2032,11 @@ int present(const application::Error& error) {
     }
 
     using C = application::ErrorCode;
-    static constexpr std::array<std::pair<C, i18n::Key>, 8> kErrorFormats{{
+    static constexpr std::array<std::pair<C, i18n::Key>, 9> kErrorFormats{{
         {C::PlanFailure, i18n::Key::ErrorPlanCalculation},
         {C::FsckFailure, i18n::Key::ErrorFsckFailed},
         {C::GarbageCollectionFailure, i18n::Key::ErrorGcCancelled},
+        {C::RepackFailure, i18n::Key::ErrorRepackFailed},
         {C::WriterRemovalFailure, i18n::Key::ErrorWriterRemovalFailed},
         {C::BarrierRemovalFailure, i18n::Key::ErrorBarrierRemovalFailed},
         {C::InventoryAuditFailure, i18n::Key::ErrorInventoryAuditFailed},

@@ -2032,6 +2032,130 @@ TEST(CliPresenterTest, ManualBarrierRemovalErrorPresentationWithDiagnostics) {
         output_pt.find("Erro de transporte: io: disk full (native_code=28)"),
         std::string::npos);
 }
+
+TEST(CliPresenterTest, RepackPresentationCoversNoOpDryRunAndPublish) {
+    {
+        const ScopedLanguage lang_en{Language::English};
+        const auto noop_with_dirty = present_out(
+            Response{
+                .operation = Operation::Repack,
+                .data = RepackCompleted{
+                    .actionable = false,
+                    .existing_packs = 3,
+                    .healthy_packs_kept = 2,
+                    .dirty_packs_detected = 1,
+                    .loose_small_blobs_detected = 1,
+                }},
+            true);
+        EXPECT_NE(noop_with_dirty.find("Nothing to repack"), std::string::npos);
+        EXPECT_NE(noop_with_dirty.find("--reclaim-dirty"), std::string::npos);
+        EXPECT_NE(noop_with_dirty.find("Inventory: 3 existing pack(s)"),
+                  std::string::npos);
+
+        const auto dry_run = present_out(
+            Response{
+                .operation = Operation::Repack,
+                .data = RepackCompleted{
+                    .dry_run = true,
+                    .actionable = true,
+                    .existing_packs = 1,
+                    .healthy_packs_kept = 0,
+                    .dirty_packs_detected = 0,
+                    .loose_small_blobs_detected = 2,
+                    .source_loose_blobs = 2,
+                    .source_clean_packs = 1,
+                    .source_dirty_packs = 0,
+                    .new_packs = 1,
+                    .repacked_blobs = 4,
+                    .repacked_plaintext_bytes = 2048,
+                }},
+            false);
+        EXPECT_NE(dry_run.find("Repack plan: 4 blob(s) (2 KB) -> 1 new Micro-Pack(s)."),
+                  std::string::npos);
+        EXPECT_NE(dry_run.find("Sources: 2 loose blob(s), 1 underfilled pack(s), 0 dirty pack(s)."),
+                  std::string::npos);
+        EXPECT_NE(dry_run.find("Repack dry-run completed"), std::string::npos);
+        EXPECT_EQ(dry_run.find("Inventory:"), std::string::npos);
+
+        const auto published = present_out(
+            Response{
+                .operation = Operation::Repack,
+                .data = RepackCompleted{
+                    .dry_run = false,
+                    .actionable = true,
+                    .published = true,
+                    .existing_packs = 2,
+                    .healthy_packs_kept = 1,
+                    .dirty_packs_detected = 1,
+                    .loose_small_blobs_detected = 3,
+                    .source_loose_blobs = 3,
+                    .source_clean_packs = 0,
+                    .source_dirty_packs = 1,
+                    .new_packs = 1,
+                    .repacked_blobs = 5,
+                    .repacked_plaintext_bytes = 4096,
+                    .published_commit_id = std::string(64, 'a'),
+                    .published_height = 7,
+                    .wire_upload_bytes = 5120,
+                    .physical_objects_uploaded = 3,
+                }},
+            true);
+        EXPECT_NE(published.find("[OK] Repack completed."), std::string::npos);
+        EXPECT_NE(published.find("Wire upload 5 KB (3 objects)"),
+                  std::string::npos);
+        EXPECT_NE(published.find("Published commit: "), std::string::npos);
+        EXPECT_NE(published.find("(height 7)"), std::string::npos);
+        EXPECT_NE(published.find("kasumi gc"), std::string::npos);
+
+        EXPECT_EQ(kasumi::cli::present(
+                      Response{.operation = Operation::Sync,
+                               .data = RepackCompleted{}}),
+                  1);
+        const auto failed = present_out(
+            Error{.operation = Operation::Repack,
+                  .code = ErrorCode::RepackFailure,
+                  .detail = "workspace dirty"},
+            1);
+        EXPECT_NE(failed.find("Repack failed: workspace dirty"),
+                  std::string::npos);
+        const auto cancelled = kasumi::test::capture_stdout([&] {
+            EXPECT_EQ(kasumi::cli::present_cancellation(Operation::Repack),
+                      130);
+        });
+        EXPECT_NE(cancelled.find("Operation cancelled by user."),
+                  std::string::npos);
+    }
+
+    const ScopedLanguage lang_pt{Language::Portuguese};
+    const auto pt_published = present_out(
+        Response{
+            .operation = Operation::Repack,
+            .data = RepackCompleted{
+                .dry_run = false,
+                .actionable = true,
+                .published = true,
+                .source_loose_blobs = 2,
+                .source_clean_packs = 1,
+                .new_packs = 1,
+                .repacked_blobs = 3,
+                .repacked_plaintext_bytes = 1024,
+                .published_commit_id = std::string(64, 'b'),
+                .published_height = 2,
+                .wire_upload_bytes = 2048,
+                .physical_objects_uploaded = 1,
+            }},
+        true);
+    EXPECT_NE(pt_published.find("[OK] Repack concluído."), std::string::npos);
+    EXPECT_NE(pt_published.find("Envio real 2 KB (1 objeto)"), std::string::npos);
+    EXPECT_NE(pt_published.find("Commit publicado: "), std::string::npos);
+    EXPECT_NE(pt_published.find("(altura 2)"), std::string::npos);
+    const auto pt_failed = present_out(
+        Error{.operation = Operation::Repack,
+              .code = ErrorCode::RepackFailure,
+              .detail = "conflito"},
+        1);
+    EXPECT_NE(pt_failed.find("Falha no repack: conflito"), std::string::npos);
+}
 } // namespace
 
 TEST(CliPresenterTest, ResolveMissingSuccessIsLocalized) {

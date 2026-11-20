@@ -188,6 +188,31 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         }
         return request(application::Operation::GarbageCollect, argc, argv);
     }
+    if (command == "repack") {
+        if (argc < 3 || argc > 5 || !operand(argv[2])) {
+            return std::unexpected(ParseError{});
+        }
+        bool dry_run = false;
+        bool reclaim_dirty = false;
+        const std::array<std::pair<std::string_view, bool*>, 2> repack_flags{{
+            {"--dry-run", &dry_run},
+            {"--reclaim-dirty", &reclaim_dirty},
+        }};
+        for (int i = 3; i < argc; ++i) {
+            const std::string_view flag{argv[i]};
+            const auto found = std::ranges::find(
+                repack_flags, flag, &std::pair<std::string_view, bool*>::first);
+            if (found == repack_flags.end() || *found->second) {
+                return std::unexpected(ParseError{});
+            }
+            *found->second = true;
+        }
+        return application::Request{
+            .operation = application::Operation::Repack,
+            .profile_name = argv[2],
+            .dry_run = dry_run,
+            .reclaim_dirty = reclaim_dirty};
+    }
     if (command == "resolve-missing") {
         return request(application::Operation::ResolveMissing, argc, argv);
     }

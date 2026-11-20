@@ -100,6 +100,9 @@ const std::vector<std::vector<std::string>> application_commands{
      "Programação-日本",
      "2796e9c1/99b74a57/8973/0e7f7095/f51c45986e4bf1accbf45b9e2a14c8ab"},
     {"gc", "remove-barrier", "Programação-日本", "--confirm-abandoned"},
+    {"repack", "Programação-日本"},
+    {"repack", "Programação-日本", "--dry-run"},
+    {"repack", "Programação-日本", "--reclaim-dirty"},
     {"resolve-missing", "Programação-日本"}};
 
 TEST(CliBoundaryTest,
@@ -236,6 +239,9 @@ std::expected<Response, Error> execute(ExecutionInput input) {
             break;
         case Operation::ResolveMissing:
             result.data = ResolveMissingCompleted{};
+            break;
+        case Operation::Repack:
+            result.data = RepackCompleted{.dry_run = input.request.dry_run};
             break;
     }
     return result;

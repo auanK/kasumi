@@ -17,6 +17,7 @@ std::expected<Response, Error> run_garbage_collect(OperationContext& context);
 std::expected<Response, Error> run_resolve_missing(OperationContext& context);
 std::expected<Response, Error> run_remove_writer(OperationContext& context);
 std::expected<Response, Error> run_remove_barrier(OperationContext& context);
+std::expected<Response, Error> run_repack(OperationContext& context);
 
 std::expected<Response, Error> dispatch(OperationContext& context) {
     switch (context.operation) {
@@ -35,6 +36,8 @@ std::expected<Response, Error> dispatch(OperationContext& context) {
             return run_remove_writer(context);
         case Operation::RemoveBarrier:
             return run_remove_barrier(context);
+        case Operation::Repack:
+            return run_repack(context);
     }
     std::unreachable();
 }
