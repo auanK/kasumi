@@ -24,7 +24,8 @@ Interactive runs show live progress on one terminal line. Sync reports physical 
 - **Adaptive storage layout** combining loose objects, `KPAK\x01` Micro-Packs for small files (`<= 256 KiB`), and FastCDC content-defined chunking (`> 8 MiB`) with block-level delta uploads and downloads.
 - **Configurable key storage (`vault`, `file`, `memory`)** supporting OS credential vaults (Windows Credential Manager, Linux Secret Service / KWallet), local `key.bin`, or stateless in-memory key derivation.
 - **Shared storage** through local paths, network shares, or rclone remotes.
-- **Immutable history and conflict handling** that preserve divergent file versions.
+- **Immutable history and conflict handling** with `KCOM` v4 commit authorship (`origin`, persistent installation identity, and machine name) that preserve divergent file versions.
+- **Offline and shared operational traceability** recording local execution outcomes and accepted commit provenance in `db.sqlite`, plus immutable `KACT` v1 maintenance records (`fsck`, `gc`, writer/barrier removal) inspectable via `show [--full]`, `config`, `remote heads`/`commits`, and `remote summary [--full]` with zero extra remote requests during `sync`.
 - **Interrupted-operation recovery** through an authenticated transaction journal.
 - **Persistent BLAKE3 hash cache** shared by sync and read-only plan observation.
 - **Integrity and maintenance tools** to audit referenced content, packs, and chunks (`fsck`), consolidate fragmented Micro-Packs locally without remote downloads or deletions (`repack`), and directly remove authenticated orphan physical objects and redundant CommitVariants (`gc`).

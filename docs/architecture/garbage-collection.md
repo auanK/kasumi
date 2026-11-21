@@ -42,6 +42,9 @@ identifiers. It is discarded at the end of the run. Eligible candidates are:
 |---|---|
 | Orphan Content | Physically present Content not referenced by protected reachable history, eligible for deletion without downloading or auditing its payload |
 | Redundant CommitVariant | Valid ciphertext of a reachable Commit that is not a required variant |
+| Expired `KACT` v1 Activity | Valid remote activity records outside retention (`min_history_depth` and `min_history_age_hours`) and not the newest `Succeeded` record for their `(machine_id, operation)` pair |
+
+GC loads and authenticates all objects under `<activity-ns>/<version-ns>/` before deletion; any unreadable, corrupt, or structurally invalid activity identifier/payload causes GC to fail closed before deleting any candidate. After completion, GC (as well as `gc remove-writer` and `gc remove-barrier`) publishes a best-effort `KACT` v1 activity record, and on successful GC refreshes the local `remote_activity_cache` in `db.sqlite` with retained records.
 
 The observation authenticates history and classifies deletion eligibility based strictly on reachability:
 
@@ -72,6 +75,7 @@ The protected set includes:
   - `KPAK\x01` Pack IDs in `StorageManifest.packed_blobs` for which **at least one** packed member `logical_hash` remains referenced by a reachable Commit (a Pack ID becomes an eligible orphan only when zero members of that pack are referenced by any reachable Commit);
   - individual FastCDC chunk Content IDs in `StorageManifest.chunked_files` referenced by any reachable chunked file (unreferenced old chunks from modified large files become eligible orphans while shared unchanged chunks remain protected);
 - valid Epoch objects and retained orphan Epoch objects;
+- protected `KACT` v1 operational activity records (newest `Succeeded` per `(machine_id, operation)` plus records retained under `min_history_depth` / `min_history_age_hours`);
 - all protocol/control objects by construction.
 
 The content reachability limit applies to one million distinct physical IDs. GC stores the type and expected size for each reachable ID, checks each occurrence for conflicting metadata, and discards per-commit reference details as it walks the authenticated history.

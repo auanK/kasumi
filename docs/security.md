@@ -82,6 +82,7 @@ Keyed BLAKE2b derives distinct 32-byte subkeys across isolated domains:
 * `Journal`: local transaction journal encryption
 * `RemoteIdentifier`: keyed identifier derivation (`Content`, `Commit`, `Epoch`, `Namespace`, `Pack`)
 * `Pack`: `KPAK\x01` Micro-Pack container payload encryption
+* `Activity`: immutable `KACT` v1 operational maintenance record encryption
 
 Content, Pack, Commit, Epoch, and namespace identifiers also use disjoint cryptographic domain tags. Derived namespace components are truncated to eight hex characters (the version component to four), so namespace derivation is not a confidentiality guarantee for protocol structure. Ephemeral subkey buffers in memory are wiped at defined cleanup points using `crypto_wipe`; Kasumi does not claim to prevent all copies or swap exposure of secrets.
 
@@ -89,7 +90,7 @@ Content, Pack, Commit, Epoch, and namespace identifiers also use disjoint crypto
 
 File contents, FastCDC chunks, `KPAK\x01` Micro-Packs, and commit payloads use **Protocol v3 (`KASUMI\x03\x00`, `FILE_HEADER_SIZE = 57`)** with **XChaCha20-Poly1305** authenticated encryption (AEAD) via Monocypher and per-chunk **Zstandard (`zstd` level 1)** compression:
 
-* **Authenticated Header (`57 bytes`)**: Contains the 8-byte magic `KASUMI\x03\x00`, a random 24-byte file nonce, the 8-byte little-endian uncompressed total plaintext size, a 1-byte `FilePurpose` tag (`Content = 0`, `History = 1`, `Pack = 2`), and a 16-byte Poly1305 header authentication tag. Binding `FilePurpose` into the header's associated data prevents cross-domain substitution between loose/chunk Content blobs, Commit objects, and `KPAK\x01` Micro-Packs even if an attacker renames objects in remote storage.
+* **Authenticated Header (`57 bytes`)**: Contains the 8-byte magic `KASUMI\x03\x00`, a random 24-byte file nonce, the 8-byte little-endian uncompressed total plaintext size, a 1-byte `FilePurpose` tag (`Content = 0`, `History = 1`, `Pack = 2`, `Activity = 3`), and a 16-byte Poly1305 header authentication tag. Binding `FilePurpose` into the header's associated data prevents cross-domain substitution between loose/chunk Content blobs, Commit objects, `KPAK\x01` Micro-Packs, and `KACT` v1 activity records even if an attacker renames objects in remote storage.
 * **In-Memory Chunk Compression & AEAD (`CHUNK_SIZE = 1 MiB`)**: Plaintext streams are processed in chunks of up to `1 MiB` (`1,048,576` bytes). Before encryption, each chunk is compressed in RAM with Zstandard (`zstd` level 1). If compression reduces the chunk size by more than 32 bytes, the compressed payload is used (`flags = 1`); otherwise the raw uncompressed bytes are used (`flags = 0`). Each encrypted chunk prepends a 5-byte cleartext prefix (`CHUNK_PREFIX_SIZE = 5`: 1-byte `flags` + 4-byte little-endian `wire_len`), followed by `wire_len` encrypted bytes and a 16-byte Poly1305 authentication tag whose associated data binds the 57-byte file header, the 64-bit chunk index, the 1-byte compression flag, and the 32-bit wire length. Decompressed chunk lengths are verified against the expected plaintext slice size (bounded by `1 MiB` per chunk and the declared file total size) before release.
 * **Micro-Pack Container Format (`KPAK\x01`)**: The plaintext inside a `FilePurpose::Pack` stream starts with `KPAK\x01` (5 bytes), a 4-byte entry count (`<= 4096`), a directory table of `(32-byte logical_hash, 4-byte offset, 4-byte size)` entries sorted canonically by `logical_hash`, and contiguous concatenated file payloads. During extraction, every requested member's bounds are checked against the pack buffer and its extracted bytes are re-hashed with BLAKE3 and verified against `logical_hash`.
 
@@ -117,7 +118,9 @@ Under different master keys, the keyed Content, Pack, Commit, and Epoch identifi
 
 ## History DAG Integrity
 
-A canonical commit (`KCOM` v3) contains the Snapshot tree, parent commit IDs, tree height, creation timestamp, and canonical `StorageManifest`. The commit ID authenticates this entire canonical serialized representation (including the `StorageManifest`) under the vault key, and the commit payload is encrypted and authenticated under the History domain (`FilePurpose::History`).
+A canonical commit (`KCOM` v4) contains the Snapshot tree, parent commit IDs, tree height, creation timestamp, commit authorship (`origin` operation, declared `machine_id`, and `machine_name` recorded at creation), and canonical `StorageManifest`. The commit ID authenticates this entire canonical serialized representation (including authorship and `StorageManifest`) under the vault key, and the commit payload is encrypted and authenticated under the History domain (`FilePurpose::History`). `KCOM` v3 commits are rejected without legacy fallback.
+
+Declared `machine_id` and `machine_name` provenance (also carried in encrypted `KACT` v1 `FilePurpose::Activity` records) represents an installation-declared identifier from a client holding the vault master key, **not** individual user authentication or hardware attestation; copying the private app-data directory (`machine.id`) copies that identity. Historical records retain the machine name captured when created and never log passwords, salts, keys, or secrets.
 
 Before accepting any commit into the local history DAG, Kasumi verifies:
 * AEAD authentication tag validity and `FilePurpose::History` binding;

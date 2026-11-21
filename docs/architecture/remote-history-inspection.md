@@ -6,28 +6,22 @@ These commands start with the [common inspection path](remote-inspection.md). Th
 
 | Command | View built and result | Boundary |
 |---|---|---|
-| `remote heads` | Authenticated current **logical heads**, with heights, parent/root/size metadata plus counts of physical and ancestral markers. It follows observed head history, not one selected file tree. | No file-content download; physical marker counts are distinct from logical-head count. Invalid history fails observation. |
+| `remote heads` | Authenticated current **logical heads**, with heights, readable local timestamps, commit authorship (`origin` and `machine`, disambiguating colliding names), parent/root/size metadata plus counts of physical and ancestral markers. Bypasses `cached_anchor` so full head provenance is always authentic. | No file-content download; physical marker counts are distinct from logical-head count. Invalid history fails observation. |
 | `remote tree [--head <id>]` | One current logical head's committed **Snapshot**, not the resolved effective tree. With one head, it can select implicitly; with multiple heads, `--head` is required and must name a current logical head. | Authentication covers the selected Commit/Snapshot, not file payload bytes. Absent, non-head, or ambiguous selection is an error rather than an arbitrary choice. |
-| `remote commits` | Complete authenticated reachable Commit DAG, including parent/height/head/marker relationships. | No file-content download. |
-| `remote commit <id>` | Selects a reachable Commit from complete history, validates its Snapshot, then inspects the physical ciphertext variants for that Commit ID and reports each Ciphertext ID and validity. | An unreachable ID fails; invalid variants are reported as such. Commit ciphertext authentication is not a file-content audit. |
-| `remote summary` | Complete authenticated history plus physical content-availability inventory and active-writer listing; reports reachable Commit/head counts, conflicts, missing/orphan content counts, and writer count. | Counts are structural/availability observations, not payload AEAD validation or [Fsck](fsck.md). A concurrent writer can change counts immediately afterward. |
+| `remote commits` | Complete authenticated reachable Commit DAG, including parent/height/head/marker relationships, readable local timestamps, and commit authorship. | No file-content download. |
+| `remote commit <id>` | Selects a reachable Commit from complete history, validates its Snapshot and `KCOM` v4 authorship, then inspects the physical ciphertext variants for that Commit ID and reports each Ciphertext ID and validity. | An unreachable ID fails; invalid variants are reported as such. Commit ciphertext authentication is not a file-content audit. |
+| `remote summary [--full]` | Complete authenticated history plus physical content-availability inventory, active-writer listing, and shared `KACT` v1 operational activity records; reports reachable Commit/head counts, conflicts, missing/orphan content counts, writer count, invalid activity count, and recent/full maintenance activity. | Counts and activities are point-in-time observations and do not modify `db.sqlite`; payload AEAD validation requires [Fsck](fsck.md). A concurrent writer can change counts immediately afterward. |
 
 Complete-history queries traverse retained reachable history rather than choosing one head. Physical HEAD markers can outnumber logical heads because an ancestral marker need not be removed immediately. Commit ID identifies logical content; Ciphertext ID distinguishes its encrypted physical variants. See [Remote Layout and Publication](remote-layout.md) for object naming and marker publication.
 
-Scoped head/tree observation can use the locally accepted Commit as a
+Scoped tree/stat/get observation can use the locally accepted Commit as a
 `cached_anchor` to avoid rereading prior ancestry. That shortcut requires proven
 ancestry linkage for every loaded branch, even when the anchor still has a HEAD
 marker. A concurrent sibling head may descend from the anchor's parent instead;
 loading then retries without the cached anchor to recover the shared ancestry.
-Multiple HEADs remain valid input to authenticated resolution. Complete-history
-queries do not relax that safety property; see
-[Cached Anchors and Scoped Observation](history-and-concurrency.md#cached-anchors-and-scoped-observation).
-
-For an accepted head represented by the cached anchor, the stored hint contains
-its tree and height, but not the original parents or creation time. `remote heads`
-can therefore display zero parents and creation time zero for that frontier row;
-those values do not prove genesis. Use `remote commit <profile> <id>` for the
-complete retained Commit metadata.
+`remote heads` always loads authentic head commits without using `cached_anchor`
+so parent IDs, creation timestamps, and commit authorship (`KCOM` v4) remain complete;
+see [Cached Anchors and Scoped Observation](history-and-concurrency.md#cached-anchors-and-scoped-observation).
 
 Summary counts are observational and do not authorize deletion; use `remote contents`
 for complete structural content references and `remote health`/`remote orphans` for

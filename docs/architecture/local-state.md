@@ -8,7 +8,8 @@ Each machine keeps private, **unsynchronized** profile state under Kasumi's appl
 |---|---|
 | `config.toml` | Profile configuration (paths, retention, and `key_storage`), owned by `config`; read during profile resolution, atomically rewritten for create/edit/key-storage/rename/delete. It is **not** a synchronized Snapshot or accepted history. Missing configuration allows an empty `config` list/create flow but prevents ordinary profile resolution; malformed configuration is an error. It relies on private filesystem permissions, not encryption. |
 | OS Credential Vault (`kasumi/<profile>`) or `profiles/<profile>/key.bin` | Vault credential material when `key_storage` is `vault` (OS credential vault: Windows Credential Manager or Linux Secret Service / KWallet) or `file` (`key.bin`), written at profile creation or `kasumi key <profile>` and read by routine operations unless `key_storage = "memory"` or an explicit key is supplied. In `file` mode, `key.bin` is **reversibly XOR-masked**, not cryptographically encrypted; permissions limit other-user access. In `memory` mode, no key is persisted on disk or in the vault. A missing persisted key in `vault` or `file` mode is an error unless restored via `kasumi key <profile>`, and a supplied `KASUMI_MASTER_KEY` must match any persisted key. It cannot be reconstructed safely from remote ciphertext or SQLite. |
-| `profiles/<profile>/db.sqlite` | SQLite owner of accepted `StoredState` (including optional `storage_manifest` metadata) plus the file-hash cache. Profile creation initializes the current schema before saving profile configuration. Operations validate an existing database read-only before resolving credentials or opening transport; a missing, corrupt, or unsupported database is rejected without recreation, except for explicit `sync --initial` after its local and remote preconditions pass. WAL sidecars can exist. Database contents are not encrypted/authenticated as a whole; private permissions (and optional disk encryption) are the at-rest boundary. Invalid schema or accepted-state corruption is not silently rebuilt as an empty base for Sync/Preview/Status. |
+| `machine.id` at the application data root | Persistent 16-byte random installation identifier (`32` lowercase hex characters) generated atomically on demand and reused across renames of the host machine. Together with the runtime OS hostname (`machine_name`), it identifies the declaring installation in `KCOM` v4 commit authorship, `KACT` v1 operational records, and local `db.sqlite` history. It is a declared identity associated with the private app-data directory, not cryptographic user/hardware proof. |
+| `profiles/<profile>/db.sqlite` | SQLite owner of accepted `StoredState` (including optional `storage_manifest` metadata), the file-hash cache, accepted commit authorship metadata (`accepted_commit_meta`), local execution traceability (`local_executions`), and offline cached remote maintenance records (`remote_activity_cache`). Profile creation initializes the current schema before saving profile configuration. Operations validate an existing database read-only before resolving credentials or opening transport; a missing, corrupt, or unsupported database is rejected without recreation, except for explicit `sync --initial` after its local and remote preconditions pass. WAL sidecars can exist. Database contents are not encrypted/authenticated as a whole; private permissions (and optional disk encryption) are the at-rest boundary. Invalid schema or accepted-state corruption is not silently rebuilt as an empty base for Sync/Preview/Status. |
 | `profiles/<profile>/transaction.bin.enc/` | [Authenticated journal directory](transaction-journal.md): immutable encrypted `snapshot.enc`, encrypted deltas in `transaction.log.enc`, authenticated `confirmed.enc` selecting the durable prefix, and `retired.enc` authorizing cleanup of that generation. It governs the unfinished Sync's pinned plan, phase, and progress. Sync, Fsck, `resolve-missing`, and GC read it during recovery. Invalid authority or missing confirmed bytes stop recovery and preserve evidence. Session caches are accelerators, not authority; clear requires verified rollback or terminal cleanup. |
 | `profiles/<profile>/.transactions/<id>/` | Transaction staging and pre-mutation backups, addressed by journal ID and operation backup slots. These workspace files are not uniformly encrypted; private filesystem access controls matter. Recovery validates paths and required backup hashes. A missing/invalid required backup blocks rollback rather than risking overwrite. Completed work removes the workspace before deleting the journal. |
 | `profile-<name>.lock` at the application data root | OS-backed exclusive **local** profile-operation lock acquired by Sync, Preview, Status, Fsck, GC, ResolveMissing, RemoveWriter, and RemoveBarrier; it serializes those processes on one machine, not different machines or `remote ...` inspection. It is a control file, not a credential/history record and not a remote writer marker. |
@@ -21,15 +22,23 @@ Each machine keeps private, **unsynchronized** profile state under Kasumi's appl
 
 ### Schema and durability
 
-The current database requires `PRAGMA user_version=1` and the validated `nodes`,
-`metadata`, `pending_materializations`, and `file_cache` schemas, including their
-column and primary-key contracts. The version number alone does not establish
-compatibility. Profile creation and explicit `sync --initial` initialize a
-missing database; initial Sync also requires no SQLite sidecars or transaction
-evidence. It admits either bootstrap into an empty remote history namespace or
-enrollment into an existing authenticated remote vault. Normal application
-operations reject missing or incompatible databases before opening transport.
-No old-schema conversion or automatic accepted-base reset occurs.
+The current database requires `PRAGMA user_version=2` and the validated `nodes`,
+`metadata`, `pending_materializations`, `file_cache`, `local_executions`,
+`accepted_commit_meta`, and `remote_activity_cache` schemas, including their
+column and primary-key contracts. Schema version `1` and any unknown layout are
+rejected without migration or automatic conversion. The version number alone
+does not establish compatibility. Profile creation and explicit `sync --initial`
+initialize a missing database; initial Sync also requires no SQLite sidecars or
+transaction evidence. It admits either bootstrap into an empty remote history
+namespace or enrollment into an existing authenticated remote vault. Normal
+application operations reject missing or incompatible databases before opening
+transport. No old-schema conversion or automatic accepted-base reset occurs.
+
+`local_executions`, `accepted_commit_meta`, and `remote_activity_cache` keep offline
+traceability queryable by `kasumi show [--full]` and `kasumi config` via temporary
+consistent SQLite snapshots without contacting remote storage or mutating live DB
+sidecars/mtimes. Only `application::execute` mutates `db.sqlite`; read-only
+`remote` inspections do not write into `remote_activity_cache`.
 
 Initialization selects WAL mode; writable state-storage connections set
 `synchronous=NORMAL`, while read-only connections do not execute write PRAGMAs.
