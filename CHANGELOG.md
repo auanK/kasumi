@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.2]
+
+### Changed
+
+- Accelerate x86-64 SHA-256 physical hashing (`sha256_update`, `sha256_finish`, and `hash_file`) with runtime-detected SHA-NI instructions on both Windows and Linux, preserving automatic fallback to software SHA-256 (and Windows CNG `BCrypt` for `hash_file`) when SHA-NI is unavailable.
+- Raise `bulk_list_probe_threshold` from `64` to `256` physical objects and remove the `>= 8` chunked-object exception during content availability checks so small incremental syncs prioritize `control_read_batch` or batched `presence` probes instead of full remote directory listings.
+
 ## [0.18.1]
 
 ### Fixed
