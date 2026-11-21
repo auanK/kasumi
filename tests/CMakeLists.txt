@@ -99,6 +99,7 @@ kasumi_add_test_suite(
         unit/platform/test_metadata.cpp
         unit/platform/test_file_fingerprint.cpp
         unit/platform/test_private_storage.cpp
+        unit/platform/test_machine_clock.cpp
     LIBRARIES
         kasumi_platform
 )
@@ -370,6 +371,7 @@ kasumi_add_test_suite(
     kasumi_test_unit_runtime
     "unit.runtime"
     SOURCES
+        unit/runtime/test_machine.cpp
         unit/runtime/test_paths_profile.cpp
         unit/runtime/test_resolver.cpp
         unit/runtime/test_vault.cpp

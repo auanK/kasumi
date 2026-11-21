@@ -437,6 +437,7 @@ add_library(kasumi_platform STATIC
     src/platform/clock.cpp
     src/platform/durability.cpp
     src/platform/file_fingerprint.cpp
+    src/platform/machine.cpp
     src/platform/metadata.cpp
     src/platform/perf_trace.cpp
     src/platform/private_storage.cpp
@@ -594,6 +595,7 @@ target_link_libraries(kasumi_application
 )
 
 add_library(kasumi_runtime STATIC
+    src/runtime/machine.cpp
     src/runtime/paths.cpp
     src/runtime/profile.cpp
     src/runtime/resolver.cpp
