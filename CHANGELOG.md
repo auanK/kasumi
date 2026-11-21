@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.19.1]
+
+### Removed
+
+- Remove the `--trust-existing-content` option from `kasumi sync --initial`, along with its unverified remote content trust bypass (`trusted_remote_content_objects`, `SyncCompleted::trusted_content_reused`, and associated warning/CLI paths). Initial bootstrap continues to verify pre-existing loose objects via AEAD decryption and plaintext BLAKE3 verification before reuse.
+
 ## [0.19.0]
 
 ### Added
