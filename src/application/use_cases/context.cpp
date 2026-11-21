@@ -329,6 +329,14 @@ void wipe_operation(OperationContext& context) noexcept {
     context.recovered_transaction = false;
     context.sync_mutated = false;
     context.remote_observed = false;
+    context.on_sync_mutation_start = {};
+    context.maintenance_failure_outcome.reset();
+    context.maintenance_failure_stage.clear();
+    context.maintenance_failure_detail.clear();
+    context.maintenance_metric_primary = 0;
+    context.maintenance_metric_secondary = 0;
+    context.maintenance_flags = 0;
+    context.gc_kept_activities.clear();
     context.initial_content_identifiers.clear();
     platform::release_profile_lock(context.profile_lock);
 }

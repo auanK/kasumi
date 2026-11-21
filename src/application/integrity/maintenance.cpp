@@ -2,6 +2,7 @@
 
 #include "application/concurrency.hpp"
 #include "application/detail.hpp"
+#include "application/history_storage/activity.hpp"
 #include "application/history_storage/content_reachability.hpp"
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
@@ -358,6 +359,10 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
     std::vector<std::string> unknown_storage_identifiers;
     for (const auto& identifier : observation->physical_identifiers) {
         if (history_storage::is_history_object(layout, identifier) ||
+            (history_storage::is_activity_object(layout, identifier) &&
+             history_storage::activity::parse_object_identifier(layout,
+                                                                identifier)
+                 .has_value()) ||
             kasumi::hash_from_hex(identifier).has_value()) {
             continue;
         }

@@ -1,6 +1,7 @@
 #include "application/inspection/inspect.hpp"
 
 #include "application/detail.hpp"
+#include "application/history_storage/activity.hpp"
 #include "application/history_storage/content_reachability.hpp"
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/history_storage.hpp"
@@ -159,8 +160,7 @@ make_observation_hints(const runtime::RuntimeData& runtime_data,
         return hints;
     }
 
-    const bool use_frontier = operation == InspectionOperation::RemoteHeads ||
-                              operation == InspectionOperation::RemoteTree ||
+    const bool use_frontier = operation == InspectionOperation::RemoteTree ||
                               operation == InspectionOperation::RemoteStat ||
                               operation == InspectionOperation::RemoteGet;
     return observation::history::make_observation_hints(
@@ -205,6 +205,45 @@ void count_tree_entries(const Snapshot& tree,
     }
 }
 
+std::string encode_machine_id_hex(
+    std::span<const std::uint8_t, 16> machine_id) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(32U);
+    for (const auto byte : machine_id) {
+        out.push_back(kHex[(byte >> 4U) & 0x0FU]);
+        out.push_back(kHex[byte & 0x0FU]);
+    }
+    return out;
+}
+
+std::optional<RemoteCommitAuthorship>
+make_remote_authorship(const kasumi::history::CommitAuthorship& authorship) {
+    if (!kasumi::history::has_commit_authorship(authorship)) {
+        return std::nullopt;
+    }
+    RemoteCommitOrigin origin = RemoteCommitOrigin::Unknown;
+    switch (authorship.operation) {
+        case kasumi::history::CommitOriginOperation::Unknown:
+            origin = RemoteCommitOrigin::Unknown;
+            break;
+        case kasumi::history::CommitOriginOperation::Sync:
+            origin = RemoteCommitOrigin::Sync;
+            break;
+        case kasumi::history::CommitOriginOperation::Repack:
+            origin = RemoteCommitOrigin::Repack;
+            break;
+        case kasumi::history::CommitOriginOperation::ResolveMissing:
+            origin = RemoteCommitOrigin::ResolveMissing;
+            break;
+    }
+    return RemoteCommitAuthorship{
+        .operation = origin,
+        .machine_id_hex = encode_machine_id_hex(authorship.machine_id),
+        .machine_name = authorship.machine_name,
+    };
+}
+
 std::expected<RemoteHeadInfo, InspectionError>
 make_head_info(std::string_view id,
                const ObservedCommitIndex& commits,
@@ -217,12 +256,14 @@ make_head_info(std::string_view id,
     }
     const auto* match = observed->second;
     const auto& tree = match->commit.tree;
-    RemoteHeadInfo result{.commit_id = match->id,
-                          .height = match->commit.height,
-                          .created_at = match->commit.created_at,
-                          .parent_ids = match->commit.parents,
-                          .root_hash = hash_hex(tree.rows.front().hash),
-                          .total_bytes = tree.rows.front().size};
+    RemoteHeadInfo result{
+        .commit_id = match->id,
+        .height = match->commit.height,
+        .created_at = match->commit.created_at,
+        .parent_ids = match->commit.parents,
+        .root_hash = hash_hex(tree.rows.front().hash),
+        .total_bytes = tree.rows.front().size,
+        .authorship = make_remote_authorship(match->commit.authorship)};
     count_tree_entries(tree, result.directory_count, result.file_count);
     return result;
 }
@@ -346,6 +387,7 @@ RemoteCommitInfo make_commit_info(const kasumi::history::LoadedCommit& loaded,
         .root_hash = hash_hex(rows.front().hash),
         .total_bytes = rows.front().size,
         .entry_count = static_cast<std::uint64_t>(rows.size() - 1),
+        .authorship = make_remote_authorship(loaded.commit.authorship),
     };
 }
 
@@ -1018,6 +1060,12 @@ RemoteObjectInfo classify_object(const history_storage::RemoteLayout& layout,
     } else if (id.starts_with(layout.probes_prefix)) {
         result.category = RemoteObjectCategory::Protocol;
         result.structurally_valid = true;
+    } else if (history_storage::is_activity_object(layout, id)) {
+        result.category = RemoteObjectCategory::Activity;
+        result.structurally_valid =
+            history_storage::activity::parse_object_identifier(layout, id)
+                .has_value();
+        result.relation = "operational activity record";
     } else if (id.starts_with(layout.gc_prefix)) {
         result.category = RemoteObjectCategory::Protocol;
     }
@@ -1640,6 +1688,43 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
         if (!writers) {
             return obs_fail(operation, "failed to observe remote writers");
         }
+        auto activities = history_storage::activity::load_all(
+            context.storage,
+            context.layout,
+            context.key,
+            context.workspace->root);
+        if (!activities) {
+            return obs_fail(operation,
+                            "failed to observe remote operational activity");
+        }
+        std::vector<RemoteActivityInfo> recent;
+        recent.reserve(activities->valid.size());
+        for (const auto& entry : activities->valid) {
+            const auto& rec = entry.record;
+            recent.push_back(RemoteActivityInfo{
+                .event_id = rec.event_id,
+                .operation =
+                    static_cast<RemoteActivityOperation>(rec.operation),
+                .outcome = static_cast<RemoteActivityOutcome>(rec.outcome),
+                .machine_id_hex = encode_machine_id_hex(rec.machine_id),
+                .machine_name = rec.machine_name,
+                .started_at = rec.started_at,
+                .finished_at = rec.finished_at,
+                .duration_ms = rec.duration_ms,
+                .metric_primary = rec.metric_primary,
+                .metric_secondary = rec.metric_secondary,
+                .metric_bytes = rec.metric_bytes,
+                .flags = rec.flags,
+                .stage = rec.stage,
+                .detail = rec.detail,
+            });
+        }
+        std::ranges::sort(recent, [](const auto& left, const auto& right) {
+            if (left.finished_at != right.finished_at) {
+                return left.finished_at > right.finished_at;
+            }
+            return left.event_id < right.event_id;
+        });
         return make_response(
             operation,
             RemoteSummaryReport{
@@ -1651,6 +1736,8 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
                 .missing_content_count = observed->missing_content_count,
                 .orphan_content_count = observed->orphan_content_count,
                 .active_writer_count = writers->size(),
+                .recent_activities = std::move(recent),
+                .invalid_activity_count = activities->invalid_objects.size(),
             });
     }
 

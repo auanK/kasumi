@@ -253,6 +253,9 @@ struct Response {
     // Payload variant corresponding to operation.
     ResponseData data;
     std::optional<InventoryAuditReport> inventory_audit;
+    // Set when a remote operational activity record could not be published
+    // after the main operation completed.
+    std::optional<std::string> activity_publish_warning;
 };
 
 // Application failure categories.

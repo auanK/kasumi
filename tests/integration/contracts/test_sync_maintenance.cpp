@@ -1,8 +1,10 @@
 #include "application/execute.hpp"
+#include "application/history_storage/activity.hpp"
 #include "application/history_storage/content_reachability.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/reachability.hpp"
 #include "application/history_storage/remote_layout.hpp"
+#include "application/inspection/inspect.hpp"
 #include "application/observation/history.hpp"
 #include "application/profile.hpp"
 #include "application/sync/publication.hpp"
@@ -355,7 +357,9 @@ TEST(ApplicationMaintenanceContract, NoOpSyncDoesNotRewriteStateOrRemote) {
     const auto paths = kasumi::runtime::resolve_profile_paths(
         environment.app_data_dir, "demo");
     ASSERT_TRUE(paths.has_value());
-    const auto state_before = kasumi::test::read_binary(paths->database_path);
+    const auto state_before =
+        kasumi::state_storage::load_state(paths->database_path);
+    ASSERT_TRUE(state_before.has_value() && *state_before);
     const auto remote_before = kasumi::test::snapshot_tree(profile.remote_dir);
     auto opened = open_initialized_storage(profile.remote_dir);
     ASSERT_TRUE(opened.has_value());
@@ -366,13 +370,34 @@ TEST(ApplicationMaintenanceContract, NoOpSyncDoesNotRewriteStateOrRemote) {
     const auto no_op = kasumi::test::scenarios::no_op_sync(environment, "demo");
     ASSERT_TRUE(no_op.has_value()) << no_op.error();
     EXPECT_TRUE(*no_op);
-    EXPECT_EQ(kasumi::test::read_binary(paths->database_path), state_before);
+    const auto state_after =
+        kasumi::state_storage::load_state(paths->database_path);
+    ASSERT_TRUE(state_after.has_value() && *state_after);
+    EXPECT_EQ((*state_after)->tree, (*state_before)->tree);
+    EXPECT_EQ((*state_after)->height, (*state_before)->height);
+    EXPECT_EQ((*state_after)->commit_id, (*state_before)->commit_id);
+    EXPECT_EQ((*state_after)->ciphertext_id, (*state_before)->ciphertext_id);
+    EXPECT_EQ((*state_after)->epoch_id, (*state_before)->epoch_id);
+    EXPECT_EQ((*state_after)->epoch_sequence,
+              (*state_before)->epoch_sequence);
+    EXPECT_EQ((*state_after)->pending_materializations,
+              (*state_before)->pending_materializations);
+    EXPECT_EQ((*state_after)->storage_manifest,
+              (*state_before)->storage_manifest);
     EXPECT_EQ(kasumi::test::snapshot_tree(profile.remote_dir), remote_before);
     const auto listing_after = kasumi::transport::list(storage);
     ASSERT_TRUE(listing_after.has_value());
     EXPECT_EQ(*listing_after, *listing_before);
     EXPECT_FALSE(
         std::filesystem::exists(paths->profile_dir / "transaction.bin.enc"));
+    const auto activity = kasumi::application::inspect_profile_activity(
+        environment, "demo");
+    ASSERT_TRUE(activity.last_attempt.has_value());
+    EXPECT_EQ(activity.last_attempt->status,
+              kasumi::application::ProfileExecutionStatus::SucceededNoChanges);
+    ASSERT_TRUE(activity.last_complete_sync.has_value());
+    EXPECT_EQ(activity.last_complete_sync->status,
+              kasumi::application::ProfileExecutionStatus::SucceededNoChanges);
 }
 
 TEST(ApplicationMaintenanceContract,
@@ -1683,6 +1708,118 @@ TEST(ApplicationRecoveryContract,
               kasumi::history::CommitOriginOperation::Unknown);
     EXPECT_TRUE(target_act->accepted_commit->machine_id_hex.empty());
     EXPECT_TRUE(target_act->accepted_commit->machine_name.empty());
+
+    // Pure download-only sync records SucceededDownloadedOnly and sets
+    // last_complete_sync.
+    const auto target_act_summary =
+        kasumi::application::inspect_profile_activity(target_env, "demo");
+    ASSERT_TRUE(target_act_summary.last_complete_sync.has_value());
+    EXPECT_EQ(target_act_summary.last_complete_sync->status,
+              kasumi::application::ProfileExecutionStatus::
+                  SucceededDownloadedOnly);
+}
+
+TEST(ApplicationMaintenanceContract,
+     MaintenancePublishesRemoteActivityGcRetentionWorksAndInvalidActivityFailsClosed) {
+    auto [workspace, environment, profile, remote, credentials] =
+        make_maintenance_env("activity-maintenance-gc-retention", '8');
+    ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
+    kasumi::test::write_text(profile.local_dir / "doc.txt", "v1");
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, environment)));
+
+    // 1. Fsck publishes Succeeded record visible via remote summary.
+    const auto fsck_ok =
+        kasumi::application::execute(request(Operation::Fsck, environment));
+    ASSERT_TRUE(fsck_ok.has_value()) << fsck_ok.error().detail;
+
+    // 2. Establish writer & remove it + remove absent barrier -> both publish.
+    auto opened = open_initialized_storage(profile.remote_dir);
+    ASSERT_TRUE(opened.has_value());
+    auto& storage = *opened;
+    const auto key_bytes =
+        *kasumi::runtime::vault::decode_hex(std::string(64, '8'));
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key_bytes);
+    const auto wr_stage = kasumi::test::workspace_path(workspace, "wr");
+    ASSERT_TRUE(std::filesystem::create_directories(wr_stage));
+    auto writer = protocol::register_writer(storage, layout, wr_stage);
+    ASSERT_TRUE(writer.has_value());
+    const auto writer_id = writer->identifier;
+    writer->storage = nullptr;
+    auto rw_req = request(Operation::RemoveWriter, environment);
+    rw_req.request.writer_identifier = writer_id;
+    ASSERT_TRUE(kasumi::application::execute(rw_req));
+
+    auto rb_req = request(Operation::RemoveBarrier, environment);
+    rb_req.request.confirm_abandoned = true;
+    ASSERT_TRUE(kasumi::application::execute(rb_req));
+
+    // 3. Seed old KACT v1 records (> age hours + > depth) and keep newest
+    // Succeeded Fsck record, then run GC -> old non-protected records pruned,
+    // newest Succeeded per (machine, op) + depth retained.
+    const auto machine = kasumi::runtime::resolve_machine_identity(
+        environment.app_data_dir, false);
+    ASSERT_TRUE(machine.has_value());
+    const auto old_stage = kasumi::test::workspace_path(workspace, "old_act");
+    ASSERT_TRUE(std::filesystem::create_directories(old_stage));
+    for (int i = 1; i <= 6; ++i) {
+        const std::string hex_suffix =
+            "0000000000000000000000000000000" + std::to_string(i);
+        kasumi::application::history_storage::activity::ActivityRecord old_rec{
+            .event_id = hex_suffix,
+            .operation = kasumi::application::history_storage::activity::
+                ActivityOperation::Fsck,
+            .outcome = kasumi::application::history_storage::activity::
+                ActivityOutcome::IssuesFound,
+            .machine_id = machine->id,
+            .machine_name = machine->name,
+            .started_at = 100000 + i,
+            .finished_at = 100010 + i,
+        };
+        ASSERT_TRUE(kasumi::application::history_storage::activity::publish(
+            storage, layout, key_bytes, old_rec, old_stage));
+    }
+
+    const auto gc_res = kasumi::application::execute(
+        request(Operation::GarbageCollect, environment));
+    ASSERT_TRUE(gc_res.has_value()) << gc_res.error().detail;
+
+    // 4. Corrupt an object under activity/v1/ -> GC fails closed before
+    // deleting anything and remote objects remain intact.
+    const auto bad_file = kasumi::test::workspace_path(workspace, "bad_act");
+    kasumi::test::write_text(bad_file, "corrupt-activity-payload");
+    const auto bad_id = layout.activity_prefix + "bad-activity-object";
+    ASSERT_TRUE(kasumi::transport::put(storage, bad_file, bad_id));
+    const auto listing_before_fail = kasumi::transport::list(storage);
+    ASSERT_TRUE(listing_before_fail.has_value());
+    const auto gc_fail = kasumi::application::execute(
+        request(Operation::GarbageCollect, environment));
+    ASSERT_FALSE(gc_fail.has_value());
+    EXPECT_EQ(gc_fail.error().code,
+              kasumi::application::ErrorCode::GarbageCollectionFailure);
+    for (const auto& obj : *listing_before_fail) {
+        if (!kasumi::application::history_storage::is_activity_object(layout,
+                                                                      obj)) {
+            EXPECT_EQ(kasumi::transport::presence(storage, obj).value(),
+                      kasumi::transport::Presence::Present);
+        }
+    }
+    ASSERT_TRUE(kasumi::transport::remove(storage, bad_id));
+
+    // 5. Inspection from second machine sees remote activities cleanly without
+    // modifying anything.
+    const auto summary = kasumi::application::inspect(
+        {kasumi::application::InspectionRequest{
+             .operation = kasumi::application::InspectionOperation::RemoteSummary,
+             .profile_name = "demo"},
+         credentials,
+         environment});
+    ASSERT_TRUE(summary.has_value()) << summary.error().detail;
+    const auto& sum_rep =
+        std::get<kasumi::application::RemoteSummaryReport>(summary->payload);
+    EXPECT_EQ(sum_rep.invalid_activity_count, 0U);
+    EXPECT_FALSE(sum_rep.recent_activities.empty());
 }
 
 } // namespace

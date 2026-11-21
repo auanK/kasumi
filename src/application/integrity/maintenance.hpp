@@ -2,6 +2,7 @@
 #define KASUMI_APPLICATION_INTEGRITY_MAINTENANCE_HPP
 
 #include "application/execute.hpp"
+#include "application/history_storage/activity.hpp"
 #include "crypto/file_crypto.hpp"
 #include "runtime/resolver.hpp"
 #include "transport/transport.hpp"
@@ -14,6 +15,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace kasumi::application::integrity {
 
@@ -60,6 +62,8 @@ struct GarbageCollectResult {
     std::size_t removed_objects = 0;
     bool analysis_only = false;
     std::chrono::nanoseconds removal_elapsed{};
+    std::size_t pruned_activities = 0;
+    std::vector<history_storage::activity::LoadedActivity> kept_activities;
 };
 
 using GarbageCollectProgressCallback =

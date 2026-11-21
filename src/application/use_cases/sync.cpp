@@ -370,7 +370,12 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     });
                     break;
                 }
-                context.sync_mutated = true;
+                if (!context.sync_mutated) {
+                    context.sync_mutated = true;
+                    if (context.on_sync_mutation_start) {
+                        context.on_sync_mutation_start();
+                    }
+                }
                 history::CommitAuthorship authorship;
                 if (context.machine_identity) {
                     authorship = make_commit_authorship(

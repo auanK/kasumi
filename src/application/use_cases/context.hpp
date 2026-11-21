@@ -2,6 +2,7 @@
 #define KASUMI_APPLICATION_USE_CASES_CONTEXT_HPP
 
 #include "application/execute.hpp"
+#include "application/history_storage/activity.hpp"
 #include "core/history.hpp"
 #include "platform/profile_lock.hpp"
 #include "runtime/machine.hpp"
@@ -12,10 +13,12 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace kasumi::application::detail {
 
@@ -41,6 +44,15 @@ struct OperationContext {
     std::string writer_identifier;
     transport::Transport storage;
     ProgressCallback on_progress{};
+    std::function<void()> on_sync_mutation_start{};
+    std::optional<history_storage::activity::ActivityOutcome>
+        maintenance_failure_outcome;
+    std::string maintenance_failure_stage;
+    std::string maintenance_failure_detail;
+    std::uint64_t maintenance_metric_primary = 0;
+    std::uint64_t maintenance_metric_secondary = 0;
+    std::uint32_t maintenance_flags = 0;
+    std::vector<history_storage::activity::LoadedActivity> gc_kept_activities;
     std::unordered_set<std::string> initial_content_identifiers;
 };
 
