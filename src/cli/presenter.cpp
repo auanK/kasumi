@@ -2083,12 +2083,6 @@ int present(const application::Response& response, bool full) {
                                       i18n::Key::ProgressObjects),
                         format_size(data.local_delta_reused_bytes));
                 }
-                if (data.trusted_content_reused > 0) {
-                    std::println(
-                        "{}",
-                        i18n::format(i18n::Key::SyncTrustedContentWarning,
-                                     data.trusted_content_reused));
-                }
                 if (response.inventory_audit) {
                     exit_code = std::max(
                         exit_code,

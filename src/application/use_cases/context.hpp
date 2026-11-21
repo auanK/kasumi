@@ -16,7 +16,6 @@
 #include <functional>
 #include <optional>
 #include <string>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -31,7 +30,6 @@ struct OperationContext {
     std::optional<runtime::MachineIdentity> machine_identity;
     bool initial_sync = false;
     bool audit_inventory = false;
-    bool trust_existing_content = false;
     bool dry_run = false;
     bool reclaim_dirty = false;
     bool has_remote_history_objects = false;
@@ -53,7 +51,6 @@ struct OperationContext {
     std::uint64_t maintenance_metric_secondary = 0;
     std::uint32_t maintenance_flags = 0;
     std::vector<history_storage::activity::LoadedActivity> gc_kept_activities;
-    std::unordered_set<std::string> initial_content_identifiers;
 };
 
 [[nodiscard]] inline history::CommitAuthorship

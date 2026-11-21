@@ -1896,17 +1896,6 @@ TEST(CliPresenterTest, PresentsGarbageCollectBoundedOutputLines) {
     EXPECT_LE(line_count, 12);
 }
 
-TEST(CliPresenterTest, PresentsTrustedContentWarningWhenReused) {
-    const ScopedLanguage lang{Language::English};
-    const auto output = present_out(
-        response(SyncCompleted{.published = true, .trusted_content_reused = 5},
-                 Operation::Sync));
-    EXPECT_NE(
-        output.find("[WARNING] Reused 5 unverified remote content objects"),
-        std::string::npos);
-    EXPECT_NE(output.find("kasumi fsck"), std::string::npos);
-}
-
 TEST(CliPresenterTest, RemoteWritersPresentsBarrierIdentifierWhenPresent) {
     const ScopedLanguage lang_en{Language::English};
     const auto output_en = present_out(InspectionResponse{

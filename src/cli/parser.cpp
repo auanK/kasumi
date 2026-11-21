@@ -124,12 +124,10 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         bool dry_run = false;
         bool initial = false;
         bool audit_inventory = false;
-        bool trust_existing_content = false;
-        const std::array<std::pair<std::string_view, bool*>, 4> sync_flags{{
+        const std::array<std::pair<std::string_view, bool*>, 3> sync_flags{{
             {"--dry-run", &dry_run},
             {"--initial", &initial},
             {"--audit-inventory", &audit_inventory},
-            {"--trust-existing-content", &trust_existing_content},
         }};
         for (int i = 3; i < argc; ++i) {
             const std::string_view flag{argv[i]};
@@ -140,12 +138,9 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
             }
             *found->second = true;
         }
-        if (audit_inventory && (dry_run || initial || trust_existing_content)) {
+        if (audit_inventory && (dry_run || initial)) {
             return std::unexpected(
                 ParseError{.unsupported_sync_audit_combination = true});
-        }
-        if (trust_existing_content && (!initial || dry_run)) {
-            return std::unexpected(ParseError{});
         }
         if (dry_run && initial) {
             return std::unexpected(ParseError{});
@@ -155,8 +150,7 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                                  : application::Operation::Sync,
             .profile_name = argv[2],
             .initial = initial,
-            .audit_inventory = audit_inventory,
-            .trust_existing_content = trust_existing_content};
+            .audit_inventory = audit_inventory};
     }
     if (command == "status") {
         return request(application::Operation::Status, argc, argv);

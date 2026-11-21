@@ -145,9 +145,6 @@ std::expected<void, Error> observe_content_availability(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     std::span<const Hash> confirmed_missing,
     bool allow_unreferenced_content_reuse,
-    bool trust_existing_content,
-    const std::unordered_set<std::string>* initial_content_identifiers =
-        nullptr,
     ProgressMeter* meter = nullptr) {
     HashSet hashes{0, hash_key};
     std::unordered_map<Hash, std::uint64_t, decltype(&hash_key)> upload_sizes{
@@ -208,7 +205,6 @@ std::expected<void, Error> observe_content_availability(
         }
     }
     input.verified_remote_content_objects.clear();
-    input.trusted_remote_content_objects.clear();
 
     // Probe a known object only when an Upload would be elided because another
     // accepted row already references the same Content identity.
@@ -238,22 +234,6 @@ std::expected<void, Error> observe_content_availability(
     add_relevant_pending(input.pending_deletion_authority);
     add_relevant_pending(result.pending_materializations);
     add_relevant_pending(result.pending_storage_rows);
-
-    if (allow_unreferenced_content_reuse && trust_existing_content &&
-        initial_content_identifiers != nullptr &&
-        !input.audit_storage_objects) {
-        for (auto it = upload_sizes.begin(); it != upload_sizes.end();) {
-            const auto identifier = crypto::content_identifier(key, it->first);
-            if (initial_content_identifiers->contains(identifier)) {
-                input.trusted_remote_content_objects.insert(
-                    hash_hex(it->first) + ':' + std::to_string(it->second));
-                hashes.erase(it->first);
-                it = upload_sizes.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
 
     if (hashes.empty()) {
         input.known_missing_content_objects.clear();
@@ -413,10 +393,6 @@ std::expected<void, Error> observe_content_availability(
             upload_it != upload_sizes.end()) {
             const auto identity =
                 hash_hex(hash) + ':' + std::to_string(upload_it->second);
-            if (trust_existing_content) {
-                input.trusted_remote_content_objects.insert(identity);
-                continue;
-            }
             if (reuse_workspace.root.empty()) {
                 auto created =
                     platform::create_workspace("sync-initial-content");
@@ -543,8 +519,6 @@ bool same_observation(const reconciliation::Input& left,
                right.known_missing_content_objects &&
            left.verified_remote_content_objects ==
                right.verified_remote_content_objects &&
-           left.trusted_remote_content_objects ==
-               right.trusted_remote_content_objects &&
            same_snapshot(left.base_tree, right.base_tree) &&
            left.base_commit_id == right.base_commit_id &&
            left.base_state_present == right.base_state_present &&
@@ -689,8 +663,6 @@ refresh_content_availability(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     std::span<const Hash> confirmed_missing,
     bool allow_unreferenced_content_reuse,
-    bool trust_existing_content,
-    const std::unordered_set<std::string>* initial_content_identifiers,
     ProgressMeter* meter) {
     auto availability =
         observe_content_availability(input,
@@ -699,8 +671,6 @@ refresh_content_availability(
                                      key,
                                      confirmed_missing,
                                      allow_unreferenced_content_reuse,
-                                     trust_existing_content,
-                                     initial_content_identifiers,
                                      meter);
     if (!availability) {
         return std::unexpected(availability.error());
@@ -726,8 +696,6 @@ stabilize(const runtime::RuntimeData& runtime_data,
           std::span<const Hash> confirmed_missing,
           bool content_availability_is_current,
           bool allow_unreferenced_content_reuse,
-          bool trust_existing_content,
-          const std::unordered_set<std::string>* initial_content_identifiers,
           bool retain_staged_workspace) {
     auto* meter = session ? session->progress : nullptr;
     const auto no_work = [](const reconciliation::Result& candidate) {
@@ -735,13 +703,6 @@ stabilize(const runtime::RuntimeData& runtime_data,
                !candidate.requires_local_mutation &&
                !candidate.requires_storage_repair &&
                !candidate.requires_state_commit;
-    };
-    const auto concurrent_trust_error = []() {
-        return detail::make_error(
-            ErrorCode::ConcurrentModification,
-            "remote history was published concurrently during initial sync "
-            "with --trust-existing-content; operation was rejected to prevent "
-            "unverified content reuse");
     };
     const auto reconcile_and_refresh =
         [&](reconciliation::Input& target,
@@ -760,14 +721,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
                                             key,
                                             confirmed_missing,
                                             allow_reuse,
-                                            trust_existing_content,
-                                            initial_content_identifiers,
                                             meter);
     };
-
-    if (trust_existing_content && observed_input.storage.history_present) {
-        return std::unexpected(concurrent_trust_error());
-    }
 
     if (!content_availability_is_current) {
         auto available =
@@ -777,8 +732,6 @@ stabilize(const runtime::RuntimeData& runtime_data,
                                          key,
                                          confirmed_missing,
                                          allow_unreferenced_content_reuse,
-                                         trust_existing_content,
-                                         initial_content_identifiers,
                                          meter);
         if (!available) {
             return std::unexpected(available.error());
@@ -887,9 +840,6 @@ stabilize(const runtime::RuntimeData& runtime_data,
             }
             return fail_with_cleanup(detail::make_error(
                 ErrorCode::ObservationFailure, observed.error().detail));
-        }
-        if (trust_existing_content && observed->storage.history_present) {
-            return fail_with_cleanup(concurrent_trust_error());
         }
         observed->pending_deletion_authority = input.pending_deletion_authority;
         mutation_fault_test::hit("before_final_local_observation",

@@ -1552,7 +1552,6 @@ TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
             .key = fixture->key,
             .writer_identifier = {},
             .storage = std::move(fixture->storage),
-            .initial_content_identifiers = {},
         };
         probe.profile = fixture->profile;
         const auto result = application::detail::run_sync(context);
@@ -1613,7 +1612,6 @@ TEST(SyncContentBatchTest,
             .key = fixture->key,
             .writer_identifier = {},
             .storage = std::move(fixture->storage),
-            .initial_content_identifiers = {},
         };
         const auto result = application::detail::run_sync(context);
         fixture->storage = std::move(context.storage);
@@ -1864,7 +1862,6 @@ TEST(SyncContentBatchTest, ResumedPublicationVerifiesChangedLayoutAndBlocksGc) {
         .key = fixture->key,
         .writer_identifier = {},
         .storage = std::move(fixture->storage),
-        .initial_content_identifiers = {},
     };
     const auto blocked = app::detail::run_garbage_collect(gc);
     fixture->storage = std::move(gc.storage);
