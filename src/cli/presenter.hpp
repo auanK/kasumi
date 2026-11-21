@@ -131,7 +131,7 @@ void present(const application::FsckProgress& progress,
 int present(const application::Response& response, bool full = false);
 
 // Displays the result of a remote inspection and returns 0.
-int present(const application::InspectionResponse& response);
+int present(const application::InspectionResponse& response, bool full = false);
 
 // Displays the error and returns 1.
 int present(const application::Error& error);
@@ -142,6 +142,21 @@ int present(const application::InspectionError& error);
 void print_ok_line(std::string_view message);
 void print_error_line(std::string_view message);
 std::string sanitize_terminal_text(std::string_view text);
+
+// Shared formatting helpers for execution and activity traceability.
+std::string format_machine_label(std::string_view name,
+                                 std::string_view id_hex,
+                                 bool show_id,
+                                 bool full_id = false);
+std::string_view commit_origin_label(std::uint8_t origin_op);
+std::string_view activity_operation_label(std::uint8_t op);
+std::string_view activity_outcome_label(std::uint8_t outcome);
+std::string format_activity_metrics(std::uint8_t op,
+                                    std::uint64_t primary,
+                                    std::uint64_t secondary,
+                                    std::uint64_t bytes,
+                                    std::uint32_t flags);
+std::string format_activity_flags(std::uint32_t flags);
 
 } // namespace kasumi::cli
 

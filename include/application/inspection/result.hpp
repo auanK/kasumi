@@ -125,6 +125,14 @@ struct RemoteActivityInfo {
     std::string detail;
 };
 
+inline constexpr std::uint32_t remote_activity_flag_analysis_only = 1U << 0U;
+inline constexpr std::uint32_t remote_activity_flag_barrier_already_absent =
+    1U << 1U;
+inline constexpr std::uint32_t remote_activity_flag_barrier_release_failed =
+    1U << 2U;
+inline constexpr std::uint32_t remote_activity_flag_mutation_uncertain =
+    1U << 3U;
+
 struct RemoteSummaryReport {
     bool history_present = false;
     std::uint64_t observed_height = 0;

@@ -688,6 +688,7 @@ target_link_libraries(
     kasumi_application
     PRIVATE
     kasumi_crypto
+    kasumi_platform
     kasumi_warnings
     kasumi_release_optimizations
     kasumi_hardening

@@ -3,6 +3,7 @@
 #include "cli/presenter.hpp"
 #include "kasumi/test/capture.hpp"
 #include "platform/cancellation.hpp"
+#include "platform/clock.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -2195,4 +2196,220 @@ TEST(CliPresenterTest, RemoteObjectsRenderExternalFieldsAsSingleSafeLines) {
                          .relation = "reason\nforged\tline"}}}});
     EXPECT_TRUE(output.contains("relatório/?[2J?2J"));
     EXPECT_TRUE(output.contains("reason?forged?line"));
+}
+
+TEST(CliPresenterTest,
+     RemoteHeadsCommitsAndCommitFormatTimestampsAndAuthorship) {
+    using namespace kasumi::application;
+    const std::int64_t ts_a = 1700000100;
+    const std::int64_t ts_b = 1700000200;
+    const auto formatted_a =
+        kasumi::platform::clock::format_local_timestamp(ts_a);
+    const auto formatted_b =
+        kasumi::platform::clock::format_local_timestamp(ts_b);
+    const std::string id_a = "aaaa1111222233334444555566667777";
+    const std::string id_b = "bbbb1111222233334444555566667777";
+    const std::string id_c = "cccc1111222233334444555566667777";
+
+    const ScopedLanguage lang{Language::English};
+    const auto heads_out = present_out(InspectionResponse{
+        .operation = InspectionOperation::RemoteHeads,
+        .payload = RemoteHeadsReport{
+            .history_present = true,
+            .observed_height = 5,
+            .heads = {
+                RemoteHeadInfo{
+                    .commit_id = std::string(64, '1'),
+                    .height = 5,
+                    .created_at = ts_a,
+                    .root_hash = std::string(64, '2'),
+                    .authorship =
+                        RemoteCommitAuthorship{
+                            .operation = RemoteCommitOrigin::Sync,
+                            .machine_id_hex = id_a,
+                            .machine_name = "workstation",
+                        },
+                },
+                RemoteHeadInfo{
+                    .commit_id = std::string(64, '3'),
+                    .height = 5,
+                    .created_at = ts_b,
+                    .root_hash = std::string(64, '4'),
+                    .authorship =
+                        RemoteCommitAuthorship{
+                            .operation = RemoteCommitOrigin::Repack,
+                            .machine_id_hex = id_b,
+                            .machine_name = "workstation",
+                        },
+                },
+            }}});
+    EXPECT_NE(heads_out.find("Created at: " + formatted_a), std::string::npos);
+    EXPECT_NE(heads_out.find("Created at: " + formatted_b), std::string::npos);
+    EXPECT_NE(heads_out.find("Origin: sync"), std::string::npos);
+    EXPECT_NE(heads_out.find("Origin: repack"), std::string::npos);
+    EXPECT_NE(heads_out.find("Machine: workstation [aaaa]"), std::string::npos);
+    EXPECT_NE(heads_out.find("Machine: workstation [bbbb]"), std::string::npos);
+
+    const auto commits_out = present_out(InspectionResponse{
+        .operation = InspectionOperation::RemoteCommits,
+        .payload = RemoteCommitsReport{
+            .history_present = true,
+            .observed_height = 2,
+            .commits = {
+                RemoteCommitInfo{
+                    .commit_id = std::string(64, '5'),
+                    .height = 2,
+                    .created_at = ts_b,
+                    .logical_head = true,
+                    .authorship =
+                        RemoteCommitAuthorship{
+                            .operation = RemoteCommitOrigin::ResolveMissing,
+                            .machine_id_hex = id_c,
+                            .machine_name = "laptop",
+                        },
+                },
+                RemoteCommitInfo{
+                    .commit_id = std::string(64, '6'),
+                    .height = 1,
+                    .created_at = ts_a,
+                    .authorship = std::nullopt,
+                },
+            }}});
+    EXPECT_NE(commits_out.find("Origin: resolve-missing"), std::string::npos);
+    EXPECT_NE(commits_out.find("Machine: laptop\n"), std::string::npos);
+    EXPECT_EQ(commits_out.find("laptop [cccc]"), std::string::npos);
+    EXPECT_NE(commits_out.find("Origin: unknown"), std::string::npos);
+    EXPECT_NE(commits_out.find("Machine: unknown"), std::string::npos);
+
+    const auto commit_out = present_out(InspectionResponse{
+        .operation = InspectionOperation::RemoteCommit,
+        .payload = RemoteCommitReport{
+            .commit = RemoteCommitInfo{
+                .commit_id = std::string(64, '5'),
+                .height = 2,
+                .created_at = ts_b,
+                .authorship =
+                    RemoteCommitAuthorship{
+                        .operation = RemoteCommitOrigin::Sync,
+                        .machine_id_hex = id_c,
+                        .machine_name = "laptop",
+                    },
+            }}});
+    EXPECT_NE(commit_out.find("Created at: " + formatted_b), std::string::npos);
+    EXPECT_NE(commit_out.find("Machine: laptop [cccc]"), std::string::npos);
+}
+
+TEST(CliPresenterTest,
+     RemoteSummaryFullActivityReportAndObjectCategoryWorkCleanly) {
+    using namespace kasumi::application;
+    const std::string id_a = "aaaa1111222233334444555566667777";
+    const std::string id_b = "bbbb1111222233334444555566667777";
+    const InspectionResponse summary_resp{
+        .operation = InspectionOperation::RemoteSummary,
+        .payload = RemoteSummaryReport{
+            .history_present = true,
+            .observed_height = 4,
+            .reachable_commit_count = 4,
+            .logical_head_count = 1,
+            .recent_activities = {
+                RemoteActivityInfo{
+                    .event_id = "00000000000000000000000000000001",
+                    .operation = RemoteActivityOperation::Fsck,
+                    .outcome = RemoteActivityOutcome::IssuesFound,
+                    .machine_id_hex = id_a,
+                    .machine_name = "host-a",
+                    .started_at = 1700000000,
+                    .finished_at = 1700000010,
+                    .duration_ms = 2500,
+                    .metric_primary = 5,
+                    .metric_bytes = 2048,
+                    .stage = "audit",
+                    .detail = "missing blob",
+                },
+                RemoteActivityInfo{
+                    .event_id = "00000000000000000000000000000002",
+                    .operation = RemoteActivityOperation::Fsck,
+                    .outcome = RemoteActivityOutcome::Succeeded,
+                    .machine_id_hex = id_b,
+                    .machine_name = "host-b",
+                    .started_at = 1700000100,
+                    .finished_at = 1700000110,
+                    .duration_ms = 1200,
+                    .metric_primary = 8,
+                    .metric_bytes = 4096,
+                },
+                RemoteActivityInfo{
+                    .event_id = "00000000000000000000000000000003",
+                    .operation = RemoteActivityOperation::GarbageCollect,
+                    .outcome = RemoteActivityOutcome::Succeeded,
+                    .machine_id_hex = id_a,
+                    .machine_name = "host-a",
+                    .started_at = 1700000200,
+                    .finished_at = 1700000210,
+                    .duration_ms = 500,
+                    .metric_primary = 0,
+                    .metric_secondary = 3,
+                    .flags = remote_activity_flag_analysis_only,
+                },
+            },
+            .invalid_activity_count = 2,
+        }};
+
+    {
+        const ScopedLanguage en{Language::English};
+        const auto brief = kasumi::test::capture_stdout([&] {
+            EXPECT_EQ(kasumi::cli::present(summary_resp, false), 0);
+        });
+        EXPECT_NE(brief.find("Invalid activity records: 2"), std::string::npos);
+        EXPECT_NE(brief.find("Recent operational activity (2):"),
+                  std::string::npos);
+        EXPECT_NE(brief.find("3 record(s) total; use --full"),
+                  std::string::npos);
+        EXPECT_NE(brief.find("host-b"), std::string::npos);
+        EXPECT_EQ(brief.find("missing blob"), std::string::npos);
+
+        const auto detailed = kasumi::test::capture_stdout([&] {
+            EXPECT_EQ(kasumi::cli::present(summary_resp, true), 0);
+        });
+        EXPECT_NE(detailed.find("Recent operational activity (3):"),
+                  std::string::npos);
+        EXPECT_NE(detailed.find(id_a), std::string::npos);
+        EXPECT_NE(detailed.find("audit: missing blob"), std::string::npos);
+        EXPECT_NE(detailed.find("analysis only"), std::string::npos);
+        EXPECT_EQ(detailed.find("use --full"), std::string::npos);
+
+        const auto obj_out = present_out(InspectionResponse{
+            .operation = InspectionOperation::RemoteObjects,
+            .payload = RemoteObjectsReport{
+                .objects = {{.identifier = "act-obj",
+                             .category = RemoteObjectCategory::Activity,
+                             .structurally_valid = true}}}});
+        EXPECT_NE(obj_out.find("Category: activity"), std::string::npos);
+    }
+
+    const ScopedLanguage pt{Language::Portuguese};
+    const auto pt_brief = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present(summary_resp, false), 0);
+    });
+    EXPECT_NE(pt_brief.find("Registros de atividade inválidos: 2"),
+              std::string::npos);
+    EXPECT_NE(pt_brief.find("3 registro(s) no total; use --full"),
+              std::string::npos);
+}
+
+TEST(CliPresenterTest,
+     SyncDefaultStdoutUnchangedAndActivityPublishWarningUsesStderr) {
+    using namespace kasumi::application;
+    const ScopedLanguage en{Language::English};
+    auto sync_resp = response(SyncCompleted{}, Operation::Sync);
+    sync_resp.activity_publish_warning = "remote write denied";
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    EXPECT_EQ(kasumi::cli::present(sync_resp, false), 0);
+    const auto out = testing::internal::GetCapturedStdout();
+    const auto err = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(out, "[OK] Synchronization completed.\n");
+    EXPECT_NE(err.find("[WARNING]"), std::string::npos);
+    EXPECT_NE(err.find("remote write denied"), std::string::npos);
 }

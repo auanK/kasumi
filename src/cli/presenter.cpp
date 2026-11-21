@@ -4,6 +4,7 @@
 #include "cli/i18n.hpp"
 #include "cli/style.hpp"
 #include "platform/cancellation.hpp"
+#include "platform/clock.hpp"
 #include "platform/path.hpp"
 
 #include <algorithm>
@@ -12,7 +13,9 @@
 #include <cmath>
 #include <cstdio>
 #include <format>
+#include <map>
 #include <print>
+#include <set>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -345,6 +348,124 @@ std::string remote_text(std::string_view text) {
     return cleaned;
 }
 
+namespace {
+
+template <typename Range, typename Extract>
+std::set<std::string> colliding_machine_names(const Range& items,
+                                              Extract&& extract) {
+    std::map<std::string, std::set<std::string>> ids_by_name;
+    for (const auto& item : items) {
+        const auto [name, id] = extract(item);
+        if (!name.empty() && !id.empty()) {
+            ids_by_name[std::string{name}].insert(std::string{id});
+        }
+    }
+    std::set<std::string> colliding;
+    for (const auto& [name, ids] : ids_by_name) {
+        if (ids.size() > 1) {
+            colliding.insert(name);
+        }
+    }
+    return colliding;
+}
+
+void present_commit_authorship(
+    const std::optional<application::RemoteCommitAuthorship>& authorship,
+    const std::set<std::string>& colliding_names,
+    bool always_show_id) {
+    if (!authorship) {
+        i18n::println(i18n::Key::FieldOrigin,
+                      i18n::tr(i18n::Key::LabelUnknown));
+        i18n::println(i18n::Key::FieldMachine,
+                      i18n::tr(i18n::Key::LabelUnknown));
+        return;
+    }
+    i18n::println(
+        i18n::Key::FieldOrigin,
+        commit_origin_label(static_cast<std::uint8_t>(authorship->operation)));
+    const bool show_id =
+        always_show_id || colliding_names.contains(authorship->machine_name);
+    i18n::println(i18n::Key::FieldMachine,
+                  format_machine_label(authorship->machine_name,
+                                       authorship->machine_id_hex,
+                                       show_id,
+                                       false));
+}
+
+template <typename Item>
+void present_activity_item(const Item& item,
+                           const std::set<std::string>& colliding_names,
+                           bool full) {
+    const auto op_raw = static_cast<std::uint8_t>(item.operation);
+    const auto out_raw = static_cast<std::uint8_t>(item.outcome);
+    const auto ts = platform::clock::format_local_timestamp(item.finished_at);
+    const auto op = activity_operation_label(op_raw);
+    const auto outcome = activity_outcome_label(out_raw);
+    const bool show_id = full || colliding_names.contains(item.machine_name);
+    const auto machine = format_machine_label(
+        item.machine_name, item.machine_id_hex, show_id, full);
+    const auto metrics = format_activity_metrics(op_raw,
+                                                 item.metric_primary,
+                                                 item.metric_secondary,
+                                                 item.metric_bytes,
+                                                 item.flags);
+    const auto flags = format_activity_flags(item.flags);
+    std::string extra;
+    if (!metrics.empty()) {
+        extra += metrics;
+    }
+    if (!flags.empty()) {
+        if (!extra.empty()) {
+            extra += ", ";
+        }
+        extra += flags;
+    }
+    if (full) {
+        const auto dur =
+            format_duration(std::chrono::milliseconds(item.duration_ms));
+        if (extra.empty()) {
+            std::println("  {} | {:<17} | {} | {} | {}", ts, op, outcome, dur, machine);
+        } else {
+            std::println("  {} | {:<17} | {} | {} | {} ({})",
+                         ts,
+                         op,
+                         outcome,
+                         dur,
+                         machine,
+                         extra);
+        }
+        if (!item.stage.empty() || !item.detail.empty()) {
+            std::string note;
+            if (!item.stage.empty()) {
+                note = sanitize_terminal_text(item.stage);
+            }
+            if (!item.detail.empty()) {
+                if (!note.empty()) {
+                    note += ": ";
+                }
+                note += sanitize_terminal_text(item.detail);
+            }
+            std::println("    {}", note);
+        }
+    } else {
+        if (item.outcome != application::RemoteActivityOutcome::Succeeded &&
+            !item.stage.empty()) {
+            if (!extra.empty()) {
+                extra += ", ";
+            }
+            extra += sanitize_terminal_text(item.stage);
+        }
+        if (extra.empty()) {
+            std::println("  {:<17} {} | {} | {}", op, ts, outcome, machine);
+        } else {
+            std::println(
+                "  {:<17} {} | {} | {} ({})", op, ts, outcome, machine, extra);
+        }
+    }
+}
+
+} // namespace
+
 template <typename Report>
 int present_remote_report(const Report& report) = delete;
 
@@ -354,11 +475,23 @@ int present_remote_report(const application::RemoteHeadsReport& report) {
         return 0;
     }
 
+    const auto colliding = colliding_machine_names(
+        report.heads,
+        [](const application::RemoteHeadInfo& h)
+            -> std::pair<std::string_view, std::string_view> {
+            if (!h.authorship) {
+                return {};
+            }
+            return {h.authorship->machine_name, h.authorship->machine_id_hex};
+        });
+
     i18n::println(i18n::Key::RemoteHeadsHeader, report.heads.size());
-    render_indexed(report.heads, [](const auto& head) {
+    render_indexed(report.heads, [&](const auto& head) {
         i18n::println(i18n::Key::FieldCommit, remote_text(head.commit_id));
         i18n::println(i18n::Key::FieldHeight, head.height);
-        i18n::println(i18n::Key::FieldCreatedAt, head.created_at);
+        i18n::println(i18n::Key::FieldCreatedAt,
+                      platform::clock::format_local_timestamp(head.created_at));
+        present_commit_authorship(head.authorship, colliding, false);
         i18n::println(i18n::Key::FieldParents, head.parent_ids.size());
         i18n::println(i18n::Key::FieldFiles, head.file_count);
         i18n::println(i18n::Key::FieldDirectories, head.directory_count);
@@ -398,6 +531,16 @@ int present_remote_report(const application::RemoteCommitsReport& report) {
         return 0;
     }
 
+    const auto colliding = colliding_machine_names(
+        report.commits,
+        [](const application::RemoteCommitInfo& c)
+            -> std::pair<std::string_view, std::string_view> {
+            if (!c.authorship) {
+                return {};
+            }
+            return {c.authorship->machine_name, c.authorship->machine_id_hex};
+        });
+
     i18n::println(i18n::Key::RemoteCommitsHeader, report.commits.size());
     for (std::size_t index = 0; index < report.commits.size(); ++index) {
         const auto& commit = report.commits[index];
@@ -408,7 +551,10 @@ int present_remote_report(const application::RemoteCommitsReport& report) {
         std::println("\n[{}] {}", index + 1, label);
         i18n::println(i18n::Key::FieldCommit, remote_text(commit.commit_id));
         i18n::println(i18n::Key::FieldHeight, commit.height);
-        i18n::println(i18n::Key::FieldCreatedAt, commit.created_at);
+        i18n::println(
+            i18n::Key::FieldCreatedAt,
+            platform::clock::format_local_timestamp(commit.created_at));
+        present_commit_authorship(commit.authorship, colliding, false);
         i18n::println(i18n::Key::FieldParents, commit.parent_ids.size());
         i18n::println(i18n::Key::FieldEntries, commit.entry_count);
         i18n::println(i18n::Key::FieldSize, format_size(commit.total_bytes));
@@ -424,7 +570,8 @@ std::string_view dash_or(std::string_view value) {
     return value.empty() ? "-" : value;
 }
 
-int present_remote_report(const application::RemoteSummaryReport& report) {
+int present_remote_report(const application::RemoteSummaryReport& report,
+                          bool full = false) {
     i18n::println(i18n::Key::RemoteSummaryHeader);
     i18n::println(i18n::Key::FieldHistory,
                   report.history_present
@@ -439,6 +586,52 @@ int present_remote_report(const application::RemoteSummaryReport& report) {
                   report.missing_content_count);
     i18n::println(i18n::Key::FieldOrphanContents, report.orphan_content_count);
     i18n::println(i18n::Key::FieldActiveWriters, report.active_writer_count);
+    if (report.invalid_activity_count > 0) {
+        i18n::println(i18n::Key::FieldInvalidActivities,
+                      report.invalid_activity_count);
+    }
+    if (report.recent_activities.empty()) {
+        i18n::println(i18n::Key::RemoteSummaryNoActivity);
+        return 0;
+    }
+
+    std::vector<const application::RemoteActivityInfo*> sorted;
+    sorted.reserve(report.recent_activities.size());
+    for (const auto& item : report.recent_activities) {
+        sorted.push_back(&item);
+    }
+    std::ranges::sort(sorted, [](const auto* a, const auto* b) {
+        if (a->finished_at != b->finished_at) {
+            return a->finished_at > b->finished_at;
+        }
+        return a->started_at > b->started_at;
+    });
+    const auto colliding = colliding_machine_names(
+        report.recent_activities,
+        [](const application::RemoteActivityInfo& item)
+            -> std::pair<std::string_view, std::string_view> {
+            return {item.machine_name, item.machine_id_hex};
+        });
+
+    std::vector<const application::RemoteActivityInfo*> selected;
+    if (full) {
+        selected = sorted;
+    } else {
+        std::set<std::uint8_t> seen_ops;
+        for (const auto* item : sorted) {
+            const auto op = static_cast<std::uint8_t>(item->operation);
+            if (seen_ops.insert(op).second) {
+                selected.push_back(item);
+            }
+        }
+    }
+    i18n::println(i18n::Key::RemoteSummaryActivityHeader, selected.size());
+    for (const auto* item : selected) {
+        present_activity_item(*item, colliding, full);
+    }
+    if (!full && sorted.size() > selected.size()) {
+        i18n::println(i18n::Key::RemoteSummaryActivityMoreHint, sorted.size());
+    }
     return 0;
 }
 
@@ -475,7 +668,9 @@ int present_remote_report(const application::RemoteCommitReport& report) {
     i18n::println(i18n::Key::RemoteCommitHeader);
     i18n::println(i18n::Key::FieldCommit, remote_text(commit.commit_id));
     i18n::println(i18n::Key::FieldHeight, commit.height);
-    i18n::println(i18n::Key::FieldCreatedAt, commit.created_at);
+    i18n::println(i18n::Key::FieldCreatedAt,
+                  platform::clock::format_local_timestamp(commit.created_at));
+    present_commit_authorship(commit.authorship, {}, true);
     i18n::println(i18n::Key::FieldLogicalHead, yes_no(commit.logical_head));
     i18n::println(i18n::Key::FieldPhysicalMarker,
                   yes_no(commit.physically_marked));
@@ -517,7 +712,8 @@ void present_epoch_info(const application::RemoteEpochInfo& epoch) {
     i18n::println(i18n::Key::FieldSequence, epoch.sequence);
     i18n::println(i18n::Key::FieldEpochId, remote_text(epoch.epoch_id));
     i18n::println(i18n::Key::FieldVaultId, remote_text(epoch.vault_id));
-    i18n::println(i18n::Key::FieldIssuedAt, epoch.issued_at);
+    i18n::println(i18n::Key::FieldIssuedAt,
+                  platform::clock::format_local_timestamp(epoch.issued_at));
     i18n::println(i18n::Key::FieldMinRetention,
                   epoch.min_history_depth,
                   epoch.min_history_age_hours);
@@ -632,7 +828,7 @@ int present_remote_report(const application::RemoteMarkersReport& report) {
 
 std::string_view object_category(application::RemoteObjectCategory category) {
     using C = application::RemoteObjectCategory;
-    static constexpr std::array<std::pair<C, i18n::Key>, 7> kTable{{
+    static constexpr std::array<std::pair<C, i18n::Key>, 8> kTable{{
         {C::Content, i18n::Key::ObjectCategoryContent},
         {C::CommitVariant, i18n::Key::ObjectCategoryCommitVariant},
         {C::HeadMarker, i18n::Key::ObjectCategoryHeadMarker},
@@ -640,6 +836,7 @@ std::string_view object_category(application::RemoteObjectCategory category) {
         {C::Writer, i18n::Key::ObjectCategoryWriter},
         {C::Barrier, i18n::Key::ObjectCategoryBarrier},
         {C::Protocol, i18n::Key::ObjectCategoryProtocol},
+        {C::Activity, i18n::Key::ObjectCategoryActivity},
     }};
     return enum_tr(category, kTable, i18n::Key::ObjectCategoryUnknown);
 }
@@ -1726,9 +1923,137 @@ void ProgressDisplay::update(const application::ExecutionProgress& progress,
     std::fflush(stdout);
 }
 
+std::string format_machine_label(std::string_view name,
+                                 std::string_view id_hex,
+                                 bool show_id,
+                                 bool full_id) {
+    const auto clean_name = sanitize_terminal_text(name);
+    const auto display_id =
+        (full_id || id_hex.size() <= 4) ? id_hex : id_hex.substr(0, 4);
+    if (clean_name.empty()) {
+        if (display_id.empty()) {
+            return std::string{i18n::tr(i18n::Key::LabelUnknown)};
+        }
+        return std::format("[{}]", sanitize_terminal_text(display_id));
+    }
+    if (show_id && !display_id.empty()) {
+        return std::format(
+            "{} [{}]", clean_name, sanitize_terminal_text(display_id));
+    }
+    return clean_name;
+}
+
+std::string_view commit_origin_label(std::uint8_t origin_op) {
+    using O = application::RemoteCommitOrigin;
+    switch (static_cast<O>(origin_op)) {
+    case O::Sync:
+        return "sync";
+    case O::Repack:
+        return "repack";
+    case O::ResolveMissing:
+        return "resolve-missing";
+    case O::Unknown:
+    default:
+        return i18n::tr(i18n::Key::LabelUnknown);
+    }
+}
+
+std::string_view activity_operation_label(std::uint8_t op) {
+    using O = application::RemoteActivityOperation;
+    switch (static_cast<O>(op)) {
+    case O::Fsck:
+        return "fsck";
+    case O::GarbageCollect:
+        return "gc";
+    case O::RemoveWriter:
+        return "gc remove-writer";
+    case O::RemoveBarrier:
+        return "gc remove-barrier";
+    default:
+        return i18n::tr(i18n::Key::LabelUnknown);
+    }
+}
+
+std::string_view activity_outcome_label(std::uint8_t outcome) {
+    using R = application::RemoteActivityOutcome;
+    static constexpr std::array<std::pair<R, i18n::Key>, 6> kTable{{
+        {R::Succeeded, i18n::Key::LabelStatusOk},
+        {R::IssuesFound, i18n::Key::LabelStatusIssuesFound},
+        {R::Blocked, i18n::Key::LabelStatusBlocked},
+        {R::Cancelled, i18n::Key::LabelStatusCancelled},
+        {R::Failed, i18n::Key::LabelStatusFailed},
+        {R::Uncertain, i18n::Key::LabelStatusUncertain},
+    }};
+    return enum_tr(static_cast<R>(outcome), kTable, i18n::Key::LabelUnknown);
+}
+
+std::string format_activity_metrics(std::uint8_t op,
+                                    std::uint64_t primary,
+                                    std::uint64_t secondary,
+                                    std::uint64_t bytes,
+                                    std::uint32_t flags) {
+    using O = application::RemoteActivityOperation;
+    switch (static_cast<O>(op)) {
+    case O::Fsck:
+        if (primary > 0 || bytes > 0) {
+            return i18n::format(
+                i18n::Key::LabelMetricFsck, primary, format_size(bytes));
+        }
+        return {};
+    case O::GarbageCollect:
+        if ((flags & application::remote_activity_flag_analysis_only) != 0U) {
+            return i18n::format(i18n::Key::LabelMetricGcCandidates, secondary);
+        }
+        if (primary > 0 || secondary > 0) {
+            return i18n::format(
+                i18n::Key::LabelMetricGcRemoved, primary, secondary);
+        }
+        return {};
+    case O::RemoveWriter:
+    case O::RemoveBarrier:
+    default:
+        return {};
+    }
+}
+
+std::string format_activity_flags(std::uint32_t flags) {
+    std::string out;
+    const auto append = [&](i18n::Key key) {
+        if (!out.empty()) {
+            out += ", ";
+        }
+        out += i18n::tr(key);
+    };
+    if ((flags & application::remote_activity_flag_analysis_only) != 0U) {
+        append(i18n::Key::LabelFlagAnalysisOnly);
+    }
+    if ((flags & application::remote_activity_flag_barrier_already_absent) !=
+        0U) {
+        append(i18n::Key::LabelFlagAlreadyAbsent);
+    }
+    if ((flags & application::remote_activity_flag_barrier_release_failed) !=
+        0U) {
+        append(i18n::Key::LabelFlagBarrierReleaseFailed);
+    }
+    if ((flags & application::remote_activity_flag_mutation_uncertain) != 0U) {
+        append(i18n::Key::LabelFlagMutationUncertain);
+    }
+    return out;
+}
+
+int present_remote_dispatch(const application::RemoteSummaryReport& report,
+                          bool full) {
+    return present_remote_report(report, full);
+}
+
+template <typename Report>
+int present_remote_dispatch(const Report& report, bool) {
+    return present_remote_report(report);
+}
+
 int present(const application::Response& response, bool full) {
     const auto op = response.operation;
-    return std::visit(
+    const int result_code = std::visit(
         [&](const auto& data) -> int {
             using T = std::decay_t<decltype(data)>;
             using Op = application::Operation;
@@ -1960,13 +2285,23 @@ int present(const application::Response& response, bool full) {
             }
         },
         response.data);
+    if (response.activity_publish_warning &&
+        !response.activity_publish_warning->empty()) {
+        std::println(stderr,
+                     "{} {}",
+                     i18n::tr(i18n::Key::LabelWarning),
+                     i18n::format(i18n::Key::LabelActivityPublishWarning,
+                                  sanitize_terminal_text(
+                                      *response.activity_publish_warning)));
+    }
+    return result_code;
 }
 
-int present(const application::InspectionResponse& response) {
+int present(const application::InspectionResponse& response, bool full) {
     return std::visit(
         [&](const auto& report) -> int {
             if (inspection_op_matches(response)) {
-                return present_remote_report(report);
+                return present_remote_dispatch(report, full);
             }
             print_status_line(style::red,
                               i18n::Key::LabelError,

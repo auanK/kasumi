@@ -186,7 +186,8 @@ INSTANTIATE_TEST_SUITE_P(
                            "sync"},
         InvalidCommandLine{
             "MissingOperand", {"remote", "get", "demo", "file"}, "remote get"},
-        InvalidCommandLine{"UnknownCommand", {"unknown"}, ""}),
+        InvalidCommandLine{
+            "UnknownCommand", {"unknown"}, ""}),
     [](const auto& case_info) {
         return case_info.param.name;
     });
@@ -207,7 +208,89 @@ INSTANTIATE_TEST_SUITE_P(
     testing::ValuesIn(std::vector<std::vector<std::string>>{
         std::vector<std::string>{"sync", "demo", "--full"},
         {"sync", "demo", "--dry-run", "--full"},
-        {"status", "demo", "--full"}}));
+        {"status", "demo", "--full"},
+        {"remote", "summary", "demo", "--full"}}));
+
+TEST_F(CliInterfaceTest, ShowAndRemoteSummaryFullGrammarValidation) {
+    const auto show_full_missing = run({"kasumi", "show", "demo", "--full"});
+    EXPECT_EQ(show_full_missing.code, 1);
+    EXPECT_TRUE(show_full_missing.out.empty());
+    EXPECT_NE(show_full_missing.err.find("[ERROR]"), std::string::npos);
+    EXPECT_EQ(show_full_missing.err.find("Usage:"), std::string::npos);
+
+    for (const auto& args : std::vector<std::vector<std::string>>{
+             {"kasumi", "show", "--full"},
+             {"kasumi", "show", "demo", "--full", "--full"},
+             {"kasumi", "remote", "summary", "--full"},
+             {"kasumi", "remote", "summary", "demo", "--full", "--full"},
+             {"kasumi", "remote", "heads", "demo", "--full"},
+         }) {
+        const auto invalid = run(args);
+        EXPECT_EQ(invalid.code, 1);
+        EXPECT_TRUE(invalid.out.empty());
+        EXPECT_NE(invalid.err.find("[ERROR]"), std::string::npos);
+        EXPECT_NE(invalid.err.find("--help"), std::string::npos);
+    }
+}
+
+TEST_F(CliInterfaceTest,
+       ShowOfflineRemoteSummaryAndConfigReflectTraceability) {
+    const auto root = kasumi::test::workspace_root(workspace);
+    const kasumi::application::ExecutionEnvironment environment{root / "kasumi"};
+    const auto remote = root / "remote";
+    const kasumi::application::Profile profile{
+        "demo", root / "local", remote.string()};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment,
+        profile,
+        kasumi::application::MasterKeyHex{std::string(64, '7')}));
+    std::filesystem::create_directories(profile.local_dir);
+    kasumi::test::write_text(profile.local_dir / "doc.txt", "hello world");
+
+    const auto synced = run({"kasumi", "sync", "demo"});
+    ASSERT_EQ(synced.code, 0) << synced.err << synced.out;
+    const auto fscked = run({"kasumi", "fsck", "demo"});
+    ASSERT_EQ(fscked.code, 0) << fscked.err << fscked.out;
+
+    // Move remote away to verify show remains completely offline.
+    const auto parked_remote = root / "remote-offline";
+    std::filesystem::rename(remote, parked_remote);
+    const auto shown = run({"kasumi", "show", "demo"});
+    const auto shown_full = run({"kasumi", "show", "demo", "--full"});
+    std::filesystem::rename(parked_remote, remote);
+
+    EXPECT_EQ(shown.code, 0) << shown.err;
+    EXPECT_NE(shown.out.find("Accepted state:"), std::string::npos);
+    EXPECT_NE(shown.out.find("Commit origin: sync"), std::string::npos);
+    EXPECT_NE(shown.out.find("Last complete sync:"), std::string::npos);
+    EXPECT_NE(shown.out.find("Last local attempt:"), std::string::npos);
+    EXPECT_NE(shown.out.find("Recent local maintenance:"), std::string::npos);
+
+    EXPECT_EQ(shown_full.code, 0) << shown_full.err;
+    EXPECT_NE(shown_full.out.find("Recent local executions (2):"),
+              std::string::npos);
+
+    const auto heads = run({"kasumi", "remote", "heads", "demo"});
+    EXPECT_EQ(heads.code, 0) << heads.err;
+    EXPECT_NE(heads.out.find("Origin: sync"), std::string::npos);
+
+    const auto summary_full =
+        run({"kasumi", "remote", "summary", "demo", "--full"});
+    EXPECT_EQ(summary_full.code, 0) << summary_full.err;
+    EXPECT_NE(summary_full.out.find("Recent operational activity (1):"),
+              std::string::npos);
+    EXPECT_NE(summary_full.out.find("fsck"), std::string::npos);
+
+    std::istringstream input{"q\n"};
+    auto* previous = std::cin.rdbuf(input.rdbuf());
+    const auto config = run({"kasumi", "config"});
+    std::cin.rdbuf(previous);
+    std::cin.clear();
+    EXPECT_EQ(config.code, 0);
+    EXPECT_NE(config.out.find("Last sync"), std::string::npos);
+    EXPECT_NE(config.out.find("Ready"), std::string::npos);
+    EXPECT_NE(config.out.find("(ok)"), std::string::npos);
+}
 class GeneralOptionTest : public CliInterfaceTest,
                           public testing::WithParamInterface<const char*> {};
 TEST_P(GeneralOptionTest, ConventionalOptionsSucceedWithoutExecution) {
