@@ -1397,6 +1397,7 @@ TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
     auto fixture = make_fixture("fastcdc-download-delta");
     fixture->storage.storage.get_batch = recording_get_batch;
     ContentWindowProbe probe;
+    probe.control_read_batch_supported = true;
     attach_probe(*fixture, probe);
     const auto first_profile = fixture->profile;
     const auto first_local = fixture->local;
@@ -1482,9 +1483,11 @@ TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
         }
         kasumi::test::write_binary(first_local / "large.bin", data);
         fixture->events.clear();
+        probe.control_read_batch_calls = 0;
         ASSERT_TRUE(synchronize());
-        EXPECT_NE(std::ranges::find(fixture->events, "list"),
+        EXPECT_EQ(std::ranges::find(fixture->events, "list"),
                   fixture->events.end());
+        EXPECT_GE(probe.control_read_batch_calls, 1U);
 
         const auto updated =
             kasumi::crypto::pack::chunk_file_fastcdc(first_local / "large.bin");

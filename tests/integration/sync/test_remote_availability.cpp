@@ -1952,7 +1952,7 @@ TEST(SyncRemoteAvailabilityTest,
      FastCdcListThresholdAndFallbackPreserveMissingChunks) {
     const auto key = test_key();
     const auto hash = kasumi::hasher::hash_string("chunked file");
-    for (const auto chunk_count : {7U, 8U}) {
+    for (const auto chunk_count : {8U, 255U, 256U}) {
         const auto remote =
             remote_tree_with(hash, chunk_count * 2U * 1024U * 1024U);
         const auto planned = downloads_for(remote);
@@ -1988,9 +1988,10 @@ TEST(SyncRemoteAvailabilityTest,
                     reobservation::refresh_content_availability(
                         input, planned, storage, key);
                 ASSERT_TRUE(refreshed.has_value()) << refreshed.error().detail;
-                EXPECT_EQ(state->full_list_count, chunk_count >= 8U ? 1U : 0U);
+                EXPECT_EQ(state->full_list_count,
+                          chunk_count >= 256U ? 1U : 0U);
                 EXPECT_EQ(state->control_read_batch_count,
-                          chunk_count < 8U || list_failure ? 1U : 0U);
+                          chunk_count < 256U || list_failure ? 1U : 0U);
                 EXPECT_EQ(input.known_missing_content_objects.contains(hash),
                           missing_chunk);
             }
@@ -2047,7 +2048,7 @@ TEST(SyncRemoteAvailabilityTest,
                 input, planned, storage, key, {}, true, true, nullptr);
         ASSERT_TRUE(refreshed.has_value()) << refreshed.error().detail;
 
-        const bool expect_bulk_list = !audit && count >= 64U;
+        const bool expect_bulk_list = !audit && count >= 256U;
         EXPECT_EQ(state->full_list_count, expect_bulk_list ? 1U : 0U);
         EXPECT_EQ(state->control_read_batch_count,
                   !expect_bulk_list || list_failure ? 1U : 0U);
@@ -2063,10 +2064,11 @@ TEST(SyncRemoteAvailabilityTest,
         }
     };
 
-    run_case(63U, false, false);
     run_case(64U, false, false);
-    run_case(64U, false, true);
-    run_case(64U, true, false);
+    run_case(255U, false, false);
+    run_case(256U, false, false);
+    run_case(256U, false, true);
+    run_case(256U, true, false);
 }
 
 TEST(SyncRemoteAvailabilityTest, LocalCopyStillProbesRequiredContent) {

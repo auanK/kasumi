@@ -276,7 +276,6 @@ std::expected<void, Error> observe_content_availability(
     logical_probes.reserve(hashes.size());
     std::vector<std::string> requested_physical;
     requested_physical.reserve(hashes.size());
-    bool has_chunked_probe = false;
     for (const auto& hash : hashes) {
         LogicalProbe probe{.hash = hash, .physical_ids = {}};
         if (const auto* packed = history::find_packed_blob(
@@ -285,7 +284,6 @@ std::expected<void, Error> observe_content_availability(
                 crypto::pack_identifier(key, packed->pack_hash));
         } else if (const auto* chunked = history::find_chunked_file(
                        input.storage.storage_manifest, hash)) {
-            has_chunked_probe = true;
             probe.physical_ids.reserve(chunked->chunks.size());
             for (const auto& chunk : chunked->chunks) {
                 probe.physical_ids.push_back(
@@ -309,11 +307,10 @@ std::expected<void, Error> observe_content_availability(
     }
     std::vector<transport::Presence> presences;
     bool probed = false;
-    constexpr std::size_t bulk_list_probe_threshold = 64U;
+    constexpr std::size_t bulk_list_probe_threshold = 256U;
     const bool use_bulk_list =
         !input.audit_storage_objects && storage.storage.list != nullptr &&
-        ((has_chunked_probe && requested_physical.size() >= 8U) ||
-         requested_physical.size() >= bulk_list_probe_threshold);
+        requested_physical.size() >= bulk_list_probe_threshold;
     if (use_bulk_list) {
         if (auto listed = transport::list(storage)) {
             const std::unordered_set<std::string> remote_set(listed->begin(),
