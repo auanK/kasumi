@@ -180,6 +180,86 @@ TEST(CryptoPhysicalHashTest, Sha256MatchesKnownVector) {
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
 }
 
+TEST(CryptoPhysicalHashTest, IncrementalSha256MatchesVectorsCopyMoveAndFileHash) {
+    {
+        auto empty = kasumi::crypto::physical::sha256_init();
+        EXPECT_EQ(
+            kasumi::crypto::physical::sha256_finish(std::move(empty)),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    }
+    {
+        auto abc = kasumi::crypto::physical::sha256_init();
+        kasumi::crypto::physical::sha256_update(abc, {});
+        const std::array<std::uint8_t, 1> a{'a'};
+        const std::array<std::uint8_t, 1> b{'b'};
+        const std::array<std::uint8_t, 1> c{'c'};
+        kasumi::crypto::physical::sha256_update(abc, a);
+        kasumi::crypto::physical::sha256_update(abc, b);
+        kasumi::crypto::physical::sha256_update(abc, c);
+        kasumi::crypto::physical::sha256_update(abc, {});
+        EXPECT_EQ(
+            kasumi::crypto::physical::sha256_finish(std::move(abc)),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+    {
+        auto workspace = kasumi::test::make_temp_workspace("inc-sha256");
+        std::vector<std::byte> payload(140U * 1024U);
+        for (std::size_t i = 0; i < payload.size(); ++i) {
+            payload[i] = static_cast<std::byte>((i * 31U + 7U) & 0xFFU);
+        }
+        const auto file = kasumi::test::workspace_path(workspace, "large.bin");
+        kasumi::test::write_binary(file, payload);
+        const auto expected = kasumi::crypto::physical::hash_file(file, "sha256");
+        ASSERT_TRUE(expected.has_value());
+
+        auto state = kasumi::crypto::physical::sha256_init();
+        std::size_t offset = 0;
+        const std::array<std::size_t, 5> strides{1U, 17U, 64U, 4096U, 32771U};
+        std::size_t sidx = 0;
+        while (offset < payload.size()) {
+            const auto take = std::min(strides[sidx % strides.size()],
+                                       payload.size() - offset);
+            kasumi::crypto::physical::sha256_update(
+                state,
+                std::span<const std::uint8_t>{
+                    reinterpret_cast<const std::uint8_t*>(payload.data()) +
+                        offset,
+                    take});
+            offset += take;
+            ++sidx;
+        }
+        EXPECT_EQ(kasumi::crypto::physical::sha256_finish(state), *expected);
+
+        auto moved = std::move(state);
+        auto forked = moved;
+        const std::array<std::uint8_t, 1> one{'1'};
+        const std::array<std::uint8_t, 1> two{'2'};
+        kasumi::crypto::physical::sha256_update(moved, one);
+        kasumi::crypto::physical::sha256_update(forked, two);
+
+        auto payload1 = payload;
+        payload1.push_back(std::byte{'1'});
+        const auto file1 = kasumi::test::workspace_path(workspace, "large1.bin");
+        kasumi::test::write_binary(file1, payload1);
+        const auto expected1 =
+            kasumi::crypto::physical::hash_file(file1, "sha256");
+        ASSERT_TRUE(expected1.has_value());
+
+        auto payload2 = payload;
+        payload2.push_back(std::byte{'2'});
+        const auto file2 = kasumi::test::workspace_path(workspace, "large2.bin");
+        kasumi::test::write_binary(file2, payload2);
+        const auto expected2 =
+            kasumi::crypto::physical::hash_file(file2, "sha256");
+        ASSERT_TRUE(expected2.has_value());
+
+        EXPECT_EQ(kasumi::crypto::physical::sha256_finish(std::move(moved)),
+                  *expected1);
+        EXPECT_EQ(kasumi::crypto::physical::sha256_finish(std::move(forked)),
+                  *expected2);
+    }
+}
+
 TEST(CryptoContentTest, EncryptionReportsHashesOfTheBytesItProcessed) {
     auto workspace = kasumi::test::make_temp_workspace("encrypted-hashes");
     const auto plaintext =

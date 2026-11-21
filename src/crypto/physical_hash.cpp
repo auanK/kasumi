@@ -20,6 +20,24 @@
 #include <bcrypt.h>
 #endif
 
+#if defined(__x86_64__) || defined(_M_X64)
+#if defined(_MSC_VER)
+#define KASUMI_HAS_X86_SHANI 1
+#define KASUMI_SHANI_ATTR __declspec(noinline)
+#include <immintrin.h>
+#include <intrin.h>
+#elif defined(__GNUC__) || defined(__clang__)
+#define KASUMI_HAS_X86_SHANI 1
+#define KASUMI_SHANI_ATTR __attribute__((target("sha,sse4.1"), noinline))
+#include <cpuid.h>
+#include <immintrin.h>
+#endif
+#endif
+
+#ifndef KASUMI_HAS_X86_SHANI
+#define KASUMI_HAS_X86_SHANI 0
+#endif
+
 namespace kasumi::crypto::physical {
 namespace {
 
@@ -43,7 +61,7 @@ std::uint32_t rotate_right(std::uint32_t value, unsigned count) noexcept {
 }
 
 void compress(std::array<std::uint32_t, 8>& state,
-              const std::array<std::uint8_t, 64>& block) noexcept {
+              const std::uint8_t* block) noexcept {
     std::array<std::uint32_t, 64> words{};
     for (std::size_t index = 0; index < 16; ++index) {
         const auto offset = index * 4;
@@ -89,6 +107,155 @@ void compress(std::array<std::uint32_t, 8>& state,
     }
     for (std::size_t index = 0; index < state.size(); ++index) {
         state[index] += working[index];
+    }
+}
+
+#if KASUMI_HAS_X86_SHANI
+bool cpu_supports_sha_ni() noexcept {
+    static const bool supported = []() noexcept {
+#if defined(_MSC_VER)
+        int regs[4]{};
+        __cpuid(regs, 0);
+        if (regs[0] < 7) {
+            return false;
+        }
+        __cpuid(regs, 1);
+        constexpr int ssse3_bit = 1 << 9;
+        constexpr int sse41_bit = 1 << 19;
+        if ((regs[2] & (ssse3_bit | sse41_bit)) != (ssse3_bit | sse41_bit)) {
+            return false;
+        }
+        __cpuidex(regs, 7, 0);
+        constexpr int sha_bit = 1 << 29;
+        return (regs[1] & sha_bit) != 0;
+#else
+        unsigned int eax = 0;
+        unsigned int ebx = 0;
+        unsigned int ecx = 0;
+        unsigned int edx = 0;
+        if (__get_cpuid(0, &eax, &ebx, &ecx, &edx) == 0 || eax < 7U) {
+            return false;
+        }
+        if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) == 0) {
+            return false;
+        }
+        constexpr unsigned int ssse3_bit = 1U << 9U;
+        constexpr unsigned int sse41_bit = 1U << 19U;
+        if ((ecx & (ssse3_bit | sse41_bit)) != (ssse3_bit | sse41_bit)) {
+            return false;
+        }
+        if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx) == 0) {
+            return false;
+        }
+        constexpr unsigned int sha_bit = 1U << 29U;
+        return (ebx & sha_bit) != 0U;
+#endif
+    }();
+    return supported;
+}
+
+KASUMI_SHANI_ATTR void
+compress_blocks_shani(std::array<std::uint32_t, 8>& state,
+                      const std::uint8_t* data,
+                      std::size_t block_count) noexcept {
+    __m128i tmp;
+    __m128i state1;
+    std::memcpy(&tmp, state.data(), sizeof(tmp));
+    std::memcpy(&state1, state.data() + 4, sizeof(state1));
+    tmp = _mm_shuffle_epi32(tmp, 0xB1);
+    state1 = _mm_shuffle_epi32(state1, 0x1B);
+    __m128i state0 = _mm_alignr_epi8(tmp, state1, 8);
+    state1 = _mm_blend_epi16(state1, tmp, 0xF0);
+
+    const __m128i bswap_mask =
+        _mm_set_epi8(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3);
+
+#define KASUMI_LOAD_MSG(dst, ptr)                                              \
+    do {                                                                       \
+        __m128i raw_blk;                                                       \
+        std::memcpy(&raw_blk, (ptr), sizeof(raw_blk));                         \
+        (dst) = _mm_shuffle_epi8(raw_blk, bswap_mask);                         \
+    } while (false)
+
+#define KASUMI_SHA256_ROUND4(cur, next, prev, r, has_msg2, has_msg1)           \
+    do {                                                                       \
+        __m128i kvec;                                                          \
+        std::memcpy(&kvec, round_constants.data() + (r), sizeof(kvec));        \
+        __m128i msg = _mm_add_epi32((cur), kvec);                              \
+        state1 = _mm_sha256rnds2_epu32(state1, state0, msg);                   \
+        if constexpr (has_msg2) {                                              \
+            const __m128i t = _mm_alignr_epi8((cur), (prev), 4);               \
+            (next) = _mm_add_epi32((next), t);                                 \
+            (next) = _mm_sha256msg2_epu32((next), (cur));                      \
+        }                                                                      \
+        msg = _mm_shuffle_epi32(msg, 0x0E);                                    \
+        state0 = _mm_sha256rnds2_epu32(state0, state1, msg);                   \
+        if constexpr (has_msg1) {                                              \
+            (prev) = _mm_sha256msg1_epu32((prev), (cur));                      \
+        }                                                                      \
+    } while (false)
+
+    for (std::size_t block_idx = 0; block_idx < block_count; ++block_idx) {
+        const std::uint8_t* blk = data + block_idx * 64U;
+        const __m128i abef_save = state0;
+        const __m128i cdgh_save = state1;
+
+        __m128i m0{};
+        __m128i m1{};
+        __m128i m2{};
+        __m128i m3{};
+
+        KASUMI_LOAD_MSG(m0, blk);
+        KASUMI_SHA256_ROUND4(m0, m1, m3, 0U, false, false);
+        KASUMI_LOAD_MSG(m1, blk + 16U);
+        KASUMI_SHA256_ROUND4(m1, m2, m0, 4U, false, true);
+        KASUMI_LOAD_MSG(m2, blk + 32U);
+        KASUMI_SHA256_ROUND4(m2, m3, m1, 8U, false, true);
+        KASUMI_LOAD_MSG(m3, blk + 48U);
+        KASUMI_SHA256_ROUND4(m3, m0, m2, 12U, true, true);
+        KASUMI_SHA256_ROUND4(m0, m1, m3, 16U, true, true);
+        KASUMI_SHA256_ROUND4(m1, m2, m0, 20U, true, true);
+        KASUMI_SHA256_ROUND4(m2, m3, m1, 24U, true, true);
+        KASUMI_SHA256_ROUND4(m3, m0, m2, 28U, true, true);
+        KASUMI_SHA256_ROUND4(m0, m1, m3, 32U, true, true);
+        KASUMI_SHA256_ROUND4(m1, m2, m0, 36U, true, true);
+        KASUMI_SHA256_ROUND4(m2, m3, m1, 40U, true, true);
+        KASUMI_SHA256_ROUND4(m3, m0, m2, 44U, true, true);
+        KASUMI_SHA256_ROUND4(m0, m1, m3, 48U, true, true);
+        KASUMI_SHA256_ROUND4(m1, m2, m0, 52U, true, false);
+        KASUMI_SHA256_ROUND4(m2, m3, m1, 56U, true, false);
+        KASUMI_SHA256_ROUND4(m3, m0, m2, 60U, false, false);
+
+        state0 = _mm_add_epi32(state0, abef_save);
+        state1 = _mm_add_epi32(state1, cdgh_save);
+    }
+
+#undef KASUMI_SHA256_ROUND4
+#undef KASUMI_LOAD_MSG
+
+    tmp = _mm_shuffle_epi32(state0, 0x1B);
+    state1 = _mm_shuffle_epi32(state1, 0xB1);
+    state0 = _mm_blend_epi16(tmp, state1, 0xF0);
+    state1 = _mm_alignr_epi8(state1, tmp, 8);
+    std::memcpy(state.data(), &state0, sizeof(state0));
+    std::memcpy(state.data() + 4, &state1, sizeof(state1));
+}
+#endif
+
+void compress_blocks(std::array<std::uint32_t, 8>& state,
+                     const std::uint8_t* data,
+                     std::size_t block_count) noexcept {
+    if (block_count == 0) {
+        return;
+    }
+#if KASUMI_HAS_X86_SHANI
+    if (cpu_supports_sha_ni()) {
+        compress_blocks_shani(state, data, block_count);
+        return;
+    }
+#endif
+    for (std::size_t i = 0; i < block_count; ++i) {
+        compress(state, data + i * 64U);
     }
 }
 
@@ -200,16 +367,25 @@ Sha256State sha256_init() noexcept {
 void sha256_update(Sha256State& state,
                    std::span<const std::uint8_t> bytes) noexcept {
     state.size += bytes.size();
-    while (!bytes.empty()) {
+    if (state.buffered > 0 && !bytes.empty()) {
         const auto count =
             std::min(bytes.size(), state.block.size() - state.buffered);
         std::memcpy(state.block.data() + state.buffered, bytes.data(), count);
         state.buffered += count;
         bytes = bytes.subspan(count);
         if (state.buffered == state.block.size()) {
-            compress(state.hash, state.block);
+            compress_blocks(state.hash, state.block.data(), 1U);
             state.buffered = 0;
         }
+    }
+    if (const auto full_blocks = bytes.size() / state.block.size();
+        full_blocks > 0) {
+        compress_blocks(state.hash, bytes.data(), full_blocks);
+        bytes = bytes.subspan(full_blocks * state.block.size());
+    }
+    if (!bytes.empty()) {
+        std::memcpy(state.block.data(), bytes.data(), bytes.size());
+        state.buffered = bytes.size();
     }
 }
 
@@ -221,7 +397,7 @@ std::string sha256_finish(Sha256State state) {
                       static_cast<std::ptrdiff_t>(state.buffered),
                   state.block.end(),
                   0);
-        compress(state.hash, state.block);
+        compress_blocks(state.hash, state.block.data(), 1U);
         state.block.fill(0);
     } else {
         std::fill(state.block.begin() +
@@ -233,7 +409,7 @@ std::string sha256_finish(Sha256State state) {
         state.block[63U - index] =
             static_cast<std::uint8_t>(bits >> (index * 8U));
     }
-    compress(state.hash, state.block);
+    compress_blocks(state.hash, state.block.data(), 1U);
     return hex_digest(state.hash);
 }
 
@@ -244,12 +420,17 @@ hash_file(const std::filesystem::path& path, std::string_view algorithm) {
     }
 
 #if defined(_WIN32)
-    auto hw_hashed = hash_file_bcrypt(path);
-    if (!hw_hashed) {
-        return std::unexpected(hw_hashed.error());
-    }
-    if (hw_hashed->has_value()) {
-        return std::move(**hw_hashed);
+#if KASUMI_HAS_X86_SHANI
+    if (!cpu_supports_sha_ni())
+#endif
+    {
+        auto hw_hashed = hash_file_bcrypt(path);
+        if (!hw_hashed) {
+            return std::unexpected(hw_hashed.error());
+        }
+        if (hw_hashed->has_value()) {
+            return std::move(**hw_hashed);
+        }
     }
 #endif
 
