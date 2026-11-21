@@ -2409,7 +2409,8 @@ std::expected<void, detail::UploadBatchError> execute_chunked_upload_batch(
             std::ranges::unique(candidate_present_ids).begin(),
             candidate_present_ids.end());
         bool probed = false;
-        if (candidate_present_ids.size() >= 8U &&
+        constexpr std::size_t bulk_list_probe_threshold = 256U;
+        if (candidate_present_ids.size() >= bulk_list_probe_threshold &&
             storage.storage.list != nullptr) {
             if (auto listed = transport::list(storage)) {
                 const std::unordered_set<std::string> remote_set(
