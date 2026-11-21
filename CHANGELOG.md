@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.19.0]
+
+### Added
+
+- Add persistent installation machine identity (`machine.id` paired with the automatically detected OS hostname) and local human-readable timestamp formatting (`YYYY-MM-DD HH:MM:SS ±HH:MM`).
+- Add immutable, encrypted, authenticated `KACT` v1 operational activity records under a dedicated keyed remote namespace (`FilePurpose::Activity`, `KeyPurpose::Activity`), published best-effort by `fsck`, `gc`, `gc remove-writer`, and `gc remove-barrier`.
+- Add `state.db` schema v2 tables (`local_executions`, `accepted_commit_meta`, `remote_activity_cache`) to persist local execution attempts and results (including no-op and download-only syncs), offline accepted-commit provenance, and cached remote maintenance summaries.
+- Display commit authorship (`sync`, `repack`, `resolve-missing` and publishing machine) and readable timestamps in `remote heads`, `remote commits`, and `remote commit`, shared operational maintenance activity in `remote summary [--full]`, offline traceability in `show <profile> [--full]`, and a concise last-sync column in `config`.
+
+### Changed
+
+- Upgrade the encrypted commit wire format to `KCOM` v4 with embedded commit authorship (`origin_operation`, persistent `machine_id`, and historical hostname at publication time) while keeping zero extra remote objects or requests during `sync`.
+- Extend `kasumi gc` to retain and prune `KACT` v1 activity records using the vault's `min_history_depth` and `min_history_age_hours` policy while preserving the newest successful record per `(machine_id, operation)` and failing closed on invalid activity objects.
+
+### Upgrade Notes
+
+- Pre-1.0 breaking format change: `v0.19.0` requires `KCOM` v4 commits and `state.db` schema v2 and rejects legacy v3 vaults and v1 local databases without automatic migration. Complete pending recovery on `v0.18.x`, back up data, upgrade all clients to `v0.19.0`, and initialize fresh vaults and local state.
+
 ## [0.18.2]
 
 ### Changed
