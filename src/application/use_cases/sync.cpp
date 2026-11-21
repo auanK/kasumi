@@ -152,8 +152,6 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
 
             const auto update_progress_after_stabilize = [&]() {
                 summary = compute_sync_summary(stable->result);
-                summary.trusted_content_reused = static_cast<std::uint32_t>(
-                    stable->input.trusted_remote_content_objects.size());
                 notify_stage(SyncStage::Calculating, summary, summary.total);
                 return !stable->result.requires_publication &&
                        !stable->result.requires_local_mutation &&
@@ -192,17 +190,6 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                                     SyncStage::Observing);
                 }
                 if (initial_pass) {
-                    if (context.trust_existing_content &&
-                        collected->storage.history_present) {
-                        return fail_app(
-                            context,
-                            ErrorCode::PlanFailure,
-                            "remote history was published concurrently "
-                            "during initial sync with "
-                            "--trust-existing-content; operation was "
-                            "rejected to prevent unverified content reuse",
-                            SyncStage::Observing);
-                    }
                     if (context.initial_sync &&
                         context.has_remote_history_objects &&
                         !collected->storage.history_present) {
@@ -241,8 +228,6 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                             context.key,
                             {},
                             allow_unreferenced_content_reuse,
-                            context.trust_existing_content,
-                            &context.initial_content_identifiers,
                             &meter);
                     if (!available) {
                         return fail_app(
@@ -327,8 +312,6 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     confirmed_missing,
                     initial_pass,
                     allow_unreferenced_content_reuse,
-                    context.trust_existing_content,
-                    &context.initial_content_identifiers,
                     true);
                 if (!stabilized) {
                     return fail_app(

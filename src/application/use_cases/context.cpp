@@ -3,7 +3,6 @@
 #include "application/detail.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
-#include "application/observation/history_detail.hpp"
 #include "application/sync/journal.hpp"
 #include "core/history.hpp"
 #include "crypto/secure_memory.hpp"
@@ -31,7 +30,6 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     output.app_data_dir = input.environment.app_data_dir;
     output.initial_sync = input.request.initial;
     output.audit_inventory = input.request.audit_inventory;
-    output.trust_existing_content = input.request.trust_existing_content;
     output.dry_run = input.request.dry_run;
     output.reclaim_dirty = input.request.reclaim_dirty;
     output.writer_identifier = input.request.writer_identifier;
@@ -45,13 +43,6 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     };
     if (input.request.initial && operation != Operation::Sync) {
         return invalid_request("--initial is only valid for sync");
-    }
-    if (input.request.trust_existing_content && !input.request.initial) {
-        return invalid_request("--trust-existing-content requires --initial");
-    }
-    if (input.request.trust_existing_content && operation != Operation::Sync) {
-        return invalid_request(
-            "--trust-existing-content is only valid for sync");
     }
     if (input.request.audit_inventory && operation != Operation::Sync) {
         return invalid_request("--audit-inventory is only valid for sync");
@@ -281,19 +272,6 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
             std::ranges::any_of(*identifiers, [&](const std::string& id) {
                 return id.starts_with(layout.history_prefix);
             });
-        if (has_remote_history && input.request.trust_existing_content) {
-            return fail("--trust-existing-content is only valid when "
-                        "bootstrapping an empty remote history");
-        }
-        if (input.request.trust_existing_content) {
-            auto collected =
-                observation::history::detail::collect_content_identifiers(
-                    *identifiers, 1'000'000);
-            if (!collected) {
-                return fail(collected.error().detail);
-            }
-            output.initial_content_identifiers = std::move(*collected);
-        }
         if (has_remote_history) {
             const auto profile_dir = runtime_data->database_path.parent_path();
             auto observed = observation::history::observe(
@@ -337,7 +315,6 @@ void wipe_operation(OperationContext& context) noexcept {
     context.maintenance_metric_secondary = 0;
     context.maintenance_flags = 0;
     context.gc_kept_activities.clear();
-    context.initial_content_identifiers.clear();
     platform::release_profile_lock(context.profile_lock);
 }
 

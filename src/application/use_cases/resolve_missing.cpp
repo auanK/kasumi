@@ -80,8 +80,6 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
                                                     {},
                                                     false,
                                                     false,
-                                                    false,
-                                                    nullptr,
                                                     true);
     if (!stable) {
         return std::unexpected(

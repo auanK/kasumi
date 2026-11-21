@@ -94,9 +94,7 @@ Use `kasumi <command> --help` for the complete arguments, options and examples.
 
 `sync --initial` requires no SQLite sidecars or unfinished transaction evidence.
 It can bootstrap empty remote history or enroll into an authenticated vault.
-`--trust-existing-content` requires `--initial` and empty remote history: it
-reuses matching remote Content without payload verification, so audit it with
-Fsck afterwards. See [Initial Sync](architecture/synchronization.md#initial-sync).
+See [Initial Sync](architecture/synchronization.md#initial-sync).
 
 `sync --audit-inventory` runs Sync and then a structural inventory audit. It
 cannot combine with `--dry-run` or `--initial`. The audit does not authenticate

@@ -35,8 +35,6 @@ TEST_P(ApplicationGrammarTest, ParsesOperationAndArguments) {
     EXPECT_EQ(actual.profile_name, test.expected.profile_name);
     EXPECT_EQ(actual.initial, test.expected.initial);
     EXPECT_EQ(actual.audit_inventory, test.expected.audit_inventory);
-    EXPECT_EQ(actual.trust_existing_content,
-              test.expected.trust_existing_content);
     EXPECT_EQ(actual.writer_identifier, test.expected.writer_identifier);
     EXPECT_EQ(actual.confirm_abandoned, test.expected.confirm_abandoned);
     EXPECT_EQ(actual.dry_run, test.expected.dry_run);
@@ -58,13 +56,6 @@ INSTANTIATE_TEST_SUITE_P(
                         {.operation = Operation::Sync,
                          .profile_name = "demo",
                          .initial = true}},
-        ApplicationCase{
-            "TrustedBootstrap",
-            {"sync", "demo", "--initial", "--trust-existing-content"},
-            {.operation = Operation::Sync,
-             .profile_name = "demo",
-             .initial = true,
-             .trust_existing_content = true}},
         ApplicationCase{"InventoryAudit",
                         {"sync", "demo", "--audit-inventory"},
                         {.operation = Operation::Sync,
@@ -336,8 +327,6 @@ INSTANTIATE_TEST_SUITE_P(
                     {"sync", "demo", "--dry-run", "--initial"}},
         InvalidCase{"AuditIncompatibleMode",
                     {"sync", "demo", "--audit-inventory", "--initial"}},
-        InvalidCase{"TrustRequiresInitial",
-                    {"sync", "demo", "--trust-existing-content"}},
         InvalidCase{"RequiredConfirmation", {"gc", "remove-barrier", "demo"}},
         InvalidCase{"InvalidWriterIdentity",
                     {"gc", "remove-writer", "demo", "../writer"}},

@@ -91,7 +91,6 @@ struct SyncCompleted {
     std::uint32_t pending = 0;
     std::vector<std::filesystem::path> pending_paths;
     bool partial = false;
-    std::uint32_t trusted_content_reused = 0;
     std::optional<std::chrono::nanoseconds> duration = std::nullopt;
     std::uint64_t wire_upload_bytes = 0;
     std::uint64_t wire_download_bytes = 0;

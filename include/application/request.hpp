@@ -36,7 +36,6 @@ struct Request {
     std::string writer_identifier;
     bool initial = false;
     bool audit_inventory = false;
-    bool trust_existing_content = false;
     bool confirm_abandoned = false;
     bool dry_run = false;
     bool reclaim_dirty = false;

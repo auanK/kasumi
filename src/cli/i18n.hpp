@@ -176,7 +176,6 @@ enum class Key {
     SyncEstimatedTraffic,
     SyncUpload,
     SyncDownload,
-    SyncTrustedContentWarning,
     SyncPartialHeader,
     SyncPendingSingular,
     SyncPendingPlural,
