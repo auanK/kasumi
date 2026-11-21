@@ -188,6 +188,10 @@ std::expected<Response, Error> run_repack(OperationContext& context) {
     options.policy.reclaim_large_dirty_packs = context.reclaim_dirty;
     options.dry_run = context.dry_run;
     options.max_parallelism = content_concurrency();
+    if (!context.dry_run && context.machine_identity) {
+        options.authorship = make_commit_authorship(
+            history::CommitOriginOperation::Repack, *context.machine_identity);
+    }
 
     auto res = integrity::repack::execute(
         context.runtime, context.storage, context.key, options, &meter);

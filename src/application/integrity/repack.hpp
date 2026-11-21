@@ -3,6 +3,7 @@
 
 #include "application/integrity/maintenance.hpp"
 #include "application/integrity/repack_planner.hpp"
+#include "core/history.hpp"
 #include "crypto/file_crypto.hpp"
 #include "runtime/resolver.hpp"
 #include "transport/transport.hpp"
@@ -30,6 +31,8 @@ struct Options {
     std::size_t max_parallelism = 0;
     // Zero selects DEFAULT_UPLOAD_WINDOW_PACKS.
     std::size_t upload_window_packs = 0;
+    // Authorship metadata embedded into the published repack commit.
+    history::CommitAuthorship authorship{};
 };
 
 // Outcome and metrics of one repack execution or dry-run.

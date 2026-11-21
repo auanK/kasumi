@@ -2,13 +2,16 @@
 #define KASUMI_APPLICATION_USE_CASES_CONTEXT_HPP
 
 #include "application/execute.hpp"
+#include "core/history.hpp"
 #include "platform/profile_lock.hpp"
+#include "runtime/machine.hpp"
 #include "runtime/resolver.hpp"
 #include "runtime/vault.hpp"
 #include "transport/transport.hpp"
 
 #include <cstdint>
 #include <expected>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <unordered_set>
@@ -19,14 +22,20 @@ namespace kasumi::application::detail {
 // Resolved resources for an application execution.
 struct OperationContext {
     Operation operation;
+    std::filesystem::path app_data_dir;
     runtime::RuntimeData runtime;
     RuntimeSummary summary;
+    std::optional<runtime::MachineIdentity> machine_identity;
     bool initial_sync = false;
     bool audit_inventory = false;
     bool trust_existing_content = false;
     bool dry_run = false;
     bool reclaim_dirty = false;
     bool has_remote_history_objects = false;
+    bool recovered_transaction = false;
+    bool sync_mutated = false;
+    bool remote_observed = false;
+    std::string accepted_commit_id;
     std::intptr_t profile_lock = platform::invalid_profile_lock;
     runtime::vault::KeyBytes key{};
     std::string writer_identifier;
@@ -34,6 +43,16 @@ struct OperationContext {
     ProgressCallback on_progress{};
     std::unordered_set<std::string> initial_content_identifiers;
 };
+
+[[nodiscard]] inline history::CommitAuthorship
+make_commit_authorship(history::CommitOriginOperation origin,
+                       const runtime::MachineIdentity& machine) {
+    return history::CommitAuthorship{
+        .operation = origin,
+        .machine_id = machine.id,
+        .machine_name = machine.name,
+    };
+}
 
 inline Error make_error(const OperationContext& context,
                         ErrorCode code,

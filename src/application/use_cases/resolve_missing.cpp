@@ -198,6 +198,12 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
         .total_items =
             static_cast<std::uint32_t>(sync_plan_size(stable->result.plan)),
     });
+    history::CommitAuthorship authorship;
+    if (context.machine_identity) {
+        authorship = make_commit_authorship(
+            history::CommitOriginOperation::ResolveMissing,
+            *context.machine_identity);
+    }
     auto synchronized = sync::coordinator::execute(
         context.runtime,
         context.storage,
@@ -205,7 +211,10 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
         stable->input,
         stable->result,
         &session,
-        stable->staged ? &*stable->staged : nullptr);
+        stable->staged ? &*stable->staged : nullptr,
+        false,
+        std::move(authorship),
+        &context.accepted_commit_id);
 
     if (history_storage::maintenance_protocol::registration_active(writer)) {
         auto released =
