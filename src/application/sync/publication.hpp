@@ -5,6 +5,7 @@
 #include "application/history_storage/publication.hpp"
 #include "core/history.hpp"
 #include "crypto/file_crypto.hpp"
+#include "state_storage/database.hpp"
 #include "transport/transport.hpp"
 
 #include <cstddef>
@@ -52,7 +53,14 @@ prepare_commit(Snapshot tree,
                std::span<const std::string> logical_heads,
                std::int64_t created_at,
                std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-               history::StorageManifest storage = {});
+               history::StorageManifest storage = {},
+               history::CommitAuthorship authorship = {});
+
+// Builds an AcceptedCommitMeta record from a validated commit (unauthored
+// commits yield CommitOriginOperation::Unknown and empty machine identity).
+state_storage::AcceptedCommitMeta
+make_accepted_commit_meta(std::string_view commit_id,
+                          const history::Commit& commit);
 
 // Publishes only the encrypted commit object.
 PublishObjectResult

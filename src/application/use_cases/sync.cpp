@@ -87,6 +87,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
     sync::journal_fault_test::hit(
         "recovery", nullptr, static_cast<std::size_t>(*recovery));
     sync::journal_fault_test::hit("recovered");
+    context.recovered_transaction =
+        (*recovery != sync::coordinator::RecoveryResult::NoJournal);
 
     observation::LocalObservationSession observation_session;
     observation_session.progress = &meter;
@@ -343,6 +345,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 return std::unexpected(first.error());
             }
             if (update_progress_after_stabilize()) {
+                context.accepted_commit_id = stable->input.base_commit_id;
                 return finish_summary();
             }
 
@@ -367,6 +370,18 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     });
                     break;
                 }
+                if (!context.sync_mutated) {
+                    context.sync_mutated = true;
+                    if (context.on_sync_mutation_start) {
+                        context.on_sync_mutation_start();
+                    }
+                }
+                history::CommitAuthorship authorship;
+                if (context.machine_identity) {
+                    authorship = make_commit_authorship(
+                        history::CommitOriginOperation::Sync,
+                        *context.machine_identity);
+                }
                 synchronized = sync::coordinator::execute(
                     context.runtime,
                     context.storage,
@@ -375,7 +390,9 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     stable->result,
                     &observation_session,
                     stable->staged ? &*stable->staged : nullptr,
-                    true);
+                    true,
+                    std::move(authorship),
+                    &context.accepted_commit_id);
                 if (synchronized ||
                     synchronized.error().code !=
                         sync::coordinator::ErrorCode::RemoteContentMissing) {

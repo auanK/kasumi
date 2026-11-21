@@ -1,11 +1,14 @@
 #include "application/detail.hpp"
+#include "application/history_storage/activity.hpp"
 #include "application/history_storage/content_reachability.hpp"
 #include "application/history_storage/detail.hpp"
+#include "application/history_storage/epoch.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/reachability.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/integrity/maintenance.hpp"
 #include "platform/cancellation.hpp"
+#include "platform/clock.hpp"
 
 #include <algorithm>
 #include <array>
@@ -314,9 +317,16 @@ required_variants(const history_storage::ReachabilityInventory& inventory,
     return required;
 }
 
-std::expected<std::vector<std::string>, Error>
+struct ObservePlan {
+    std::vector<std::string> candidates;
+    std::vector<history_storage::activity::LoadedActivity> kept_activities;
+    std::size_t pruned_activities = 0;
+};
+
+std::expected<ObservePlan, Error>
 observe(transport::Transport& storage,
         KeySpan key,
+        const history_storage::epoch::RetentionPolicy& retention,
         const std::filesystem::path& workspace_root,
         const GarbageCollectProgressCallback& on_progress) {
     auto listing = transport::list(storage);
@@ -352,8 +362,33 @@ observe(transport::Transport& storage,
         return std::unexpected(valid.error());
     }
 
+    auto activities = history_storage::activity::load_all(
+        storage, layout, key, workspace_root, *listing);
+    if (!activities) {
+        return std::unexpected(history_error(activities.error()));
+    }
+    if (!activities->invalid_objects.empty()) {
+        return std::unexpected(make_error(
+            ErrorCode::IntegrityFailure,
+            "remote contains invalid operational activity objects",
+            activities->invalid_objects.front()));
+    }
+    const auto now_unix = platform::clock::unix_seconds();
+    if (!now_unix) {
+        return std::unexpected(make_error(
+            ErrorCode::StateFailure,
+            "failed to read system clock for activity retention: " +
+                now_unix.error()));
+    }
+    auto prunable_activities = history_storage::activity::plan_pruning(
+        activities->valid, retention, *now_unix);
+    history_storage::detail::sort_unique(prunable_activities);
+
     std::vector<std::string> orphan_ids = content->orphan_content_ids;
     history_storage::detail::sort_unique(orphan_ids);
+
+    std::vector<history_storage::activity::LoadedActivity> kept_activities;
+    kept_activities.reserve(activities->valid.size());
 
     auto protected_objects = required_variants(*history, layout);
     protected_objects.insert(protected_objects.end(),
@@ -365,6 +400,12 @@ observe(transport::Transport& storage,
     protected_objects.insert(protected_objects.end(),
                              history->orphan_epochs.begin(),
                              history->orphan_epochs.end());
+    for (const auto& entry : activities->valid) {
+        if (!std::ranges::binary_search(prunable_activities, entry.identifier)) {
+            kept_activities.push_back(entry);
+            protected_objects.push_back(entry.identifier);
+        }
+    }
     history_storage::detail::sort_unique(protected_objects);
 
     std::vector<std::string> candidates;
@@ -390,7 +431,8 @@ observe(transport::Transport& storage,
     }
     history_storage::detail::sort_unique(candidates);
 
-    for (const auto& identifier : orphan_ids) {
+    const auto append_unprotected_candidate = [&](const std::string& identifier)
+        -> std::expected<void, Error> {
         if (identifier.empty() ||
             protocol::is_control_object(layout, identifier) ||
             std::ranges::binary_search(protected_objects, identifier)) {
@@ -400,9 +442,25 @@ observe(transport::Transport& storage,
                 identifier));
         }
         candidates.push_back(identifier);
+        return {};
+    };
+    for (const auto& identifier : orphan_ids) {
+        if (auto ok = append_unprotected_candidate(identifier); !ok) {
+            return std::unexpected(ok.error());
+        }
     }
+    for (const auto& identifier : prunable_activities) {
+        if (auto ok = append_unprotected_candidate(identifier); !ok) {
+            return std::unexpected(ok.error());
+        }
+    }
+    history_storage::detail::sort_unique(candidates);
 
-    return candidates;
+    return ObservePlan{
+        .candidates = std::move(candidates),
+        .kept_activities = std::move(kept_activities),
+        .pruned_activities = prunable_activities.size(),
+    };
 }
 
 std::expected<void, Error>
@@ -557,13 +615,17 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
 
         failure_diagnostic.stage = GarbageCollectStage::Analyzing;
         notify(on_progress, GarbageCollectStage::Analyzing, std::nullopt, 0);
-        auto observed_candidates =
-            observe(storage, key, workspace_root, on_progress);
-        if (!observed_candidates) {
-            return finish(std::unexpected(observed_candidates.error()));
+        const history_storage::epoch::RetentionPolicy retention{
+            .min_history_depth = runtime_data.min_history_depth,
+            .min_history_age_hours = runtime_data.min_history_age_hours,
+        };
+        auto observed_plan =
+            observe(storage, key, retention, workspace_root, on_progress);
+        if (!observed_plan) {
+            return finish(std::unexpected(observed_plan.error()));
         }
 
-        const auto& candidates = *observed_candidates;
+        const auto& candidates = observed_plan->candidates;
         const auto candidate_count = candidates.size();
         failure_diagnostic.candidate_objects = candidate_count;
         notify(on_progress, GarbageCollectStage::Analyzing, candidate_count, 0);
@@ -578,6 +640,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                 .candidate_objects = candidate_count,
                 .removed_objects = 0,
                 .analysis_only = true,
+                .kept_activities = std::move(observed_plan->kept_activities),
             });
         }
 
@@ -748,6 +811,8 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             .removed_objects = removed_objects,
             .analysis_only = false,
             .removal_elapsed = removal_elapsed,
+            .pruned_activities = observed_plan->pruned_activities,
+            .kept_activities = std::move(observed_plan->kept_activities),
         });
     } catch (const std::exception& error) {
         return fail_exception(error.what());

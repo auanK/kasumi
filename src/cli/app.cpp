@@ -152,17 +152,26 @@ int run(int argc, char* argv[]) {
     }
     i18n::init_language(argc, argv);
     const auto sanitized = i18n::extract_language_argument(argc, argv);
-    const bool supports_full =
+    const bool supports_command_full =
         sanitized.size() > 2 && !sanitized[2].empty() &&
         sanitized[2].front() != '-' &&
         (sanitized[1] == "sync" || sanitized[1] == "status" ||
-         sanitized[1] == "repack");
+         sanitized[1] == "repack" || sanitized[1] == "show");
+    const bool supports_remote_summary_full =
+        sanitized.size() > 3 && sanitized[1] == "remote" &&
+        sanitized[2] == "summary" && !sanitized[3].empty() &&
+        sanitized[3].front() != '-';
+    const bool supports_full =
+        supports_command_full || supports_remote_summary_full;
+    const std::size_t full_start_index =
+        supports_remote_summary_full ? 4U : 3U;
     bool full = false;
     bool invalid_options = false;
     std::vector<std::string> without_full;
     for (std::size_t index = 0; index < sanitized.size(); ++index) {
         const auto& argument = sanitized[index];
-        if (supports_full && index >= 3 && argument == "--full") {
+        if (supports_full && index >= full_start_index &&
+            argument == "--full") {
             invalid_options |= full;
             full = true;
         } else {
@@ -233,7 +242,7 @@ int run(int argc, char* argv[]) {
         return run_profile_query(environment);
     }
     if (const auto* show = std::get_if<ShowInvocation>(&*parse_result)) {
-        return run_profile_query(environment, show->profile_name);
+        return run_profile_query(environment, show->profile_name, full);
     }
 
     if (std::holds_alternative<ConfigureInvocation>(*parse_result)) {
@@ -277,7 +286,7 @@ int run(int argc, char* argv[]) {
         }
 
         if (result) {
-            return finish(present(*result));
+            return finish(present(*result, full));
         }
         return finish(present(result.error()));
     }

@@ -8,6 +8,7 @@
 #include "core/history.hpp"
 #include "crypto/secure_memory.hpp"
 #include "platform/profile_lock.hpp"
+#include "runtime/machine.hpp"
 #include "runtime/resolver.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
@@ -27,6 +28,7 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     wipe_operation(output);
     const auto operation = input.request.operation;
     output.operation = operation;
+    output.app_data_dir = input.environment.app_data_dir;
     output.initial_sync = input.request.initial;
     output.audit_inventory = input.request.audit_inventory;
     output.trust_existing_content = input.request.trust_existing_content;
@@ -109,6 +111,17 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         runtime_data->min_history_depth > history::maximum_graph_depth ||
         runtime_data->min_history_age_hours == 0) {
         return fail("invalid retention policy");
+    }
+    const bool needs_machine_identity =
+        !(operation == Operation::Status || operation == Operation::Preview ||
+          (operation == Operation::Repack && input.request.dry_run));
+    if (needs_machine_identity) {
+        auto identity = runtime::resolve_machine_identity(
+            input.environment.app_data_dir, true);
+        if (!identity) {
+            return fail(identity.error().detail);
+        }
+        output.machine_identity = std::move(*identity);
     }
     auto profile_lock = platform::acquire_profile_lock(
         input.environment.app_data_dir /
@@ -310,6 +323,20 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
 
 void wipe_operation(OperationContext& context) noexcept {
     crypto::secure_memory::wipe(context.key.data(), context.key.size());
+    context.app_data_dir.clear();
+    context.machine_identity.reset();
+    context.accepted_commit_id.clear();
+    context.recovered_transaction = false;
+    context.sync_mutated = false;
+    context.remote_observed = false;
+    context.on_sync_mutation_start = {};
+    context.maintenance_failure_outcome.reset();
+    context.maintenance_failure_stage.clear();
+    context.maintenance_failure_detail.clear();
+    context.maintenance_metric_primary = 0;
+    context.maintenance_metric_secondary = 0;
+    context.maintenance_flags = 0;
+    context.gc_kept_activities.clear();
     context.initial_content_identifiers.clear();
     platform::release_profile_lock(context.profile_lock);
 }

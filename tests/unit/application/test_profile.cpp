@@ -3565,4 +3565,59 @@ TEST(ApplicationProfileTest,
               ProfileLocalState::Initialized);
 }
 
+TEST(ApplicationProfileTest,
+     InspectProfileActivityReportsOfflineExecutionInterruptedAndLifecycle) {
+    ProfileFixture fixture{"app-profile-activity"};
+    const auto lock_path =
+        fixture.environment.app_data_dir / "profile-main.lock";
+
+    // Absent lock + InProgress row maps to Interrupted without creating lock.
+    ASSERT_TRUE(kasumi::state_storage::record_execution_start(
+        fixture.database_path(),
+        kasumi::state_storage::LocalExecutionRecord{
+            .execution_id = "exec-interrupted",
+            .operation = kasumi::state_storage::LocalOperationKind::Sync,
+            .machine_id_hex = std::string(32, 'a'),
+            .machine_name = "BoxA",
+            .started_at = 1700000100,
+        }));
+    const auto interrupted_report = kasumi::application::inspect_profile_activity(
+        fixture.environment, "main");
+    EXPECT_TRUE(interrupted_report.database_present);
+    EXPECT_FALSE(std::filesystem::exists(lock_path));
+    ASSERT_TRUE(interrupted_report.last_attempt.has_value());
+    EXPECT_EQ(interrupted_report.last_attempt->status,
+              kasumi::application::ProfileExecutionStatus::Interrupted);
+    EXPECT_FALSE(interrupted_report.last_complete_sync.has_value());
+
+    // Held lock reports live InProgress.
+    auto held = kasumi::platform::acquire_profile_lock(lock_path);
+    ASSERT_TRUE(held.has_value()) << held.error();
+    const auto running_report = kasumi::application::inspect_profile_activity(
+        fixture.environment, "main");
+    ASSERT_TRUE(running_report.last_attempt.has_value());
+    EXPECT_EQ(running_report.last_attempt->status,
+              kasumi::application::ProfileExecutionStatus::InProgress);
+    kasumi::platform::release_profile_lock(*held);
+
+    // Clone starts with empty activity/authorship; rename preserves it.
+    ASSERT_TRUE(kasumi::application::clone_profile(
+        fixture.environment, "main", "cloned"));
+    const auto cloned_report = kasumi::application::inspect_profile_activity(
+        fixture.environment, "cloned");
+    EXPECT_TRUE(cloned_report.database_present);
+    EXPECT_FALSE(cloned_report.last_attempt.has_value());
+    EXPECT_TRUE(cloned_report.recent_executions.empty());
+
+    ASSERT_TRUE(kasumi::application::rename_profile(
+        fixture.environment, "main", "moved"));
+    const auto moved_report = kasumi::application::inspect_profile_activity(
+        fixture.environment, "moved");
+    ASSERT_TRUE(moved_report.last_attempt.has_value());
+    EXPECT_EQ(moved_report.last_attempt->execution_id, "exec-interrupted");
+
+    ASSERT_TRUE(delete_profile(fixture.environment, "cloned"));
+    ASSERT_TRUE(delete_profile(fixture.environment, "moved"));
+}
+
 } // namespace

@@ -1569,9 +1569,103 @@ TEST(ApplicationExecuteTest, RepackRunsDryRunAndPublishThroughPublicBoundary) {
     EXPECT_FALSE(noop_data->published);
 
     const auto checked = kasumi::application::execute(
-        {Request{.operation = Operation::Fsck, .profile_name = "demo"},
+        {Request{Operation::Fsck, "demo"},
          Credentials{NoCredentials{}},
          env});
     ASSERT_TRUE(checked.has_value()) << checked.error().detail;
 }
+
+TEST(ApplicationExecuteTest,
+     MaintenanceAuditAndPostSyncAuditFailureTrackRemoteAndLocalActivity) {
+    auto workspace = kasumi::test::make_temp_workspace("exec-activity-audit");
+    write_profile(workspace);
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto remote = kasumi::test::workspace_path(workspace, "remote");
+    const ExecutionEnvironment env{
+        kasumi::test::workspace_path(workspace, "app")};
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    kasumi::test::write_text(local / "item.txt", "audit-item");
+
+    const auto sync1 = kasumi::application::execute(
+        {Request{Operation::Sync, "demo"}, Credentials{key()}, env});
+    ASSERT_TRUE(sync1.has_value()) << sync1.error().detail;
+
+    // Plant a stray object inside the control namespace on remote -> Sync with
+    // --audit-inventory succeeds on sync step then fails audit; recorded
+    // distinctly in DB.
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(
+            application_key());
+    const auto stray_path = remote / (layout.gc_prefix + "stray-object");
+    std::error_code dir_ec;
+    std::filesystem::create_directories(stray_path.parent_path(), dir_ec);
+    ASSERT_FALSE(dir_ec) << dir_ec.message();
+    kasumi::test::write_text(stray_path, "foreign");
+    const auto audit_sync = kasumi::application::execute(
+        {Request{.operation = Operation::Sync,
+                 .profile_name = "demo",
+                 .audit_inventory = true},
+         Credentials{key()},
+         env});
+    ASSERT_FALSE(audit_sync.has_value());
+    EXPECT_EQ(audit_sync.error().code, ErrorCode::InventoryAuditFailure);
+    EXPECT_TRUE(audit_sync.error().sync_completed.has_value());
+
+    const auto activity = kasumi::application::inspect_profile_activity(
+        env, "demo");
+    ASSERT_TRUE(activity.last_attempt.has_value());
+    EXPECT_EQ(activity.last_attempt->status,
+              kasumi::application::ProfileExecutionStatus::Failed);
+    EXPECT_EQ(activity.last_attempt->stage, "audit");
+    EXPECT_NE(
+        activity.last_attempt->flags &
+            kasumi::application::profile_execution_flag_audit_failed_after_sync,
+        0U);
+    ASSERT_TRUE(activity.last_complete_sync.has_value());
+    EXPECT_EQ(activity.last_complete_sync->status,
+              kasumi::application::ProfileExecutionStatus::Succeeded);
+}
+
+TEST(ApplicationExecuteTest,
+     BestEffortActivityPublishFailureSetsWarningAndPendingPublishState) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("exec-activity-publish-warning");
+    write_profile(workspace);
+    const auto remote = kasumi::test::workspace_path(workspace, "remote");
+    const ExecutionEnvironment env{
+        kasumi::test::workspace_path(workspace, "app")};
+    auto opened = kasumi::transport::open_transport(remote.string());
+    ASSERT_TRUE(opened.has_value()) << opened.error().message;
+    ASSERT_TRUE(kasumi::transport::initialize(*opened));
+
+    // A regular file named after the keyed activity root blocks creating
+    // <activity_ns>/<v1_ns>/*.act while leaving barrier checks and
+    // RemoveBarrier intact.
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(
+            application_key());
+    const auto act_root =
+        layout.activity_prefix.substr(0, layout.activity_prefix.find('/'));
+    kasumi::test::write_text(remote / act_root, "blocker");
+
+    const auto res = kasumi::application::execute(
+        {Request{.operation = Operation::RemoveBarrier,
+                 .profile_name = "demo",
+                 .confirm_abandoned = true},
+         Credentials{key()},
+         env});
+    ASSERT_TRUE(res.has_value()) << res.error().detail;
+    EXPECT_TRUE(res->activity_publish_warning.has_value());
+
+    const auto activity =
+        kasumi::application::inspect_profile_activity(env, "demo");
+    ASSERT_TRUE(activity.last_attempt.has_value());
+    EXPECT_EQ(activity.last_attempt->operation,
+              kasumi::application::ProfileOperationKind::RemoveBarrier);
+    EXPECT_EQ(activity.last_attempt->status,
+              kasumi::application::ProfileExecutionStatus::Succeeded);
+    EXPECT_EQ(activity.last_attempt->remote_publish_state,
+              kasumi::application::ProfileRemotePublishState::Pending);
+}
+
 } // namespace

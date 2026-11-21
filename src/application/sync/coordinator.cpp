@@ -1475,11 +1475,19 @@ verify_existing_content(transport::Transport& storage,
     return checked->state == history_storage::ContentObjectState::Present;
 }
 
-std::expected<void, Error>
-save_state_checked(const std::filesystem::path& database_path,
-                   const state_storage::StoredState& state) {
-    if (!state_storage::initialize(database_path) ||
-        !state_storage::save_state(database_path, state)) {
+std::expected<void, Error> save_state_checked(
+    const std::filesystem::path& database_path,
+    const state_storage::StoredState& state,
+    const std::optional<state_storage::AcceptedCommitMeta>& accepted_meta) {
+    if (!state_storage::initialize(database_path)) {
+        return std::unexpected(
+            make_error(ErrorCode::DatabaseFailure, "failed to save state.db"));
+    }
+    const bool saved = accepted_meta.has_value()
+                           ? state_storage::save_state(
+                                 database_path, state, *accepted_meta)
+                           : state_storage::save_state(database_path, state);
+    if (!saved) {
         return std::unexpected(
             make_error(ErrorCode::DatabaseFailure, "failed to save state.db"));
     }
@@ -3682,7 +3690,9 @@ execute(const runtime::RuntimeData& runtime_data,
         const reconciliation::Result& reconciliation_result,
         observation::LocalObservationSession* session,
         StagedExecutionHandoff* staged_handoff,
-        bool enable_micro_packs) {
+        bool enable_micro_packs,
+        history::CommitAuthorship authorship,
+        std::string* accepted_commit_id) {
     auto* meter = session ? session->progress : nullptr;
     struct StagedHandoffGuard {
         StagedExecutionHandoff* handoff = nullptr;
@@ -3980,7 +3990,8 @@ execute(const runtime::RuntimeData& runtime_data,
             observed_input.storage.logical_heads,
             commit_time->created_at,
             key,
-            layout_plan->target_manifest);
+            layout_plan->target_manifest,
+            std::move(authorship));
         if (!prepared) {
             return fail_terminal(publication_error(prepared.error()));
         }
@@ -4773,6 +4784,14 @@ execute(const runtime::RuntimeData& runtime_data,
         if (meter) {
             meter->notify(SyncProgress{.stage = SyncStage::Finalizing});
         }
+        std::optional<state_storage::AcceptedCommitMeta> accepted_meta;
+        if (found->commit.created_at > 0 ||
+            history::has_commit_authorship(found->commit.authorship) ||
+            !observed_input.base_state_present ||
+            found->id != observed_input.base_commit_id) {
+            accepted_meta = publication::make_accepted_commit_meta(
+                found->id, found->commit);
+        }
         if (auto saved_state = detail::save_state_checked(
                 runtime_data.database_path,
                 state_storage::StoredState{
@@ -4784,7 +4803,8 @@ execute(const runtime::RuntimeData& runtime_data,
                     .epoch_sequence = observed_input.storage.epoch_sequence,
                     .pending_materializations =
                         reconciliation_result.pending_materializations,
-                    .storage_manifest = found->commit.storage});
+                    .storage_manifest = found->commit.storage},
+                accepted_meta);
             !saved_state) {
             auto rolled = rollback_terminal();
             if (!rolled) {
@@ -4794,6 +4814,9 @@ execute(const runtime::RuntimeData& runtime_data,
                         "; rollback failed: " + rolled.error().detail));
             }
             return std::unexpected(saved_state.error());
+        }
+        if (accepted_commit_id != nullptr) {
+            *accepted_commit_id = found->id;
         }
         if (auto saved_phase =
                 advance_phase(transaction::Phase::DatabaseCommitted);
@@ -5002,6 +5025,8 @@ execute(const runtime::RuntimeData& runtime_data,
     if (meter) {
         meter->notify(SyncProgress{.stage = SyncStage::Finalizing});
     }
+    const auto accepted_meta = publication::make_accepted_commit_meta(
+        prepared_commit->commit_id, prepared_commit->commit);
     if (auto saved_state = detail::save_state_checked(
             runtime_data.database_path,
             state_storage::StoredState{
@@ -5015,9 +5040,13 @@ execute(const runtime::RuntimeData& runtime_data,
                     *epoch_reference ? (**epoch_reference).sequence : 0,
                 .pending_materializations =
                     reconciliation_result.pending_materializations,
-                .storage_manifest = prepared_commit->commit.storage});
+                .storage_manifest = prepared_commit->commit.storage},
+            accepted_meta);
         !saved_state) {
         return std::unexpected(saved_state.error());
+    }
+    if (accepted_commit_id != nullptr) {
+        *accepted_commit_id = prepared_commit->commit_id;
     }
     if (auto saved_phase = advance_phase(transaction::Phase::DatabaseCommitted);
         !saved_phase) {

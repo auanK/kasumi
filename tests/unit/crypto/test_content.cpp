@@ -1783,4 +1783,27 @@ TEST(CryptoPackTest, AdaptiveFastCdcSelectsTiersAndStreamsLargeSlices) {
     EXPECT_EQ(kasumi::crypto::content::hash_file(slice_dec), first_chunk.hash);
 }
 
+TEST(CryptoContentTest, ActivityPurposeIsCryptographicallyIsolated) {
+    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{7, 8, 9};
+    const std::vector<std::uint8_t> payload{'K', 'A', 'C', 'T', 1, 2, 3, 4};
+    const auto cipher = kasumi::crypto::encrypt_bytes(
+        payload, key, kasumi::crypto::FilePurpose::Activity);
+    ASSERT_TRUE(cipher.has_value());
+
+    const auto back = kasumi::crypto::decrypt_bytes(
+        *cipher, key, kasumi::crypto::FilePurpose::Activity);
+    ASSERT_TRUE(back.has_value());
+    EXPECT_EQ(*back, payload);
+
+    EXPECT_FALSE(kasumi::crypto::decrypt_bytes(
+                     *cipher, key, kasumi::crypto::FilePurpose::Content)
+                     .has_value());
+    EXPECT_FALSE(kasumi::crypto::decrypt_bytes(
+                     *cipher, key, kasumi::crypto::FilePurpose::History)
+                     .has_value());
+    EXPECT_FALSE(kasumi::crypto::decrypt_bytes(
+                     *cipher, key, kasumi::crypto::FilePurpose::Pack)
+                     .has_value());
+}
+
 } // namespace

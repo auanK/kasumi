@@ -1,12 +1,16 @@
 #include "application/execute.hpp"
+#include "application/history_storage/activity.hpp"
 #include "application/history_storage/content_reachability.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/reachability.hpp"
 #include "application/history_storage/remote_layout.hpp"
+#include "application/inspection/inspect.hpp"
 #include "application/observation/history.hpp"
 #include "application/profile.hpp"
+#include "application/sync/publication.hpp"
 #include "cli/app.hpp"
 #include "core/hasher.hpp"
+#include "core/history.hpp"
 #include "crypto/file_crypto.hpp"
 #include "crypto/key_derivation.hpp"
 #include "kasumi/test/capture.hpp"
@@ -14,6 +18,7 @@
 #include "kasumi/test/provider_scenarios.hpp"
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
+#include "runtime/machine.hpp"
 #include "runtime/paths.hpp"
 #include "runtime/vault.hpp"
 #include "state_storage/database.hpp"
@@ -352,7 +357,9 @@ TEST(ApplicationMaintenanceContract, NoOpSyncDoesNotRewriteStateOrRemote) {
     const auto paths = kasumi::runtime::resolve_profile_paths(
         environment.app_data_dir, "demo");
     ASSERT_TRUE(paths.has_value());
-    const auto state_before = kasumi::test::read_binary(paths->database_path);
+    const auto state_before =
+        kasumi::state_storage::load_state(paths->database_path);
+    ASSERT_TRUE(state_before.has_value() && *state_before);
     const auto remote_before = kasumi::test::snapshot_tree(profile.remote_dir);
     auto opened = open_initialized_storage(profile.remote_dir);
     ASSERT_TRUE(opened.has_value());
@@ -363,13 +370,34 @@ TEST(ApplicationMaintenanceContract, NoOpSyncDoesNotRewriteStateOrRemote) {
     const auto no_op = kasumi::test::scenarios::no_op_sync(environment, "demo");
     ASSERT_TRUE(no_op.has_value()) << no_op.error();
     EXPECT_TRUE(*no_op);
-    EXPECT_EQ(kasumi::test::read_binary(paths->database_path), state_before);
+    const auto state_after =
+        kasumi::state_storage::load_state(paths->database_path);
+    ASSERT_TRUE(state_after.has_value() && *state_after);
+    EXPECT_EQ((*state_after)->tree, (*state_before)->tree);
+    EXPECT_EQ((*state_after)->height, (*state_before)->height);
+    EXPECT_EQ((*state_after)->commit_id, (*state_before)->commit_id);
+    EXPECT_EQ((*state_after)->ciphertext_id, (*state_before)->ciphertext_id);
+    EXPECT_EQ((*state_after)->epoch_id, (*state_before)->epoch_id);
+    EXPECT_EQ((*state_after)->epoch_sequence,
+              (*state_before)->epoch_sequence);
+    EXPECT_EQ((*state_after)->pending_materializations,
+              (*state_before)->pending_materializations);
+    EXPECT_EQ((*state_after)->storage_manifest,
+              (*state_before)->storage_manifest);
     EXPECT_EQ(kasumi::test::snapshot_tree(profile.remote_dir), remote_before);
     const auto listing_after = kasumi::transport::list(storage);
     ASSERT_TRUE(listing_after.has_value());
     EXPECT_EQ(*listing_after, *listing_before);
     EXPECT_FALSE(
         std::filesystem::exists(paths->profile_dir / "transaction.bin.enc"));
+    const auto activity = kasumi::application::inspect_profile_activity(
+        environment, "demo");
+    ASSERT_TRUE(activity.last_attempt.has_value());
+    EXPECT_EQ(activity.last_attempt->status,
+              kasumi::application::ProfileExecutionStatus::SucceededNoChanges);
+    ASSERT_TRUE(activity.last_complete_sync.has_value());
+    EXPECT_EQ(activity.last_complete_sync->status,
+              kasumi::application::ProfileExecutionStatus::SucceededNoChanges);
 }
 
 TEST(ApplicationMaintenanceContract,
@@ -1482,6 +1510,316 @@ TEST(ApplicationRecoveryContract,
     const auto* lost_row = kasumi::find_row((*post_state)->tree, "lost.txt");
     ASSERT_NE(lost_row, nullptr);
     EXPECT_FALSE(lost_row->is_directory);
+}
+
+TEST(ApplicationRecoveryContract,
+     AuthorshipFlowCoversSyncDownloadNoOpResolveMissingAndUnauthoredCommit) {
+    auto f = make_recovery_fixture("authorship-sync-download-resolve");
+    ASSERT_TRUE(kasumi::application::create_profile(
+        f.env_a, f.profile_a, MasterKeyHex{f.master_hex}));
+    ASSERT_TRUE(kasumi::application::create_profile(
+        f.env_b, f.profile_b, MasterKeyHex{f.master_hex}));
+
+    auto opened = kasumi::transport::open_transport(f.remote_dir.string());
+    ASSERT_TRUE(opened.has_value());
+    auto& storage = *opened;
+    ASSERT_TRUE(kasumi::transport::initialize(storage));
+
+    const auto decoded_key = kasumi::runtime::vault::decode_hex(f.master_hex);
+    ASSERT_TRUE(decoded_key.has_value());
+
+    // Machine A uploads file via Sync -> KCOM v4 Sync authorship.
+    kasumi::test::write_text(f.local_a / "lost.txt", "lost-payload");
+    const auto sync_a =
+        kasumi::application::execute(request(Operation::Sync, f.env_a));
+    ASSERT_TRUE(sync_a.has_value()) << sync_a.error().detail;
+
+    const auto id_a =
+        kasumi::runtime::resolve_machine_identity(f.env_a.app_data_dir, false);
+    ASSERT_TRUE(id_a.has_value());
+    const auto paths_a =
+        kasumi::runtime::resolve_profile_paths(f.env_a.app_data_dir, "demo");
+    ASSERT_TRUE(paths_a.has_value());
+    const auto state_a =
+        kasumi::state_storage::load_state(paths_a->database_path);
+    ASSERT_TRUE(state_a.has_value() && *state_a);
+    const auto act_a =
+        kasumi::state_storage::load_local_activity(paths_a->database_path);
+    ASSERT_TRUE(act_a.has_value() && act_a->accepted_commit);
+    EXPECT_EQ(act_a->accepted_commit->commit_id, (*state_a)->commit_id);
+    EXPECT_EQ(act_a->accepted_commit->origin_operation,
+              kasumi::history::CommitOriginOperation::Sync);
+    EXPECT_EQ(act_a->accepted_commit->machine_id_hex, id_a->id_hex);
+    EXPECT_EQ(act_a->accepted_commit->machine_name, id_a->name);
+
+    // Status and Preview on fresh Machine B do NOT create machine.id.
+    ASSERT_TRUE(std::filesystem::create_directories(f.local_b));
+    ASSERT_FALSE(std::filesystem::exists(f.env_b.app_data_dir / "machine.id"));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Status, f.env_b)));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Preview, f.env_b)));
+    EXPECT_FALSE(std::filesystem::exists(f.env_b.app_data_dir / "machine.id"));
+
+    // Delete content so Machine B does a partial download-only sync.
+    const auto lost_cid = content_id_for(f.master_hex, "lost-payload");
+    ASSERT_TRUE(kasumi::transport::remove(storage, lost_cid));
+    const auto sync_b =
+        kasumi::application::execute(request(Operation::Sync, f.env_b));
+    ASSERT_TRUE(sync_b.has_value()) << sync_b.error().detail;
+
+    const auto paths_b =
+        kasumi::runtime::resolve_profile_paths(f.env_b.app_data_dir, "demo");
+    ASSERT_TRUE(paths_b.has_value());
+    const auto act_b_dl =
+        kasumi::state_storage::load_local_activity(paths_b->database_path);
+    ASSERT_TRUE(act_b_dl.has_value() && act_b_dl->accepted_commit);
+    EXPECT_EQ(act_b_dl->accepted_commit->commit_id, (*state_a)->commit_id);
+    EXPECT_EQ(act_b_dl->accepted_commit->origin_operation,
+              kasumi::history::CommitOriginOperation::Sync);
+    EXPECT_EQ(act_b_dl->accepted_commit->machine_id_hex, id_a->id_hex);
+    EXPECT_EQ(act_b_dl->accepted_commit->machine_name, id_a->name);
+
+    // Subsequent no-op sync on B preserves A's accepted commit authorship.
+    const auto sync_b_noop =
+        kasumi::application::execute(request(Operation::Sync, f.env_b));
+    ASSERT_TRUE(sync_b_noop.has_value()) << sync_b_noop.error().detail;
+    const auto act_b_noop =
+        kasumi::state_storage::load_local_activity(paths_b->database_path);
+    ASSERT_TRUE(act_b_noop.has_value() && act_b_noop->accepted_commit);
+    EXPECT_EQ(*act_b_noop->accepted_commit, *act_b_dl->accepted_commit);
+
+    // Machine B runs resolve-missing -> publishes KCOM v4 ResolveMissing under B.
+    const auto id_b =
+        kasumi::runtime::resolve_machine_identity(f.env_b.app_data_dir, false);
+    ASSERT_TRUE(id_b.has_value());
+    const auto rm = kasumi::application::execute(
+        request(Operation::ResolveMissing, f.env_b));
+    ASSERT_TRUE(rm.has_value()) << rm.error().detail;
+    const auto act_b_rm =
+        kasumi::state_storage::load_local_activity(paths_b->database_path);
+    ASSERT_TRUE(act_b_rm.has_value() && act_b_rm->accepted_commit);
+    EXPECT_NE(act_b_rm->accepted_commit->commit_id, (*state_a)->commit_id);
+    EXPECT_EQ(act_b_rm->accepted_commit->origin_operation,
+              kasumi::history::CommitOriginOperation::ResolveMissing);
+    EXPECT_EQ(act_b_rm->accepted_commit->machine_id_hex, id_b->id_hex);
+    EXPECT_EQ(act_b_rm->accepted_commit->machine_name, id_b->name);
+
+    const auto obs_dir = kasumi::test::workspace_path(f.workspace, "obs");
+    ASSERT_TRUE(std::filesystem::create_directories(obs_dir));
+    const auto observed = kasumi::application::observation::history::observe(
+        storage, *decoded_key, obs_dir, false);
+    ASSERT_TRUE(observed.has_value());
+    const auto head_it =
+        std::ranges::find(observed->reachable_commits,
+                          act_b_rm->accepted_commit->commit_id,
+                          &kasumi::history::LoadedCommit::id);
+    ASSERT_NE(head_it, observed->reachable_commits.end());
+    EXPECT_TRUE(
+        kasumi::history::has_commit_authorship(head_it->commit.authorship));
+    EXPECT_EQ(head_it->commit.authorship.operation,
+              kasumi::history::CommitOriginOperation::ResolveMissing);
+    EXPECT_EQ(head_it->commit.authorship.machine_id, id_b->id);
+
+    // KCOM v4 commit with undeclared authorship yields Unknown on fast-forward.
+    const auto unauthored_ws =
+        kasumi::test::make_temp_workspace("authorship-unauthored-kcom-v4");
+    const auto seed_remote =
+        kasumi::test::workspace_path(unauthored_ws, "seed_remote");
+    const auto seed_local =
+        kasumi::test::workspace_path(unauthored_ws, "seed_local");
+    const ExecutionEnvironment seed_env{
+        kasumi::test::workspace_path(unauthored_ws, "seed_app")};
+    ASSERT_TRUE(std::filesystem::create_directories(seed_local));
+    ASSERT_TRUE(kasumi::application::create_profile(
+        seed_env,
+        Profile{"demo", seed_local, seed_remote.string()},
+        MasterKeyHex{f.master_hex}));
+    kasumi::test::write_text(seed_local / "plain.txt", "unauthored-payload");
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, seed_env)));
+    const auto seed_paths =
+        kasumi::runtime::resolve_profile_paths(seed_env.app_data_dir, "demo");
+    ASSERT_TRUE(seed_paths.has_value());
+    const auto seed_state =
+        kasumi::state_storage::load_state(seed_paths->database_path);
+    ASSERT_TRUE(seed_state.has_value() && *seed_state);
+
+    const auto target_remote =
+        kasumi::test::workspace_path(unauthored_ws, "remote");
+    const auto target_local =
+        kasumi::test::workspace_path(unauthored_ws, "local");
+    ASSERT_TRUE(std::filesystem::create_directories(target_local));
+    auto seed_storage_res =
+        kasumi::transport::open_transport(seed_remote.string());
+    ASSERT_TRUE(seed_storage_res.has_value());
+    auto target_storage_res =
+        kasumi::transport::open_transport(target_remote.string());
+    ASSERT_TRUE(target_storage_res.has_value());
+    auto& target_storage = *target_storage_res;
+    ASSERT_TRUE(kasumi::transport::initialize(target_storage));
+    const auto plain_cid = content_id_for(f.master_hex, "unauthored-payload");
+    const auto plain_tmp =
+        kasumi::test::workspace_path(unauthored_ws, "plain_content.enc");
+    ASSERT_TRUE(
+        kasumi::transport::get(*seed_storage_res, plain_cid, plain_tmp));
+    ASSERT_TRUE(
+        kasumi::transport::put(target_storage, plain_tmp, plain_cid));
+
+    const auto unauthored_prepared =
+        kasumi::application::sync::publication::prepare_commit(
+            (*seed_state)->tree, false, 0, {}, 1700000100, *decoded_key);
+    ASSERT_TRUE(unauthored_prepared.has_value());
+    const auto target_layout =
+        kasumi::application::history_storage::derive_remote_layout(
+            *decoded_key);
+    const auto stage = kasumi::test::workspace_path(unauthored_ws, "stage");
+    ASSERT_TRUE(std::filesystem::create_directories(stage));
+    const auto published_obj =
+        kasumi::application::sync::publication::publish_commit_object(
+            target_storage,
+            target_layout,
+            *decoded_key,
+            *unauthored_prepared,
+            stage);
+    ASSERT_TRUE(published_obj.has_value());
+    ASSERT_TRUE(kasumi::application::sync::publication::publish_head_marker(
+        target_storage, target_layout, published_obj->head, stage));
+
+    const ExecutionEnvironment target_env{
+        kasumi::test::workspace_path(unauthored_ws, "app")};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        target_env,
+        Profile{"demo", target_local, target_remote.string()},
+        MasterKeyHex{f.master_hex}));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, target_env)));
+    EXPECT_TRUE(std::filesystem::exists(target_local / "plain.txt"));
+    const auto target_paths = kasumi::runtime::resolve_profile_paths(
+        target_env.app_data_dir, "demo");
+    ASSERT_TRUE(target_paths.has_value());
+    const auto target_act = kasumi::state_storage::load_local_activity(
+        target_paths->database_path);
+    ASSERT_TRUE(target_act.has_value() && target_act->accepted_commit);
+    EXPECT_EQ(target_act->accepted_commit->commit_id,
+              unauthored_prepared->commit_id);
+    EXPECT_EQ(target_act->accepted_commit->created_at, 1700000100);
+    EXPECT_EQ(target_act->accepted_commit->origin_operation,
+              kasumi::history::CommitOriginOperation::Unknown);
+    EXPECT_TRUE(target_act->accepted_commit->machine_id_hex.empty());
+    EXPECT_TRUE(target_act->accepted_commit->machine_name.empty());
+
+    // Pure download-only sync records SucceededDownloadedOnly and sets
+    // last_complete_sync.
+    const auto target_act_summary =
+        kasumi::application::inspect_profile_activity(target_env, "demo");
+    ASSERT_TRUE(target_act_summary.last_complete_sync.has_value());
+    EXPECT_EQ(target_act_summary.last_complete_sync->status,
+              kasumi::application::ProfileExecutionStatus::
+                  SucceededDownloadedOnly);
+}
+
+TEST(ApplicationMaintenanceContract,
+     MaintenancePublishesRemoteActivityGcRetentionWorksAndInvalidActivityFailsClosed) {
+    auto [workspace, environment, profile, remote, credentials] =
+        make_maintenance_env("activity-maintenance-gc-retention", '8');
+    ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
+    kasumi::test::write_text(profile.local_dir / "doc.txt", "v1");
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, environment)));
+
+    // 1. Fsck publishes Succeeded record visible via remote summary.
+    const auto fsck_ok =
+        kasumi::application::execute(request(Operation::Fsck, environment));
+    ASSERT_TRUE(fsck_ok.has_value()) << fsck_ok.error().detail;
+
+    // 2. Establish writer & remove it + remove absent barrier -> both publish.
+    auto opened = open_initialized_storage(profile.remote_dir);
+    ASSERT_TRUE(opened.has_value());
+    auto& storage = *opened;
+    const auto key_bytes =
+        *kasumi::runtime::vault::decode_hex(std::string(64, '8'));
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key_bytes);
+    const auto wr_stage = kasumi::test::workspace_path(workspace, "wr");
+    ASSERT_TRUE(std::filesystem::create_directories(wr_stage));
+    auto writer = protocol::register_writer(storage, layout, wr_stage);
+    ASSERT_TRUE(writer.has_value());
+    const auto writer_id = writer->identifier;
+    writer->storage = nullptr;
+    auto rw_req = request(Operation::RemoveWriter, environment);
+    rw_req.request.writer_identifier = writer_id;
+    ASSERT_TRUE(kasumi::application::execute(rw_req));
+
+    auto rb_req = request(Operation::RemoveBarrier, environment);
+    rb_req.request.confirm_abandoned = true;
+    ASSERT_TRUE(kasumi::application::execute(rb_req));
+
+    // 3. Seed old KACT v1 records (> age hours + > depth) and keep newest
+    // Succeeded Fsck record, then run GC -> old non-protected records pruned,
+    // newest Succeeded per (machine, op) + depth retained.
+    const auto machine = kasumi::runtime::resolve_machine_identity(
+        environment.app_data_dir, false);
+    ASSERT_TRUE(machine.has_value());
+    const auto old_stage = kasumi::test::workspace_path(workspace, "old_act");
+    ASSERT_TRUE(std::filesystem::create_directories(old_stage));
+    for (int i = 1; i <= 6; ++i) {
+        const std::string hex_suffix =
+            "0000000000000000000000000000000" + std::to_string(i);
+        kasumi::application::history_storage::activity::ActivityRecord old_rec{
+            .event_id = hex_suffix,
+            .operation = kasumi::application::history_storage::activity::
+                ActivityOperation::Fsck,
+            .outcome = kasumi::application::history_storage::activity::
+                ActivityOutcome::IssuesFound,
+            .machine_id = machine->id,
+            .machine_name = machine->name,
+            .started_at = 100000 + i,
+            .finished_at = 100010 + i,
+        };
+        ASSERT_TRUE(kasumi::application::history_storage::activity::publish(
+            storage, layout, key_bytes, old_rec, old_stage));
+    }
+
+    const auto gc_res = kasumi::application::execute(
+        request(Operation::GarbageCollect, environment));
+    ASSERT_TRUE(gc_res.has_value()) << gc_res.error().detail;
+
+    // 4. Corrupt an object under activity/v1/ -> GC fails closed before
+    // deleting anything and remote objects remain intact.
+    const auto bad_file = kasumi::test::workspace_path(workspace, "bad_act");
+    kasumi::test::write_text(bad_file, "corrupt-activity-payload");
+    const auto bad_id = layout.activity_prefix + "bad-activity-object";
+    ASSERT_TRUE(kasumi::transport::put(storage, bad_file, bad_id));
+    const auto listing_before_fail = kasumi::transport::list(storage);
+    ASSERT_TRUE(listing_before_fail.has_value());
+    const auto gc_fail = kasumi::application::execute(
+        request(Operation::GarbageCollect, environment));
+    ASSERT_FALSE(gc_fail.has_value());
+    EXPECT_EQ(gc_fail.error().code,
+              kasumi::application::ErrorCode::GarbageCollectionFailure);
+    for (const auto& obj : *listing_before_fail) {
+        if (!kasumi::application::history_storage::is_activity_object(layout,
+                                                                      obj)) {
+            EXPECT_EQ(kasumi::transport::presence(storage, obj).value(),
+                      kasumi::transport::Presence::Present);
+        }
+    }
+    ASSERT_TRUE(kasumi::transport::remove(storage, bad_id));
+
+    // 5. Inspection from second machine sees remote activities cleanly without
+    // modifying anything.
+    const auto summary = kasumi::application::inspect(
+        {kasumi::application::InspectionRequest{
+             .operation = kasumi::application::InspectionOperation::RemoteSummary,
+             .profile_name = "demo"},
+         credentials,
+         environment});
+    ASSERT_TRUE(summary.has_value()) << summary.error().detail;
+    const auto& sum_rep =
+        std::get<kasumi::application::RemoteSummaryReport>(summary->payload);
+    EXPECT_EQ(sum_rep.invalid_activity_count, 0U);
+    EXPECT_FALSE(sum_rep.recent_activities.empty());
 }
 
 } // namespace

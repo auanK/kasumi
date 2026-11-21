@@ -18,10 +18,11 @@ structural notation, not literal path names:
   <history-ns>/<gc-ns>/<version-ns>/<barrier-id>
   <history-ns>/<gc-ns>/<version-ns>/<writers-ns>/<token>
   <history-ns>/<gc-ns>/<version-ns>/<probes-ns>/<token>
+  <activity-ns>/<version-ns>/<20-digit-finished-at>-<event-id>
 ```
 
-Commit variants, physical markers, Epoch objects, writer/probe objects, Pack IDs, and
-ordinary Content IDs are extensionless. Commits are published at the flat path `<history-ns>/<commits-ns>/<commit-id>_<ciphertext-id>` so that all commit variants in the namespace can be discovered with a single directory listing. The active layout is key-derived.
+Commit variants, physical markers, Epoch objects, writer/probe objects, activity
+records, Pack IDs, and ordinary Content IDs are extensionless. Commits are published at the flat path `<history-ns>/<commits-ns>/<commit-id>_<ciphertext-id>` so that all commit variants in the namespace can be discovered with a single directory listing, while immutable operational activity records (`KACT` v1, encrypted with Protocol v3 under `FilePurpose::Activity`) live in their own derived namespace `<activity-ns>/<version-ns>/` so they remain bounded (`maximum_activity_object_count = 1024`) independently of the 8,192-object Commit inventory cap. Normal `sync` adds zero extra remote objects or requests for traceability: commit authorship rides inside `KCOM` v4, and download-only or no-op syncs are recorded locally in `db.sqlite`. The active layout is key-derived.
 Former fixed `history/...` paths are not parsed, migrated, or deleted.
 Unrecognized objects, including legacy quarantine state, are left untouched.
 For compatibility and backup requirements, see
@@ -44,7 +45,7 @@ Logical file rows in a `Snapshot` are always identified by their whole-file plai
 
 ## Identities and Visibility
 
-A **Commit ID** is a keyed identifier of canonical Commit bytes (`KCOM` v3): the complete Snapshot, sorted parents, height, timestamp, and canonical `StorageManifest`. A **Ciphertext ID** is BLAKE3 of one encrypted Commit payload. Random encryption nonces permit several physical ciphertext variants for one logical Commit ID. `HeadReference` binds both IDs. A physical HEAD marker names that reference and records publication; a **logical head** is a marked Commit that is not an ancestor of another marked Commit. Old ancestral markers can coexist until pruning. Content IDs and Pack IDs derive from plaintext logical BLAKE3 hashes and Pack Hashes under the vault key, enabling deduplication inside a vault without exposing raw hashes as object names. See [History and Concurrency](history-and-concurrency.md) and [Security](../security.md).
+A **Commit ID** is a keyed identifier of canonical Commit bytes (`KCOM` v4): the complete Snapshot, sorted parents, height, timestamp, commit authorship (`origin`, `machine_id`, `machine_name`), and canonical `StorageManifest` (`KCOM` v3 commits are rejected without legacy fallback). A **Ciphertext ID** is BLAKE3 of one encrypted Commit payload. Random encryption nonces permit several physical ciphertext variants for one logical Commit ID. `HeadReference` binds both IDs. A physical HEAD marker names that reference and records publication; a **logical head** is a marked Commit that is not an ancestor of another marked Commit. Old ancestral markers can coexist until pruning. Content IDs and Pack IDs derive from plaintext logical BLAKE3 hashes and Pack Hashes under the vault key, enabling deduplication inside a vault without exposing raw hashes as object names. See [History and Concurrency](history-and-concurrency.md) and [Security](../security.md).
 
 Remote storage still sees object count, byte sizes, access timing, deduplication, opaque IDs, Commit/Ciphertext relationships, and the clear decimal Epoch sequence in its object name. Derived namespace components hide literal protocol labels from a storage listing but are short and do not hide the structural pattern. Commit payloads contain encrypted paths, metadata, parents, and trees. Provider metadata and transport behavior remain outside Kasumi's encrypted payload boundary.
 

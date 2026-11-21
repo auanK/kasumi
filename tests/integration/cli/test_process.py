@@ -693,6 +693,42 @@ class CliProcessTest(unittest.TestCase):
 
         self.invoke("fsck", "demo")
 
+    def test_traceability_show_remote_summary_and_config_in_real_processes(self):
+        local, remote = self.root / "local", self.root / "remote"
+        local.mkdir()
+        self.invoke("config", input=f"n\ndemo\n{local}\n{remote}\n\nq\n".encode())
+        (local / "note.txt").write_text("traceability", encoding="utf-8")
+
+        sync_out = self.invoke("sync", "demo")
+        self.assertIn(b"[OK] Synchronization completed.", sync_out)
+
+        self.invoke("fsck", "demo")
+
+        # Verify offline show works when remote is unreachable.
+        parked = self.root / "remote-parked"
+        remote.rename(parked)
+        try:
+            shown = self.invoke("show", "demo")
+            shown_full = self.invoke("show", "demo", "--full")
+        finally:
+            parked.rename(remote)
+
+        self.assertIn(b"Accepted state:", shown)
+        self.assertIn(b"Commit origin: sync", shown)
+        self.assertIn(b"Last complete sync:", shown)
+        self.assertIn(b"Last local attempt:", shown)
+        self.assertIn(b"Recent local maintenance:", shown)
+        self.assertIn(b"Recent local executions (2):", shown_full)
+
+        summary = self.invoke("remote", "summary", "demo")
+        summary_full = self.invoke("remote", "summary", "demo", "--full")
+        self.assertIn(b"Recent operational activity (1):", summary)
+        self.assertIn(b"fsck", summary_full)
+
+        listed = self.invoke("config", input=b"q\n")
+        self.assertIn(b"Last sync", listed)
+        self.assertRegex(listed, rb"\bdemo\s+Ready\s+.*\(ok\)")
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)

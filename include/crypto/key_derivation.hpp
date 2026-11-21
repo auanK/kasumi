@@ -19,6 +19,7 @@ enum class KeyPurpose {
     Journal,
     RemoteIdentifier,
     Pack,
+    Activity,
 };
 
 enum class IdentifierPurpose {

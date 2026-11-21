@@ -6,7 +6,7 @@
 
 * **Zero remote payload downloads**: All repacked member bytes are read from live local files in `local_dir` and verified against their expected BLAKE3 hash and size while staging fresh encrypted `KPAK\x01` packs.
 * **Zero remote deletions**: Old loose objects and replaced Micro-Packs are never deleted by `repack`. Because older history Commits remain valid under Epoch retention, replaced packs remain protected by history reachability until retention advances and [`kasumi gc`](garbage-collection.md) removes them.
-* **Identical logical tree**: A published repack creates a new `KCOM` v3 Commit carrying the exact same logical `Snapshot` tree and an updated `StorageManifest`. Other enrolled clients fast-forward cleanly on their next Sync without re-downloading unchanged files, while fresh `sync --initial` clients enroll directly into the consolidated packs.
+* **Identical logical tree**: A published repack creates a new `KCOM` v4 Commit carrying `CommitOriginOperation::Repack` authorship, the exact same logical `Snapshot` tree, and an updated `StorageManifest`. Other enrolled clients fast-forward cleanly on their next Sync without re-downloading unchanged files, while fresh `sync --initial` clients enroll directly into the consolidated packs.
 
 ## Deterministic planning policy
 
@@ -36,7 +36,7 @@ To detect fragmentation without network I/O, the planner groups `StorageManifest
 4. **Pure planning**: Computes the consolidation plan. `--dry-run` or non-actionable plans exit here without registering a remote writer or performing remote writes.
 5. **Cooperative writer and parallel staging**: Registers a remote writer marker (failing closed if a GC maintenance barrier is active), resolves distinct content hashes to readable local source paths, and processes `new_packs` in bounded windows (`DEFAULT_UPLOAD_WINDOW_PACKS = 16`, up to `~64 MiB` per staging window). In each window, worker threads (`content_concurrency()`) stage and encrypt the window's `KPAK\x01` packs from verified local files in a private temporary workspace (rejecting concurrent local edits, size mismatches, or pack hash mismatches).
 6. **Upload, verification, and cleanup per window**: Checks writer admission, uploads the window's packs in parallel, verifies remote objects (`verify_upload_batch`), and deletes the window's staged files before starting the next window—keeping temporary local disk bounded regardless of total vault size. After all windows succeed, repack re-checks writer admission and remote HEAD markers (`list_remote_head_commit_ids`) to reject concurrent remote publications before committing.
-7. **Publication and cleanup**: Publishes and verifies the new `KCOM` v3 Commit and HEAD marker preserving the live `Snapshot` with `target_manifest`, saves accepted `StoredState` locally, best-effort prunes observed parent/ancestral HEAD markers, and releases the writer marker.
+7. **Publication and cleanup**: Publishes and verifies the new `KCOM` v4 Commit and HEAD marker preserving the live `Snapshot` with `target_manifest`, saves accepted `StoredState` and `accepted_commit_meta` locally, best-effort prunes observed parent/ancestral HEAD markers, and releases the writer marker.
 
 ## Operational contract and two-step reclamation
 

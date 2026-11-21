@@ -5,16 +5,21 @@
 #include "cli/i18n.hpp"
 #include "cli/presenter.hpp"
 #include "platform/cancellation.hpp"
+#include "platform/clock.hpp"
 #include "platform/path.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <format>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <print>
+#include <set>
 #include <string>
 
 #if !defined(_WIN32)
@@ -79,10 +84,443 @@ bool read_tty_line(std::string& value) {
 }
 #endif
 
+std::string_view
+profile_operation_label(application::ProfileOperationKind op) {
+    using K = application::ProfileOperationKind;
+    switch (op) {
+    case K::Sync:
+        return "sync";
+    case K::Fsck:
+        return "fsck";
+    case K::GarbageCollect:
+        return "gc";
+    case K::Repack:
+        return "repack";
+    case K::ResolveMissing:
+        return "resolve-missing";
+    case K::RemoveWriter:
+        return "gc remove-writer";
+    case K::RemoveBarrier:
+        return "gc remove-barrier";
+    default:
+        return i18n::tr(i18n::Key::LabelUnknown);
+    }
+}
+
+std::string_view
+execution_status_label(application::ProfileExecutionStatus status) {
+    using S = application::ProfileExecutionStatus;
+    static constexpr std::array<std::pair<S, i18n::Key>, 11> kTable{{
+        {S::InProgress, i18n::Key::LabelStatusInProgress},
+        {S::Succeeded, i18n::Key::LabelStatusOk},
+        {S::SucceededNoChanges, i18n::Key::LabelStatusNoChanges},
+        {S::SucceededDownloadedOnly, i18n::Key::LabelStatusDownloadedOnly},
+        {S::SucceededPartial, i18n::Key::LabelStatusPartial},
+        {S::IssuesFound, i18n::Key::LabelStatusIssuesFound},
+        {S::Blocked, i18n::Key::LabelStatusBlocked},
+        {S::Cancelled, i18n::Key::LabelStatusCancelled},
+        {S::Failed, i18n::Key::LabelStatusFailed},
+        {S::Uncertain, i18n::Key::LabelStatusUncertain},
+        {S::Interrupted, i18n::Key::LabelStatusInterrupted},
+    }};
+    for (const auto& [candidate, key] : kTable) {
+        if (candidate == status) {
+            return i18n::tr(key);
+        }
+    }
+    return i18n::tr(i18n::Key::LabelUnknown);
+}
+
+std::string format_execution_metrics(const application::ProfileExecutionSummary& e) {
+    using K = application::ProfileOperationKind;
+    switch (e.operation) {
+    case K::Sync:
+        if (e.summary_a > 0 && e.summary_c > 0) {
+            return i18n::format(i18n::Key::LabelMetricSyncChanged, e.summary_a) +
+                   ", " +
+                   i18n::format(i18n::Key::LabelMetricSyncPending, e.summary_c);
+        }
+        if (e.summary_a > 0) {
+            return i18n::format(i18n::Key::LabelMetricSyncChanged, e.summary_a);
+        }
+        if (e.summary_c > 0) {
+            return i18n::format(i18n::Key::LabelMetricSyncPending, e.summary_c);
+        }
+        return {};
+    case K::Fsck:
+        if (e.summary_a > 0 || e.summary_bytes > 0) {
+            return format_activity_metrics(
+                static_cast<std::uint8_t>(application::RemoteActivityOperation::Fsck),
+                e.summary_a,
+                e.summary_b,
+                e.summary_bytes,
+                e.flags);
+        }
+        return {};
+    case K::GarbageCollect:
+        if (e.summary_a > 0 || e.summary_b > 0 ||
+            (e.flags & application::remote_activity_flag_analysis_only) != 0U) {
+            return format_activity_metrics(
+                static_cast<std::uint8_t>(
+                    application::RemoteActivityOperation::GarbageCollect),
+                e.summary_a,
+                e.summary_b,
+                e.summary_bytes,
+                e.flags);
+        }
+        return {};
+    case K::Repack:
+        if (e.summary_a > 0 || e.summary_b > 0) {
+            return i18n::format(i18n::Key::LabelMetricRepack,
+                                e.summary_a,
+                                e.summary_b,
+                                format_size(e.summary_bytes));
+        }
+        return {};
+    case K::ResolveMissing:
+        if (e.summary_a > 0) {
+            return i18n::format(i18n::Key::LabelMetricResolveMissing,
+                                e.summary_a);
+        }
+        return {};
+    default:
+        return {};
+    }
+}
+
+std::string format_execution_extra(const application::ProfileExecutionSummary& e,
+                                   bool include_stage) {
+    std::string extra = format_execution_metrics(e);
+    const auto append = [&](std::string_view part) {
+        if (part.empty()) {
+            return;
+        }
+        if (!extra.empty()) {
+            extra += ", ";
+        }
+        extra += part;
+    };
+    if (e.recovered) {
+        append(i18n::tr(i18n::Key::LabelFlagRecovered));
+    }
+    if ((e.flags & application::profile_execution_flag_audit_failed_after_sync) !=
+        0U) {
+        append(i18n::tr(i18n::Key::LabelFlagAuditFailedAfterSync));
+    }
+    if (e.remote_publish_state == application::ProfileRemotePublishState::Pending) {
+        append(i18n::tr(i18n::Key::LabelFlagRemotePublishPending));
+    }
+    append(format_activity_flags(e.flags));
+    if (include_stage && !e.stage.empty()) {
+        append(sanitize_terminal_text(e.stage));
+    }
+    return extra;
+}
+
+std::string
+format_config_last_sync(const application::ProfileActivityReport& activity) {
+    if (!activity.database_present) {
+        return "-";
+    }
+    const application::ProfileExecutionSummary* chosen = nullptr;
+    if (activity.last_attempt &&
+        activity.last_attempt->operation ==
+            application::ProfileOperationKind::Sync &&
+        (!activity.last_complete_sync ||
+         activity.last_attempt->started_at >
+             activity.last_complete_sync->started_at)) {
+        chosen = &*activity.last_attempt;
+    } else if (activity.last_complete_sync) {
+        chosen = &*activity.last_complete_sync;
+    }
+    if (chosen == nullptr) {
+        return "-";
+    }
+    const auto ts = platform::clock::format_local_timestamp(
+        chosen->finished_at.value_or(chosen->started_at), false);
+    return std::format("{} ({})", ts, execution_status_label(chosen->status));
+}
+
+void present_profile_activity(std::string_view profile_name,
+                              const application::ProfileActivityReport& report,
+                              bool full) {
+    if (report.accepted_commit) {
+        const auto& c = *report.accepted_commit;
+        const std::string_view cid =
+            (!full && c.commit_id.size() > 16)
+                ? std::string_view{c.commit_id}.substr(0, 16)
+                : std::string_view{c.commit_id};
+        i18n::println(
+            i18n::Key::WizardShowAcceptedCommit,
+            sanitize_terminal_text(cid),
+            c.height,
+            platform::clock::format_local_timestamp(c.created_at),
+            commit_origin_label(c.origin_operation),
+            format_machine_label(c.machine_name, c.machine_id_hex, full, full),
+            platform::clock::format_local_timestamp(c.accepted_at));
+    } else {
+        i18n::println(i18n::Key::WizardShowNoAcceptedCommit);
+    }
+
+    if (report.last_complete_sync) {
+        const auto& s = *report.last_complete_sync;
+        const auto ts = platform::clock::format_local_timestamp(
+            s.finished_at.value_or(s.started_at));
+        const auto status = execution_status_label(s.status);
+        const auto machine =
+            format_machine_label(s.machine_name, s.machine_id_hex, full, full);
+        i18n::println(
+            i18n::Key::WizardShowLastCompleteSync, ts, status, machine);
+    } else {
+        i18n::println(i18n::Key::WizardShowNoCompleteSync);
+    }
+
+    if (report.last_attempt) {
+        const auto& a = *report.last_attempt;
+        const auto ts = platform::clock::format_local_timestamp(
+            a.finished_at.value_or(a.started_at));
+        std::string status{execution_status_label(a.status)};
+        if (a.recovered) {
+            status +=
+                std::format(" ({})", i18n::tr(i18n::Key::LabelFlagRecovered));
+        }
+        i18n::println(
+            i18n::Key::WizardShowLastAttempt,
+            profile_operation_label(a.operation),
+            ts,
+            status,
+            format_machine_label(a.machine_name, a.machine_id_hex, full, full));
+        const bool is_ok =
+            a.status == application::ProfileExecutionStatus::Succeeded ||
+            a.status == application::ProfileExecutionStatus::SucceededNoChanges ||
+            a.status ==
+                application::ProfileExecutionStatus::SucceededDownloadedOnly;
+        if (!a.stage.empty() && (!is_ok || full)) {
+            i18n::println(i18n::Key::WizardShowAttemptStage,
+                          sanitize_terminal_text(a.stage));
+        }
+        if (!a.detail.empty() && (!is_ok || full)) {
+            i18n::println(i18n::Key::WizardShowAttemptDetail,
+                          sanitize_terminal_text(a.detail));
+        }
+        if ((a.flags &
+             application::profile_execution_flag_audit_failed_after_sync) !=
+            0U) {
+            i18n::println(i18n::Key::WizardShowAttemptAuditWarning);
+        }
+        if (a.remote_publish_state ==
+            application::ProfileRemotePublishState::Pending) {
+            i18n::println(i18n::Key::WizardShowAttemptPendingPublish);
+        }
+    } else {
+        i18n::println(i18n::Key::WizardShowNoAttempts);
+    }
+
+    if (!report.recent_executions.empty()) {
+        std::vector<const application::ProfileExecutionSummary*> sorted;
+        sorted.reserve(report.recent_executions.size());
+        for (const auto& item : report.recent_executions) {
+            sorted.push_back(&item);
+        }
+        std::ranges::sort(sorted, [](const auto* a, const auto* b) {
+            const auto ta = a->finished_at.value_or(a->started_at);
+            const auto tb = b->finished_at.value_or(b->started_at);
+            if (ta != tb) {
+                return ta > tb;
+            }
+            return a->started_at > b->started_at;
+        });
+
+        if (full) {
+            i18n::println(i18n::Key::WizardShowRecentExecutionsHeader,
+                          sorted.size());
+            for (const auto* item : sorted) {
+                const auto ts = platform::clock::format_local_timestamp(
+                    item->finished_at.value_or(item->started_at));
+                const auto op = profile_operation_label(item->operation);
+                const auto status = execution_status_label(item->status);
+                const auto dur = format_duration(
+                    std::chrono::milliseconds(item->duration_ms));
+                const auto machine = format_machine_label(
+                    item->machine_name, item->machine_id_hex, true, true);
+                const auto extra = format_execution_extra(*item, false);
+                if (extra.empty()) {
+                    std::println("  {} | {:<17} | {} | {} | {}",
+                                 ts,
+                                 op,
+                                 status,
+                                 dur,
+                                 machine);
+                } else {
+                    std::println("  {} | {:<17} | {} | {} | {} ({})",
+                                 ts,
+                                 op,
+                                 status,
+                                 dur,
+                                 machine,
+                                 extra);
+                }
+                if (!item->stage.empty() || !item->detail.empty()) {
+                    std::string note;
+                    if (!item->stage.empty()) {
+                        note = sanitize_terminal_text(item->stage);
+                    }
+                    if (!item->detail.empty()) {
+                        if (!note.empty()) {
+                            note += ": ";
+                        }
+                        note += sanitize_terminal_text(item->detail);
+                    }
+                    std::println("    {}", note);
+                }
+            }
+        } else {
+            std::set<application::ProfileOperationKind> seen_ops;
+            std::vector<const application::ProfileExecutionSummary*> maint;
+            for (const auto* item : sorted) {
+                if (item->operation != application::ProfileOperationKind::Sync &&
+                    seen_ops.insert(item->operation).second) {
+                    maint.push_back(item);
+                }
+            }
+            if (!maint.empty()) {
+                i18n::println(i18n::Key::WizardShowLocalMaintenanceHeader);
+                for (const auto* item : maint) {
+                    const auto ts = platform::clock::format_local_timestamp(
+                        item->finished_at.value_or(item->started_at));
+                    const auto op = profile_operation_label(item->operation);
+                    const auto status = execution_status_label(item->status);
+                    const auto extra = format_execution_extra(*item, true);
+                    if (extra.empty()) {
+                        std::println("  {:<17} {} | {}", op, ts, status);
+                    } else {
+                        std::println(
+                            "  {:<17} {} | {} ({})", op, ts, status, extra);
+                    }
+                }
+            }
+            if (sorted.size() > 1) {
+                i18n::println(i18n::Key::WizardShowExecutionsMoreHint,
+                              sorted.size(),
+                              profile_name);
+            }
+        }
+    }
+
+    if (!report.cached_remote_activities.empty()) {
+        i18n::println(i18n::Key::WizardShowCachedRemoteHeader, profile_name);
+        std::vector<const application::ProfileCachedRemoteActivity*> sorted;
+        sorted.reserve(report.cached_remote_activities.size());
+        for (const auto& item : report.cached_remote_activities) {
+            sorted.push_back(&item);
+        }
+        std::ranges::sort(sorted, [](const auto* a, const auto* b) {
+            if (a->finished_at != b->finished_at) {
+                return a->finished_at > b->finished_at;
+            }
+            return a->started_at > b->started_at;
+        });
+
+        std::map<std::string, std::set<std::string>> ids_by_name;
+        for (const auto* item : sorted) {
+            if (!item->machine_name.empty() && !item->machine_id_hex.empty()) {
+                ids_by_name[item->machine_name].insert(item->machine_id_hex);
+            }
+        }
+
+        std::vector<const application::ProfileCachedRemoteActivity*> shown;
+        if (full) {
+            shown = sorted;
+        } else {
+            std::set<std::uint8_t> seen_ops;
+            for (const auto* item : sorted) {
+                if (seen_ops.insert(item->operation).second) {
+                    shown.push_back(item);
+                }
+            }
+        }
+        for (const auto* item : shown) {
+            const auto ts =
+                platform::clock::format_local_timestamp(item->finished_at);
+            const auto op = activity_operation_label(item->operation);
+            const auto outcome = activity_outcome_label(item->outcome);
+            const bool collide =
+                ids_by_name.contains(item->machine_name) &&
+                ids_by_name.at(item->machine_name).size() > 1;
+            const auto machine = format_machine_label(
+                item->machine_name, item->machine_id_hex, full || collide, full);
+            const auto metrics = format_activity_metrics(item->operation,
+                                                         item->metric_primary,
+                                                         item->metric_secondary,
+                                                         item->metric_bytes,
+                                                         item->flags);
+            const auto flags = format_activity_flags(item->flags);
+            std::string extra;
+            if (!metrics.empty()) {
+                extra += metrics;
+            }
+            if (!flags.empty()) {
+                if (!extra.empty()) {
+                    extra += ", ";
+                }
+                extra += flags;
+            }
+            if (full) {
+                const auto dur = format_duration(
+                    std::chrono::milliseconds(item->duration_ms));
+                const auto cached_note = i18n::format(
+                    i18n::Key::WizardShowCachedAt,
+                    platform::clock::format_local_timestamp(item->cached_at));
+                if (!extra.empty()) {
+                    extra += ", ";
+                }
+                extra += cached_note;
+                std::println("  {} | {:<17} | {} | {} | {} ({})",
+                             ts,
+                             op,
+                             outcome,
+                             dur,
+                             machine,
+                             extra);
+                if (!item->stage.empty() || !item->detail.empty()) {
+                    std::string note;
+                    if (!item->stage.empty()) {
+                        note = sanitize_terminal_text(item->stage);
+                    }
+                    if (!item->detail.empty()) {
+                        if (!note.empty()) {
+                            note += ": ";
+                        }
+                        note += sanitize_terminal_text(item->detail);
+                    }
+                    std::println("    {}", note);
+                }
+            } else {
+                if (extra.empty()) {
+                    std::println(
+                        "  {:<17} {} | {} | {}", op, ts, outcome, machine);
+                } else {
+                    std::println("  {:<17} {} | {} | {} ({})",
+                                 op,
+                                 ts,
+                                 outcome,
+                                 machine,
+                                 extra);
+                }
+            }
+        }
+        if (!full && sorted.size() > shown.size()) {
+            i18n::println(i18n::Key::WizardShowCachedRemoteMoreHint,
+                          sorted.size());
+        }
+    }
+}
+
 } // namespace
 
 int run_profile_query(const application::ExecutionEnvironment& environment,
-                      std::string_view profile_name) {
+                      std::string_view profile_name,
+                      bool full) {
     const auto fail_query = [](std::string_view message) {
         std::println(stderr, "{} {}", i18n::tr(i18n::Key::LabelError), message);
         return 1;
@@ -127,6 +565,11 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
                 i18n::println(
                     i18n::Key::WizardProblemReason,
                     i18n::tr(problem_keys[static_cast<std::size_t>(problem)]));
+            }
+            const auto activity =
+                application::inspect_profile_activity(environment, profile.name);
+            if (activity.database_present) {
+                present_profile_activity(profile.name, activity, full);
             }
             return 0;
         }
@@ -276,9 +719,12 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             for (const auto& prof : profiles) {
                 const auto state = application::inspect_profile_local_state(
                     environment, prof.name);
+                const auto activity = application::inspect_profile_activity(
+                    environment, prof.name);
                 i18n::println(i18n::Key::WizardProfileListEntry,
                               prof.name,
-                              application::to_string(state));
+                              application::to_string(state),
+                              format_config_last_sync(activity));
             }
         }
 

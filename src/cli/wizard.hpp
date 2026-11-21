@@ -10,7 +10,8 @@ namespace kasumi::cli {
 // Interactively creates or edits profiles.
 int run_config_wizard(const application::ExecutionEnvironment& environment);
 int run_profile_query(const application::ExecutionEnvironment& environment,
-                      std::string_view profile_name = {});
+                      std::string_view profile_name = {},
+                      bool full = false);
 int run_profile_key(const application::ExecutionEnvironment& environment,
                     std::string_view profile_name);
 

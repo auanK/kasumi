@@ -1087,11 +1087,96 @@ validate_parent_ids(std::span<const std::string> parents, bool require_sorted) {
     return {};
 }
 
+namespace {
+
+bool is_valid_utf8(std::string_view text) noexcept {
+    std::size_t i = 0;
+    while (i < text.size()) {
+        const auto lead = static_cast<unsigned char>(text[i]);
+        if (lead <= 0x7FU) {
+            ++i;
+            continue;
+        }
+        std::size_t count = 0;
+        std::uint32_t code = 0;
+        std::uint32_t min_code = 0;
+        if ((lead & 0xE0U) == 0xC0U) {
+            count = 1;
+            code = lead & 0x1FU;
+            min_code = 0x80U;
+        } else if ((lead & 0xF0U) == 0xE0U) {
+            count = 2;
+            code = lead & 0x0FU;
+            min_code = 0x800U;
+        } else if ((lead & 0xF8U) == 0xF0U) {
+            count = 3;
+            code = lead & 0x07U;
+            min_code = 0x10000U;
+        } else {
+            return false;
+        }
+        if (i + count >= text.size()) {
+            return false;
+        }
+        for (std::size_t j = 1; j <= count; ++j) {
+            const auto cont = static_cast<unsigned char>(text[i + j]);
+            if ((cont & 0xC0U) != 0x80U) {
+                return false;
+            }
+            code = (code << 6U) | (cont & 0x3FU);
+        }
+        if (code < min_code || code > 0x10FFFFU ||
+            (code >= 0xD800U && code <= 0xDFFFU)) {
+            return false;
+        }
+        i += count + 1;
+    }
+    return true;
+}
+
+} // namespace
+
+bool has_commit_authorship(const CommitAuthorship& authorship) noexcept {
+    const bool any_id = std::ranges::any_of(
+        authorship.machine_id, [](std::uint8_t b) { return b != 0U; });
+    return authorship.operation != CommitOriginOperation::Unknown || any_id ||
+           !authorship.machine_name.empty();
+}
+
+bool valid_commit_authorship(const CommitAuthorship& authorship) noexcept {
+    const auto op_raw = static_cast<std::uint8_t>(authorship.operation);
+    if (op_raw > static_cast<std::uint8_t>(CommitOriginOperation::ResolveMissing)) {
+        return false;
+    }
+    if (!has_commit_authorship(authorship)) {
+        return true;
+    }
+    if (authorship.machine_name.size() > maximum_machine_name_bytes) {
+        return false;
+    }
+    for (const auto ch : authorship.machine_name) {
+        const auto byte = static_cast<unsigned char>(ch);
+        if (byte < 0x20U || byte == 0x7FU) {
+            return false;
+        }
+    }
+    if (!is_valid_utf8(authorship.machine_name)) {
+        return false;
+    }
+    const bool any_id = std::ranges::any_of(
+        authorship.machine_id, [](std::uint8_t b) { return b != 0U; });
+    if (authorship.operation != CommitOriginOperation::Unknown && !any_id) {
+        return false;
+    }
+    return true;
+}
+
 CommitResult make_commit(std::uint64_t height,
                          std::vector<std::string> parents,
                          Snapshot tree,
                          std::int64_t created_at,
-                         StorageManifest storage) {
+                         StorageManifest storage,
+                         CommitAuthorship authorship) {
     try {
         if (auto valid = validate_parent_ids(parents, false); !valid) {
             return std::unexpected(valid.error());
@@ -1109,11 +1194,16 @@ CommitResult make_commit(std::uint64_t height,
             return std::unexpected(
                 Error{ErrorCode::InvalidCommit, "invalid storage manifest"});
         }
+        if (!valid_commit_authorship(authorship)) {
+            return std::unexpected(
+                Error{ErrorCode::InvalidCommit, "invalid commit authorship"});
+        }
         return Commit{.height = height,
                       .created_at = created_at,
                       .parents = std::move(parents),
                       .tree = std::move(tree),
-                      .storage = std::move(storage)};
+                      .storage = std::move(storage),
+                      .authorship = std::move(authorship)};
     } catch (const std::bad_alloc&) {
         return std::unexpected(
             Error{ErrorCode::LimitExceeded, "allocation failed"});
@@ -1126,9 +1216,14 @@ CommitResult make_commit(std::uint64_t height,
 CommitResult make_bootstrap(Snapshot tree,
                             std::uint64_t height,
                             std::int64_t created_at,
-                            StorageManifest storage) {
-    return make_commit(
-        height, {}, std::move(tree), created_at, std::move(storage));
+                            StorageManifest storage,
+                            CommitAuthorship authorship) {
+    return make_commit(height,
+                       {},
+                       std::move(tree),
+                       created_at,
+                       std::move(storage),
+                       std::move(authorship));
 }
 
 CommitResult make_empty_bootstrap(std::int64_t created_at) {
@@ -1162,6 +1257,10 @@ BytesResult serialize(const Commit& commit) {
             return std::unexpected(
                 Error{ErrorCode::InvalidCommit, "invalid storage manifest"});
         }
+        if (!valid_commit_authorship(commit.authorship)) {
+            return std::unexpected(
+                Error{ErrorCode::InvalidCommit, "invalid commit authorship"});
+        }
 
         auto tree_bytes = serialize_tree(commit.tree, commit.height);
         if (tree_bytes.size() > maximum_commit_plaintext_size) {
@@ -1169,14 +1268,13 @@ BytesResult serialize(const Commit& commit) {
                                          "tree size exceeds maximum size"});
         }
 
-        constexpr std::uint8_t format_version = 3U;
         wire::Writer writer;
         wire::write_array(writer,
                           std::array<std::byte, 4>{std::byte{'K'},
                                                    std::byte{'C'},
                                                    std::byte{'O'},
                                                    std::byte{'M'}});
-        wire::write(writer, format_version);
+        wire::write(writer, commit_format_version);
         wire::write(writer, static_cast<uint64_t>(commit.height));
         wire::write<int64_t>(writer, commit.created_at);
         wire::write(writer, static_cast<uint32_t>(commit.parents.size()));
@@ -1191,6 +1289,11 @@ BytesResult serialize(const Commit& commit) {
         wire::write(writer, static_cast<uint64_t>(tree_bytes.size()));
         wire::write_bytes(writer, tree_bytes);
         write_storage_manifest(writer, commit.storage);
+        wire::write(writer,
+                    static_cast<std::uint8_t>(commit.authorship.operation));
+        wire::write_bytes(
+            writer, std::as_bytes(std::span{commit.authorship.machine_id}));
+        wire::write_string(writer, commit.authorship.machine_name);
         if (writer.buffer.size() > maximum_commit_plaintext_size) {
             return std::unexpected(
                 Error{ErrorCode::LimitExceeded, "commit exceeds maximum size"});
@@ -1227,7 +1330,7 @@ CommitResult deserialize(std::span<const std::uint8_t> bytes) {
                         magic ? "invalid magic" : "truncated magic");
         }
         auto version = wire::read<uint8_t>(reader);
-        if (!version || *version != 3) {
+        if (!version || *version != commit_format_version) {
             return fail(version ? ErrorCode::UnsupportedVersion
                                 : ErrorCode::InvalidEncoding,
                         version ? "unsupported version" : "truncated version");
@@ -1275,8 +1378,29 @@ CommitResult deserialize(std::span<const std::uint8_t> bytes) {
             return std::unexpected(parsed_manifest.error());
         }
         StorageManifest storage = std::move(*parsed_manifest);
+
+        auto raw_op = wire::read<std::uint8_t>(reader);
+        auto machine_id_bytes =
+            wire::read_array<machine_id_byte_count>(reader);
+        auto machine_name =
+            wire::read_string(reader, maximum_machine_name_bytes);
+        if (!raw_op || !machine_id_bytes || !machine_name) {
+            return fail(ErrorCode::InvalidEncoding,
+                        "truncated commit authorship");
+        }
         if (!reader.data.empty()) {
             return fail(ErrorCode::InvalidEncoding, "trailing bytes");
+        }
+
+        CommitAuthorship authorship;
+        authorship.operation = static_cast<CommitOriginOperation>(*raw_op);
+        for (std::size_t i = 0; i < machine_id_byte_count; ++i) {
+            authorship.machine_id[i] =
+                std::to_integer<std::uint8_t>((*machine_id_bytes)[i]);
+        }
+        authorship.machine_name = std::move(*machine_name);
+        if (!valid_commit_authorship(authorship)) {
+            return fail(ErrorCode::InvalidCommit, "invalid commit authorship");
         }
 
         uint64_t generation = 0;
@@ -1299,7 +1423,8 @@ CommitResult deserialize(std::span<const std::uint8_t> bytes) {
                       .created_at = *created_at,
                       .parents = std::move(parents),
                       .tree = std::move(*tree),
-                      .storage = std::move(storage)};
+                      .storage = std::move(storage),
+                      .authorship = std::move(authorship)};
     } catch (const std::bad_alloc&) {
         return fail(ErrorCode::LimitExceeded, "allocation failed");
     } catch (...) {

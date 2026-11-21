@@ -1978,4 +1978,224 @@ std::string_view to_string(ProfileLocalState state) noexcept {
     return "Problem";
 }
 
+namespace {
+
+ProfileOperationKind
+to_profile_op(state_storage::LocalOperationKind kind) noexcept {
+    using SK = state_storage::LocalOperationKind;
+    using PK = ProfileOperationKind;
+    switch (kind) {
+        case SK::Sync:
+            return PK::Sync;
+        case SK::Fsck:
+            return PK::Fsck;
+        case SK::GarbageCollect:
+            return PK::GarbageCollect;
+        case SK::Repack:
+            return PK::Repack;
+        case SK::ResolveMissing:
+            return PK::ResolveMissing;
+        case SK::RemoveWriter:
+            return PK::RemoveWriter;
+        case SK::RemoveBarrier:
+            return PK::RemoveBarrier;
+    }
+    return PK::Sync;
+}
+
+ProfileExecutionStatus
+to_profile_status(state_storage::LocalExecutionStatus status,
+                  bool lock_held) noexcept {
+    using SS = state_storage::LocalExecutionStatus;
+    using PS = ProfileExecutionStatus;
+    switch (status) {
+        case SS::InProgress:
+            return lock_held ? PS::InProgress : PS::Interrupted;
+        case SS::Succeeded:
+            return PS::Succeeded;
+        case SS::SucceededNoChanges:
+            return PS::SucceededNoChanges;
+        case SS::SucceededDownloadedOnly:
+            return PS::SucceededDownloadedOnly;
+        case SS::Partial:
+            return PS::SucceededPartial;
+        case SS::IssuesFound:
+            return PS::IssuesFound;
+        case SS::Blocked:
+            return PS::Blocked;
+        case SS::Cancelled:
+            return PS::Cancelled;
+        case SS::Failed:
+            return PS::Failed;
+        case SS::Uncertain:
+            return PS::Uncertain;
+    }
+    return PS::Failed;
+}
+
+ProfileRemotePublishState
+to_profile_publish(state_storage::RemotePublishState state) noexcept {
+    using SP = state_storage::RemotePublishState;
+    using PP = ProfileRemotePublishState;
+    switch (state) {
+        case SP::NotApplicable:
+            return PP::NotApplicable;
+        case SP::Published:
+            return PP::Published;
+        case SP::Pending:
+            return PP::Pending;
+    }
+    return PP::NotApplicable;
+}
+
+} // namespace
+
+ProfileActivityReport
+inspect_profile_activity(const ExecutionEnvironment& environment,
+                         std::string_view profile_name) {
+    ProfileActivityReport report;
+    if (!runtime::is_valid_profile_name(profile_name)) {
+        return report;
+    }
+    auto paths =
+        runtime::resolve_profile_paths(environment.app_data_dir, profile_name);
+    if (!paths) {
+        return report;
+    }
+    const auto profiles_dir = paths->profile_dir.parent_path();
+    for (const auto& directory :
+         {environment.app_data_dir, profiles_dir, paths->profile_dir}) {
+        if (!query_entry(directory).is_plain_dir()) {
+            return report;
+        }
+    }
+    const auto db_entry = query_entry(paths->database_path);
+    if (!db_entry.is_plain_file()) {
+        return report;
+    }
+    const auto auxiliary_corrupt = [](const EntryInfo& entry) {
+        return entry.state == EntryState::Error ||
+               (entry.state == EntryState::Present &&
+                (!entry.regular || entry.link));
+    };
+    const auto sidecars = detail::sqlite_sidecar_paths(paths->database_path);
+    const auto wal = query_entry(sidecars[0]);
+    const auto shm = query_entry(sidecars[1]);
+    const auto rollback = query_entry(sidecars[2]);
+    if (auxiliary_corrupt(wal) || auxiliary_corrupt(shm) ||
+        auxiliary_corrupt(rollback)) {
+        return report;
+    }
+
+    // Always snapshot db.sqlite to a temporary directory before opening with
+    // SQLite so read-only queries never touch WAL/SHM sidecars or DB mtimes.
+    auto random_id = platform::random::hex_id(16);
+    std::error_code temp_error;
+    const auto temp_root = std::filesystem::temp_directory_path(temp_error);
+    if (!random_id || random_id->empty() || temp_error) {
+        return report;
+    }
+    const auto temp_dir = temp_root / ("kasumi_act_" + *random_id);
+    if (!platform::private_storage::create_directory(temp_dir)) {
+        return report;
+    }
+    InspectionTempDirectory guard{temp_dir};
+    guard.owns = true;
+    guard.identity = query_directory_identity(temp_dir);
+    if (!guard.identity.valid) {
+        return report;
+    }
+    const auto copy_path = temp_dir / "db.sqlite";
+    const bool active_rollback =
+        rollback.state == EntryState::Present && rollback.size > 0;
+    if (!take_sqlite_snapshot(paths->database_path,
+                              copy_path,
+                              wal.state == EntryState::Present,
+                              active_rollback)) {
+        return report;
+    }
+    auto loaded_activity = state_storage::load_local_activity(copy_path);
+    static_cast<void>(guard.perform_cleanup());
+    if (!loaded_activity) {
+        return report;
+    }
+
+    report.database_present = true;
+    const auto lock_path = environment.app_data_dir /
+                           ("profile-" + std::string{profile_name} + ".lock");
+    const bool lock_held = platform::is_profile_lock_held(lock_path);
+
+    if (loaded_activity->accepted_commit) {
+        const auto& meta = *loaded_activity->accepted_commit;
+        report.accepted_commit = ProfileCommitAuthorship{
+            .commit_id = meta.commit_id,
+            .height = meta.height,
+            .created_at = meta.created_at,
+            .origin_operation = static_cast<std::uint8_t>(meta.origin_operation),
+            .machine_id_hex = meta.machine_id_hex,
+            .machine_name = meta.machine_name,
+            .accepted_at = meta.accepted_at,
+        };
+    }
+
+    report.recent_executions.reserve(loaded_activity->executions.size());
+    for (const auto& rec : loaded_activity->executions) {
+        ProfileExecutionSummary item{
+            .execution_id = rec.execution_id,
+            .operation = to_profile_op(rec.operation),
+            .machine_id_hex = rec.machine_id_hex,
+            .machine_name = rec.machine_name,
+            .started_at = rec.started_at,
+            .finished_at = rec.finished_at,
+            .duration_ms = rec.duration_ms,
+            .status = to_profile_status(rec.status, lock_held),
+            .recovered = rec.recovered,
+            .stage = rec.stage,
+            .detail = rec.detail,
+            .commit_id = rec.commit_id,
+            .summary_a = rec.summary_a,
+            .summary_b = rec.summary_b,
+            .summary_c = rec.summary_c,
+            .summary_bytes = rec.summary_bytes,
+            .flags = rec.flags,
+            .remote_publish_state =
+                to_profile_publish(rec.remote_publish_state),
+        };
+        if (!report.last_attempt) {
+            report.last_attempt = item;
+        }
+        if (!report.last_complete_sync &&
+            item.operation == ProfileOperationKind::Sync &&
+            (item.status == ProfileExecutionStatus::Succeeded ||
+             item.status == ProfileExecutionStatus::SucceededNoChanges ||
+             item.status == ProfileExecutionStatus::SucceededDownloadedOnly)) {
+            report.last_complete_sync = item;
+        }
+        report.recent_executions.push_back(std::move(item));
+    }
+
+    report.cached_remote_activities.reserve(
+        loaded_activity->cached_remote_activities.size());
+    for (const auto& entry : loaded_activity->cached_remote_activities) {
+        report.cached_remote_activities.push_back(ProfileCachedRemoteActivity{
+            .event_id = entry.event_id,
+            .operation = entry.operation,
+            .outcome = entry.outcome,
+            .machine_id_hex = entry.machine_id_hex,
+            .machine_name = entry.machine_name,
+            .started_at = entry.started_at,
+            .finished_at = entry.finished_at,
+            .duration_ms = entry.duration_ms,
+            .metric_primary = entry.metric_primary,
+            .metric_secondary = entry.metric_secondary,
+            .metric_bytes = entry.metric_bytes,
+            .flags = entry.flags,
+            .stage = entry.stage,
+            .detail = entry.detail,
+            .cached_at = entry.cached_at,
+        });
+    }
+    return report;
+}
+
 } // namespace kasumi::application

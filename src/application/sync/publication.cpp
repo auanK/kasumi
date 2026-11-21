@@ -3,13 +3,26 @@
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
+#include "platform/clock.hpp"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <utility>
 
 namespace kasumi::application::sync::publication {
 namespace {
+
+std::string encode_hex_bytes(std::span<const std::uint8_t> bytes) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2U);
+    for (const auto byte : bytes) {
+        out.push_back(kHex[(byte >> 4U) & 0x0FU]);
+        out.push_back(kHex[byte & 0x0FU]);
+    }
+    return out;
+}
 
 std::optional<std::string>
 commit_identifier(std::span<const std::uint8_t, crypto::KEY_SIZE> key,
@@ -64,7 +77,8 @@ prepare_commit(Snapshot tree,
                std::span<const std::string> logical_heads,
                std::int64_t created_at,
                std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-               history::StorageManifest storage) {
+               history::StorageManifest storage,
+               history::CommitAuthorship authorship) {
     if (created_at <= 0) {
         return std::unexpected(
             Error{ErrorCode::InvalidInput, "invalid commit timestamp"});
@@ -78,8 +92,11 @@ prepare_commit(Snapshot tree,
             return std::unexpected(Error{ErrorCode::InvalidInput,
                                          "invalid bootstrap history state"});
         }
-        commit = history::make_bootstrap(
-            std::move(tree), 0, created_at, std::move(storage));
+        commit = history::make_bootstrap(std::move(tree),
+                                         0,
+                                         created_at,
+                                         std::move(storage),
+                                         std::move(authorship));
     } else {
         if (logical_heads.empty() || !std::ranges::is_sorted(logical_heads) ||
             std::ranges::adjacent_find(logical_heads) != logical_heads.end() ||
@@ -98,7 +115,8 @@ prepare_commit(Snapshot tree,
                                                           logical_heads.end()},
                                  std::move(tree),
                                  created_at,
-                                 std::move(storage));
+                                 std::move(storage),
+                                 std::move(authorship));
     }
     if (!commit) {
         return std::unexpected(
@@ -114,6 +132,24 @@ prepare_commit(Snapshot tree,
     }
     return PreparedCommit{.commit = std::move(*commit),
                           .commit_id = std::move(*id)};
+}
+
+state_storage::AcceptedCommitMeta
+make_accepted_commit_meta(std::string_view commit_id,
+                          const history::Commit& commit) {
+    state_storage::AcceptedCommitMeta meta;
+    meta.commit_id = std::string{commit_id};
+    meta.height = commit.height;
+    meta.created_at = commit.created_at;
+    if (history::has_commit_authorship(commit.authorship)) {
+        meta.origin_operation = commit.authorship.operation;
+        meta.machine_id_hex = encode_hex_bytes(commit.authorship.machine_id);
+        meta.machine_name = commit.authorship.machine_name;
+    } else {
+        meta.origin_operation = history::CommitOriginOperation::Unknown;
+    }
+    meta.accepted_at = platform::clock::unix_seconds().value_or(0);
+    return meta;
 }
 
 std::expected<void, Error>

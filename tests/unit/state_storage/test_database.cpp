@@ -286,15 +286,33 @@ TEST(StateStorageDatabaseTest, UnknownAuxiliaryTablesAreIgnoredAndPreserved) {
                   db, "SELECT directory_count FROM directory_lineage_metadata"),
               std::vector<std::string>{"2"});
     EXPECT_EQ(query_text(db, "PRAGMA user_version"),
-              std::vector<std::string>{"1"});
+              std::vector<std::string>{"2"});
 }
 TEST(StateStorageDatabaseTest, FreshDatabaseCreatesInitialSchemaAndEmptyCache) {
     auto [workspace, database_path] = make_db("persistence-schema");
-    EXPECT_EQ(query_text(database_path, "PRAGMA user_version").front(), "1");
+    EXPECT_EQ(query_text(database_path, "PRAGMA user_version").front(), "2");
     EXPECT_TRUE(
         query_text(database_path,
                    "SELECT name FROM sqlite_master WHERE name='file_cache'")
             .size() == 1);
+    EXPECT_EQ(
+        query_text(
+            database_path,
+            "SELECT name FROM sqlite_master WHERE name='local_executions'")
+            .size(),
+        1U);
+    EXPECT_EQ(
+        query_text(
+            database_path,
+            "SELECT name FROM sqlite_master WHERE name='accepted_commit_meta'")
+            .size(),
+        1U);
+    EXPECT_EQ(
+        query_text(
+            database_path,
+            "SELECT name FROM sqlite_master WHERE name='remote_activity_cache'")
+            .size(),
+        1U);
     EXPECT_TRUE(query_text(database_path,
                            "SELECT name FROM sqlite_master WHERE "
                            "name='observation_checkpoint'")
@@ -735,7 +753,7 @@ TEST(StateStorageDatabaseTest, ValidationRecoversSchemaFromUncheckpointedWal) {
     auto writer = open_database(database, SQLITE_OPEN_READWRITE);
     ASSERT_EQ(
         sqlite3_exec(
-            writer.get(), "PRAGMA user_version = 1", nullptr, nullptr, nullptr),
+            writer.get(), "PRAGMA user_version = 2", nullptr, nullptr, nullptr),
         SQLITE_OK);
 
     const auto recovered = database.parent_path() / "recovered.sqlite";
@@ -746,7 +764,7 @@ TEST(StateStorageDatabaseTest, ValidationRecoversSchemaFromUncheckpointedWal) {
     ASSERT_TRUE(std::filesystem::copy_file(wal(database), wal(recovered)));
     EXPECT_TRUE(kasumi::state_storage::validate(recovered));
     EXPECT_EQ(query_text(recovered, "PRAGMA user_version"),
-              std::vector<std::string>{"1"});
+              std::vector<std::string>{"2"});
 }
 
 TEST(StateStorageDatabaseTest, RejectsRedirectedDatabaseAndWal) {
@@ -1387,6 +1405,178 @@ TEST(StateStorageDatabaseTest, ObsoleteEntriesRemovedByDelta) {
     ASSERT_TRUE(loaded.has_value());
     ASSERT_EQ(loaded->size(), 1U);
     EXPECT_EQ(loaded->front().path, "keep.txt");
+}
+
+TEST(StateStorageDatabaseTest,
+     RejectsLegacySchemaV1WithoutModifyingDatabase) {
+    auto workspace = kasumi::test::make_temp_workspace("persistence-reject-v1");
+    const auto db = kasumi::test::workspace_path(workspace, "state.db");
+    execute_sql(
+        db,
+        "PRAGMA journal_mode=WAL;"
+        "CREATE TABLE nodes (path TEXT PRIMARY KEY, hash TEXT NOT NULL, "
+        "size INTEGER NOT NULL, mtime INTEGER NOT NULL, is_dir INTEGER NOT NULL);"
+        "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+        "CREATE TABLE pending_materializations (path TEXT PRIMARY KEY NOT NULL, "
+        "hash TEXT NOT NULL, size INTEGER NOT NULL, mtime INTEGER NOT NULL);"
+        "CREATE TABLE file_cache (path TEXT PRIMARY KEY NOT NULL, hash TEXT NOT NULL, "
+        "size INTEGER NOT NULL, fingerprint_kind INTEGER NOT NULL, "
+        "fp0 TEXT NOT NULL, fp1 TEXT NOT NULL, fp2 TEXT NOT NULL, fp3 TEXT NOT NULL);"
+        "PRAGMA user_version = 1;",
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
+
+    EXPECT_FALSE(kasumi::state_storage::validate(db));
+    EXPECT_FALSE(kasumi::state_storage::initialize(db));
+    EXPECT_FALSE(kasumi::state_storage::load_state(db).has_value());
+    EXPECT_FALSE(kasumi::state_storage::load_local_activity(db).has_value());
+    EXPECT_FALSE(kasumi::state_storage::save_state(
+        db, kasumi::state_storage::StoredState{
+                make_snapshot("a.txt", "alpha", 1), 1, std::string(64, 'a')}));
+    EXPECT_EQ(query_text(db, "PRAGMA user_version"),
+              std::vector<std::string>{"1"});
+}
+
+TEST(StateStorageDatabaseTest,
+     LocalExecutionsAcceptedMetaAndActivityCacheRoundTripAndBoundHistory) {
+    auto [workspace, db] = make_db("persistence-v2-activity");
+
+    // Recording an execution on an uninitialized vault keeps load_state()==nullopt.
+    kasumi::state_storage::LocalExecutionRecord start_rec{
+        .execution_id = "exec-initial",
+        .operation = kasumi::state_storage::LocalOperationKind::Fsck,
+        .machine_id_hex = std::string(32, 'a'),
+        .machine_name = "PC-Casa",
+        .started_at = 1700000000,
+        .status = kasumi::state_storage::LocalExecutionStatus::InProgress,
+    };
+    ASSERT_TRUE(kasumi::state_storage::record_execution_start(db, start_rec));
+    const auto empty_state = kasumi::state_storage::load_state(db);
+    ASSERT_TRUE(empty_state.has_value());
+    EXPECT_FALSE(empty_state->has_value());
+
+    start_rec.finished_at = 1700000010;
+    start_rec.duration_ms = 10000;
+    start_rec.status = kasumi::state_storage::LocalExecutionStatus::Succeeded;
+    start_rec.remote_publish_state =
+        kasumi::state_storage::RemotePublishState::Published;
+    start_rec.summary_a = 42;
+    ASSERT_TRUE(kasumi::state_storage::record_execution_finish(db, start_rec));
+
+    // Insert 55 completed sync executions -> capped at max_local_execution_history (50).
+    for (int i = 0; i < 55; ++i) {
+        kasumi::state_storage::LocalExecutionRecord rec{
+            .execution_id = "sync-" + std::to_string(i),
+            .operation = kasumi::state_storage::LocalOperationKind::Sync,
+            .machine_id_hex = std::string(32, 'a'),
+            .machine_name = "PC-Casa",
+            .started_at = 1700000100 + i,
+            .finished_at = 1700000100 + i,
+            .duration_ms = 25,
+            .status = kasumi::state_storage::LocalExecutionStatus::
+                SucceededNoChanges,
+            .commit_id = std::string(64, 'c'),
+        };
+        ASSERT_TRUE(kasumi::state_storage::record_execution_complete(db, rec));
+    }
+
+    const kasumi::state_storage::AcceptedCommitMeta meta{
+        .commit_id = std::string(64, 'd'),
+        .height = 12,
+        .created_at = 1700000500,
+        .origin_operation = kasumi::history::CommitOriginOperation::Repack,
+        .machine_id_hex = std::string(32, 'b'),
+        .machine_name = "Notebook",
+        .accepted_at = 1700000550,
+    };
+    ASSERT_TRUE(kasumi::state_storage::save_accepted_commit_meta(db, meta));
+
+    const std::vector<kasumi::state_storage::CachedRemoteActivity> cached{
+        kasumi::state_storage::CachedRemoteActivity{
+            .event_id = std::string(32, 'e'),
+            .operation = 1,
+            .outcome = 1,
+            .machine_id_hex = std::string(32, 'b'),
+            .machine_name = "Notebook",
+            .started_at = 1700000400,
+            .finished_at = 1700000410,
+            .duration_ms = 10000,
+            .metric_primary = 9,
+            .cached_at = 1700000600,
+        },
+    };
+    ASSERT_TRUE(kasumi::state_storage::save_remote_activity_cache(db, cached));
+
+    const auto loaded = kasumi::state_storage::load_local_activity(db);
+    ASSERT_TRUE(loaded.has_value()) << loaded.error();
+    EXPECT_EQ(loaded->executions.size(),
+              kasumi::state_storage::max_local_execution_history);
+    EXPECT_EQ(loaded->executions.front().execution_id, "sync-54");
+    ASSERT_TRUE(loaded->accepted_commit.has_value());
+    EXPECT_EQ(*loaded->accepted_commit, meta);
+    ASSERT_EQ(loaded->cached_remote_activities.size(), 1U);
+    EXPECT_EQ(loaded->cached_remote_activities.front(), cached.front());
+}
+
+TEST(StateStorageDatabaseTest,
+     SaveStateWithAcceptedCommitMetaIsAtomicAcrossStateAndAuthorship) {
+    auto [workspace, db] = make_db("persistence-atomic-state-meta");
+    const auto initial_snapshot = make_snapshot("alpha.txt", "alpha", 10);
+    const kasumi::state_storage::StoredState initial_state{
+        initial_snapshot, 1, std::string(64, 'a')};
+    const kasumi::state_storage::AcceptedCommitMeta initial_meta{
+        .commit_id = std::string(64, 'a'),
+        .height = 1,
+        .created_at = 1700000100,
+        .origin_operation = kasumi::history::CommitOriginOperation::Sync,
+        .machine_id_hex = std::string(32, '1'),
+        .machine_name = "Workstation-A",
+        .accepted_at = 1700000105,
+    };
+    ASSERT_TRUE(kasumi::state_storage::save_state(db, initial_state, initial_meta));
+
+    const auto bad_snapshot = make_snapshot("beta.txt", "beta", 20);
+    const kasumi::state_storage::StoredState next_state{
+        bad_snapshot, 2, std::string(64, 'b')};
+    kasumi::state_storage::AcceptedCommitMeta bad_meta = initial_meta;
+    bad_meta.commit_id = "invalid-commit-id";
+    EXPECT_FALSE(kasumi::state_storage::save_state(db, next_state, bad_meta));
+
+    kasumi::state_storage::StoredState invalid_state = next_state;
+    invalid_state.epoch_id = "not-a-valid-hex-epoch";
+    const kasumi::state_storage::AcceptedCommitMeta valid_meta2{
+        .commit_id = std::string(64, 'b'),
+        .height = 2,
+        .created_at = 1700000200,
+        .origin_operation = kasumi::history::CommitOriginOperation::Repack,
+        .machine_id_hex = std::string(32, '2'),
+        .machine_name = "Workstation-B",
+        .accepted_at = 1700000205,
+    };
+    EXPECT_FALSE(
+        kasumi::state_storage::save_state(db, invalid_state, valid_meta2));
+
+    const auto loaded_state = kasumi::state_storage::load_state(db);
+    ASSERT_TRUE(loaded_state.has_value()) << loaded_state.error();
+    ASSERT_TRUE(loaded_state->has_value());
+    EXPECT_EQ((*loaded_state)->commit_id, initial_state.commit_id);
+    EXPECT_EQ((*loaded_state)->height, initial_state.height);
+    EXPECT_EQ((*loaded_state)->tree, initial_snapshot);
+
+    const auto loaded_activity = kasumi::state_storage::load_local_activity(db);
+    ASSERT_TRUE(loaded_activity.has_value()) << loaded_activity.error();
+    ASSERT_TRUE(loaded_activity->accepted_commit.has_value());
+    EXPECT_EQ(*loaded_activity->accepted_commit, initial_meta);
+
+    ASSERT_TRUE(kasumi::state_storage::save_state(db, next_state, valid_meta2));
+    const auto updated_state = kasumi::state_storage::load_state(db);
+    ASSERT_TRUE(updated_state.has_value());
+    ASSERT_TRUE(updated_state->has_value());
+    EXPECT_EQ((*updated_state)->commit_id, next_state.commit_id);
+    const auto updated_activity =
+        kasumi::state_storage::load_local_activity(db);
+    ASSERT_TRUE(updated_activity.has_value());
+    ASSERT_TRUE(updated_activity->accepted_commit.has_value());
+    EXPECT_EQ(*updated_activity->accepted_commit, valid_meta2);
 }
 
 } // namespace

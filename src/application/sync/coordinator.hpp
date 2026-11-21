@@ -2,6 +2,7 @@
 #define KASUMI_APPLICATION_SYNC_COORDINATOR_HPP
 
 #include "application/observation/state.hpp"
+#include "core/history.hpp"
 #include "core/reconciliation/types.hpp"
 #include "core/transaction/types.hpp"
 #include "crypto/file_crypto.hpp"
@@ -80,7 +81,9 @@ execute(const runtime::RuntimeData& runtime_data,
         const reconciliation::Result& reconciliation_result,
         observation::LocalObservationSession* session = nullptr,
         StagedExecutionHandoff* staged_handoff = nullptr,
-        bool enable_micro_packs = false);
+        bool enable_micro_packs = false,
+        history::CommitAuthorship authorship = {},
+        std::string* accepted_commit_id = nullptr);
 
 // Recovers an interrupted transaction, if any.
 std::expected<RecoveryResult, Error>

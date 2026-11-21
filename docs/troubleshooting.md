@@ -447,12 +447,14 @@ The table below clarifies the purpose and operational behavior of Kasumi's diagn
 | `kasumi gc remove-barrier <profile> --confirm-abandoned` | Remove an abandoned maintenance barrier | No | No | Exclusive | Operator verifies liveness; breaks deadlock with coexisting writers |
 | `kasumi remote health <profile>` | Operational diagnostic | No | No | None | Point-in-time observation |
 | `kasumi remote contents <profile> --audit` | Audit all physical payloads | Yes (all present) | No | None | Point-in-time observation |
-| `kasumi remote summary <profile>` | Overview of vault state | No | No | None | Point-in-time observation |
+| `kasumi remote summary <profile> [--full]` | Overview of vault state and shared operational activity | No | No | None | Point-in-time observation |
 
-The exclusive lock prevents another normal application command using the same profile on this machine from running concurrently. Remote inspection does not take that lock; it can observe changing remote state. Fsck, real `repack`, and GC run pending Sync transaction recovery first, which may change local files or complete remote publication (both `repack` and GC refuse a `ResumableTransaction` upload, and `repack --dry-run` only inspects the journal read-only). Manual writer or barrier removal takes the local lock but does not run recovery or acquire a remote barrier; the operator must verify that the associated process is inactive. Fsck's audit itself does not intentionally modify remote objects. `repack` writes only new consolidated packs and a tree-preserving Commit/HEAD without deleting old objects. GC modifies remote objects only after its barrier, probe, single authenticated observation, and global plan validation pass.
+The exclusive lock prevents another normal application command using the same profile on this machine from running concurrently. Remote inspection does not take that lock; it can observe changing remote state. Fsck, real `repack`, and GC run pending Sync transaction recovery first, which may change local files or complete remote publication (both `repack` and GC refuse a `ResumableTransaction` upload, and `repack --dry-run` only inspects the journal read-only). Manual writer or barrier removal takes the local lock but does not run recovery or acquire a remote barrier; the operator must verify that the associated process is inactive. Fsck's audit does not modify synced contents/commits, and all four maintenance commands (`fsck`, `gc`, `gc remove-writer`, `gc remove-barrier`) publish a best-effort `KACT` v1 operational record to the remote activity namespace without failing a completed operation if activity publication fails (`remote_publish_state` stays `Pending` in `db.sqlite` with a stderr warning). `repack` writes only new consolidated packs and a tree-preserving `KCOM` v4 Commit/HEAD without deleting old objects. GC modifies remote objects only after its barrier, probe, single authenticated observation, and global plan validation pass.
 
 Fsck counts distinct payloads referenced by the effective current tree; physical
 content inspection can include retained historical versions. Neither count is
-the total number of protocol objects. A cached head can display zero parents/time in
-`remote heads` without being genesis; `remote commit <profile> <id>` inspects
-complete retained metadata. See [History Inspection](architecture/remote-history-inspection.md).
+the total number of protocol objects. `remote heads` bypasses local `cached_anchor`
+shortcuts so every current head reports its genuine parents, creation timestamp,
+and commit authorship (`origin` and `machine`); offline local traceability is
+available via `kasumi show <profile> [--full]`. See
+[History Inspection](architecture/remote-history-inspection.md).

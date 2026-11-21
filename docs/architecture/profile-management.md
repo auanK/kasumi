@@ -20,11 +20,8 @@ Clone, rename, edit, key entry, key-storage change, and delete validate the sele
 asking for later fields. An unknown name repeats the selection prompt without
 discarding other accepted input or changing profile data.
 
-`kasumi list` prints only configured profile names, one per line. `kasumi show <profile>`
-shows the selected profile's local path, remote destination, `key_storage` mode (`vault`, `file`, or `memory`), retention settings,
-and local state. Neither query contacts remote storage or changes persistent
-profile data; credentials are never displayed. The wizard lists names and states
-in a compact table; paths and retention details are available through `show`.
+`kasumi list` prints only configured profile names, one per line. `kasumi show <profile> [--full]`
+shows the selected profile's local path, remote destination, `key_storage` mode (`vault`, `file`, or `memory`), retention settings, local state, and offline local traceability (`accepted_commit_meta`, last complete sync, last local attempt, local maintenance summary, and any offline-cached remote maintenance records with `--full` expanding complete IDs and histories). Neither query contacts remote storage or changes persistent profile data (SQLite snapshots are always copied to temporary storage before inspection); credentials are never displayed. The wizard lists names, states, and a compact last-sync summary column; paths and retention details are available through `show`.
 
 When `show` reports `Problem`, it also explains the first issue detected during
 that same local inspection, such as an unavailable key, invalid database, busy

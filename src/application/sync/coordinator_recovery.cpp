@@ -157,7 +157,8 @@ ensure_state(const runtime::RuntimeData& runtime_data,
             .epoch_id = epoch_id,
             .epoch_sequence = epoch_sequence,
             .pending_materializations = std::move(*target_pending),
-            .storage_manifest = commit.commit.storage});
+            .storage_manifest = commit.commit.storage},
+        publication::make_accepted_commit_meta(commit.id, commit.commit));
 }
 
 std::expected<history::LoadedCommit, Error>

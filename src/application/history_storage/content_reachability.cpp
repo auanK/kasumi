@@ -313,7 +313,8 @@ inventory_impl(transport::Transport& storage,
             std::size_t object_count = 0;
             physical.reserve(listing_span.size());
             for (const auto& identifier : listing_span) {
-                if (is_history_object(layout, identifier)) {
+                if (is_history_object(layout, identifier) ||
+                    is_activity_object(layout, identifier)) {
                     continue;
                 }
                 if (++object_count > maximum_content_object_count) {

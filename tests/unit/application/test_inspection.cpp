@@ -1,3 +1,4 @@
+#include "application/history_storage/activity.hpp"
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/remote_layout.hpp"
@@ -99,10 +100,12 @@ void expect_same_heads(const kasumi::application::RemoteHeadsReport& actual,
         EXPECT_EQ(left.commit_id, right.commit_id);
         EXPECT_EQ(left.height, right.height);
         EXPECT_EQ(left.created_at, right.created_at);
+        EXPECT_EQ(left.parent_ids, right.parent_ids);
         EXPECT_EQ(left.root_hash, right.root_hash);
         EXPECT_EQ(left.file_count, right.file_count);
         EXPECT_EQ(left.directory_count, right.directory_count);
         EXPECT_EQ(left.total_bytes, right.total_bytes);
+        EXPECT_EQ(left.authorship, right.authorship);
     }
 }
 
@@ -2166,4 +2169,97 @@ TEST(
     EXPECT_TRUE(std::filesystem::exists(
         remote_root / std::filesystem::path{layout.barrier_identifier}));
 }
+
+TEST(ApplicationInspectionTest,
+     RemoteHeadsCommitsSummaryAndObjectsExposeAuthorshipAndActivity) {
+    auto fixture = make_local_storage();
+    auto workspace =
+        kasumi::test::make_temp_workspace("application-authorship-activity");
+    const auto remote_root =
+        kasumi::test::workspace_path(fixture.workspace, "storage");
+    write_profile(workspace, remote_root);
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+
+    const std::array<std::uint8_t, 16> machine_id{
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+        0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00};
+    auto authored = make_commit(0, {}, "file.txt", "contents");
+    ASSERT_TRUE(authored.has_value());
+    authored->authorship = kasumi::history::CommitAuthorship{
+        .operation = kasumi::history::CommitOriginOperation::Repack,
+        .machine_id = machine_id,
+        .machine_name = "BuilderPC",
+    };
+    const auto published = publish(fixture, *authored);
+
+    // Publish an operational activity record (Fsck Succeeded).
+    const kasumi::application::history_storage::activity::ActivityRecord act{
+        .event_id = "0123456789abcdef0123456789abcdef",
+        .operation =
+            kasumi::application::history_storage::activity::ActivityOperation::
+                Fsck,
+        .outcome =
+            kasumi::application::history_storage::activity::ActivityOutcome::
+                Succeeded,
+        .machine_id = machine_id,
+        .machine_name = "BuilderPC",
+        .started_at = 1700000100,
+        .finished_at = 1700000105,
+        .duration_ms = 5000,
+        .metric_primary = 1,
+    };
+    const auto act_id = kasumi::application::history_storage::activity::publish(
+        fixture.transport,
+        layout,
+        test_key(),
+        act,
+        kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_TRUE(act_id.has_value()) << act_id.error().detail;
+
+    const auto heads = inspect(workspace, InspectionOperation::RemoteHeads);
+    ASSERT_TRUE(heads.has_value()) << heads.error().detail;
+    const auto& heads_rep =
+        std::get<kasumi::application::RemoteHeadsReport>(heads->payload);
+    ASSERT_EQ(heads_rep.heads.size(), 1U);
+    ASSERT_TRUE(heads_rep.heads.front().authorship.has_value());
+    EXPECT_EQ(heads_rep.heads.front().authorship->operation,
+              kasumi::application::RemoteCommitOrigin::Repack);
+    EXPECT_EQ(heads_rep.heads.front().authorship->machine_name, "BuilderPC");
+    EXPECT_EQ(heads_rep.heads.front().authorship->machine_id_hex,
+              "112233445566778899aabbccddeeff00");
+
+    const auto commits = inspect(workspace, InspectionOperation::RemoteCommits);
+    ASSERT_TRUE(commits.has_value()) << commits.error().detail;
+    const auto& commits_rep =
+        std::get<kasumi::application::RemoteCommitsReport>(commits->payload);
+    ASSERT_EQ(commits_rep.commits.size(), 1U);
+    ASSERT_TRUE(commits_rep.commits.front().authorship.has_value());
+    EXPECT_EQ(commits_rep.commits.front().authorship->operation,
+              kasumi::application::RemoteCommitOrigin::Repack);
+
+    const auto objects = inspect(workspace, InspectionOperation::RemoteObjects);
+    ASSERT_TRUE(objects.has_value()) << objects.error().detail;
+    const auto& objects_rep =
+        std::get<kasumi::application::RemoteObjectsReport>(objects->payload);
+    EXPECT_EQ(objects_rep.unknown_count, 0U);
+    const auto act_obj = std::ranges::find(
+        objects_rep.objects,
+        *act_id,
+        &kasumi::application::RemoteObjectInfo::identifier);
+    ASSERT_NE(act_obj, objects_rep.objects.end());
+    EXPECT_EQ(act_obj->category,
+              kasumi::application::RemoteObjectCategory::Activity);
+    EXPECT_TRUE(act_obj->structurally_valid);
+
+    const auto summary = inspect(workspace, InspectionOperation::RemoteSummary);
+    ASSERT_TRUE(summary.has_value()) << summary.error().detail;
+    const auto& summary_rep =
+        std::get<kasumi::application::RemoteSummaryReport>(summary->payload);
+    EXPECT_EQ(summary_rep.invalid_activity_count, 0U);
+    ASSERT_EQ(summary_rep.recent_activities.size(), 1U);
+    EXPECT_EQ(summary_rep.recent_activities.front().event_id, act.event_id);
+    EXPECT_EQ(summary_rep.recent_activities.front().machine_name, "BuilderPC");
+}
+
 } // namespace

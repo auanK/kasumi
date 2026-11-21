@@ -2,14 +2,19 @@
 
 #include "application/concurrency.hpp"
 #include "application/detail.hpp"
+#include "application/history_storage/activity.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/integrity/repack.hpp"
 #include "application/progress.hpp"
 #include "application/sync/coordinator.hpp"
 #include "application/use_cases/context.hpp"
+#include "core/history.hpp"
+#include "platform/cancellation.hpp"
 
 #include <optional>
+#include <string>
+#include <utility>
 
 namespace kasumi::application::detail {
 namespace {
@@ -55,16 +60,109 @@ run_with_recovery(OperationContext& context,
     }
     if (context.operation == Operation::GarbageCollect &&
         *recovery == sync::coordinator::RecoveryResult::ResumableTransaction) {
+        context.maintenance_failure_outcome =
+            history_storage::activity::ActivityOutcome::Blocked;
+        context.maintenance_failure_stage = "preparing";
+        context.maintenance_failure_detail =
+            "complete the interrupted upload with sync before garbage "
+            "collection";
         return fail_app(context,
                         failure_code,
-                        "complete the interrupted upload with sync before "
-                        "garbage collection");
+                        context.maintenance_failure_detail);
     }
     auto res = fn(std::move(callback));
     if (!res) {
-        auto error =
-            make_error(context, failure_code, integrity::describe(res.error()));
-        error.garbage_collection = res.error().garbage_collection;
+        const auto described = integrity::describe(res.error());
+        const auto& err = res.error();
+        if (context.operation == Operation::Fsck) {
+            using IE = integrity::ErrorCode;
+            using AO = history_storage::activity::ActivityOutcome;
+            switch (err.code) {
+                case IE::IntegrityFailure:
+                case IE::Unrecoverable:
+                    context.remote_observed = true;
+                    context.maintenance_failure_outcome = AO::IssuesFound;
+                    context.maintenance_failure_stage = "auditing";
+                    break;
+                case IE::ConcurrentChange:
+                    context.remote_observed = true;
+                    context.maintenance_failure_outcome = AO::Blocked;
+                    context.maintenance_failure_stage = "auditing";
+                    break;
+                case IE::TransportFailure:
+                case IE::CryptoFailure:
+                    context.remote_observed = true;
+                    context.maintenance_failure_outcome = AO::Failed;
+                    context.maintenance_failure_stage = "auditing";
+                    break;
+                case IE::StateFailure:
+                    if (platform::cancellation::requested()) {
+                        context.remote_observed = true;
+                        context.maintenance_failure_outcome = AO::Cancelled;
+                    } else {
+                        context.maintenance_failure_outcome = AO::Failed;
+                    }
+                    context.maintenance_failure_stage = "auditing";
+                    break;
+                case IE::InvalidInput:
+                case IE::WorkspaceFailure:
+                    context.maintenance_failure_outcome = AO::Failed;
+                    context.maintenance_failure_stage = "preparing";
+                    break;
+            }
+            context.maintenance_failure_detail = described;
+        } else {
+            using IE = integrity::ErrorCode;
+            using AO = history_storage::activity::ActivityOutcome;
+            const auto& gc = err.garbage_collection;
+            context.remote_observed =
+                gc.has_value() || err.code == IE::ConcurrentChange ||
+                err.code == IE::IntegrityFailure;
+            if (gc.has_value()) {
+                context.maintenance_metric_primary = gc->candidate_objects;
+                context.maintenance_metric_secondary = gc->confirmed_removed;
+                if (gc->barrier_cleanup_error.has_value()) {
+                    context.maintenance_flags |=
+                        history_storage::activity::flag_barrier_release_failed;
+                }
+                if (gc->mutation_state ==
+                    GarbageCollectMutationState::Uncertain) {
+                    context.maintenance_flags |=
+                        history_storage::activity::flag_mutation_uncertain;
+                }
+                switch (gc->stage) {
+                    case GarbageCollectStage::Preparing:
+                        context.maintenance_failure_stage = "preparing";
+                        break;
+                    case GarbageCollectStage::Analyzing:
+                        context.maintenance_failure_stage = "analyzing";
+                        break;
+                    case GarbageCollectStage::Applying:
+                        context.maintenance_failure_stage = "applying";
+                        break;
+                    case GarbageCollectStage::Finalizing:
+                        context.maintenance_failure_stage = "finalizing";
+                        break;
+                }
+            } else {
+                context.maintenance_failure_stage = "preparing";
+            }
+            if (gc.has_value() &&
+                gc->mutation_state == GarbageCollectMutationState::Uncertain) {
+                context.maintenance_failure_outcome = AO::Uncertain;
+            } else if (platform::cancellation::requested()) {
+                context.maintenance_failure_outcome = AO::Cancelled;
+            } else if (err.code == IE::ConcurrentChange) {
+                context.maintenance_failure_outcome = AO::Blocked;
+            } else if (err.code == IE::IntegrityFailure) {
+                context.maintenance_failure_outcome = AO::IssuesFound;
+            } else {
+                context.maintenance_failure_outcome = AO::Failed;
+            }
+            context.maintenance_failure_detail = described;
+        }
+        auto error = make_error(context, failure_code, described);
+        error.garbage_collection = err.garbage_collection;
         return std::unexpected(std::move(error));
     }
     return make_response(context, std::move(*res));
@@ -88,6 +186,7 @@ std::expected<Response, Error> run_fsck(OperationContext& context) {
             if (!checked) {
                 return std::unexpected(std::move(checked.error()));
             }
+            context.remote_observed = true;
             return FsckCompleted{
                 .checked_objects = checked->checked_objects,
                 .checked_plaintext_bytes =
@@ -117,6 +216,8 @@ std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
             if (!collected) {
                 return std::unexpected(std::move(collected.error()));
             }
+            context.remote_observed = true;
+            context.gc_kept_activities = std::move(collected->kept_activities);
             return GarbageCollectCompleted{
                 .candidate_objects = collected->candidate_objects,
                 .analysis_only = collected->analysis_only,
@@ -140,6 +241,47 @@ std::expected<Response, Error> run_remove_barrier(OperationContext& context) {
                 ? static_cast<BarrierRemovalMutationState>(*err.mutation_state)
                 : BarrierRemovalMutationState::NotAttempted;
 
+        using P = history_storage::maintenance_protocol::ErrorCode;
+        using AO = history_storage::activity::ActivityOutcome;
+        context.remote_observed =
+            err.code != P::InvalidInput &&
+            stage != BarrierRemovalStage::CheckingPresence;
+        switch (stage) {
+            case BarrierRemovalStage::CheckingPresence:
+                context.maintenance_failure_stage = "checking-presence";
+                break;
+            case BarrierRemovalStage::DownloadingPayload:
+                context.maintenance_failure_stage = "downloading-payload";
+                break;
+            case BarrierRemovalStage::ValidatingPayload:
+                context.maintenance_failure_stage = "validating-payload";
+                break;
+            case BarrierRemovalStage::CheckingWriters:
+                context.maintenance_failure_stage = "checking-writers";
+                break;
+            case BarrierRemovalStage::VerifyingPhysicalIdentity:
+                context.maintenance_failure_stage = "verifying-identity";
+                break;
+            case BarrierRemovalStage::Removing:
+                context.maintenance_failure_stage = "removing";
+                break;
+            case BarrierRemovalStage::ConfirmingAbsence:
+                context.maintenance_failure_stage = "confirming-absence";
+                break;
+        }
+        if (mutation_state == BarrierRemovalMutationState::Uncertain) {
+            context.maintenance_flags |=
+                history_storage::activity::flag_mutation_uncertain;
+            context.maintenance_failure_outcome = AO::Uncertain;
+        } else if (platform::cancellation::requested()) {
+            context.maintenance_failure_outcome = AO::Cancelled;
+        } else if (err.code == P::Blocked) {
+            context.maintenance_failure_outcome = AO::Blocked;
+        } else {
+            context.maintenance_failure_outcome = AO::Failed;
+        }
+        context.maintenance_failure_detail = err.detail;
+
         return std::unexpected(Error{
             .operation = context.operation,
             .code = ErrorCode::BarrierRemovalFailure,
@@ -155,6 +297,7 @@ std::expected<Response, Error> run_remove_barrier(OperationContext& context) {
                 },
         });
     }
+    context.remote_observed = true;
     const auto outcome =
         (removed->outcome ==
          history_storage::maintenance_protocol::BarrierRemovalOutcome::Removed)
@@ -174,9 +317,24 @@ std::expected<Response, Error> run_remove_writer(OperationContext& context) {
     auto removed = history_storage::maintenance_protocol::remove_writer(
         context.storage, layout, context.writer_identifier);
     if (!removed) {
+        using P = history_storage::maintenance_protocol::ErrorCode;
+        using AO = history_storage::activity::ActivityOutcome;
+        const auto& err = removed.error();
+        context.remote_observed =
+            err.code != P::WorkspaceFailure &&
+            !(err.code == P::InvalidInput &&
+              !history_storage::valid_writer_identifier(
+                  layout, context.writer_identifier));
+        context.maintenance_failure_stage = "removing-writer";
+        context.maintenance_failure_detail = err.detail;
+        context.maintenance_failure_outcome =
+            platform::cancellation::requested() ? AO::Cancelled
+            : err.code == P::Blocked            ? AO::Blocked
+                                                : AO::Failed;
         return fail_app(
-            context, ErrorCode::WriterRemovalFailure, removed.error().detail);
+            context, ErrorCode::WriterRemovalFailure, err.detail);
     }
+    context.remote_observed = true;
     return make_response(
         context,
         ManualWriterRemovalCompleted{.identifier = context.writer_identifier});
@@ -188,6 +346,10 @@ std::expected<Response, Error> run_repack(OperationContext& context) {
     options.policy.reclaim_large_dirty_packs = context.reclaim_dirty;
     options.dry_run = context.dry_run;
     options.max_parallelism = content_concurrency();
+    if (!context.dry_run && context.machine_identity) {
+        options.authorship = make_commit_authorship(
+            history::CommitOriginOperation::Repack, *context.machine_identity);
+    }
 
     auto res = integrity::repack::execute(
         context.runtime, context.storage, context.key, options, &meter);

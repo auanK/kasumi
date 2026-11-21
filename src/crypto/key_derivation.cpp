@@ -20,6 +20,8 @@ constexpr std::string_view domain(KeyPurpose purpose) noexcept {
             return "kasumi/v2/key/remote-id";
         case KeyPurpose::Pack:
             return "kasumi-v3-pack-key";
+        case KeyPurpose::Activity:
+            return "kasumi/v4/key/activity";
     }
     return {};
 }

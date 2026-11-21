@@ -30,6 +30,57 @@ void release_profile_lock(std::intptr_t& lock) noexcept {
 #endif
 }
 
+bool is_profile_lock_held(const std::filesystem::path& lock_path) noexcept {
+    if (lock_path.empty()) {
+        return false;
+    }
+#ifdef _WIN32
+    const auto handle = CreateFileW(
+        lock_path.c_str(),
+        GENERIC_READ,
+        0,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr);
+    if (handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(handle);
+        return false;
+    }
+    const DWORD code = GetLastError();
+    return code == ERROR_SHARING_VIOLATION || code == ERROR_LOCK_VIOLATION;
+#else
+    int flags = O_RDONLY | O_NONBLOCK;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    const int fd = ::open(lock_path.c_str(), flags);
+    if (fd < 0) {
+        return false;
+    }
+    struct stat st{};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        static_cast<void>(::close(fd));
+        return false;
+    }
+    int flock_result = 0;
+    do {
+        flock_result = ::flock(fd, LOCK_EX | LOCK_NB);
+    } while (flock_result != 0 && errno == EINTR);
+    if (flock_result == 0) {
+        static_cast<void>(::flock(fd, LOCK_UN));
+        static_cast<void>(::close(fd));
+        return false;
+    }
+    const int code = errno;
+    static_cast<void>(::close(fd));
+    return code == EWOULDBLOCK || code == EAGAIN;
+#endif
+}
+
 std::expected<std::intptr_t, std::string>
 acquire_profile_lock(const std::filesystem::path& lock_path) {
     if (lock_path.empty()) {

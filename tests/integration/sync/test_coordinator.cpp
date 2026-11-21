@@ -12879,6 +12879,61 @@ TEST(SyncCoordinatorTest,
     EXPECT_FALSE(std::filesystem::exists(profile / "transaction.bin.enc"));
 }
 
+TEST(SyncCoordinatorTest,
+     CommitPreparedRecoveryPersistsCommitAuthorshipInAcceptedCommitMeta) {
+    auto [workspace, profile, local, storage_path, runtime_data, key] =
+        make_coordinator_env("recovery-persists-authorship");
+
+    auto opened = open_initialized_storage(storage_path);
+    ASSERT_TRUE(opened.has_value());
+    auto& storage = *opened;
+
+    ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
+
+    const kasumi::Snapshot tree{.rows = {dir_row("")}};
+    const std::array<std::uint8_t, 16> author_id{
+        0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80,
+        0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0, 0x01};
+    const kasumi::history::CommitAuthorship authorship{
+        .operation = kasumi::history::CommitOriginOperation::Sync,
+        .machine_id = author_id,
+        .machine_name = "RecoverPC",
+    };
+    auto prepared = kasumi::application::sync::publication::prepare_commit(
+        tree, false, 0, {}, 1700000444, key, {}, authorship);
+    ASSERT_TRUE(prepared.has_value());
+    auto object = kasumi::application::sync::publication::publish_commit_object(
+        storage, key, *prepared, local);
+    ASSERT_TRUE(object.has_value());
+    const auto& layout = test_remote_layout();
+    auto marker = kasumi::application::sync::publication::publish_head_marker(
+        storage, layout, object->head, local);
+    ASSERT_TRUE(marker.has_value());
+
+    const auto transaction_id =
+        save_recovery_record(profile,
+                             kasumi::transaction::Phase::CommitVerified,
+                             key,
+                             prepared->commit_id,
+                             object->head.ciphertext_id);
+    ASSERT_FALSE(transaction_id.empty());
+
+    ASSERT_TRUE(recover_expect(
+        runtime_data, storage, key, RecoveryResult::RolledForward));
+
+    const auto activity =
+        kasumi::state_storage::load_local_activity(runtime_data.database_path);
+    ASSERT_TRUE(activity.has_value()) << activity.error();
+    ASSERT_TRUE(activity->accepted_commit.has_value());
+    EXPECT_EQ(activity->accepted_commit->commit_id, prepared->commit_id);
+    EXPECT_EQ(activity->accepted_commit->created_at, 1700000444);
+    EXPECT_EQ(activity->accepted_commit->origin_operation,
+              kasumi::history::CommitOriginOperation::Sync);
+    EXPECT_EQ(activity->accepted_commit->machine_id_hex,
+              "102030405060708090a0b0c0d0e0f001");
+    EXPECT_EQ(activity->accepted_commit->machine_name, "RecoverPC");
+}
+
 TEST(SyncCoordinatorTest, ReadCanonicalMtimeFailsExplicitlyOnMissingPath) {
     const auto missing = std::filesystem::path("non_existent_file_xyz123.tmp");
     const auto res = read_canonical_mtime(missing);

@@ -1050,4 +1050,21 @@ TEST(PrivateStorageTest, SecurityInspectionFailurePropagatesError) {
 }
 #endif
 
+TEST(ProfileLockTest, IsProfileLockHeldProbesNonBlockingWithoutCreatingLockFile) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("profile-lock-probe-nonblocking");
+    const auto lock_path =
+        kasumi::test::workspace_path(workspace, "profile-demo.lock");
+
+    EXPECT_FALSE(kasumi::platform::is_profile_lock_held(lock_path));
+    EXPECT_FALSE(std::filesystem::exists(lock_path));
+
+    auto held = kasumi::platform::acquire_profile_lock(lock_path);
+    ASSERT_TRUE(held.has_value()) << held.error();
+    EXPECT_TRUE(kasumi::platform::is_profile_lock_held(lock_path));
+
+    kasumi::platform::release_profile_lock(*held);
+    EXPECT_FALSE(kasumi::platform::is_profile_lock_held(lock_path));
+}
+
 } // namespace

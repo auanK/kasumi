@@ -6,6 +6,7 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "application/integrity/maintenance.hpp"
 #include "application/integrity/repack.hpp"
+#include "application/observation/history.hpp"
 #include "application/sync/journal.hpp"
 #include "core/history.hpp"
 #include "crypto/pack.hpp"
@@ -14,6 +15,7 @@
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/clock.hpp"
 #include "platform/metadata.hpp"
+#include "runtime/machine.hpp"
 #include "runtime/resolver.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
@@ -731,6 +733,113 @@ TEST(RepackTest, BoundedWindowsCleanStagingBetweenBatchesAndPublishSingleCommit)
 
     const auto audited = integrity::fsck(runtime, wrapped, key, 1);
     ASSERT_TRUE(audited.has_value()) << audited.error().detail;
+}
+
+TEST(RepackTest,
+     ExecutePublishesRepackAuthorshipViaApplicationWhileDryRunStaysReadOnly) {
+    const auto workspace =
+        kasumi::test::make_temp_workspace("repack-authorship-kcom-v4");
+    const auto remote_dir =
+        kasumi::test::workspace_path(workspace, "remote");
+    init_remote(remote_dir);
+    auto machine = create_machine(workspace, "m1", remote_dir);
+
+    for (int i = 0; i < 3; ++i) {
+        write_settled_file(machine.local_dir /
+                               ("s" + std::to_string(i + 1) + ".txt"),
+                           "small-" + std::to_string(i + 1));
+        run_sync(machine, false);
+    }
+
+    const auto key = test_key();
+    const auto runtime = machine.resolve(AccessMode::ReadOnly);
+    const auto before_state =
+        kasumi::state_storage::load_state(runtime.database_path);
+    ASSERT_TRUE(before_state.has_value() && before_state->has_value());
+
+    // Simulate a separate machine checking repack --dry-run without creating
+    // machine.id or publishing any commit.
+    auto observer = create_machine(workspace, "obs", remote_dir, false);
+    std::filesystem::copy_file(
+        machine.app_dir / "profiles" / "demo" / "db.sqlite",
+        observer.app_dir / "profiles" / "demo" / "db.sqlite",
+        std::filesystem::copy_options::overwrite_existing);
+    for (int i = 0; i < 3; ++i) {
+        write_settled_file(observer.local_dir /
+                               ("s" + std::to_string(i + 1) + ".txt"),
+                           "small-" + std::to_string(i + 1));
+    }
+    const auto dry_resp = kasumi::application::execute(
+        {Request{.operation = Operation::Repack,
+                 .profile_name = observer.profile_name,
+                 .dry_run = true},
+         observer.creds(),
+         observer.env()});
+    ASSERT_TRUE(dry_resp.has_value()) << dry_resp.error().detail;
+    EXPECT_FALSE(
+        std::filesystem::exists(observer.app_dir / "machine.id"));
+
+    // Run real repack through application::execute -> embeds KCOM v4 Repack
+    // authorship and atomically updates accepted_commit_meta.
+    const auto real_resp = kasumi::application::execute(
+        {Request{.operation = Operation::Repack,
+                 .profile_name = machine.profile_name},
+         machine.creds(),
+         machine.env()});
+    ASSERT_TRUE(real_resp.has_value()) << real_resp.error().detail;
+    const auto* repacked =
+        std::get_if<kasumi::application::RepackCompleted>(&real_resp->data);
+    ASSERT_NE(repacked, nullptr);
+    EXPECT_TRUE(repacked->published);
+    EXPECT_NE(repacked->published_commit_id, (*before_state)->commit_id);
+
+    auto storage = kasumi::transport::open_transport(runtime.storage_location,
+                                                     runtime.local_dir);
+    ASSERT_TRUE(storage.has_value());
+    const auto observed = kasumi::application::observation::history::observe(
+        *storage, key, machine.app_dir, false);
+    ASSERT_TRUE(observed.has_value()) << observed.error().detail;
+    const auto head_it =
+        std::ranges::find(observed->reachable_commits,
+                          repacked->published_commit_id,
+                          &kasumi::history::LoadedCommit::id);
+    ASSERT_NE(head_it, observed->reachable_commits.end());
+    EXPECT_TRUE(
+        kasumi::history::has_commit_authorship(head_it->commit.authorship));
+    EXPECT_EQ(head_it->commit.authorship.operation,
+              kasumi::history::CommitOriginOperation::Repack);
+
+    const auto machine_id =
+        kasumi::runtime::resolve_machine_identity(machine.app_dir, false);
+    ASSERT_TRUE(machine_id.has_value());
+    EXPECT_EQ(head_it->commit.authorship.machine_id, machine_id->id);
+
+    const auto activity =
+        kasumi::state_storage::load_local_activity(runtime.database_path);
+    ASSERT_TRUE(activity.has_value()) << activity.error();
+    ASSERT_TRUE(activity->accepted_commit.has_value());
+    EXPECT_EQ(activity->accepted_commit->commit_id,
+              repacked->published_commit_id);
+    EXPECT_EQ(activity->accepted_commit->origin_operation,
+              kasumi::history::CommitOriginOperation::Repack);
+    EXPECT_EQ(activity->accepted_commit->machine_id_hex, machine_id->id_hex);
+
+    // No-work repack publishes nothing and leaves accepted_commit_meta intact.
+    const auto second = kasumi::application::execute(
+        {Request{.operation = Operation::Repack,
+                 .profile_name = machine.profile_name},
+         machine.creds(),
+         machine.env()});
+    ASSERT_TRUE(second.has_value()) << second.error().detail;
+    const auto* second_repack =
+        std::get_if<kasumi::application::RepackCompleted>(&second->data);
+    ASSERT_NE(second_repack, nullptr);
+    EXPECT_FALSE(second_repack->published);
+    const auto activity_after =
+        kasumi::state_storage::load_local_activity(runtime.database_path);
+    ASSERT_TRUE(activity_after.has_value() && activity_after->accepted_commit);
+    EXPECT_EQ(activity_after->accepted_commit->commit_id,
+              repacked->published_commit_id);
 }
 
 } // namespace

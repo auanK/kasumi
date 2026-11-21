@@ -175,10 +175,11 @@ TEST(HistoryTest, BootstrapDeterminism) {
     EXPECT_EQ(
         *s1,
         hex_bytes(
-            "4b434f4d0300000000000000000000000000000000000000004500000000000000"
+            "4b434f4d0400000000000000000000000000000000000000004500000000000000"
             "4b415355000000000000000000000000af1349b9f5f9a1a6a"
             "0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
-            "0000000000000000000000000000000001000000000000000000000000"));
+            "0000000000000000000000000000000001000000000000000000000000"
+            "000000000000000000000000000000000000000000"));
 
     auto id1 = compute_id(*b1);
     auto id2 = compute_id(*b2);
@@ -186,7 +187,7 @@ TEST(HistoryTest, BootstrapDeterminism) {
     ASSERT_TRUE(id2.has_value());
     EXPECT_EQ(
         *id1,
-        "7be8eca2bf4f7b6cdd137c60492a9b4d39bca58fc9e06f883e89cc955c0ebfa2");
+        "11bd654761a2c8d5731450a0d6557964826092d04354c3bc4ec57269f517e99f");
     EXPECT_EQ(*id2, *id1);
 }
 
@@ -223,31 +224,34 @@ TEST(HistoryTest, CommitCodecGoldenVectors) {
             EXPECT_EQ(*actual_id, id);
         };
     expect(*empty,
-           "4b434f4d0300000000000000000000000000000000000000004500000000000000"
+           "4b434f4d0400000000000000000000000000000000000000004500000000000000"
            "4b415355000000000000000000000000af1349b9f5f9a1a6a0404dea36dcc949"
            "9bcb25c9adc112b7cc9a93cae41f326200000000000000000000000000000000"
-           "01000000000000000000000000",
-           "7be8eca2bf4f7b6cdd137c60492a9b4d39bca58fc9e06f883e89cc955c0ebfa2");
+           "01000000000000000000000000"
+           "000000000000000000000000000000000000000000",
+           "11bd654761a2c8d5731450a0d6557964826092d04354c3bc4ec57269f517e99f");
     expect(*with_file,
-           "4b434f4d03000000000000000000000000000000000000000087000000000000004"
+           "4b434f4d04000000000000000000000000000000000000000087000000000000004"
            "b41535500000000000000000000000035e462ba5dde50"
            "0fdaa4273bd553d2a3eb89984e51e322fdcb2465247449f69705000000000000000"
            "000000000000000010100000009000000616c7068612e"
            "747874644a9bc57c6063e2ba4028fa73ed585170ae7db8ac7723d32be49c021a022"
-           "5f5050000000000000015cd5b070000000000000000000000000000000000",
-           "18a1bc35d3fb2101153ac083f5da06eec13c51aea76d94f7788d29121cca69b6");
+           "5f5050000000000000015cd5b070000000000000000000000000000000000"
+           "000000000000000000000000000000000000000000",
+           "00d28ff0dce9fb2799780bbce7095a2560112dcdbc3376d1e562635babea7605");
     expect(*one_parent,
-           "4b434f4d0301000000000000000000000000000000010000007be8eca2bf4f7b6cd"
-           "d137c60492a9b4d39bca58fc9e06f883e89cc955c0ebf"
-           "a286000000000000004b4153550100000000000000000000004bc2873777530dc75"
+           "4b434f4d04010000000000000000000000000000000100000011bd654761a2c8d57"
+           "31450a0d6557964826092d04354c3bc4ec57269f517e9"
+           "9f86000000000000004b4153550100000000000000000000004bc2873777530dc75"
            "56a9788d558d522e1e15ff905766a1fc3d9e95775d2b7"
            "5104000000000000000000000000000000010100000008000000626574612e74787"
            "4c607f0e66519ff41d34c1c8e2e312228c3cc358c0a5b"
            "75cef4b22cf8ed3875db040000000000000015ae510d00000000000000000000000"
-           "00000000000",
-           "54fb948e5b6de321fb7fa34c2619ad0215c14e81ed5a5b60b09415ca0142ddfa");
+           "00000000000"
+           "000000000000000000000000000000000000000000",
+           "f7593180ce3a746a9e25cf0e160b09110883621f77fc23b3636b39514506d7c3");
     expect(*multiple_parent,
-           "4b434f4d03090000000000000000000000000000000200000000000000000000000"
+           "4b434f4d04090000000000000000000000000000000200000000000000000000000"
            "000000000000000000000000000000000000000000000"
            "0011111111111111111111111111111111111111111111111111111111111111118"
            "7000000000000004b4153550900000000000000000000"
@@ -255,8 +259,9 @@ TEST(HistoryTest, CommitCodecGoldenVectors) {
            "500000000000000000000000000000001010000000900"
            "000067616d6d612e747874039b3fa6c7a5987c410ffe6d58ab194dfc98840263841"
            "bc7c949bdd4497fd5760500000000000000158f471300"
-           "00000000000000000000000000000000",
-           "13f9607ebe85aa7961178e9f4709e07c5c4ade1b68352f690b708bf99fdd49e1");
+           "00000000000000000000000000000000"
+           "000000000000000000000000000000000000000000",
+           "e09ffad14c9a2f559e4cc338c4a71763d82b6df46570d2817ce87eb3b919a46b");
 }
 
 TEST(HistoryTest, MakeCommit) {
@@ -398,6 +403,11 @@ TEST(HistoryTest, CodecErrors) {
     std::vector<uint8_t> bad_version = *s;
     bad_version[4] = 99;
     EXPECT_EQ(deserialize(bad_version).error().code,
+              ErrorCode::UnsupportedVersion);
+
+    std::vector<uint8_t> v3_version = *s;
+    v3_version[4] = 3;
+    EXPECT_EQ(deserialize(v3_version).error().code,
               ErrorCode::UnsupportedVersion);
 
     std::vector<uint8_t> trunc_header = *s;
@@ -1850,7 +1860,7 @@ forge_commit_with_component(std::string_view component_name) {
 
     std::vector<std::uint8_t> commit;
     commit.insert(commit.end(), {'K', 'C', 'O', 'M'});
-    commit.push_back(3);          // version = 3
+    commit.push_back(4);          // version = 4
     append_zero_bytes(commit, 8); // height: 0
     append_zero_bytes(commit, 8); // created_at: 0
     append_zero_bytes(commit, 4); // parent_count: 0
@@ -1861,6 +1871,7 @@ forge_commit_with_component(std::string_view component_name) {
     }
     commit.insert(commit.end(), tree.begin(), tree.end());
     append_zero_bytes(commit, 8); // empty StorageManifest (0 packed, 0 chunked)
+    append_zero_bytes(commit, 21); // empty CommitAuthorship (1B Unknown + 16B zero id + 4B empty name len)
     return commit;
 }
 
@@ -2379,6 +2390,80 @@ TEST(HistoryTest,
         maximum_chunk_slice_size + 1U;
     tree.rows.back().size += 1U;
     EXPECT_FALSE(valid_storage_manifest(oversized_manifest, tree));
+}
+
+TEST(HistoryTest, SerializesAndValidatesKcomV4Authorship) {
+    auto tree = make_valid_snapshot();
+    const std::array<std::uint8_t, machine_id_byte_count> machine_id{
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+        0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe};
+
+    for (const auto op : {CommitOriginOperation::Sync,
+                          CommitOriginOperation::Repack,
+                          CommitOriginOperation::ResolveMissing}) {
+        const CommitAuthorship authored{
+            .operation = op,
+            .machine_id = machine_id,
+            .machine_name = "Workstation-BR",
+        };
+        const auto commit = make_bootstrap(tree, 0, 1700000123, {}, authored);
+        ASSERT_TRUE(commit.has_value()) << commit.error().detail;
+        const auto encoded = serialize(*commit);
+        ASSERT_TRUE(encoded.has_value()) << encoded.error().detail;
+        EXPECT_EQ((*encoded)[4], commit_format_version);
+
+        const auto decoded = deserialize(*encoded);
+        ASSERT_TRUE(decoded.has_value()) << decoded.error().detail;
+        EXPECT_EQ(decoded->authorship, authored);
+        const auto decoded_id = compute_id(*decoded);
+        const auto commit_id = compute_id(*commit);
+        ASSERT_TRUE(decoded_id.has_value());
+        ASSERT_TRUE(commit_id.has_value());
+        EXPECT_EQ(*decoded_id, *commit_id);
+
+        std::vector<std::uint8_t> truncated = *encoded;
+        truncated.resize(truncated.size() - 3U);
+        EXPECT_EQ(deserialize(truncated).error().code,
+                  ErrorCode::InvalidEncoding);
+    }
+
+    // Default undeclared authorship round-trips with Unknown and zeroed id.
+    const auto empty_authored = make_bootstrap(tree, 0, 1700000124);
+    ASSERT_TRUE(empty_authored.has_value());
+    const auto encoded_empty = serialize(*empty_authored);
+    ASSERT_TRUE(encoded_empty.has_value());
+    EXPECT_EQ((*encoded_empty)[4], commit_format_version);
+    const auto decoded_empty = deserialize(*encoded_empty);
+    ASSERT_TRUE(decoded_empty.has_value());
+    EXPECT_FALSE(has_commit_authorship(decoded_empty->authorship));
+
+    // Rejects invalid operation, control chars, invalid UTF-8, oversized name,
+    // and non-Unknown operation without machine ID.
+    EXPECT_FALSE(valid_commit_authorship(CommitAuthorship{
+        .operation = static_cast<CommitOriginOperation>(9),
+        .machine_id = machine_id,
+        .machine_name = "PC",
+    }));
+    EXPECT_FALSE(valid_commit_authorship(CommitAuthorship{
+        .operation = CommitOriginOperation::Sync,
+        .machine_id = {},
+        .machine_name = "PC",
+    }));
+    EXPECT_FALSE(valid_commit_authorship(CommitAuthorship{
+        .operation = CommitOriginOperation::Sync,
+        .machine_id = machine_id,
+        .machine_name = "Bad\nName",
+    }));
+    EXPECT_FALSE(valid_commit_authorship(CommitAuthorship{
+        .operation = CommitOriginOperation::Sync,
+        .machine_id = machine_id,
+        .machine_name = std::string{"Bad"} + '\xFF',
+    }));
+    EXPECT_FALSE(valid_commit_authorship(CommitAuthorship{
+        .operation = CommitOriginOperation::Sync,
+        .machine_id = machine_id,
+        .machine_name = std::string(maximum_machine_name_bytes + 1U, 'x'),
+    }));
 }
 
 } // namespace

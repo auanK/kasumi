@@ -107,13 +107,13 @@ Kasumi provides distinct tools for auditing vault integrity and remote storage h
 
 | Tool | Audits Referenced Payloads | Audits Orphan Payloads | Runs Transaction Recovery | Modifies Remote Vault |
 |---|---|---|---|---|
-| `kasumi fsck` | Yes (full download & verify) | No | Yes | No during audit; preceding recovery may publish |
+| `kasumi fsck` | Yes (full download & verify) | No | Yes | Publishes best-effort `KACT` v1 operational record (`FilePurpose::Activity`); preceding recovery may publish Sync changes |
 | `kasumi remote health` | No payload audit | No | No | No |
 | `kasumi remote contents <profile> --audit` | Yes (full download & verify) | Yes | No | No |
 | `kasumi repack` | No payload audit; verifies local sources before staging | No | Yes (`--dry-run` inspects read-only) | `--dry-run`: No. Real run: uploads consolidated packs and publishes Commit/HEAD; zero deletions |
 | `kasumi gc` | No Fsck-style payload audit | No | Yes | Yes: authorized direct deletions and control cleanup; preceding recovery may publish |
 
-Fsck and GC run pending Sync transaction recovery first. Recovery may change local files or complete remote publication; Fsck's audit itself does not intentionally modify the remote vault.
+Fsck and GC run pending Sync transaction recovery first. Recovery may change local files or complete remote publication; Fsck's audit does not publish or delete file contents or commits, though maintenance operations (`fsck`, `gc`, `gc remove-writer`, and `gc remove-barrier`) publish best-effort encrypted `KACT` v1 activity records inspectable from any client via `kasumi remote summary [--full]`.
 
 Run `kasumi fsck` when you need a full integrity audit of referenced content. It downloads and verifies every payload in the effective remote tree.
 

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -135,6 +136,105 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
 
 // Returns a canonical string representation for the profile local state.
 std::string_view to_string(ProfileLocalState state) noexcept;
+
+enum class ProfileOperationKind : std::uint8_t {
+    Sync = 1,
+    Fsck = 2,
+    GarbageCollect = 3,
+    Repack = 4,
+    ResolveMissing = 5,
+    RemoveWriter = 6,
+    RemoveBarrier = 7,
+};
+
+enum class ProfileExecutionStatus : std::uint8_t {
+    InProgress = 1,
+    Succeeded = 2,
+    SucceededNoChanges = 3,
+    SucceededDownloadedOnly = 4,
+    SucceededPartial = 5,
+    IssuesFound = 6,
+    Blocked = 7,
+    Cancelled = 8,
+    Failed = 9,
+    Uncertain = 10,
+    Interrupted = 11,
+};
+
+enum class ProfileRemotePublishState : std::uint8_t {
+    NotApplicable = 0,
+    Published = 1,
+    Pending = 2,
+};
+
+inline constexpr std::uint32_t profile_execution_flag_audit_failed_after_sync =
+    1U << 8;
+
+struct ProfileExecutionSummary {
+    std::string execution_id;
+    ProfileOperationKind operation = ProfileOperationKind::Sync;
+    std::string machine_id_hex;
+    std::string machine_name;
+    std::int64_t started_at = 0;
+    std::optional<std::int64_t> finished_at;
+    std::uint64_t duration_ms = 0;
+    ProfileExecutionStatus status = ProfileExecutionStatus::Succeeded;
+    bool recovered = false;
+    std::string stage;
+    std::string detail;
+    std::string commit_id;
+    std::uint64_t summary_a = 0;
+    std::uint64_t summary_b = 0;
+    std::uint64_t summary_c = 0;
+    std::uint64_t summary_bytes = 0;
+    std::uint32_t flags = 0;
+    ProfileRemotePublishState remote_publish_state =
+        ProfileRemotePublishState::NotApplicable;
+};
+
+struct ProfileCommitAuthorship {
+    std::string commit_id;
+    std::uint64_t height = 0;
+    std::int64_t created_at = 0;
+    std::uint8_t origin_operation = 0;
+    std::string machine_id_hex;
+    std::string machine_name;
+    std::int64_t accepted_at = 0;
+};
+
+struct ProfileCachedRemoteActivity {
+    std::string event_id;
+    std::uint8_t operation = 0;
+    std::uint8_t outcome = 0;
+    std::string machine_id_hex;
+    std::string machine_name;
+    std::int64_t started_at = 0;
+    std::int64_t finished_at = 0;
+    std::uint64_t duration_ms = 0;
+    std::uint64_t metric_primary = 0;
+    std::uint64_t metric_secondary = 0;
+    std::uint64_t metric_bytes = 0;
+    std::uint32_t flags = 0;
+    std::string stage;
+    std::string detail;
+    std::int64_t cached_at = 0;
+};
+
+struct ProfileActivityReport {
+    bool database_present = false;
+    std::optional<ProfileCommitAuthorship> accepted_commit;
+    std::optional<ProfileExecutionSummary> last_attempt;
+    std::optional<ProfileExecutionSummary> last_complete_sync;
+    std::vector<ProfileExecutionSummary> recent_executions;
+    std::vector<ProfileCachedRemoteActivity> cached_remote_activities;
+};
+
+// Inspects offline local traceability and cached remote activity for a
+// profile without accessing remote storage, initializing SQLite, or
+// creating lock files.
+ProfileActivityReport
+inspect_profile_activity(const ExecutionEnvironment& environment,
+                         std::string_view profile_name);
 
 } // namespace kasumi::application
 

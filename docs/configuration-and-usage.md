@@ -25,7 +25,7 @@ mutation.
 With an empty profile list, the wizard offers New and Quit. Type `:back` at a
 profile, path, or key storage prompt to return to the menu.
 
-The wizard lists profiles and allows creating, cloning, editing paths, changing key storage (`[s] Storage`), re-entering keys (`[k] Key`), renaming, and deleting them. It displays each profile's local state: `Initialized`, `Ready`, `Pending`, or `Problem`. During creation, it prompts for the profile name, local synchronized path, remote destination, and key storage mode before asking for Password and Password Salt. Press Enter at the key storage prompt to use `key_storage = "vault"` (Windows Credential Manager on Windows; GNOME Keyring / Freedesktop Secret Service or KDE KWallet on Linux). You can switch any profile between `vault`, `file` (stored locally in `profiles/<name>/key.bin`), and `memory` (prompted on every command without persisting the key) via `[s] Storage` in `kasumi config` or by editing `config.toml`; switching away from `vault` or `file` removes the previously saved key and requires `kasumi key <profile>` (or `[k] Key`) when entering `vault` or `file`. Profile names contain only letters, digits, `_`, or `-`; the local path must be absolute. Cloning reuses configuration and the master key but creates fresh SQLite state without copying accepted history or remote data. Editing changes the configured local and remote paths, not the key. Renaming moves private profile state and OS vault entries. Deleting removes local configuration, key, and state, while leaving the synchronized folder and remote objects intact. See [Profile Management](architecture/profile-management.md) for state meanings, the lifecycle, and rollback boundaries. For operational guidance, see [Best Practices](best-practices.md); for troubleshooting operational issues, see [Troubleshooting](troubleshooting.md).
+The wizard lists profiles and allows creating, cloning, editing paths, changing key storage (`[s] Storage`), re-entering keys (`[k] Key`), renaming, and deleting them. It displays each profile's local state (`Initialized`, `Ready`, `Pending`, or `Problem`) alongside a compact summary of the last local sync timestamp and outcome. During creation, it prompts for the profile name, local synchronized path, remote destination, and key storage mode before asking for Password and Password Salt. Press Enter at the key storage prompt to use `key_storage = "vault"` (Windows Credential Manager on Windows; GNOME Keyring / Freedesktop Secret Service or KDE KWallet on Linux). You can switch any profile between `vault`, `file` (stored locally in `profiles/<name>/key.bin`), and `memory` (prompted on every command without persisting the key) via `[s] Storage` in `kasumi config` or by editing `config.toml`; switching away from `vault` or `file` removes the previously saved key and requires `kasumi key <profile>` (or `[k] Key`) when entering `vault` or `file`. Profile names contain only letters, digits, `_`, or `-`; the local path must be absolute. Cloning reuses configuration and the master key but creates fresh SQLite state without copying accepted history or remote data. Editing changes the configured local and remote paths, not the key. Renaming moves private profile state and OS vault entries. Deleting removes local configuration, key, and state, while leaving the synchronized folder and remote objects intact. See [Profile Management](architecture/profile-management.md) for state meanings, the lifecycle, and rollback boundaries. For operational guidance, see [Best Practices](best-practices.md); for troubleshooting operational issues, see [Troubleshooting](troubleshooting.md).
 
 * **Password**: Minimum 12 characters.
 * **Password Salt**: Minimum 16 characters. A reproducible, user-provided passphrase used as the cryptographic salt for Argon2id key derivation (not an automatically generated or stored random salt). When configuring another machine for the same vault through the interactive wizard, use the same Password and Password Salt so that it derives the same vault master key.
@@ -81,7 +81,7 @@ Use `kasumi <command> --help` for the complete arguments, options and examples.
 | Manage local profiles | `kasumi config` |
 | Re-enter or save profile key | `kasumi key <profile>` |
 | List profile names | `kasumi list` |
-| Show profile settings and local state | `kasumi show <profile>` |
+| Show profile settings and local traceability | `kasumi show <profile> [--full]` |
 | Inspect the current plan | `kasumi status <profile>` or `kasumi sync <profile> --dry-run` |
 | Synchronize | `kasumi sync <profile>` |
 | Audit referenced payloads | `kasumi fsck <profile>` |
@@ -89,12 +89,7 @@ Use `kasumi <command> --help` for the complete arguments, options and examples.
 | Reclaim eligible remote storage | `kasumi gc <profile>` |
 | Resolve permanently missing content as logical deletion | `kasumi resolve-missing <profile>` |
 
-`--full` applies only to Sync, Status, and Repack, after the profile. In Sync
-and Status it displays every plan and pending-path item (otherwise lists longer
-than ten items show the first and last five) and keeps detailed progress lines
-for each activity; in Repack it displays the full pack inventory summary and
-published Commit/height details. Preview and Status do not execute the plan,
-recover transactions, or persist file-hash cache changes. See
+`--full` applies to `sync`, `status`, `repack`, `show`, and `remote summary`, after the profile. In `sync` and `status` it displays every plan and pending-path item (otherwise lists longer than ten items show the first and last five) and keeps detailed progress lines for each activity; in `repack` it displays the full pack inventory summary and published Commit/height details; in `show` it displays full Commit/machine IDs plus recorded local execution and cached remote maintenance histories (noting offline cache limits for other machines); in `remote summary` it expands full machine IDs and the complete operational activity timeline. Preview and Status do not execute the plan, recover transactions, or persist file-hash cache changes. See
 [Preview and Status](architecture/planning-and-status.md).
 
 `sync --initial` requires no SQLite sidecars or unfinished transaction evidence.
@@ -176,7 +171,7 @@ Use `kasumi remote --help` to choose a view, and
 `kasumi remote <subcommand> --help` for its required arguments. For example:
 
 ```sh
-kasumi remote summary Programming
+kasumi remote summary Programming [--full]
 kasumi remote tree Programming --head <commit>
 kasumi remote contents Programming --audit
 ```
@@ -199,8 +194,7 @@ kasumi [--lang <code>] <command> [subcommand] [arguments] [options]
 ```
 
 `--lang <code>` is the optional global prefix, before the command. Command
-options follow required arguments; `--full` is available to Sync, Status, and
-Repack. `config` and `list` take no profile.
+options follow required arguments; `--full` is available to `sync`, `status`, `repack`, `show`, and `remote summary`. `config` and `list` take no profile.
 
 `kasumi --help` (`-h`) shows global Help. Add `--help` or `-h` after a command,
 subcommand or otherwise valid invocation for contextual Help. Help returns 0

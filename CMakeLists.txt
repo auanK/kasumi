@@ -437,6 +437,7 @@ add_library(kasumi_platform STATIC
     src/platform/clock.cpp
     src/platform/durability.cpp
     src/platform/file_fingerprint.cpp
+    src/platform/machine.cpp
     src/platform/metadata.cpp
     src/platform/perf_trace.cpp
     src/platform/private_storage.cpp
@@ -524,6 +525,7 @@ fetchcontent_makeavailable(tomlplusplus)
 set(CMAKE_WARN_DEPRECATED ON)
 
 add_library(kasumi_application STATIC
+    src/application/history_storage/activity.cpp
     src/application/history_storage/epoch.cpp
     src/application/history_storage/history_storage.cpp
     src/application/history_storage/inventory.cpp
@@ -594,6 +596,7 @@ target_link_libraries(kasumi_application
 )
 
 add_library(kasumi_runtime STATIC
+    src/runtime/machine.cpp
     src/runtime/paths.cpp
     src/runtime/profile.cpp
     src/runtime/resolver.cpp
@@ -685,6 +688,7 @@ target_link_libraries(
     kasumi_application
     PRIVATE
     kasumi_crypto
+    kasumi_platform
     kasumi_warnings
     kasumi_release_optimizations
     kasumi_hardening

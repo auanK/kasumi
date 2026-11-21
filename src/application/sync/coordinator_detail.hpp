@@ -297,10 +297,13 @@ apply_packed_downloads(
     const AppliedOpsCallback& on_applied = {},
     ProgressMeter* meter = nullptr);
 
-// Initializes state.db (if needed) and persists the committed StoredState.
-std::expected<void, Error>
-save_state_checked(const std::filesystem::path& database_path,
-                   const state_storage::StoredState& state);
+// Initializes state.db (if needed) and persists the committed StoredState,
+// optionally updating accepted_commit_meta in the same SQLite transaction.
+std::expected<void, Error> save_state_checked(
+    const std::filesystem::path& database_path,
+    const state_storage::StoredState& state,
+    const std::optional<state_storage::AcceptedCommitMeta>& accepted_meta =
+        std::nullopt);
 
 // Publishes and verifies an Epoch checkpointed via EpochUploaded ->
 // EpochVerified.

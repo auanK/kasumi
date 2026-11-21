@@ -640,7 +640,8 @@ execute(const runtime::RuntimeData& runtime_data,
         collected->storage.logical_heads,
         *created_at,
         key,
-        planned->target_manifest);
+        planned->target_manifest,
+        options.authorship);
     if (!prepared) {
         return std::unexpected(map_history_error(prepared.error()));
     }
@@ -687,7 +688,9 @@ execute(const runtime::RuntimeData& runtime_data,
                 .epoch_sequence = collected->storage.epoch_sequence,
                 .pending_materializations = {},
                 .storage_manifest = prepared->commit.storage,
-            })) {
+            },
+            sync::publication::make_accepted_commit_meta(prepared->commit_id,
+                                                         prepared->commit))) {
         return std::unexpected(
             make_error(integrity::ErrorCode::StateFailure,
                        "repack published remote commit but failed to update "

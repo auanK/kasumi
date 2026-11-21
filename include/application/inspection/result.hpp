@@ -12,6 +12,21 @@
 
 namespace kasumi::application {
 
+enum class RemoteCommitOrigin : std::uint8_t {
+    Unknown = 0,
+    Sync = 1,
+    Repack = 2,
+    ResolveMissing = 3,
+};
+
+struct RemoteCommitAuthorship {
+    RemoteCommitOrigin operation = RemoteCommitOrigin::Unknown;
+    std::string machine_id_hex;
+    std::string machine_name;
+
+    bool operator==(const RemoteCommitAuthorship&) const = default;
+};
+
 struct RemoteHeadInfo {
     std::string commit_id;
     std::uint64_t height = 0;
@@ -21,6 +36,7 @@ struct RemoteHeadInfo {
     std::uint64_t file_count = 0;
     std::uint64_t directory_count = 0;
     std::uint64_t total_bytes = 0;
+    std::optional<RemoteCommitAuthorship> authorship;
 };
 
 struct RemoteHeadsReport {
@@ -66,6 +82,7 @@ struct RemoteCommitInfo {
     std::string root_hash;
     std::uint64_t total_bytes = 0;
     std::uint64_t entry_count = 0;
+    std::optional<RemoteCommitAuthorship> authorship;
 };
 
 struct RemoteCommitsReport {
@@ -74,6 +91,47 @@ struct RemoteCommitsReport {
     std::vector<std::string> logical_head_ids;
     std::vector<RemoteCommitInfo> commits;
 };
+
+enum class RemoteActivityOperation : std::uint8_t {
+    Fsck = 1,
+    GarbageCollect = 2,
+    RemoveWriter = 3,
+    RemoveBarrier = 4,
+};
+
+enum class RemoteActivityOutcome : std::uint8_t {
+    Succeeded = 1,
+    IssuesFound = 2,
+    Blocked = 3,
+    Cancelled = 4,
+    Failed = 5,
+    Uncertain = 6,
+};
+
+struct RemoteActivityInfo {
+    std::string event_id;
+    RemoteActivityOperation operation = RemoteActivityOperation::Fsck;
+    RemoteActivityOutcome outcome = RemoteActivityOutcome::Succeeded;
+    std::string machine_id_hex;
+    std::string machine_name;
+    std::int64_t started_at = 0;
+    std::int64_t finished_at = 0;
+    std::uint64_t duration_ms = 0;
+    std::uint64_t metric_primary = 0;
+    std::uint64_t metric_secondary = 0;
+    std::uint64_t metric_bytes = 0;
+    std::uint32_t flags = 0;
+    std::string stage;
+    std::string detail;
+};
+
+inline constexpr std::uint32_t remote_activity_flag_analysis_only = 1U << 0U;
+inline constexpr std::uint32_t remote_activity_flag_barrier_already_absent =
+    1U << 1U;
+inline constexpr std::uint32_t remote_activity_flag_barrier_release_failed =
+    1U << 2U;
+inline constexpr std::uint32_t remote_activity_flag_mutation_uncertain =
+    1U << 3U;
 
 struct RemoteSummaryReport {
     bool history_present = false;
@@ -84,6 +142,8 @@ struct RemoteSummaryReport {
     std::size_t missing_content_count = 0;
     std::size_t orphan_content_count = 0;
     std::size_t active_writer_count = 0;
+    std::vector<RemoteActivityInfo> recent_activities;
+    std::size_t invalid_activity_count = 0;
 };
 
 struct RemoteStatReport {
@@ -213,6 +273,7 @@ enum class RemoteObjectCategory : std::uint8_t {
     Writer,
     Barrier,
     Protocol,
+    Activity,
     Unknown,
 };
 
