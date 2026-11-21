@@ -191,8 +191,10 @@ TEST(ReachabilityTest, UnmarkedValidChainIsOrphan) {
               kasumi::transport::Removal::Removed);
     const auto result = inventory(storage);
     EXPECT_TRUE(result.reachable_commits.empty());
-    EXPECT_EQ(result.orphan_commits,
-              (std::vector<std::string>{commit_id(first), commit_id(second)}));
+    std::vector<std::string> expected_orphans{commit_id(first),
+                                              commit_id(second)};
+    std::ranges::sort(expected_orphans);
+    EXPECT_EQ(result.orphan_commits, expected_orphans);
 }
 
 TEST(ReachabilityTest, ReachableCommitReportsMissingParent) {

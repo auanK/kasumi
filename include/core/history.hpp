@@ -101,6 +101,28 @@ inline constexpr std::uint64_t maximum_packed_blob_size =
 inline constexpr std::uint32_t maximum_chunk_slice_size =
     32U * 1024U * 1024U;
 
+inline constexpr std::uint8_t commit_format_version = 4;
+inline constexpr std::size_t machine_id_byte_count = 16;
+inline constexpr std::size_t machine_id_hex_size = 32;
+inline constexpr std::size_t maximum_machine_name_bytes = 128;
+
+// Logical command that published a commit.
+enum class CommitOriginOperation : std::uint8_t {
+    Unknown = 0,
+    Sync = 1,
+    Repack = 2,
+    ResolveMissing = 3,
+};
+
+// Installation-declared authorship stored inside KCOM v4 commits.
+struct CommitAuthorship {
+    CommitOriginOperation operation = CommitOriginOperation::Unknown;
+    std::array<std::uint8_t, machine_id_byte_count> machine_id{};
+    std::string machine_name;
+
+    bool operator==(const CommitAuthorship&) const noexcept = default;
+};
+
 // Versioned state with its position in the history DAG.
 struct Commit {
     // Height in the DAG; ordinary commits use max parent height plus one.
@@ -113,6 +135,8 @@ struct Commit {
     Snapshot tree;
     // Physical packing/chunking layout referenced by files in tree.
     StorageManifest storage;
+    // Installation-declared commit authorship metadata.
+    CommitAuthorship authorship{};
 };
 
 // Commit associated with the ID used by the graph.
@@ -152,18 +176,27 @@ using ResolutionResult = std::expected<Resolution, Error>;
 // Accepts only canonical IDs with 64 lowercase hexadecimal digits.
 bool valid_commit_id(std::string_view id) noexcept;
 
+// Validates declared KCOM v4 commit authorship metadata.
+bool valid_commit_authorship(const CommitAuthorship& authorship) noexcept;
+
+// Returns true when authorship carries any non-default operation, machine ID,
+// or machine name.
+bool has_commit_authorship(const CommitAuthorship& authorship) noexcept;
+
 // Validates and constructs a commit, ordering its parents.
 CommitResult make_commit(std::uint64_t height,
                          std::vector<std::string> parents,
                          Snapshot tree,
                          std::int64_t created_at = 0,
-                         StorageManifest storage = {});
+                         StorageManifest storage = {},
+                         CommitAuthorship authorship = {});
 
 // Creates a parentless bootstrap commit to start history with tree.
 CommitResult make_bootstrap(Snapshot tree,
                             std::uint64_t height,
                             std::int64_t created_at = 0,
-                            StorageManifest storage = {});
+                            StorageManifest storage = {},
+                            CommitAuthorship authorship = {});
 
 // Validates manifest sorting, bounds, disjointness, and snapshot membership.
 bool valid_storage_manifest(const StorageManifest& manifest,
