@@ -149,6 +149,15 @@ bind(Statement& statement, int index, std::int64_t value) {
     return {};
 }
 
+// Binds NULL to a 1-based positional parameter.
+inline std::expected<void, std::string> bind_null(Statement& statement,
+                                                  int index) {
+    if (sqlite3_bind_null(statement.get(), index) != SQLITE_OK) {
+        return std::unexpected(error(sqlite3_db_handle(statement.get())));
+    }
+    return {};
+}
+
 // Reads text; converts NULL to an empty string.
 inline std::string text(const Statement& statement, int column) {
     const auto* value = sqlite3_column_text(statement.get(), column);
