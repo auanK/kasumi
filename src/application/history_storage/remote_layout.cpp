@@ -53,6 +53,7 @@ RemoteLayout derive_remote_layout(
     layout.barrier_identifier = layout.gc_prefix + ns("barrier");
     layout.writers_prefix = layout.gc_prefix + ns("writers") + "/";
     layout.probes_prefix = layout.gc_prefix + ns("probes") + "/";
+    layout.activity_prefix = ns("activity") + "/" + v1_hash + "/";
     return layout;
 }
 
@@ -139,6 +140,11 @@ bool is_control_object(const RemoteLayout& layout,
 bool is_history_object(const RemoteLayout& layout,
                        std::string_view identifier) noexcept {
     return identifier.starts_with(layout.history_prefix);
+}
+
+bool is_activity_object(const RemoteLayout& layout,
+                        std::string_view identifier) noexcept {
+    return identifier.starts_with(layout.activity_prefix);
 }
 
 bool valid_hex_hash(std::string_view value) noexcept {

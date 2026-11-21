@@ -36,6 +36,8 @@ KeyPurpose key_purpose_for(FilePurpose purpose) noexcept {
             return KeyPurpose::History;
         case FilePurpose::Pack:
             return KeyPurpose::Pack;
+        case FilePurpose::Activity:
+            return KeyPurpose::Activity;
     }
     return KeyPurpose::Content;
 }

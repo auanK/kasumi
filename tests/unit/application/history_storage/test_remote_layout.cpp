@@ -166,6 +166,14 @@ TEST(RemoteLayoutTest, ControlAndHistoryClassification) {
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     EXPECT_FALSE(is_history_object(layout, content_id));
     EXPECT_FALSE(is_control_object(layout, content_id));
+    EXPECT_FALSE(is_activity_object(layout, content_id));
+
+    const std::string activity_id =
+        layout.activity_prefix +
+        "00000000001700000100-0123456789abcdef0123456789abcdef";
+    EXPECT_TRUE(is_activity_object(layout, activity_id));
+    EXPECT_FALSE(is_history_object(layout, activity_id));
+    EXPECT_FALSE(is_control_object(layout, activity_id));
 }
 
 } // namespace

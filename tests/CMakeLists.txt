@@ -269,6 +269,7 @@ kasumi_add_test_suite(
     kasumi_test_unit_application_history_storage
     "unit.application.history_storage"
     SOURCES
+        unit/application/history_storage/test_activity.cpp
         unit/application/history_storage/test_epoch.cpp
         unit/application/history_storage/test_epoch_planner.cpp
         unit/application/history_storage/test_history_storage.cpp

@@ -525,6 +525,7 @@ fetchcontent_makeavailable(tomlplusplus)
 set(CMAKE_WARN_DEPRECATED ON)
 
 add_library(kasumi_application STATIC
+    src/application/history_storage/activity.cpp
     src/application/history_storage/epoch.cpp
     src/application/history_storage/history_storage.cpp
     src/application/history_storage/inventory.cpp

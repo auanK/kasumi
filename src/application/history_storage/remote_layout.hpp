@@ -22,6 +22,7 @@ struct RemoteLayout {
     std::string barrier_identifier;
     std::string writers_prefix;
     std::string probes_prefix;
+    std::string activity_prefix;
 };
 
 RemoteLayout derive_remote_layout(
@@ -49,6 +50,8 @@ bool is_control_object(const RemoteLayout& layout,
                        std::string_view identifier) noexcept;
 bool is_history_object(const RemoteLayout& layout,
                        std::string_view identifier) noexcept;
+bool is_activity_object(const RemoteLayout& layout,
+                        std::string_view identifier) noexcept;
 bool valid_hex_hash(std::string_view value) noexcept;
 bool valid_writer_identifier(std::string_view identifier) noexcept;
 bool valid_writer_identifier(const RemoteLayout& layout,

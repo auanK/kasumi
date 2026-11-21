@@ -30,6 +30,7 @@ enum class FilePurpose : std::uint8_t {
     Content = 0,
     History = 1,
     Pack = 2,
+    Activity = 3,
 };
 
 // Metadata computed during file encryption.
