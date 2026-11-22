@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.21.2]
+
+### Fixed
+
+- Report actively locked profiles (e.g. during `sync`, `gc`, `fsck`, or `repack`) as `Running` (annotated with the active operation such as `Running (gc)` when recorded in local activity) rather than `Problem` across `kasumi config`, `kasumi show`, and `kasumi diagnostics`, while keeping malformed, symlinked, or unreadable lock files reported as `Problem`.
+- Keep `kasumi diagnostics` healthy (`overall_ok: true`, `"running"` / `"running (<op>)"` detail) when an active execution holds a valid lock or writes its active `transaction.bin.enc` journal, and stop setting `lock_busy = true` on corrupt/unreadable lock errors.
+- Enrich `lock_busy` / `LockFailure` messages across `execute`, `config` mutations, and `kasumi key` with `(running <op>)` when an `InProgress` local operation is present.
+- Expose `"state": "running"`, `"lock_active"`, and `"active_operation"` in `kasumi show --json` and `"active_operation"` in `kasumi diagnostics --json`.
+
+### Documentation
+
+- Document the `Running` local profile state, JSON `running` / `lock_active` / `active_operation` fields, and lock-busy operation reporting across [profile-management.md](docs/architecture/profile-management.md), [configuration-and-usage.md](docs/configuration-and-usage.md), and [troubleshooting.md](docs/troubleshooting.md).
+
+### Upgrade Notes
+
+- Protocol and local storage formats remain unchanged (`KCOM` v4, `KACT` v1, `KPAK\x01`, `state.db` schema v2, `transaction.bin.enc`, and `config.toml`), staying 100% compatible with `v0.19.x`–`v0.21.1`.
+
 ## [0.21.1]
 
 ### Changed
