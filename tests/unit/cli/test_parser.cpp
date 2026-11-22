@@ -35,6 +35,7 @@ TEST_P(ApplicationGrammarTest, ParsesOperationAndArguments) {
     EXPECT_EQ(actual.profile_name, test.expected.profile_name);
     EXPECT_EQ(actual.initial, test.expected.initial);
     EXPECT_EQ(actual.audit_inventory, test.expected.audit_inventory);
+    EXPECT_EQ(actual.repair, test.expected.repair);
     EXPECT_EQ(actual.writer_identifier, test.expected.writer_identifier);
     EXPECT_EQ(actual.confirm_abandoned, test.expected.confirm_abandoned);
     EXPECT_EQ(actual.confirm, test.expected.confirm);
@@ -62,6 +63,17 @@ INSTANTIATE_TEST_SUITE_P(
                         {.operation = Operation::Sync,
                          .profile_name = "demo",
                          .audit_inventory = true}},
+        ApplicationCase{"SyncRepair",
+                        {"sync", "demo", "--repair"},
+                        {.operation = Operation::Sync,
+                         .profile_name = "demo",
+                         .repair = true}},
+        ApplicationCase{"SyncRepairWithAudit",
+                        {"sync", "demo", "--repair", "--audit-inventory"},
+                        {.operation = Operation::Sync,
+                         .profile_name = "demo",
+                         .audit_inventory = true,
+                         .repair = true}},
         ApplicationCase{
             "Status",
             {"status", "demo"},
@@ -344,6 +356,11 @@ INSTANTIATE_TEST_SUITE_P(
                     {"sync", "demo", "--dry-run", "--initial"}},
         InvalidCase{"AuditIncompatibleMode",
                     {"sync", "demo", "--audit-inventory", "--initial"}},
+        InvalidCase{"RepairDuplicate", {"sync", "demo", "--repair", "--repair"}},
+        InvalidCase{"RepairWithDryRun",
+                    {"sync", "demo", "--repair", "--dry-run"}},
+        InvalidCase{"RepairWithInitial",
+                    {"sync", "demo", "--repair", "--initial"}},
         InvalidCase{"RequiredConfirmation", {"gc", "remove-barrier", "demo"}},
         InvalidCase{"GcDuplicateDryRun", {"gc", "demo", "--dry-run", "--dry-run"}},
         InvalidCase{"GcDryRunOnSubcommand",
@@ -399,5 +416,30 @@ TEST(CliParserTest, ParsesRepackHelpTopic) {
         EXPECT_EQ(std::get<kasumi::cli::HelpInvocation>(*result).topic,
                   "repack");
     }
+}
+
+TEST(CliParserTest, ParsesDiagnosticsWithOptionalProfileAndRejectsExtraOperands) {
+    const auto bare = parse({"diagnostics"});
+    ASSERT_TRUE(bare.has_value());
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::cli::DiagnosticsInvocation>(*bare));
+    EXPECT_TRUE(
+        std::get<kasumi::cli::DiagnosticsInvocation>(*bare).profile_name.empty());
+
+    const auto single = parse({"diagnostics", "demo"});
+    ASSERT_TRUE(single.has_value());
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::cli::DiagnosticsInvocation>(*single));
+    EXPECT_EQ(std::get<kasumi::cli::DiagnosticsInvocation>(*single).profile_name,
+              "demo");
+
+    const auto help = parse({"diagnostics", "--help"});
+    ASSERT_TRUE(help.has_value());
+    ASSERT_TRUE(std::holds_alternative<kasumi::cli::HelpInvocation>(*help));
+    EXPECT_EQ(std::get<kasumi::cli::HelpInvocation>(*help).topic,
+              "diagnostics");
+
+    EXPECT_FALSE(parse({"diagnostics", "--unknown"}).has_value());
+    EXPECT_FALSE(parse({"diagnostics", "demo", "extra"}).has_value());
 }
 } // namespace

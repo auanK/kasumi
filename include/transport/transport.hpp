@@ -218,6 +218,38 @@ struct Transport {
 // Validates only the storage location syntax.
 Result validate_transport_location(std::string_view location);
 
+struct RcloneVersion {
+    int major = 0;
+    int minor = 0;
+    int patch = 0;
+    std::string raw;
+
+    bool operator==(const RcloneVersion&) const = default;
+};
+
+inline constexpr int minimum_rclone_major = 1;
+inline constexpr int minimum_rclone_minor = 60;
+inline constexpr int minimum_rclone_patch = 0;
+
+struct RcloneProbeResult {
+    bool found = false;
+    std::filesystem::path executable;
+    std::optional<RcloneVersion> version;
+    bool meets_minimum = false;
+    std::string detail;
+};
+
+// Parses a version string such as "rclone v1.75.1" or "v1.60.0".
+std::optional<RcloneVersion>
+parse_rclone_version(std::string_view text) noexcept;
+
+// Checks whether the parsed rclone version meets the minimum requirement.
+bool meets_minimum_rclone_version(const RcloneVersion& version) noexcept;
+
+// Resolves and queries rclone executable/version without touching any remote.
+RcloneProbeResult probe_rclone_installation(
+    const std::filesystem::path& forbidden_executable_root = {});
+
 // Opens the implementation indicated by location.
 std::expected<Transport, Error>
 open_transport(std::string_view location,

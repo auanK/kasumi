@@ -1,5 +1,6 @@
 #include "application/inspection/result.hpp"
 #include "cli/i18n.hpp"
+#include "cli/json_presenter.hpp"
 #include "cli/presenter.hpp"
 #include "kasumi/test/capture.hpp"
 #include "platform/cancellation.hpp"
@@ -2450,4 +2451,21 @@ TEST(CliPresenterTest,
     EXPECT_EQ(out, "[OK] Synchronization completed.\n");
     EXPECT_NE(err.find("[WARNING]"), std::string::npos);
     EXPECT_NE(err.find("remote write denied"), std::string::npos);
+}
+
+TEST(CliPresenterTest, JsonMapsInsufficientDiskSpaceErrorCode) {
+    using namespace kasumi::application;
+    Error err{
+        .operation = Operation::Sync,
+        .code = ErrorCode::SynchronizationFailure,
+        .detail = "insufficient local disk space",
+        .insufficient_disk_space = true,
+    };
+    const auto json_out = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present_json(
+                      "demo", err, std::chrono::milliseconds{5}),
+                  1);
+    });
+    EXPECT_NE(json_out.find("\"code\":\"insufficient_disk_space\""),
+              std::string::npos);
 }

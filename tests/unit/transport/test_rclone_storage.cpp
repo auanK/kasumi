@@ -2775,4 +2775,82 @@ TEST(RcloneSessionTest, RejectsUnsafeRemoteNamesBeforeSpawningProcess) {
     }
 }
 
+TEST(RcloneSessionTest, ParsesAndValidatesMinimumRcloneVersion) {
+    const auto v1 = kasumi::transport::parse_rclone_version(
+        "rclone v1.75.1\n- os/version: Microsoft Windows 11");
+    ASSERT_TRUE(v1.has_value());
+    EXPECT_EQ(v1->major, 1);
+    EXPECT_EQ(v1->minor, 75);
+    EXPECT_EQ(v1->patch, 1);
+    EXPECT_EQ(v1->raw, "v1.75.1");
+    EXPECT_TRUE(kasumi::transport::meets_minimum_rclone_version(*v1));
+
+    const auto min_ok = kasumi::transport::parse_rclone_version("v1.60.0");
+    ASSERT_TRUE(min_ok.has_value());
+    EXPECT_TRUE(kasumi::transport::meets_minimum_rclone_version(*min_ok));
+
+    const auto too_old = kasumi::transport::parse_rclone_version("v1.59.2");
+    ASSERT_TRUE(too_old.has_value());
+    EXPECT_FALSE(kasumi::transport::meets_minimum_rclone_version(*too_old));
+
+    EXPECT_FALSE(kasumi::transport::parse_rclone_version("").has_value());
+    EXPECT_FALSE(kasumi::transport::parse_rclone_version("not-a-ver").has_value());
+}
+
+TEST(RcloneRcClientTest, RejectsUnsupportedRcloneVersionDuringHandshake) {
+    RcServerState remote;
+    remote.server.Post("/rc/core/pid", [](const auto&, auto& response) {
+        response.set_content(R"({"pid":4242})", "application/json");
+    });
+    remote.server.Post("/rc/core/version", [](const auto&, auto& response) {
+        response.set_content(
+            R"({"version":"v1.59.2","decomposed":[1,59,2]})",
+            "application/json");
+    });
+    start_rc_server(remote);
+    configure_state(remote.client, remote.port);
+    remote.client.ready = false;
+
+    const auto rejected =
+        rclone_detail::establish_rc_connection(remote.client, 4242);
+    stop_rc_server(remote);
+
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(rejected.error().code,
+              kasumi::transport::ErrorCode::BackendUnavailable);
+    EXPECT_NE(rejected.error().message.find("v1.59.2"), std::string::npos);
+    EXPECT_NE(rejected.error().message.find("v1.60.0"), std::string::npos);
+}
+
+TEST(RcloneRcClientTest, AcceptsSupportedRcloneVersionDuringHandshake) {
+    RcServerState remote;
+    remote.server.Post("/rc/core/pid", [](const auto&, auto& response) {
+        response.set_content(R"({"pid":4242})", "application/json");
+    });
+    remote.server.Post("/rc/core/version", [](const auto&, auto& response) {
+        response.set_content(
+            R"({"version":"v1.60.0","decomposed":[1,60,0]})",
+            "application/json");
+    });
+    start_rc_server(remote);
+    configure_state(remote.client, remote.port);
+    remote.client.ready = false;
+
+    const auto accepted =
+        rclone_detail::establish_rc_connection(remote.client, 4242);
+    stop_rc_server(remote);
+
+    ASSERT_TRUE(accepted.has_value()) << accepted.error().message;
+    EXPECT_TRUE(remote.client.ready);
+}
+
+TEST(RcloneSessionTest, ProbeReportsMissingRcloneWhenPathIsEmpty) {
+    auto path_guard =
+        kasumi::test::scoped_environment_variable("PATH", std::string{});
+    const auto probed = kasumi::transport::probe_rclone_installation();
+    EXPECT_FALSE(probed.found);
+    EXPECT_FALSE(probed.meets_minimum);
+    EXPECT_FALSE(probed.detail.empty());
+}
+
 } // namespace

@@ -83,6 +83,7 @@ struct SyncCompleted {
     std::uint32_t renamed = 0;
     std::uint32_t created_dirs = 0;
     std::uint32_t removed_dirs = 0;
+    std::uint32_t repaired = 0;
 
     std::uint64_t upload_bytes = 0;
     std::uint64_t download_bytes = 0;
@@ -295,6 +296,7 @@ struct Error {
     // Sync succeeded before a subsequent inventory audit failed.
     std::optional<SyncCompleted> sync_completed;
     bool lock_busy = false;
+    bool insufficient_disk_space = false;
 };
 
 } // namespace kasumi::application

@@ -2098,6 +2098,12 @@ int present(const application::Response& response, bool full, bool quiet) {
                 } else {
                     print_ok_line(i18n::tr(i18n::Key::SyncCompleted));
                 }
+                if (data.repaired > 0) {
+                    i18n::println(data.repaired == 1
+                                      ? i18n::Key::SyncRepairedSingular
+                                      : i18n::Key::SyncRepairedPlural,
+                                  data.repaired);
+                }
                 if (data.physical_objects_uploaded ||
                     data.physical_objects_downloaded ||
                     data.local_delta_reused_bytes) {
@@ -2491,6 +2497,87 @@ int present(const application::Error& error) {
         }
     }
     return 1;
+}
+
+int present(const application::DiagnosticsReport& report,
+            std::string_view version,
+            bool quiet) {
+    if (quiet && report.overall_ok) {
+        return 0;
+    }
+    if (!quiet) {
+        i18n::println(i18n::Key::DiagnosticsHeader);
+        i18n::println(i18n::Key::DiagnosticsVersion, version);
+        i18n::println(i18n::Key::DiagnosticsOs,
+                      sanitize_terminal_text(report.os_name));
+        i18n::println(
+            i18n::Key::DiagnosticsAppData,
+            sanitize_terminal_text(platform::path::to_utf8(report.app_data_dir)));
+        if (report.app_data_free_bytes) {
+            i18n::println(i18n::Key::DiagnosticsFreeSpace,
+                          format_size(*report.app_data_free_bytes));
+        }
+        i18n::println(report.config_exists
+                          ? i18n::Key::DiagnosticsConfigFound
+                          : i18n::Key::DiagnosticsConfigMissing,
+                      sanitize_terminal_text(
+                          platform::path::to_utf8(report.config_path)));
+
+        i18n::println(i18n::Key::DiagnosticsRcloneHeader);
+        if (report.rclone.found) {
+            i18n::println(i18n::Key::DiagnosticsRcloneFound,
+                          sanitize_terminal_text(
+                              platform::path::to_utf8(report.rclone.executable)),
+                          report.rclone.version.empty()
+                              ? std::string{i18n::tr(i18n::Key::LabelUnknown)}
+                              : sanitize_terminal_text(report.rclone.version),
+                          sanitize_terminal_text(report.rclone.minimum_version));
+            if (!report.rclone.meets_minimum &&
+                !report.rclone.version.empty()) {
+                i18n::println(
+                    i18n::Key::DiagnosticsRcloneOutdated,
+                    sanitize_terminal_text(report.rclone.version),
+                    sanitize_terminal_text(report.rclone.minimum_version));
+            }
+        } else {
+            i18n::println(i18n::Key::DiagnosticsRcloneMissing,
+                          sanitize_terminal_text(report.rclone.detail));
+        }
+
+        if (report.profiles.empty()) {
+            i18n::println(i18n::Key::DiagnosticsProfilesNone);
+        } else {
+            for (const auto& entry : report.profiles) {
+                i18n::println(i18n::Key::DiagnosticsProfileHeader,
+                              sanitize_terminal_text(entry.profile.name),
+                              entry.healthy ? i18n::tr(i18n::Key::LabelOk)
+                                            : i18n::tr(i18n::Key::LabelWarning));
+                std::println("  {} -> {} ({})",
+                             sanitize_terminal_text(
+                                 platform::path::to_utf8(entry.profile.local_dir)),
+                             sanitize_terminal_text(entry.profile.remote_dir),
+                             application::to_string(entry.local_state));
+                if (entry.local_free_bytes) {
+                    i18n::println(i18n::Key::DiagnosticsFreeSpace,
+                                  format_size(*entry.local_free_bytes));
+                }
+                if (!entry.healthy && !entry.detail.empty()) {
+                    std::println("  {} {}",
+                                 i18n::tr(i18n::Key::LabelWarning),
+                                 sanitize_terminal_text(entry.detail));
+                }
+            }
+        }
+    }
+
+    if (report.overall_ok) {
+        print_ok_line(i18n::tr(i18n::Key::DiagnosticsOverallOk));
+    } else {
+        print_status_line(style::yellow,
+                          i18n::Key::LabelWarning,
+                          i18n::tr(i18n::Key::DiagnosticsOverallIssues));
+    }
+    return 0;
 }
 
 int present(const application::InspectionError& error) {

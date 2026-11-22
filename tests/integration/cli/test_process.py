@@ -908,6 +908,64 @@ class CliProcessTest(unittest.TestCase):
         self.assertEqual(rm_confirm["data"]["resolved_count"], 1)
         self.assertTrue(rm_confirm["data"]["published"])
 
+        # Exercise sync --repair on a missing remote object still present locally.
+        (local / "repair_me.bin").write_bytes(b"R" * (300 * 1024))
+        self.invoke("sync", "demo")
+        contents_after = self.invoke("remote", "contents", "demo").decode("utf-8")
+        repair_cid = None
+        for block in contents_after.split("Content ID:")[1:]:
+            if "repair_me.bin" in block:
+                repair_cid = block.strip().splitlines()[0].strip()
+                break
+        self.assertIsNotNone(repair_cid, contents_after)
+        self.assertTrue((remote / repair_cid).exists())
+        (remote / repair_cid).unlink()
+
+        repair_doc = run_json("sync", "demo", "--repair", "--json")
+        self.assertTrue(repair_doc["ok"])
+        self.assertEqual(repair_doc["data"]["repaired"], 1)
+        self.assertFalse(repair_doc["data"]["published"])
+        self.assertTrue((remote / repair_cid).exists())
+        self.invoke("fsck", "demo")
+
+        diag_doc = run_json("diagnostics", "--json")
+        self.assertTrue(diag_doc["ok"])
+        self.assertEqual(diag_doc["command"], "diagnostics")
+        self.assertTrue(diag_doc["data"]["config_exists"])
+        self.assertTrue(diag_doc["data"]["overall_ok"])
+        self.assertGreaterEqual(len(diag_doc["data"]["profiles"]), 1)
+        self.assertIn("rclone", diag_doc["data"])
+
+        diag_single = run_json("diagnostics", "demo", "--json")
+        self.assertEqual(diag_single["profile"], "demo")
+        self.assertEqual(len(diag_single["data"]["profiles"]), 1)
+        self.assertEqual(diag_single["data"]["profiles"][0]["name"], "demo")
+        self.assertTrue(diag_single["data"]["profiles"][0]["healthy"])
+
+        diag_missing = run_json("diagnostics", "absent", "--json", expected=1)
+        self.assertEqual(diag_missing["error"]["code"], "profile_not_found")
+
+        # Verify --log-file in both NDJSON (--json) and clean UTF-8 text modes.
+        ndjson_log = self.root / "logs" / "process.ndjson"
+        run_json("diagnostics", "--json", "--log-file", str(ndjson_log))
+        run_json("list", "--json", "--log-file", str(ndjson_log))
+        ndjson_lines = [
+            json.loads(line)
+            for line in ndjson_log.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(ndjson_lines), 2)
+        self.assertEqual(ndjson_lines[0]["command"], "diagnostics")
+        self.assertEqual(ndjson_lines[1]["command"], "list")
+
+        text_log = self.root / "logs" / "process.log"
+        self.invoke("diagnostics", "demo", "--log-file", str(text_log))
+        self.invoke("list", "--log-file", str(text_log))
+        text_contents = text_log.read_text(encoding="utf-8")
+        self.assertNotIn("\x1b", text_contents)
+        self.assertIn("command=diagnostics exit=0", text_contents)
+        self.assertIn("command=list exit=0", text_contents)
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)

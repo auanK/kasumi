@@ -9,8 +9,11 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <format>
+#include <limits>
 #include <span>
 #include <string>
+#include <system_error>
 #include <utility>
 
 namespace kasumi::application::detail {
@@ -86,6 +89,77 @@ std::string describe_reconciliation_error(const reconciliation::Error& error) {
         detail += ')';
     }
     return detail;
+}
+
+std::optional<std::uint64_t>
+query_available_disk_space(const std::filesystem::path& path) noexcept {
+    if (path.empty()) {
+        return std::nullopt;
+    }
+    std::error_code error;
+    const auto info = std::filesystem::space(path, error);
+    if (error || info.available == static_cast<std::uintmax_t>(-1)) {
+        return std::nullopt;
+    }
+    if (info.available > (std::numeric_limits<std::uint64_t>::max)()) {
+        return (std::numeric_limits<std::uint64_t>::max)();
+    }
+    return static_cast<std::uint64_t>(info.available);
+}
+
+std::expected<void, std::string>
+check_sync_disk_space(const std::filesystem::path& local_dir,
+                      const std::filesystem::path& profile_dir,
+                      const SyncPlan& plan,
+                      const DiskSpaceQuery& query) {
+    constexpr std::uint64_t max_headroom = 16ULL * 1024ULL * 1024ULL;
+    const auto saturating_add = [](std::uint64_t a,
+                                   std::uint64_t b) noexcept -> std::uint64_t {
+        const auto limit = (std::numeric_limits<std::uint64_t>::max)();
+        return (a > limit - b) ? limit : (a + b);
+    };
+
+    std::uint64_t required_local_bytes = 0;
+    std::uint64_t max_download_bytes = 0;
+    for (const auto& op : sync_plan_operations(plan)) {
+        if (op.action == Action::Download) {
+            required_local_bytes = saturating_add(required_local_bytes, op.size);
+            max_download_bytes = std::max(max_download_bytes, op.size);
+        } else if (op.action == Action::CopyLocal) {
+            required_local_bytes = saturating_add(required_local_bytes, op.size);
+        }
+    }
+    if (required_local_bytes == 0) {
+        return {};
+    }
+
+    const auto& space_fn =
+        query ? query : DiskSpaceQuery{query_available_disk_space};
+    const auto margin = std::min(required_local_bytes, max_headroom);
+    const auto needed_local = saturating_add(required_local_bytes, margin);
+    if (const auto available_local = space_fn(local_dir);
+        available_local && *available_local < needed_local) {
+        return std::unexpected(std::format(
+            "insufficient local disk space at '{}': need {} bytes ({} plus {} "
+            "bytes staging headroom), {} bytes available",
+            platform::path::to_utf8(local_dir),
+            needed_local,
+            required_local_bytes,
+            margin,
+            *available_local));
+    }
+    if (max_download_bytes > 0) {
+        if (const auto available_profile = space_fn(profile_dir);
+            available_profile && *available_profile < max_download_bytes) {
+            return std::unexpected(std::format(
+                "insufficient disk space in profile staging directory '{}': "
+                "need {} bytes for largest download, {} bytes available",
+                platform::path::to_utf8(profile_dir),
+                max_download_bytes,
+                *available_profile));
+        }
+    }
+    return {};
 }
 
 std::expected<Response, Error> run_plan(OperationContext& context) {

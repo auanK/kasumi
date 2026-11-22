@@ -1,20 +1,28 @@
 #include "cli/json_presenter.hpp"
 
+#include "cli/log_file.hpp"
 #include "platform/path.hpp"
 
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <print>
 #include <string>
+#include <utility>
 
 namespace kasumi::cli {
 namespace {
 
 using json = nlohmann::json;
 
+thread_local const std::filesystem::path* g_json_log_file = nullptr;
+
 void emit_json(const json& doc) {
-    std::println("{}",
-                 doc.dump(-1, ' ', false, json::error_handler_t::replace));
+    const auto line =
+        doc.dump(-1, ' ', false, json::error_handler_t::replace);
+    std::println("{}", line);
+    if (g_json_log_file != nullptr) {
+        (void)append_log_line(*g_json_log_file, line);
+    }
 }
 
 double to_duration_ms(std::chrono::nanoseconds duration) noexcept {
@@ -279,6 +287,9 @@ std::string_view error_code_string(const application::Error& error) noexcept {
     if (error.lock_busy) {
         return "lock_busy";
     }
+    if (error.insufficient_disk_space) {
+        return "insufficient_disk_space";
+    }
     if ((error.garbage_collection && error.garbage_collection->transport_error) ||
         (error.barrier_removal && error.barrier_removal->transport_error)) {
         return "transport_error";
@@ -381,6 +392,7 @@ json serialize_sync_completed(const application::SyncCompleted& sync) {
         {"renamed", sync.renamed},
         {"created_dirs", sync.created_dirs},
         {"removed_dirs", sync.removed_dirs},
+        {"repaired", sync.repaired},
         {"upload_bytes", sync.upload_bytes},
         {"download_bytes", sync.download_bytes},
         {"published", sync.published},
@@ -423,7 +435,41 @@ json serialize_execution_summary(const application::ProfileExecutionSummary& e) 
     return out;
 }
 
+std::string_view
+profile_local_state_name(application::ProfileLocalState state) noexcept {
+    switch (state) {
+    case application::ProfileLocalState::Initialized:
+        return "initialized";
+    case application::ProfileLocalState::Ready:
+        return "ready";
+    case application::ProfileLocalState::Pending:
+        return "pending";
+    case application::ProfileLocalState::Problem:
+        return "problem";
+    }
+    return "problem";
+}
+
 } // namespace
+
+ScopedJsonLogFile::ScopedJsonLogFile(
+    std::optional<std::filesystem::path> path)
+    : path_(std::move(path)), previous_(g_json_log_file) {
+    if (path_.has_value()) {
+        g_json_log_file = &*path_;
+    }
+}
+
+ScopedJsonLogFile::~ScopedJsonLogFile() noexcept {
+    g_json_log_file = previous_;
+}
+
+int present_json_io_error(std::string_view command,
+                          std::string_view profile_name,
+                          std::string_view detail) {
+    return emit_json_error(
+        command.empty() ? "kasumi" : command, profile_name, 1, "io_error", detail);
+}
 
 int present_json_parse_error(std::string_view command,
                              std::string_view detail) {
@@ -457,21 +503,7 @@ int present_json_show(const application::Profile& profile,
                       const application::ProfileActivityReport& activity,
                       bool full) {
     auto doc = make_envelope("show", profile.name, true, 0, std::nullopt);
-    std::string_view state_str = "initialized";
-    switch (state) {
-    case application::ProfileLocalState::Initialized:
-        state_str = "initialized";
-        break;
-    case application::ProfileLocalState::Ready:
-        state_str = "ready";
-        break;
-    case application::ProfileLocalState::Pending:
-        state_str = "pending";
-        break;
-    case application::ProfileLocalState::Problem:
-        state_str = "problem";
-        break;
-    }
+    const std::string_view state_str = profile_local_state_name(state);
 
     json data{
         {"name", profile.name},
@@ -544,6 +576,77 @@ int present_json_show(const application::Profile& profile,
         data["cached_remote_activities"] = std::move(cached);
     }
     doc["data"] = std::move(data);
+    emit_json(doc);
+    return 0;
+}
+
+int present_json_diagnostics(const application::DiagnosticsReport& report,
+                             std::string_view version,
+                             std::string_view requested_profile,
+                             std::chrono::nanoseconds duration) {
+    auto doc =
+        make_envelope("diagnostics", requested_profile, true, 0, duration);
+
+    json rclone{
+        {"found", report.rclone.found},
+        {"executable", platform::path::to_utf8(report.rclone.executable)},
+        {"version", report.rclone.version},
+        {"minimum_version", report.rclone.minimum_version},
+        {"meets_minimum", report.rclone.meets_minimum},
+        {"detail", report.rclone.detail},
+    };
+
+    json profiles = json::array();
+    for (const auto& item : report.profiles) {
+        json entry{
+            {"name", item.profile.name},
+            {"local_dir", platform::path::to_utf8(item.profile.local_dir)},
+            {"remote_dir", item.profile.remote_dir},
+            {"state", profile_local_state_name(item.local_state)},
+            {"problem", local_problem_name(item.local_problem)},
+            {"key_storage", application::to_string(item.profile.key_storage)},
+            {"local_dir_exists", item.local_dir_exists},
+            {"local_dir_writable", item.local_dir_writable},
+            {"local_free_bytes",
+             item.local_free_bytes ? json(*item.local_free_bytes)
+                                   : json(nullptr)},
+            {"local_capacity_bytes",
+             item.local_capacity_bytes ? json(*item.local_capacity_bytes)
+                                       : json(nullptr)},
+            {"uses_rclone", item.uses_rclone},
+            {"lock_active", item.lock_active},
+            {"journal_present", item.journal_present},
+            {"key_accessible", item.key_accessible},
+            {"database_present", item.activity.database_present},
+            {"healthy", item.healthy},
+            {"detail", item.detail},
+            {"last_attempt",
+             item.activity.last_attempt
+                 ? serialize_execution_summary(*item.activity.last_attempt)
+                 : json(nullptr)},
+        };
+        if (item.activity.accepted_commit) {
+            entry["accepted_commit_id"] =
+                item.activity.accepted_commit->commit_id;
+        } else {
+            entry["accepted_commit_id"] = nullptr;
+        }
+        profiles.push_back(std::move(entry));
+    }
+
+    doc["data"] = json{
+        {"version", version},
+        {"os", report.os_name},
+        {"app_data_dir", platform::path::to_utf8(report.app_data_dir)},
+        {"config_path", platform::path::to_utf8(report.config_path)},
+        {"config_exists", report.config_exists},
+        {"app_data_free_bytes",
+         report.app_data_free_bytes ? json(*report.app_data_free_bytes)
+                                    : json(nullptr)},
+        {"rclone", std::move(rclone)},
+        {"profiles", std::move(profiles)},
+        {"overall_ok", report.overall_ok},
+    };
     emit_json(doc);
     return 0;
 }
@@ -836,6 +939,21 @@ int present_json(std::string_view profile_name,
                            inspection_error_code_string(error),
                            error.detail,
                            duration);
+}
+
+std::string_view
+profile_local_state_name(application::ProfileLocalState state) noexcept {
+    switch (state) {
+    case application::ProfileLocalState::Initialized:
+        return "initialized";
+    case application::ProfileLocalState::Ready:
+        return "ready";
+    case application::ProfileLocalState::Pending:
+        return "pending";
+    case application::ProfileLocalState::Problem:
+        return "problem";
+    }
+    return "problem";
 }
 
 } // namespace kasumi::cli

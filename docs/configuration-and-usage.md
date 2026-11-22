@@ -82,8 +82,9 @@ Use `kasumi <command> --help` for the complete arguments, options and examples.
 | Re-enter or save profile key | `kasumi key <profile>` |
 | List profile names | `kasumi list` |
 | Show profile settings and local traceability | `kasumi show <profile> [--full]` |
+| Inspect local environment, `rclone`, and profile health | `kasumi diagnostics [<profile>]` |
 | Inspect the current plan | `kasumi status <profile>` or `kasumi sync <profile> --dry-run` |
-| Synchronize | `kasumi sync <profile>` |
+| Synchronize (or fast-repair missing remote objects) | `kasumi sync <profile> [--repair]` |
 | Audit referenced payloads | `kasumi fsck <profile>` |
 | Consolidate fragmented Micro-Packs | `kasumi repack <profile> [--dry-run] [--reclaim-dirty] [--full]` |
 | Reclaim eligible remote storage | `kasumi gc <profile> [--dry-run]` |
@@ -100,6 +101,23 @@ See [Initial Sync](architecture/synchronization.md#initial-sync).
 cannot combine with `--dry-run` or `--initial`. The audit does not authenticate
 payload bytes and its failure does not undo Sync's effects or publication.
 See [Inventory Audit](architecture/synchronization.md#optional-remote-inventory-audit).
+
+`sync --repair` discovers missing remote physical objects across the entire
+effective `StorageManifest` (loose objects, `KPAK\x01` Micro-Packs, and FastCDC
+chunks) using a single remote physical listing, and re-uploads missing payloads
+from verified local copies without downloading payloads (`fsck`) or publishing a
+new logical Commit when no local changes require publication. It cannot combine
+with `--dry-run` or `--initial`, and reports repaired count in `data.repaired`
+under `--json`.
+
+Before running remote transfers or downloads, `sync` performs local disk-space
+and toolchain preflight checks: insufficient local free space for planned
+downloads fails cleanly before staging (`error.code = "insufficient_disk_space"`
+in `--json`), and `rclone` backends enforce a minimum supported `rclone` version
+of `v1.60.0` via `core/version`. Run `kasumi diagnostics [<profile>]` to inspect
+`rclone` availability/version, OS, free disk space, profile local state,
+active locks, journals, and key availability read-only without remote access or
+exposing secrets.
 
 **GC permanently deletes eligible objects.** Stop Sync on every client and
 serialize maintenance across the vault. Use `kasumi gc <profile> --dry-run` to
@@ -136,7 +154,7 @@ compatibility and backup precautions before replacing binaries.
 
 ### Partial Synchronization and Explicit Data-Loss Operations
 
-When `kasumi sync <profile>` has unresolved missing payloads required by its current work, it records pending materializations and exits with status `2`. Treat this as **partial**, not full, synchronization. If a required Content object is absent, Sync can upload it when a compatible local source matches the expected hash and size; otherwise it preserves logical state and pending evidence. A no-op does not check for or repair unrelated missing objects, even if another local copy exists. Restore intact bytes from a client or independent backup so they are available when a later Sync operation needs them. Use `sync --audit-inventory` to identify broader structural absences and Fsck for payload integrity checks. Do not automatically convert status `2` into a deletion. Transport failures and LIST/PRESENCE disagreements fail the run rather than being classified as missing.
+When `kasumi sync <profile>` has unresolved missing payloads required by its current work, it records pending materializations and exits with status `2`. Treat this as **partial**, not full, synchronization. If a required Content object is absent, Sync can upload it when a compatible local source matches the expected hash and size; otherwise it preserves logical state and pending evidence. A no-op does not check for or repair unrelated missing objects, even if another local copy exists; run `kasumi sync <profile> --repair` on a machine with intact local copies to discover and repair missing remote objects across the effective tree in a single listing without downloading payloads. Alternatively, restore intact bytes from a client or independent backup so they are available when a later Sync or `--repair` run needs them. Use `sync --audit-inventory` to identify broader structural absences and Fsck for payload integrity checks. Do not automatically convert status `2` into a deletion. Transport failures and LIST/PRESENCE disagreements fail the run rather than being classified as missing.
 
 `kasumi resolve-missing <profile>` is an explicit, potentially destructive resolution path: by default it previews eligible unresolved paths with no local source and asks for interactive confirmation (`[y/N]` / `[s/N]`) before publishing logical deletions (returning exit `1` if declined or `130` on EOF/signal). Use `resolve-missing <profile> --dry-run` to inspect eligible paths read-only without mutating state, or `--confirm` for non-interactive automation after verifying pending paths. It is not a download/repair command; use it only when losing those files is an informed decision.
 
@@ -259,15 +277,23 @@ content, and retry; do not turn it automatically into deletions. See
 
 ### Quiet Mode (`--quiet`)
 
-Pass `--quiet` after the profile (or after `kasumi list` / `kasumi remote <subcommand> <profile>`) to suppress banners, live progress, `Duration:` lines, and non-error operational stdout on `sync`, `status`, `fsck`, `gc`, `repack`, and `resolve-missing`. Query commands (`list`, `show`, `remote ...`) retain their query output without progress or duration lines, and errors, partial-pending lists (exit `2`), and `stderr` warnings remain visible.
+Pass `--quiet` after the profile (or after `kasumi list`, `kasumi diagnostics [<profile>]`, or `kasumi remote <subcommand> <profile>`) to suppress banners, live progress, `Duration:` lines, and non-error operational stdout on `sync`, `status`, `fsck`, `gc`, `repack`, `resolve-missing`, and healthy `diagnostics` runs. Query commands (`list`, `show`, `remote ...`) retain their query output without progress or duration lines, and errors, partial-pending lists (exit `2`), unhealthy `diagnostics` summaries, and `stderr` warnings remain visible.
 
 ### Machine-Readable Output (`--json`)
 
-Pass `--json` on supported commands (`list`, `show`, `status`, `sync`, `fsck`, `gc <profile>`, `repack`, `resolve-missing`, and `remote summary`) to emit a single language-independent JSON object (`"schema_version": 1`) to `stdout` with empty `stderr`, suppressing banners, progress output, and localized text differences regardless of `--lang`:
+Pass `--json` on supported commands (`list`, `show`, `diagnostics`, `status`, `sync`, `fsck`, `gc <profile>`, `repack`, `resolve-missing`, and `remote summary`) to emit a single language-independent JSON object (`"schema_version": 1`) to `stdout` with empty `stderr`, suppressing banners, progress output, and localized text differences regardless of `--lang`:
 
 - Every response includes `schema_version`, `command`, `ok`, and `exit_code` (plus `profile`, `duration_ms`, `data`, `warning`, or `error` as applicable).
 - `resolve-missing <profile> --json` without `--confirm` or `--dry-run` runs read-only and fails safely with `error.code = "confirmation_required"` and `data.resolved_paths` whenever unresolved paths exist (never blocking on `stdin`).
-- Stable `error.code` values: `invalid_arguments`, `profile_not_found`, `lock_busy`, `credentials_required`, `auth_failed`, `confirmation_required`, `cancelled`, `partial_pending`, `audit_findings`, `transport_error`, `plan_failed`, `sync_failed`, `recovery_failed`, `fsck_failed`, `gc_failed`, `repack_failed`, `writer_removal_failed`, `barrier_removal_failed`, `inventory_audit_failed`, `remote_observation_failed`, `config_error`, and `runtime_error`.
+- Stable `error.code` values: `invalid_arguments`, `profile_not_found`, `lock_busy`, `credentials_required`, `auth_failed`, `confirmation_required`, `insufficient_disk_space`, `io_error`, `cancelled`, `partial_pending`, `audit_findings`, `transport_error`, `plan_failed`, `sync_failed`, `recovery_failed`, `fsck_failed`, `gc_failed`, `repack_failed`, `writer_removal_failed`, `barrier_removal_failed`, `inventory_audit_failed`, `remote_observation_failed`, `config_error`, and `runtime_error`.
+
+### Persistent Log File (`--log-file <path>`)
+
+Pass `--log-file <path>` (or `--log-file=<path>`) on supported non-interactive commands (`list`, `show`, `diagnostics`, `sync`, `status`, `fsck`, `gc`, `repack`, `resolve-missing`, and `remote ...`) to append durable logs without interrupting terminal output:
+
+- **With `--json`**: Appends the exact serialized JSON envelope as one NDJSON line per invocation.
+- **Without `--json`**: Appends UTF-8 plain-text lines with UTC timestamps, ANSI escape sequences stripped, command name, exit status, and a concise secret-free summary.
+- The log path is validated before execution (creating missing parent directories; rejecting directories, symlinks, and unwritable targets with exit code `1` or `error.code = "io_error"` under `--json`). Passing `--help` / `-h` never creates or modifies the log file, and cryptographic keys or passwords are never logged.
 
 ## `.kasumiignore`
 

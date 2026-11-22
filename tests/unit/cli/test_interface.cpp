@@ -2,11 +2,13 @@
 #include "platform/profile_lock.hpp"
 #include "application/profile.hpp"
 #include "cli/app.hpp"
+#include "cli/log_file.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 
 #include <csignal>
+#include <fstream>
 #include <future>
 #include <gtest/gtest.h>
 #include <iostream>
@@ -83,6 +85,8 @@ INSTANTIATE_TEST_SUITE_P(
     testing::ValuesIn(std::vector<std::vector<std::string>>{
         std::vector<std::string>{"sync"},
         {"status"},
+        {"show"},
+        {"diagnostics"},
         {"fsck"},
         {"gc"},
         {"gc", "remove-writer"},
@@ -388,6 +392,123 @@ TEST_F(CliInterfaceTest, JsonOutputsStructuredSchemaLockBusyAndErrorCodes) {
     EXPECT_NE(sync_dry.out.find("\"command\":\"sync\""), std::string::npos);
     EXPECT_NE(sync_dry.out.find("\"dry_run\":true"), std::string::npos);
     EXPECT_NE(sync_dry.out.find("\"upload\":1"), std::string::npos);
+
+    const auto diag_all = run({"kasumi", "diagnostics", "--json"});
+    EXPECT_EQ(diag_all.code, 0) << diag_all.out;
+    EXPECT_TRUE(diag_all.err.empty());
+    EXPECT_NE(diag_all.out.find("\"command\":\"diagnostics\""),
+              std::string::npos);
+    EXPECT_NE(diag_all.out.find("\"overall_ok\":true"), std::string::npos);
+    EXPECT_EQ(diag_all.out.find(std::string(64, '7')), std::string::npos);
+
+    const auto diag_missing =
+        run({"kasumi", "diagnostics", "absent", "--json"});
+    EXPECT_EQ(diag_missing.code, 1);
+    EXPECT_TRUE(diag_missing.err.empty());
+    EXPECT_NE(diag_missing.out.find("\"code\":\"profile_not_found\""),
+              std::string::npos);
+
+    const auto diag_quiet = run({"kasumi", "diagnostics", "--quiet"});
+    EXPECT_EQ(diag_quiet.code, 0);
+    EXPECT_TRUE(diag_quiet.out.empty());
+    EXPECT_TRUE(diag_quiet.err.empty());
+}
+
+TEST_F(CliInterfaceTest, LogFileWritesCleanTextAndAppendsNdjsonWithoutCreatingOnHelp) {
+    const auto root = kasumi::test::workspace_root(workspace);
+    const kasumi::application::ExecutionEnvironment environment{root / "kasumi"};
+    const std::string master_key(64, '8');
+    const kasumi::application::Profile profile{
+        "demo", root / "local", (root / "remote").string()};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment,
+        profile,
+        kasumi::application::MasterKeyHex{master_key}));
+    std::filesystem::create_directories(profile.local_dir);
+    kasumi::test::write_text(profile.local_dir / "item.txt", "log payload");
+
+    const auto help_log = root / "logs" / "help-unused.log";
+    const auto help_out =
+        run({"kasumi", "list", "--log-file", help_log.string(), "--help"});
+    EXPECT_EQ(help_out.code, 0);
+    EXPECT_FALSE(std::filesystem::exists(help_log));
+
+    const auto missing_val = run({"kasumi", "list", "--log-file"});
+    EXPECT_EQ(missing_val.code, 1);
+
+    const auto dir_target = root / "dir-as-log";
+    std::filesystem::create_directories(dir_target);
+    const auto dir_json =
+        run({"kasumi", "list", "--json", "--log-file", dir_target.string()});
+    EXPECT_EQ(dir_json.code, 1);
+    EXPECT_TRUE(dir_json.err.empty());
+    EXPECT_NE(dir_json.out.find("\"code\":\"io_error\""), std::string::npos);
+
+    const auto dir_text =
+        run({"kasumi", "list", "--log-file", dir_target.string()});
+    EXPECT_EQ(dir_text.code, 1);
+    EXPECT_FALSE(dir_text.err.empty());
+
+    const auto ndjson_log = root / "logs" / "events.ndjson";
+    const auto json_list =
+        run({"kasumi", "list", "--json", "--log-file", ndjson_log.string()});
+    ASSERT_EQ(json_list.code, 0) << json_list.err;
+    const auto json_diag = run({"kasumi",
+                                "diagnostics",
+                                "demo",
+                                "--json",
+                                "--log-file=" + ndjson_log.string()});
+    ASSERT_EQ(json_diag.code, 0) << json_diag.err;
+
+    std::vector<std::string> ndjson_lines;
+    {
+        std::ifstream in(ndjson_log, std::ios::binary);
+        ASSERT_TRUE(in.is_open());
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            if (!line.empty()) {
+                ndjson_lines.push_back(line);
+            }
+        }
+    }
+    ASSERT_EQ(ndjson_lines.size(), 2u);
+    EXPECT_NE(ndjson_lines[0].find("\"command\":\"list\""), std::string::npos);
+    EXPECT_NE(ndjson_lines[1].find("\"command\":\"diagnostics\""),
+              std::string::npos);
+    EXPECT_EQ(ndjson_lines[1].find(master_key), std::string::npos);
+
+    const auto text_log = root / "logs" / "text.log";
+    const auto text_sync = run({"kasumi",
+                                "sync",
+                                "demo",
+                                "--dry-run",
+                                "--quiet",
+                                "--log-file",
+                                text_log.string()});
+    ASSERT_EQ(text_sync.code, 0) << text_sync.err;
+    const auto text_diag = run({"kasumi",
+                                "diagnostics",
+                                "absent",
+                                "--log-file=" + text_log.string()});
+    EXPECT_EQ(text_diag.code, 1);
+
+    std::string text_content;
+    {
+        std::ifstream in(text_log, std::ios::binary);
+        ASSERT_TRUE(in.is_open());
+        text_content.assign(std::istreambuf_iterator<char>(in), {});
+    }
+    EXPECT_EQ(text_content.find('\x1b'), std::string::npos);
+    EXPECT_NE(text_content.find("command=sync exit=0"), std::string::npos);
+    EXPECT_NE(text_content.find("command=diagnostics exit=1"),
+              std::string::npos);
+    EXPECT_EQ(text_content.find(master_key), std::string::npos);
+
+    EXPECT_EQ(kasumi::cli::strip_ansi_sequences("\x1b[32m[OK]\x1b[0m\tOl\xC3\xA1\n"),
+              "[OK] Ol\xC3\xA1");
 }
 class GeneralOptionTest : public CliInterfaceTest,
                           public testing::WithParamInterface<const char*> {};

@@ -17,9 +17,11 @@
 #endif
 
 #include <algorithm>
+#include <charconv>
 #include <cstdlib>
 #include <cwchar>
 #include <filesystem>
+#include <format>
 #include <future>
 #include <iterator>
 #include <limits>
@@ -657,9 +659,8 @@ resolve_rclone_executable(const detail::RcloneConfiguration& configuration) {
 }
 
 std::expected<ChildEnvironment, Error>
-make_child_environment(const State& state) {
+build_sanitized_environment(const ChildEnvironment& controlled) {
     try {
-        auto controlled = controlled_environment(state);
         ChildEnvironment result;
 #if defined(_WIN32)
         using EnvironmentBlock =
@@ -706,9 +707,24 @@ make_child_environment(const State& state) {
             }
         }
 #endif
-        result.insert(result.end(),
-                      std::make_move_iterator(controlled.begin()),
-                      std::make_move_iterator(controlled.end()));
+        return result;
+    } catch (const std::bad_alloc&) {
+        return std::unexpected(
+            make_error(ErrorCode::Io, "could not copy rclone environment"));
+    }
+}
+
+std::expected<ChildEnvironment, Error>
+make_child_environment(const State& state) {
+    try {
+        auto controlled = controlled_environment(state);
+        auto result = build_sanitized_environment(controlled);
+        if (!result) {
+            return result;
+        }
+        result->insert(result->end(),
+                       std::make_move_iterator(controlled.begin()),
+                       std::make_move_iterator(controlled.end()));
         return result;
     } catch (const std::bad_alloc&) {
         return std::unexpected(
@@ -748,8 +764,11 @@ start_state(detail::RcloneConfiguration configuration) {
         }
         const bool missing_executable =
             definitely_missing_executable(last_error);
+        const bool unsupported_version =
+            last_error.code == ErrorCode::BackendUnavailable;
         const bool cancelled = last_error.code == ErrorCode::Cancelled;
-        if (!cleaned || missing_executable || cancelled) {
+        if (!cleaned || missing_executable || unsupported_version ||
+            cancelled) {
             if (!cleaned) {
                 last_error =
                     make_error(ErrorCode::ProcessFailure,
@@ -775,6 +794,180 @@ void destroy_state(void* context) noexcept {
 }
 
 } // namespace kasumi::transport::rclone_detail
+
+namespace kasumi::transport {
+
+std::optional<RcloneVersion>
+parse_rclone_version(std::string_view text) noexcept {
+    const auto trim_ws = [](std::string_view sv) noexcept {
+        while (!sv.empty() &&
+               (sv.front() == ' ' || sv.front() == '\t' ||
+                sv.front() == '\r' || sv.front() == '\n')) {
+            sv.remove_prefix(1);
+        }
+        while (!sv.empty() &&
+               (sv.back() == ' ' || sv.back() == '\t' ||
+                sv.back() == '\r' || sv.back() == '\n')) {
+            sv.remove_suffix(1);
+        }
+        return sv;
+    };
+    const auto line_end = text.find_first_of("\r\n");
+    auto line = trim_ws(text.substr(0, line_end));
+    if (line.empty()) {
+        return std::nullopt;
+    }
+    if (line.starts_with("rclone")) {
+        line.remove_prefix(6);
+        line = trim_ws(line);
+    }
+    const auto token_end = line.find_first_of(" \t");
+    const auto token = line.substr(0, token_end);
+    if (token.empty()) {
+        return std::nullopt;
+    }
+    std::string_view nums = token;
+    if (nums.front() == 'v' || nums.front() == 'V') {
+        nums.remove_prefix(1);
+    }
+    int major = 0;
+    int minor = 0;
+    int patch = 0;
+    const auto parse_int = [](std::string_view& sv, int& out) noexcept {
+        const auto* begin = sv.data();
+        const auto* end = sv.data() + sv.size();
+        const auto res = std::from_chars(begin, end, out);
+        if (res.ec != std::errc{} || res.ptr == begin || out < 0) {
+            return false;
+        }
+        sv.remove_prefix(static_cast<std::size_t>(res.ptr - begin));
+        return true;
+    };
+    if (!parse_int(nums, major) || nums.empty() || nums.front() != '.') {
+        return std::nullopt;
+    }
+    nums.remove_prefix(1);
+    if (!parse_int(nums, minor)) {
+        return std::nullopt;
+    }
+    if (!nums.empty() && nums.front() == '.') {
+        nums.remove_prefix(1);
+        if (!parse_int(nums, patch)) {
+            return std::nullopt;
+        }
+    }
+    return RcloneVersion{
+        .major = major,
+        .minor = minor,
+        .patch = patch,
+        .raw = std::string{token},
+    };
+}
+
+bool meets_minimum_rclone_version(const RcloneVersion& version) noexcept {
+    if (version.major != minimum_rclone_major) {
+        return version.major > minimum_rclone_major;
+    }
+    if (version.minor != minimum_rclone_minor) {
+        return version.minor > minimum_rclone_minor;
+    }
+    return version.patch >= minimum_rclone_patch;
+}
+
+RcloneProbeResult probe_rclone_installation(
+    const std::filesystem::path& forbidden_executable_root) {
+    auto resolved = rclone_detail::resolve_rclone_executable(
+        detail::RcloneConfiguration{
+            .forbidden_executable_root = forbidden_executable_root});
+    if (!resolved) {
+        return RcloneProbeResult{
+            .found = false,
+            .detail = resolved.error().message,
+        };
+    }
+
+    RcloneProbeResult result{
+        .found = true,
+        .executable = *resolved,
+    };
+    auto environment = rclone_detail::build_sanitized_environment({});
+    if (!environment) {
+        result.detail = environment.error().message;
+        return result;
+    }
+
+    reproc::process proc;
+    reproc::options options;
+    options.env.behavior = reproc::env::empty;
+    options.env.extra = reproc::env{*environment};
+    options.redirect.in.type = reproc::redirect::discard;
+    options.redirect.out.type = reproc::redirect::pipe;
+    options.redirect.err.type = reproc::redirect::discard;
+    const std::vector<std::string> args{
+        platform::path::to_utf8(*resolved), "version"};
+    if (const auto err = proc.start(args, options)) {
+        result.detail = "could not execute rclone version: " + err.message();
+        return result;
+    }
+
+    std::string output;
+    std::uint8_t buffer[512]{};
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (std::chrono::steady_clock::now() < deadline &&
+           output.size() < 4096U) {
+        auto [events, poll_err] = proc.poll(
+            reproc::event::out | reproc::event::exit,
+            reproc::milliseconds(50));
+        if (poll_err) {
+            break;
+        }
+        if ((events & reproc::event::out) != 0) {
+            auto [count, read_err] =
+                proc.read(reproc::stream::out, buffer, sizeof(buffer));
+            if (count > 0) {
+                output.append(reinterpret_cast<const char*>(buffer),
+                              std::min<std::size_t>(
+                                  count, 4096U - output.size()));
+            }
+            if (read_err) {
+                break;
+            }
+        }
+        if ((events & reproc::event::exit) != 0 &&
+            (events & reproc::event::out) == 0) {
+            break;
+        }
+    }
+    const auto [status, wait_err] = proc.stop(reproc::stop_actions{
+        {reproc::stop::wait, reproc::milliseconds(1000)},
+        {reproc::stop::terminate, reproc::milliseconds(500)},
+        {reproc::stop::kill, reproc::milliseconds(500)},
+    });
+    if (wait_err || status != 0) {
+        result.detail = "rclone version exited with status " +
+                        std::to_string(status);
+        return result;
+    }
+
+    result.version = parse_rclone_version(output);
+    if (!result.version) {
+        result.detail = "could not parse rclone version output";
+        return result;
+    }
+    result.meets_minimum = meets_minimum_rclone_version(*result.version);
+    if (!result.meets_minimum) {
+        result.detail = std::format(
+            "unsupported rclone version {} (minimum required: v{}.{}.{})",
+            result.version->raw,
+            minimum_rclone_major,
+            minimum_rclone_minor,
+            minimum_rclone_patch);
+    }
+    return result;
+}
+
+} // namespace kasumi::transport
 
 namespace kasumi::transport::detail {
 

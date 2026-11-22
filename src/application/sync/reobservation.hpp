@@ -36,7 +36,8 @@ refresh_content_availability(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     std::span<const Hash> confirmed_missing = {},
     bool allow_unreferenced_content_reuse = false,
-    ProgressMeter* meter = nullptr);
+    ProgressMeter* meter = nullptr,
+    bool repair_missing = false);
 
 // Re-observes until the plan stabilizes or fails. When
 // content_availability_is_current is true, the initial availability probe and
@@ -51,7 +52,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
           std::span<const Hash> confirmed_missing = {},
           bool content_availability_is_current = false,
           bool allow_unreferenced_content_reuse = false,
-          bool retain_staged_workspace = false);
+          bool retain_staged_workspace = false,
+          bool repair_missing = false);
 
 } // namespace kasumi::application::sync::coordinator::reobservation
 

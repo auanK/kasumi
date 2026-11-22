@@ -544,11 +544,70 @@ post_rc_read_only(State& state,
     return std::unexpected(std::move(last_error));
 }
 
+std::expected<void, Error> verify_rclone_version(State& state) {
+    const auto response = post_rc(
+        state, "core/version", "{}", maximum_response_size, default_read_timeout);
+    if (!response) {
+        return std::unexpected(response.error());
+    }
+    try {
+        const auto json = nlohmann::json::parse(*response);
+        std::optional<RcloneVersion> parsed;
+        if (json.contains("decomposed") && json["decomposed"].is_array() &&
+            json["decomposed"].size() >= 3 &&
+            json["decomposed"][0].is_number_integer() &&
+            json["decomposed"][1].is_number_integer() &&
+            json["decomposed"][2].is_number_integer()) {
+            const int major = json["decomposed"][0].get<int>();
+            const int minor = json["decomposed"][1].get<int>();
+            const int patch = json["decomposed"][2].get<int>();
+            if (major >= 0 && minor >= 0 && patch >= 0) {
+                std::string raw =
+                    (json.contains("version") && json["version"].is_string())
+                        ? json["version"].get<std::string>()
+                        : std::format("v{}.{}.{}", major, minor, patch);
+                parsed = RcloneVersion{
+                    .major = major,
+                    .minor = minor,
+                    .patch = patch,
+                    .raw = std::move(raw),
+                };
+            }
+        } else if (json.contains("version") && json["version"].is_string()) {
+            parsed = parse_rclone_version(
+                json["version"].get_ref<const std::string&>());
+        }
+        if (!parsed) {
+            return std::unexpected(make_error(
+                ErrorCode::ProtocolFailure, "invalid core/version response"));
+        }
+        if (!meets_minimum_rclone_version(*parsed)) {
+            return std::unexpected(make_error(
+                ErrorCode::BackendUnavailable,
+                std::format("unsupported rclone version {} (minimum required: "
+                            "v{}.{}.{})",
+                            parsed->raw,
+                            minimum_rclone_major,
+                            minimum_rclone_minor,
+                            minimum_rclone_patch)));
+        }
+    } catch (const std::exception&) {
+        return std::unexpected(make_error(
+            ErrorCode::ProtocolFailure,
+            "invalid core/version JSON; body omitted"));
+    }
+    return {};
+}
+
 std::expected<void, Error> establish_rc_connection(State& state,
                                                    int child_pid) {
     const auto ready = wait_for_rc_readiness(state, child_pid);
     if (!ready) {
         return std::unexpected(ready.error());
+    }
+    const auto version = verify_rclone_version(state);
+    if (!version) {
+        return std::unexpected(version.error());
     }
     state.ready = true;
     return {};

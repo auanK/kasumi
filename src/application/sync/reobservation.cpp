@@ -145,7 +145,8 @@ std::expected<void, Error> observe_content_availability(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     std::span<const Hash> confirmed_missing,
     bool allow_unreferenced_content_reuse,
-    ProgressMeter* meter = nullptr) {
+    ProgressMeter* meter = nullptr,
+    bool repair_missing = false) {
     HashSet hashes{0, hash_key};
     std::unordered_map<Hash, std::uint64_t, decltype(&hash_key)> upload_sizes{
         0, hash_key};
@@ -235,6 +236,14 @@ std::expected<void, Error> observe_content_availability(
     add_relevant_pending(result.pending_materializations);
     add_relevant_pending(result.pending_storage_rows);
 
+    if (repair_missing && input.storage.history_present) {
+        for (const auto& row : input.storage.tree.rows) {
+            if (!row.is_directory) {
+                add_hash(row.hash);
+            }
+        }
+    }
+
     if (hashes.empty()) {
         input.known_missing_content_objects.clear();
         input.known_missing_content_objects.insert(confirmed_missing.begin(),
@@ -290,9 +299,11 @@ std::expected<void, Error> observe_content_availability(
     constexpr std::size_t bulk_list_probe_threshold = 256U;
     const bool use_bulk_list =
         !input.audit_storage_objects && storage.storage.list != nullptr &&
-        requested_physical.size() >= bulk_list_probe_threshold;
+        (repair_missing ||
+         requested_physical.size() >= bulk_list_probe_threshold);
     if (use_bulk_list) {
-        if (auto listed = transport::list(storage)) {
+        auto listed = transport::list(storage);
+        if (listed) {
             const std::unordered_set<std::string> remote_set(listed->begin(),
                                                              listed->end());
             presences.reserve(requested_physical.size());
@@ -302,6 +313,11 @@ std::expected<void, Error> observe_content_availability(
                                         : transport::Presence::Absent);
             }
             probed = true;
+        } else if (repair_missing &&
+                   listed.error().code != transport::ErrorCode::Unsupported) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::ObservationFailure,
+                transport::describe(listed.error())));
         }
     }
     if (!probed && storage.storage.control_read_batch != nullptr) {
@@ -663,7 +679,8 @@ refresh_content_availability(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     std::span<const Hash> confirmed_missing,
     bool allow_unreferenced_content_reuse,
-    ProgressMeter* meter) {
+    ProgressMeter* meter,
+    bool repair_missing) {
     auto availability =
         observe_content_availability(input,
                                      reconciliation_result,
@@ -671,7 +688,8 @@ refresh_content_availability(
                                      key,
                                      confirmed_missing,
                                      allow_unreferenced_content_reuse,
-                                     meter);
+                                     meter,
+                                     repair_missing);
     if (!availability) {
         return std::unexpected(availability.error());
     }
@@ -696,7 +714,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
           std::span<const Hash> confirmed_missing,
           bool content_availability_is_current,
           bool allow_unreferenced_content_reuse,
-          bool retain_staged_workspace) {
+          bool retain_staged_workspace,
+          bool repair_missing) {
     auto* meter = session ? session->progress : nullptr;
     const auto no_work = [](const reconciliation::Result& candidate) {
         return !candidate.requires_publication &&
@@ -721,7 +740,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
                                             key,
                                             confirmed_missing,
                                             allow_reuse,
-                                            meter);
+                                            meter,
+                                            repair_missing);
     };
 
     if (!content_availability_is_current) {
@@ -732,7 +752,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
                                          key,
                                          confirmed_missing,
                                          allow_unreferenced_content_reuse,
-                                         meter);
+                                         meter,
+                                         repair_missing);
         if (!available) {
             return std::unexpected(available.error());
         }

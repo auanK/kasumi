@@ -235,6 +235,7 @@ struct Result {
 
     // Indicates that missing physical objects can be republished.
     bool requires_storage_repair = false;
+    std::uint32_t repair_uploads = 0;
 
     // Predicted shared tree after applying logical plan.
     Snapshot candidate_shared_tree;

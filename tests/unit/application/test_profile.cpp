@@ -3677,4 +3677,59 @@ TEST(ApplicationProfileTest,
     ASSERT_TRUE(delete_profile(fixture.environment, "moved"));
 }
 
+TEST(ApplicationProfileTest, CollectDiagnosticsInspectsEnvironmentAndProfilesReadOnly) {
+    const auto empty_ws =
+        kasumi::test::make_temp_workspace("app-diag-empty");
+    const ExecutionEnvironment empty_env{
+        kasumi::test::workspace_path(empty_ws, "app")};
+    const auto empty_diag = kasumi::application::collect_diagnostics(empty_env);
+    ASSERT_TRUE(empty_diag.has_value()) << empty_diag.error().detail;
+    EXPECT_FALSE(empty_diag->config_exists);
+    EXPECT_TRUE(empty_diag->profiles.empty());
+    EXPECT_TRUE(empty_diag->overall_ok);
+    EXPECT_FALSE(empty_diag->os_name.empty());
+
+    const auto ws = kasumi::test::make_temp_workspace("app-diag-profile");
+    const ExecutionEnvironment env{kasumi::test::workspace_path(ws, "app")};
+    const auto local_dir = kasumi::test::workspace_path(ws, "local");
+    const auto remote_dir = kasumi::test::workspace_path(ws, "remote");
+    std::filesystem::create_directories(local_dir);
+    std::filesystem::create_directories(remote_dir);
+    const Profile profile{
+        .name = "main",
+        .local_dir = local_dir,
+        .remote_dir = kasumi::platform::path::to_utf8(remote_dir),
+        .key_storage = KeyStorage::File,
+    };
+    ASSERT_TRUE(kasumi::application::create_profile(env, profile, key()));
+
+    const auto all = kasumi::application::collect_diagnostics(env);
+    ASSERT_TRUE(all.has_value()) << all.error().detail;
+    EXPECT_TRUE(all->config_exists);
+    ASSERT_EQ(all->profiles.size(), 1U);
+    EXPECT_TRUE(all->profiles.front().healthy) << all->profiles.front().detail;
+    EXPECT_TRUE(all->profiles.front().local_dir_exists);
+    EXPECT_TRUE(all->profiles.front().local_dir_writable);
+    EXPECT_TRUE(all->profiles.front().local_free_bytes.has_value());
+    EXPECT_FALSE(all->profiles.front().uses_rclone);
+    EXPECT_FALSE(all->profiles.front().lock_active);
+    EXPECT_FALSE(all->profiles.front().journal_present);
+    EXPECT_TRUE(all->profiles.front().key_accessible);
+    EXPECT_TRUE(all->overall_ok);
+
+    // Missing local directory marks profile unhealthy without mutating disk.
+    std::filesystem::remove_all(local_dir);
+    const auto broken = kasumi::application::collect_diagnostics(env, "main");
+    ASSERT_TRUE(broken.has_value()) << broken.error().detail;
+    ASSERT_EQ(broken->profiles.size(), 1U);
+    EXPECT_FALSE(broken->profiles.front().local_dir_exists);
+    EXPECT_FALSE(broken->profiles.front().healthy);
+    EXPECT_FALSE(broken->overall_ok);
+
+    const auto missing = kasumi::application::collect_diagnostics(env, "missing");
+    ASSERT_FALSE(missing.has_value());
+    EXPECT_EQ(missing.error().code,
+              kasumi::application::ProfileErrorCode::NotFound);
+}
+
 } // namespace

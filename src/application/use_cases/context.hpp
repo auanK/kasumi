@@ -30,6 +30,7 @@ struct OperationContext {
     std::optional<runtime::MachineIdentity> machine_identity;
     bool initial_sync = false;
     bool audit_inventory = false;
+    bool repair = false;
     bool dry_run = false;
     bool reclaim_dirty = false;
     bool has_remote_history_objects = false;
