@@ -90,7 +90,8 @@ ReachabilityResult inventory_impl(
     const std::filesystem::path& workspace_root,
     std::optional<std::span<const std::string>> identifiers = std::nullopt,
     std::optional<std::span<const epoch::VerifiedEpoch>> verified_epochs =
-        std::nullopt) {
+        std::nullopt,
+    ReachabilityProgressCallback on_progress = {}) {
     if (!transport::valid(storage)) {
         return std::unexpected(
             detail::error(ErrorCode::InvalidInput, "invalid transport"));
@@ -119,6 +120,24 @@ ReachabilityResult inventory_impl(
         return std::unexpected(prefetched.error());
     }
 
+    std::size_t total_commit_variants = 0;
+    for (const auto& [unused, references] : listed->commit_variants) {
+        static_cast<void>(unused);
+        total_commit_variants += references.size();
+    }
+    std::size_t processed_commit_variants = 0;
+    const auto notify_commit_progress = [&](std::size_t done) noexcept {
+        if (!on_progress) {
+            return;
+        }
+        try {
+            on_progress(done, total_commit_variants);
+        } catch (...) {
+            // Progress reporting cannot alter reachability analysis.
+        }
+    };
+    notify_commit_progress(0);
+
     CommitList commits;
     commits.reserve(listed->commit_variants.size() +
                     listed->marker_variants.size());
@@ -137,6 +156,8 @@ ReachabilityResult inventory_impl(
             if (!loaded) {
                 return std::unexpected(loaded.error());
             }
+            ++processed_commit_variants;
+            notify_commit_progress(processed_commit_variants);
             commit.variants.push_back(ReachabilityVariant{
                 .reference = reference,
                 .identifier = commit_object(layout, reference),
@@ -146,6 +167,40 @@ ReachabilityResult inventory_impl(
                 commit.valid = true;
                 commit.parents = loaded->commit->commit.parents;
                 commit.tree = loaded->commit->commit;
+            }
+        }
+    }
+
+    const auto epochs_dir = (*temporary)->workspace.root / "prefetched-epochs";
+    if (!verified_epochs && storage.storage.get_batch != nullptr) {
+        transport::GetBatch epoch_batch{
+            .source_prefix =
+                std::string{detail::trim_trailing_slash(layout.epochs_prefix)},
+            .destination_root = epochs_dir,
+        };
+        for (const auto& identifier : listed->identifiers) {
+            if (!identifier.starts_with(layout.heads_prefix) &&
+                !parse_commit_object(layout, identifier) &&
+                epoch::parse_object_identifier(layout, identifier) &&
+                identifier.starts_with(layout.epochs_prefix)) {
+                epoch_batch.identifiers.push_back(
+                    identifier.substr(layout.epochs_prefix.size()));
+            }
+        }
+        if (epoch_batch.identifiers.size() >= 2) {
+            std::error_code dir_ec;
+            std::filesystem::create_directories(epochs_dir, dir_ec);
+            if (dir_ec) {
+                return std::unexpected(detail::error(
+                    ErrorCode::WorkspaceFailure,
+                    "failed to prepare epoch prefetch workspace: " +
+                        dir_ec.message()));
+            }
+            auto prefetched = transport::get_batch(storage, epoch_batch);
+            if (!prefetched &&
+                prefetched.error().code != transport::ErrorCode::Unsupported &&
+                prefetched.error().code != transport::ErrorCode::ObjectNotFound) {
+                return std::unexpected(detail::transport_error(prefetched.error()));
             }
         }
     }
@@ -192,14 +247,31 @@ ReachabilityResult inventory_impl(
                 }
                 continue;
             }
-            const auto path = (*temporary)->workspace.root /
-                              ("epoch-" + std::to_string(sequence++));
-            auto downloaded = detail::download(storage, identifier, path);
-            if (!downloaded) {
-                return std::unexpected(downloaded.error());
+            std::filesystem::path path;
+            std::error_code fs_err;
+            const auto prefetched_epoch =
+                identifier.starts_with(layout.epochs_prefix)
+                    ? epochs_dir / identifier.substr(layout.epochs_prefix.size())
+                    : std::filesystem::path{};
+            const bool has_prefetched =
+                !prefetched_epoch.empty() &&
+                std::filesystem::is_regular_file(prefetched_epoch, fs_err) &&
+                !std::filesystem::is_symlink(prefetched_epoch, fs_err);
+            if (has_prefetched) {
+                path = prefetched_epoch;
+            } else {
+                path = (*temporary)->workspace.root /
+                       ("epoch-" + std::to_string(sequence++));
+                auto downloaded = detail::download(storage, identifier, path);
+                if (!downloaded) {
+                    return std::unexpected(downloaded.error());
+                }
             }
             auto bytes =
                 detail::read_file(path, epoch::maximum_encoded_size + 64U);
+            if (has_prefetched) {
+                detail::remove_file(path);
+            }
             if (bytes) {
                 auto opened = epoch::open(*bytes, *epoch_reference, key);
                 if (opened) {
@@ -242,15 +314,81 @@ ReachabilityResult inventory_impl(
             ErrorCode::LimitExceeded, "history contains too many commits"));
     }
 
+    const auto markers_dir = (*temporary)->workspace.root / "prefetched-markers";
+    if (storage.storage.get_batch != nullptr) {
+        transport::GetBatch marker_batch{
+            .source_prefix =
+                std::string{detail::trim_trailing_slash(layout.heads_prefix)},
+            .destination_root = markers_dir,
+        };
+        for (const auto& marker : result.markers) {
+            if (!marker.reference.has_value()) {
+                continue;
+            }
+            const auto marker_id = marker_object(layout, *marker.reference);
+            if (marker_id.starts_with(layout.heads_prefix)) {
+                marker_batch.identifiers.push_back(
+                    marker_id.substr(layout.heads_prefix.size()));
+            }
+        }
+        detail::sort_unique(marker_batch.identifiers);
+        if (marker_batch.identifiers.size() >= 2) {
+            std::error_code dir_ec;
+            std::filesystem::create_directories(markers_dir, dir_ec);
+            if (dir_ec) {
+                return std::unexpected(detail::error(
+                    ErrorCode::WorkspaceFailure,
+                    "failed to prepare marker prefetch workspace: " +
+                        dir_ec.message()));
+            }
+            auto prefetched = transport::get_batch(storage, marker_batch);
+            if (!prefetched &&
+                prefetched.error().code != transport::ErrorCode::Unsupported &&
+                prefetched.error().code != transport::ErrorCode::ObjectNotFound) {
+                return std::unexpected(detail::transport_error(prefetched.error()));
+            }
+        }
+    }
+
     for (auto& marker : result.markers) {
         if (!marker.reference.has_value()) {
             continue;
         }
-        auto inspected = detail::inspect_marker(storage,
-                                                layout,
-                                                *marker.reference,
-                                                (*temporary)->workspace.root,
-                                                sequence);
+        std::expected<detail::MarkerState, Error> inspected;
+        const auto marker_id = marker_object(layout, *marker.reference);
+        const auto prefetched_marker =
+            marker_id.starts_with(layout.heads_prefix)
+                ? markers_dir / marker_id.substr(layout.heads_prefix.size())
+                : std::filesystem::path{};
+        std::error_code fs_err;
+        const bool has_prefetched_marker =
+            !prefetched_marker.empty() &&
+            std::filesystem::is_regular_file(prefetched_marker, fs_err) &&
+            !std::filesystem::is_symlink(prefetched_marker, fs_err);
+        if (has_prefetched_marker) {
+            auto bytes = detail::read_file(prefetched_marker, detail::marker_size);
+            detail::remove_file(prefetched_marker);
+            if (!bytes) {
+                if (bytes.error().code == ErrorCode::LimitExceeded) {
+                    inspected = detail::MarkerState::Invalid;
+                } else {
+                    inspected = std::unexpected(bytes.error());
+                }
+            } else if (bytes->size() != detail::marker_size) {
+                inspected = detail::MarkerState::Invalid;
+            } else {
+                const auto decoded = decode_marker(*bytes);
+                inspected = (decoded && *decoded == *marker.reference)
+                                ? detail::MarkerState::Valid
+                                : detail::MarkerState::Invalid;
+            }
+        } else {
+            inspected = detail::inspect_marker(storage,
+                                               layout,
+                                               *marker.reference,
+                                               (*temporary)->workspace.root,
+                                               sequence);
+        }
         if (!inspected) {
             return std::unexpected(inspected.error());
         }
@@ -344,10 +482,15 @@ ReachabilityResult inventory_impl(
 ReachabilityResult
 inventory_reachability(transport::Transport& storage,
                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                       const std::filesystem::path& workspace_root) {
+                       const std::filesystem::path& workspace_root,
+                       ReachabilityProgressCallback on_progress) {
     return detail::guard_alloc([&] {
-        return inventory_impl(
-            storage, key, workspace_root, std::nullopt, std::nullopt);
+        return inventory_impl(storage,
+                              key,
+                              workspace_root,
+                              std::nullopt,
+                              std::nullopt,
+                              std::move(on_progress));
     });
 }
 
@@ -355,10 +498,15 @@ ReachabilityResult
 inventory_reachability(transport::Transport& storage,
                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                        std::span<const std::string> identifiers,
-                       const std::filesystem::path& workspace_root) {
+                       const std::filesystem::path& workspace_root,
+                       ReachabilityProgressCallback on_progress) {
     return detail::guard_alloc([&] {
-        return inventory_impl(
-            storage, key, workspace_root, identifiers, std::nullopt);
+        return inventory_impl(storage,
+                              key,
+                              workspace_root,
+                              identifiers,
+                              std::nullopt,
+                              std::move(on_progress));
     });
 }
 
@@ -367,10 +515,15 @@ inventory_reachability(transport::Transport& storage,
                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                        std::span<const std::string> identifiers,
                        std::span<const epoch::VerifiedEpoch> verified_epochs,
-                       const std::filesystem::path& workspace_root) {
+                       const std::filesystem::path& workspace_root,
+                       ReachabilityProgressCallback on_progress) {
     return detail::guard_alloc([&] {
-        return inventory_impl(
-            storage, key, workspace_root, identifiers, verified_epochs);
+        return inventory_impl(storage,
+                              key,
+                              workspace_root,
+                              identifiers,
+                              verified_epochs,
+                              std::move(on_progress));
     });
 }
 
