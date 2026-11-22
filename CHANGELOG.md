@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.19.2]
+
+### Added
+
+- Add root `SECURITY.md` defining Kasumi's pre-1.0 support policy and private vulnerability reporting via GitHub Security Advisories.
+
+### Fixed
+
+- Guard `set_profile_key`, `kasumi key <profile>`, and `kasumi config` `[k] Key` against silently overwriting a different persisted master key (`ProfileErrorCode::AlreadyExists` unless explicitly confirmed/allowed; constant-time `crypto_verify32` comparison keeps identical key re-entry idempotent and still permits recovery of missing or corrupt local keys).
+
+### Documentation
+
+- Clarify that `kasumi key` performs local key entry/replacement rather than vault re-encryption, remove stale `--non-interactive` and managed package-manager claims, document `windows-2022` (`/MT`) and `ubuntu-latest` (GCC 14 / dynamic `glibc`) release baselines, and add `gh attestation verify` verification steps.
+
 ## [0.19.1]
 
 ### Removed
