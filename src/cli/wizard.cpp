@@ -3,6 +3,7 @@
 #include "application/profile.hpp"
 #include "cli/credentials.hpp"
 #include "cli/i18n.hpp"
+#include "cli/json_presenter.hpp"
 #include "cli/presenter.hpp"
 #include "platform/cancellation.hpp"
 #include "platform/clock.hpp"
@@ -592,16 +593,30 @@ int apply_profile_key_update(
 
 } // namespace
 
+bool prompt_confirmation(std::string_view message) {
+    return confirm_change(message);
+}
+
 int run_profile_query(const application::ExecutionEnvironment& environment,
                       std::string_view profile_name,
-                      bool full) {
-    const auto fail_query = [](std::string_view message) {
+                      bool full,
+                      bool json) {
+    const auto fail_query = [&](std::string_view message) {
         std::println(stderr, "{} {}", i18n::tr(i18n::Key::LabelError), message);
         return 1;
     };
     auto profiles = application::list_profiles(environment);
     if (!profiles) {
+        if (json) {
+            return present_json_profile_error(
+                profile_name.empty() ? "list" : "show",
+                profile_name,
+                profiles.error());
+        }
         return fail_query(profiles.error().detail);
+    }
+    if (json && profile_name.empty()) {
+        return present_json_list(*profiles);
     }
     for (const auto& profile : *profiles) {
         if (profile_name.empty()) {
@@ -610,6 +625,12 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
             application::ProfileLocalProblem problem;
             const auto state = application::inspect_profile_local_state(
                 environment, profile.name, &problem);
+            if (json) {
+                const auto activity = application::inspect_profile_activity(
+                    environment, profile.name);
+                return present_json_show(
+                    profile, state, problem, activity, full);
+            }
             i18n::println(i18n::Key::WizardProfileDetails,
                           profile.name,
                           platform::path::to_utf8(profile.local_dir),
@@ -649,6 +670,14 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
         }
     }
     if (!profile_name.empty()) {
+        if (json) {
+            return present_json_profile_error(
+                "show",
+                profile_name,
+                application::ProfileError{
+                    .code = application::ProfileErrorCode::NotFound,
+                    .detail = "profile not found"});
+        }
         return fail_query(i18n::tr(i18n::Key::WizardProfileNotFound));
     }
     return 0;

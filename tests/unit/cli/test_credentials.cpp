@@ -156,8 +156,10 @@ TEST(CliAppTest, PrintsMinimalHelpWithoutRuntimeAccess) {
               std::string::npos);
     EXPECT_NE(output.find("does not run GC"), std::string::npos);
     EXPECT_NE(output.find("health diagnostic"), std::string::npos);
-    EXPECT_NE(output.find("Analyze garbage collection candidates"),
+    EXPECT_NE(output.find("Analyze or run garbage collection on safe objects."),
               std::string::npos);
+    EXPECT_NE(output.find("--quiet"), std::string::npos);
+    EXPECT_NE(output.find("--json"), std::string::npos);
 }
 
 TEST(CliAppTest, PrintsHelpInPortugueseWhenFlagProvided) {
@@ -165,8 +167,11 @@ TEST(CliAppTest, PrintsHelpInPortugueseWhenFlagProvided) {
     EXPECT_NE(output.find("kasumi sync <perfil>"), std::string::npos);
     EXPECT_NE(output.find("não executa GC"), std::string::npos);
     EXPECT_NE(output.find("diagnóstico remoto completo"), std::string::npos);
-    EXPECT_NE(output.find("Analisa candidatos à coleta de lixo"),
-              std::string::npos);
+    EXPECT_NE(
+        output.find("Analisa ou executa a coleta de lixo de objetos seguros."),
+        std::string::npos);
+    EXPECT_NE(output.find("--quiet"), std::string::npos);
+    EXPECT_NE(output.find("--json"), std::string::npos);
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
 }
 

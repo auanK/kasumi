@@ -127,8 +127,11 @@ void present(const application::GarbageCollectProgress& progress,
 void present(const application::FsckProgress& progress,
              FsckProgressDisplayState& state);
 
-// Displays success and returns 0.
-int present(const application::Response& response, bool full = false);
+// Displays success and returns 0. When quiet is true and exit code is 0,
+// suppresses non-error status stdout while preserving stderr warnings.
+int present(const application::Response& response,
+            bool full = false,
+            bool quiet = false);
 
 // Displays the result of a remote inspection and returns 0.
 int present(const application::InspectionResponse& response, bool full = false);

@@ -155,6 +155,10 @@ struct GarbageCollectFailure {
 struct GarbageCollectCompleted {
     std::size_t candidate_objects = 0;
     bool analysis_only = false;
+    bool dry_run = false;
+    std::size_t candidate_content_objects = 0;
+    std::size_t candidate_commit_variants = 0;
+    std::size_t candidate_activities = 0;
     std::size_t removed_objects = 0;
     std::chrono::nanoseconds removal_elapsed{};
 };
@@ -165,6 +169,7 @@ struct ResolveMissingCompleted {
     std::size_t resolved_count = 0;
     std::vector<std::string> resolved_paths;
     bool published = false;
+    bool dry_run = false;
 };
 
 struct ManualWriterRemovalCompleted {
@@ -289,6 +294,7 @@ struct Error {
     std::optional<BarrierRemovalFailure> barrier_removal;
     // Sync succeeded before a subsequent inventory audit failed.
     std::optional<SyncCompleted> sync_completed;
+    bool lock_busy = false;
 };
 
 } // namespace kasumi::application

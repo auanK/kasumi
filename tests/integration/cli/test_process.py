@@ -2,6 +2,7 @@
 
 import argparse
 import ctypes
+import json
 import os
 from pathlib import Path
 import re
@@ -768,6 +769,144 @@ class CliProcessTest(unittest.TestCase):
         listed = self.invoke("config", input=b"q\n")
         self.assertIn(b"Last sync", listed)
         self.assertRegex(listed, rb"\bdemo\s+Ready\s+.*\(ok\)")
+
+    def test_gc_dry_run_analyzes_without_mutating_or_publishing_activity(self):
+        local, remote = self.root / "local", self.root / "remote"
+        local.mkdir()
+        self.invoke("config", input=f"n\ndemo\n{local}\n{remote}\n\nq\n".encode())
+        (local / "item.txt").write_text("gc-dry-run-process", encoding="utf-8")
+        self.invoke("sync", "demo")
+
+        dry = self.invoke("gc", "demo", "--dry-run")
+        self.assertIn(b"Simulating garbage collection", dry)
+        self.assertIn(b"No garbage collection candidates found", dry)
+        self.assertIn(b"Garbage collection dry-run completed: no objects removed.", dry)
+
+        summary = self.invoke("remote", "summary", "demo")
+        self.assertIn(b"Recent operational activity: none", summary)
+
+    def test_quiet_suppresses_operational_stdout_while_keeping_errors(self):
+        local, remote = self.root / "local", self.root / "remote"
+        local.mkdir()
+        self.invoke("config", input=f"n\ndemo\n{local}\n{remote}\n\nq\n".encode())
+        (local / "item.txt").write_text("quiet-process", encoding="utf-8")
+
+        quiet_sync = self.invoke_raw("sync", "demo", "--quiet")
+        self.assertEqual(quiet_sync.returncode, 0, quiet_sync.stdout + quiet_sync.stderr)
+        self.assertEqual(quiet_sync.stdout, b"")
+        self.assertEqual(quiet_sync.stderr, b"")
+
+        quiet_status = self.invoke_raw("status", "demo", "--quiet")
+        self.assertEqual(quiet_status.returncode, 0)
+        self.assertEqual(quiet_status.stdout, b"")
+        self.assertEqual(quiet_status.stderr, b"")
+
+        quiet_summary = self.invoke_raw("remote", "summary", "demo", "--quiet")
+        self.assertEqual(quiet_summary.returncode, 0)
+        self.assertEqual(quiet_summary.stderr, b"")
+        self.assertIn(b"Remote summary", quiet_summary.stdout)
+        self.assertNotIn(b"Duration:", quiet_summary.stdout)
+
+        quiet_fail = self.invoke_raw("sync", "missing", "--quiet")
+        self.assertEqual(quiet_fail.returncode, 1)
+        self.assertIn(b"[ERROR]", quiet_fail.stdout)
+        self.assertNotIn(b"Duration:", quiet_fail.stdout)
+
+    def test_json_output_and_error_codes_in_real_processes(self):
+        local, remote = self.root / "local", self.root / "remote"
+        local.mkdir()
+        self.invoke("config", input=f"n\ndemo\n{local}\n{remote}\n\nq\n".encode())
+        (local / "keep.txt").write_text("json-keep", encoding="utf-8")
+
+        def run_json(*args, expected=0):
+            res = self.invoke_raw(*args)
+            self.assertEqual(res.returncode, expected, res.stdout + res.stderr)
+            self.assertEqual(res.stderr, b"")
+            return json.loads(res.stdout.decode("utf-8"))
+
+        listed = run_json("list", "--json")
+        self.assertEqual(listed["schema_version"], 1)
+        self.assertEqual(listed["command"], "list")
+        self.assertTrue(listed["ok"])
+        self.assertEqual(listed["data"]["profiles"], ["demo"])
+
+        status_doc = run_json("status", "demo", "--json", "--quiet")
+        self.assertEqual(status_doc["command"], "status")
+        self.assertEqual(status_doc["data"]["action_counts"]["upload"], 1)
+
+        sync_dry = run_json("sync", "demo", "--dry-run", "--json")
+        self.assertEqual(sync_dry["command"], "sync")
+        self.assertTrue(sync_dry["data"]["dry_run"])
+
+        sync_doc = run_json("--lang", "pt-BR", "sync", "demo", "--json")
+        self.assertEqual(sync_doc["command"], "sync")
+        self.assertEqual(sync_doc["data"]["uploaded"], 1)
+        self.assertTrue(sync_doc["data"]["published"])
+        self.assertIn("duration_ms", sync_doc)
+
+        fsck_doc = run_json("fsck", "demo", "--json")
+        self.assertEqual(fsck_doc["command"], "fsck")
+        self.assertGreaterEqual(fsck_doc["data"]["checked_objects"], 1)
+
+        gc_dry = run_json("gc", "demo", "--dry-run", "--json")
+        self.assertEqual(gc_dry["command"], "gc")
+        self.assertTrue(gc_dry["data"]["dry_run"])
+        self.assertEqual(gc_dry["data"]["removed_objects"], 0)
+
+        repack_dry = run_json("repack", "demo", "--dry-run", "--json")
+        self.assertEqual(repack_dry["command"], "repack")
+
+        show_doc = run_json("show", "demo", "--full", "--json")
+        self.assertEqual(show_doc["command"], "show")
+        self.assertEqual(show_doc["data"]["state"], "ready")
+        self.assertEqual(len(show_doc["data"]["accepted_commit"]["commit_id"]), 64)
+
+        summary_doc = run_json("remote", "summary", "demo", "--full", "--json")
+        self.assertEqual(summary_doc["command"], "remote summary")
+        self.assertTrue(summary_doc["data"]["history_present"])
+
+        missing_doc = run_json("--lang", "pt-BR", "show", "missing", "--json", expected=1)
+        self.assertFalse(missing_doc["ok"])
+        self.assertEqual(missing_doc["error"]["code"], "profile_not_found")
+
+        bad_doc = run_json("remote", "heads", "demo", "--json", expected=1)
+        self.assertEqual(bad_doc["error"]["code"], "invalid_arguments")
+
+        # Exercise partial sync (exit 2) + resolve-missing JSON guard via a second client.
+        local2 = self.root / "local2"
+        local2.mkdir()
+        (local / "lost.txt").write_text("json-lost-payload", encoding="utf-8")
+        self.invoke("sync", "demo")
+
+        contents_out = self.invoke("remote", "contents", "demo").decode("utf-8")
+        lost_cid = None
+        for block in contents_out.split("Content ID:")[1:]:
+            if "lost.txt" in block:
+                lost_cid = block.strip().splitlines()[0].strip()
+                break
+        self.assertIsNotNone(lost_cid, contents_out)
+        (remote / lost_cid).unlink()
+
+        self.invoke("config", input=f"n\nclient2\n{local2}\n{remote}\n\nq\n".encode())
+        partial_doc = run_json("sync", "client2", "--json", expected=2)
+        self.assertFalse(partial_doc["ok"])
+        self.assertEqual(partial_doc["exit_code"], 2)
+        self.assertEqual(partial_doc["error"]["code"], "partial_pending")
+        self.assertTrue(partial_doc["data"]["partial"])
+        self.assertEqual(partial_doc["data"]["pending_paths"], ["lost.txt"])
+
+        rm_dry = run_json("resolve-missing", "client2", "--dry-run", "--json")
+        self.assertTrue(rm_dry["data"]["dry_run"])
+        self.assertEqual(rm_dry["data"]["resolved_paths"], ["lost.txt"])
+
+        rm_guard = run_json("resolve-missing", "client2", "--json", expected=1)
+        self.assertEqual(rm_guard["error"]["code"], "confirmation_required")
+        self.assertEqual(rm_guard["data"]["resolved_paths"], ["lost.txt"])
+
+        rm_confirm = run_json("resolve-missing", "client2", "--confirm", "--json")
+        self.assertTrue(rm_confirm["ok"])
+        self.assertEqual(rm_confirm["data"]["resolved_count"], 1)
+        self.assertTrue(rm_confirm["data"]["published"])
 
 
 if __name__ == "__main__":

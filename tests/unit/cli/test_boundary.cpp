@@ -95,6 +95,7 @@ const std::vector<std::vector<std::string>> application_commands{
     {"status", "Programação-日本"},
     {"fsck", "Programação-日本"},
     {"gc", "Programação-日本"},
+    {"gc", "Programação-日本", "--dry-run"},
     {"gc",
      "remove-writer",
      "Programação-日本",
@@ -103,7 +104,9 @@ const std::vector<std::vector<std::string>> application_commands{
     {"repack", "Programação-日本"},
     {"repack", "Programação-日本", "--dry-run"},
     {"repack", "Programação-日本", "--reclaim-dirty"},
-    {"resolve-missing", "Programação-日本"}};
+    {"resolve-missing", "Programação-日本"},
+    {"resolve-missing", "Programação-日本", "--dry-run"},
+    {"resolve-missing", "Programação-日本", "--confirm"}};
 
 TEST(CliBoundaryTest,
      ApplicationOutcomesHaveOneRealElapsedDurationAndKeepExitCodes) {
@@ -229,7 +232,8 @@ std::expected<Response, Error> execute(ExecutionInput input) {
             result.data = FsckCompleted{};
             break;
         case Operation::GarbageCollect:
-            result.data = GarbageCollectCompleted{};
+            result.data =
+                GarbageCollectCompleted{.dry_run = input.request.dry_run};
             break;
         case Operation::RemoveWriter:
             result.data = ManualWriterRemovalCompleted{};
@@ -238,7 +242,8 @@ std::expected<Response, Error> execute(ExecutionInput input) {
             result.data = ManualBarrierRemovalCompleted{};
             break;
         case Operation::ResolveMissing:
-            result.data = ResolveMissingCompleted{};
+            result.data =
+                ResolveMissingCompleted{.dry_run = input.request.dry_run};
             break;
         case Operation::Repack:
             result.data = RepackCompleted{.dry_run = input.request.dry_run};

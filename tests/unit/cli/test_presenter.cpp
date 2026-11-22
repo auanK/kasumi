@@ -1693,6 +1693,40 @@ TEST(CliPresenterTest, PresentsGarbageCollectProgressAnalysisOnlyWarning) {
     EXPECT_EQ(output.find("[OK]"), std::string::npos);
 }
 
+TEST(CliPresenterTest, GcDryRunPresentsBreakdownAndNoDeletions) {
+    const ScopedLanguage lang{Language::English};
+    const auto with_candidates = present_out(
+        Response{.operation = Operation::GarbageCollect,
+                 .data = GarbageCollectCompleted{
+                     .candidate_objects = 5,
+                     .dry_run = true,
+                     .candidate_content_objects = 2,
+                     .candidate_commit_variants = 2,
+                     .candidate_activities = 1,
+                 }});
+    EXPECT_NE(
+        with_candidates.find(
+            "GC plan: 5 candidate(s) (2 content object(s), 2 commit "
+            "variant(s), 1 activity record(s))."),
+        std::string::npos);
+    EXPECT_NE(
+        with_candidates.find(
+            "Garbage collection dry-run completed: no objects removed."),
+        std::string::npos);
+
+    const auto empty = present_out(
+        Response{.operation = Operation::GarbageCollect,
+                 .data = GarbageCollectCompleted{
+                     .candidate_objects = 0,
+                     .dry_run = true,
+                 }});
+    EXPECT_NE(empty.find("[OK] No garbage collection candidates found."),
+              std::string::npos);
+    EXPECT_NE(
+        empty.find("Garbage collection dry-run completed: no objects removed."),
+        std::string::npos);
+}
+
 TEST(CliPresenterTest, PresentsFsckProgressInPortugueseIncludingZeroBytes) {
     const ScopedLanguage lang{Language::Portuguese};
     kasumi::cli::FsckProgressDisplayState state;
@@ -2160,7 +2194,22 @@ TEST(CliPresenterTest, ResolveMissingSuccessIsLocalized) {
                              .data = ResolveMissingCompleted{}});
     EXPECT_NE(empty.find("Nenhum caminho ausente pendente para resolver"),
               std::string::npos);
+
     kasumi::cli::i18n::set_language(Language::English);
+    const auto dry = present_out(
+        Response{.operation = Operation::ResolveMissing,
+                 .data = ResolveMissingCompleted{
+                     .resolved_count = 2,
+                     .resolved_paths = {"alpha.txt", "sub/\x1b[31mbeta.txt"},
+                     .published = false,
+                     .dry_run = true}});
+    EXPECT_NE(dry.find("Paths eligible for logical deletion (2):"),
+              std::string::npos);
+    EXPECT_NE(dry.find("  alpha.txt"), std::string::npos);
+    EXPECT_NE(dry.find("  sub/?[31mbeta.txt"), std::string::npos);
+    EXPECT_NE(
+        dry.find("Resolve-missing dry-run completed: no deletions published."),
+        std::string::npos);
 }
 
 TEST(CliPresenterTest, SanitizesTerminalControlAndEscapeSequences) {

@@ -37,6 +37,7 @@ struct Request {
     bool initial = false;
     bool audit_inventory = false;
     bool confirm_abandoned = false;
+    bool confirm = false;
     bool dry_run = false;
     bool reclaim_dirty = false;
 };

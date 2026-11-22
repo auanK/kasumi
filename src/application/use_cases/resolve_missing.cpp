@@ -4,6 +4,7 @@
 #include "application/progress.hpp"
 #include "application/sync/coordinator.hpp"
 #include "application/sync/coordinator_detail.hpp"
+#include "application/sync/journal.hpp"
 #include "application/sync/reobservation.hpp"
 #include "application/use_cases/context.hpp"
 #include "application/use_cases/plan_support.hpp"
@@ -22,13 +23,33 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
     ProgressMeter meter(context.on_progress, context.storage);
     meter.notify(SyncProgress{.stage = SyncStage::Observing});
     meter.phase(Activity::Scanning);
-    auto recovered = sync::coordinator::recover_if_needed(
-        context.runtime, context.storage, context.key);
-    if (!recovered) {
-        return std::unexpected(
-            make_error(context,
-                       ErrorCode::SynchronizationFailure,
-                       sync::coordinator::describe(recovered.error())));
+    if (context.dry_run) {
+        const auto journal_paths = sync::journal::make_paths(
+            context.runtime.database_path.parent_path());
+        if (!journal_paths) {
+            return fail_app(context,
+                            ErrorCode::SynchronizationFailure,
+                            "cannot inspect local transaction journal: " +
+                                journal_paths.error());
+        }
+        const auto journal_state =
+            sync::journal::inspect(*journal_paths, context.key);
+        if (journal_state != sync::journal::InspectionResult::Absent) {
+            return fail_app(
+                context,
+                ErrorCode::SynchronizationFailure,
+                "pending or invalid local transaction journal exists; complete "
+                "recovery with sync before resolve-missing --dry-run");
+        }
+    } else {
+        auto recovered = sync::coordinator::recover_if_needed(
+            context.runtime, context.storage, context.key);
+        if (!recovered) {
+            return std::unexpected(
+                make_error(context,
+                           ErrorCode::SynchronizationFailure,
+                           sync::coordinator::describe(recovered.error())));
+        }
     }
 
     auto state = state_storage::load_state(context.runtime.database_path);
@@ -44,6 +65,7 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
                                  .resolved_count = 0,
                                  .resolved_paths = {},
                                  .published = false,
+                                 .dry_run = context.dry_run,
                              });
     }
 
@@ -154,12 +176,13 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
                         "plan contains unrelated logical mutations");
     }
 
-    if (resolved_paths.empty()) {
+    if (context.dry_run || resolved_paths.empty()) {
         return make_response(context,
                              ResolveMissingCompleted{
-                                 .resolved_count = 0,
-                                 .resolved_paths = {},
+                                 .resolved_count = resolved_paths.size(),
+                                 .resolved_paths = std::move(resolved_paths),
                                  .published = false,
+                                 .dry_run = context.dry_run,
                              });
     }
 

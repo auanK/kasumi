@@ -86,8 +86,8 @@ Use `kasumi <command> --help` for the complete arguments, options and examples.
 | Synchronize | `kasumi sync <profile>` |
 | Audit referenced payloads | `kasumi fsck <profile>` |
 | Consolidate fragmented Micro-Packs | `kasumi repack <profile> [--dry-run] [--reclaim-dirty] [--full]` |
-| Reclaim eligible remote storage | `kasumi gc <profile>` |
-| Resolve permanently missing content as logical deletion | `kasumi resolve-missing <profile>` |
+| Reclaim eligible remote storage | `kasumi gc <profile> [--dry-run]` |
+| Resolve permanently missing content as logical deletion | `kasumi resolve-missing <profile> [--dry-run \| --confirm]` |
 
 `--full` applies to `sync`, `status`, `repack`, `show`, and `remote summary`, after the profile. In `sync` and `status` it displays every plan and pending-path item (otherwise lists longer than ten items show the first and last five) and keeps detailed progress lines for each activity; in `repack` it displays the full pack inventory summary and published Commit/height details; in `show` it displays full Commit/machine IDs plus recorded local execution and cached remote maintenance histories (noting offline cache limits for other machines); in `remote summary` it expands full machine IDs and the complete operational activity timeline. Preview and Status do not execute the plan, recover transactions, or persist file-hash cache changes. See
 [Preview and Status](architecture/planning-and-status.md).
@@ -102,10 +102,13 @@ payload bytes and its failure does not undo Sync's effects or publication.
 See [Inventory Audit](architecture/synchronization.md#optional-remote-inventory-audit).
 
 **GC permanently deletes eligible objects.** Stop Sync on every client and
-serialize maintenance across the vault. Manual `gc remove-writer` requires an
-exact marker whose process is verified inactive. `gc remove-barrier` requires
-`--confirm-abandoned` after verifying no Sync or maintenance is active; barrier
-age alone is insufficient. See the [GC operational contract](architecture/garbage-collection.md#operational-contract).
+serialize maintenance across the vault. Use `kasumi gc <profile> --dry-run` to
+preview candidate counts (content objects, redundant commit variants, and expired
+activity records) read-only without establishing a barrier, deleting remote
+objects, or publishing a `KACT` activity record. Manual `gc remove-writer`
+requires an exact marker whose process is verified inactive. `gc remove-barrier`
+requires `--confirm-abandoned` after verifying no Sync or maintenance is active;
+barrier age alone is insufficient. See the [GC operational contract](architecture/garbage-collection.md#operational-contract).
 
 `kasumi repack <profile>` consolidates loose small files and fragmented
 `KPAK\x01` Micro-Packs from live local files **without downloading payloads or
@@ -135,7 +138,7 @@ compatibility and backup precautions before replacing binaries.
 
 When `kasumi sync <profile>` has unresolved missing payloads required by its current work, it records pending materializations and exits with status `2`. Treat this as **partial**, not full, synchronization. If a required Content object is absent, Sync can upload it when a compatible local source matches the expected hash and size; otherwise it preserves logical state and pending evidence. A no-op does not check for or repair unrelated missing objects, even if another local copy exists. Restore intact bytes from a client or independent backup so they are available when a later Sync operation needs them. Use `sync --audit-inventory` to identify broader structural absences and Fsck for payload integrity checks. Do not automatically convert status `2` into a deletion. Transport failures and LIST/PRESENCE disagreements fail the run rather than being classified as missing.
 
-`kasumi resolve-missing <profile>` is an explicit, potentially destructive resolution path: it first recovers any pending synchronization transaction, then validates the accepted state and current observations and may publish logical deletions for eligible unresolved paths that have no local source. It is not a download/repair command. Use it only when losing those files is an informed decision.
+`kasumi resolve-missing <profile>` is an explicit, potentially destructive resolution path: by default it previews eligible unresolved paths with no local source and asks for interactive confirmation (`[y/N]` / `[s/N]`) before publishing logical deletions (returning exit `1` if declined or `130` on EOF/signal). Use `resolve-missing <profile> --dry-run` to inspect eligible paths read-only without mutating state, or `--confirm` for non-interactive automation after verifying pending paths. It is not a download/repair command; use it only when losing those files is an informed decision.
 
 ### Interruption and Recovery
 
@@ -146,7 +149,7 @@ and backups; these workspace files are not uniformly encrypted. Preserve both
 directories when recovery fails. See the [journal format](architecture/transaction-journal.md).
 
 If synchronization is interrupted:
-* Sync, Fsck, `resolve-missing`, `repack` (non-`--dry-run`), and GC inspect the existing local transaction journal before their own work; both GC and `repack` refuse an interrupted upload (`ResumableTransaction`) so Sync finishes it first. Preview, Status, `repack --dry-run`, remote inspection, and manual writer/barrier maintenance do not execute journal recovery (`repack --dry-run` inspects the journal read-only and refuses pending transactions).
+* Sync, Fsck, `resolve-missing` (non-`--dry-run`), `repack` (non-`--dry-run`), and GC (non-`--dry-run`) inspect the existing local transaction journal before their own work; both GC and `repack` refuse an interrupted upload (`ResumableTransaction`) so Sync finishes it first. Preview, Status, `--dry-run` modes (`repack --dry-run`, `gc --dry-run`, `resolve-missing --dry-run`), remote inspection, and manual writer/barrier maintenance do not execute journal recovery (and maintenance `--dry-run` modes inspect the journal read-only and refuse pending/invalid journals).
 * Depending on the persisted phase and observed state, recovery may resume, rollback, or roll forward the transaction.
 * Conflicting or indeterminate publication states are reported as recovery errors rather than assumed successful.
 * Already present content objects may be reused when their identifiers and verification checks match the required content.
@@ -253,6 +256,18 @@ To switch to **Portuguese**:
 Treat code `2` as incomplete synchronization. Preserve pending paths, restore unavailable
 content, and retry; do not turn it automatically into deletions. See
 [Pending Materializations](troubleshooting.md#exit-code-2--pending-materializations).
+
+### Quiet Mode (`--quiet`)
+
+Pass `--quiet` after the profile (or after `kasumi list` / `kasumi remote <subcommand> <profile>`) to suppress banners, live progress, `Duration:` lines, and non-error operational stdout on `sync`, `status`, `fsck`, `gc`, `repack`, and `resolve-missing`. Query commands (`list`, `show`, `remote ...`) retain their query output without progress or duration lines, and errors, partial-pending lists (exit `2`), and `stderr` warnings remain visible.
+
+### Machine-Readable Output (`--json`)
+
+Pass `--json` on supported commands (`list`, `show`, `status`, `sync`, `fsck`, `gc <profile>`, `repack`, `resolve-missing`, and `remote summary`) to emit a single language-independent JSON object (`"schema_version": 1`) to `stdout` with empty `stderr`, suppressing banners, progress output, and localized text differences regardless of `--lang`:
+
+- Every response includes `schema_version`, `command`, `ok`, and `exit_code` (plus `profile`, `duration_ms`, `data`, `warning`, or `error` as applicable).
+- `resolve-missing <profile> --json` without `--confirm` or `--dry-run` runs read-only and fails safely with `error.code = "confirmation_required"` and `data.resolved_paths` whenever unresolved paths exist (never blocking on `stdin`).
+- Stable `error.code` values: `invalid_arguments`, `profile_not_found`, `lock_busy`, `credentials_required`, `auth_failed`, `confirmation_required`, `cancelled`, `partial_pending`, `audit_findings`, `transport_error`, `plan_failed`, `sync_failed`, `recovery_failed`, `fsck_failed`, `gc_failed`, `repack_failed`, `writer_removal_failed`, `barrier_removal_failed`, `inventory_audit_failed`, `remote_observation_failed`, `config_error`, and `runtime_error`.
 
 ## `.kasumiignore`
 

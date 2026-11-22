@@ -2051,7 +2051,37 @@ int present_remote_dispatch(const Report& report, bool) {
     return present_remote_report(report);
 }
 
-int present(const application::Response& response, bool full) {
+int response_exit_code(const application::Response& response) noexcept {
+    if (const auto* sync =
+            std::get_if<application::SyncCompleted>(&response.data)) {
+        int code = sync->partial ? 2 : 0;
+        if (response.inventory_audit &&
+            (response.inventory_audit->missing_content != 0 ||
+             response.inventory_audit->orphan_content != 0 ||
+             response.inventory_audit->unknown_objects != 0)) {
+            code = 2;
+        }
+        return code;
+    }
+    if (const auto* plan = std::get_if<application::PlanReport>(&response.data)) {
+        return plan->pending_paths.empty() ? 0 : 2;
+    }
+    return 0;
+}
+
+int present(const application::Response& response, bool full, bool quiet) {
+    if (quiet && response_exit_code(response) == 0) {
+        if (response.activity_publish_warning &&
+            !response.activity_publish_warning->empty()) {
+            std::println(stderr,
+                         "{} {}",
+                         i18n::tr(i18n::Key::LabelWarning),
+                         i18n::format(i18n::Key::LabelActivityPublishWarning,
+                                      sanitize_terminal_text(
+                                          *response.activity_publish_warning)));
+        }
+        return 0;
+    }
     const auto op = response.operation;
     const int result_code = std::visit(
         [&](const auto& data) -> int {
@@ -2161,6 +2191,19 @@ int present(const application::Response& response, bool full) {
                 if (op != Op::GarbageCollect) {
                     return 1;
                 }
+                if (data.dry_run) {
+                    if (data.candidate_objects == 0) {
+                        print_ok_line(i18n::tr(i18n::Key::GcCandidatesNone));
+                    } else {
+                        i18n::println(i18n::Key::GcDryRunSummary,
+                                      data.candidate_objects,
+                                      data.candidate_content_objects,
+                                      data.candidate_commit_variants,
+                                      data.candidate_activities);
+                    }
+                    i18n::println(i18n::Key::GcDryRunCompleted);
+                    return 0;
+                }
                 if (data.analysis_only) {
                     const auto header =
                         format_plural(data.candidate_objects,
@@ -2200,6 +2243,19 @@ int present(const application::Response& response, bool full) {
                                      application::ResolveMissingCompleted>) {
                 if (op != Op::ResolveMissing) {
                     return 1;
+                }
+                if (data.dry_run) {
+                    if (data.resolved_count > 0) {
+                        i18n::println(i18n::Key::ResolveMissingDryRunHeader,
+                                      data.resolved_count);
+                        for (const auto& path : data.resolved_paths) {
+                            std::println("  {}", sanitize_terminal_text(path));
+                        }
+                        i18n::println(i18n::Key::ResolveMissingDryRunCompleted);
+                    } else {
+                        i18n::println(i18n::Key::ResolveMissingNone);
+                    }
+                    return 0;
                 }
                 if (data.resolved_count > 0) {
                     print_ok_line(

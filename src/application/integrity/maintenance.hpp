@@ -61,6 +61,10 @@ struct GarbageCollectResult {
     // physical audit; no presence read-back is performed after deletion.
     std::size_t removed_objects = 0;
     bool analysis_only = false;
+    bool dry_run = false;
+    std::size_t candidate_content_objects = 0;
+    std::size_t candidate_commit_variants = 0;
+    std::size_t candidate_activities = 0;
     std::chrono::nanoseconds removal_elapsed{};
     std::size_t pruned_activities = 0;
     std::vector<history_storage::activity::LoadedActivity> kept_activities;
@@ -79,6 +83,14 @@ std::expected<GarbageCollectResult, Error>
 garbage_collect(const runtime::RuntimeData& runtime_data,
                 transport::Transport& storage,
                 std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                GarbageCollectProgressCallback on_progress = {});
+
+// Dry-run overload when dry_run is true; otherwise identical to garbage_collect.
+std::expected<GarbageCollectResult, Error>
+garbage_collect(const runtime::RuntimeData& runtime_data,
+                transport::Transport& storage,
+                std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                bool dry_run,
                 GarbageCollectProgressCallback on_progress = {});
 
 // Compatibility overload retaining the historical maintenance call shape.

@@ -217,6 +217,7 @@ enum class Key {
 
     // Garbage Collection
     GcStarting,
+    GcDryRunStarting,
     GcStagePreparing,
     GcStageAnalyzing,
     GcCandidatesNone,
@@ -226,6 +227,8 @@ enum class Key {
     GcStageFinalizing,
     GcCompleted,
     GcSummary,
+    GcDryRunSummary,
+    GcDryRunCompleted,
     GcListedObjects,
     GcConfirmedRemovals,
     ManualWriterRemovalWarning,
@@ -265,6 +268,12 @@ enum class Key {
     RepackRetentionHint,
 
     // Operations / Errors
+    ResolveMissingDryRunStarting,
+    ResolveMissingDryRunHeader,
+    ResolveMissingDryRunCompleted,
+    ResolveMissingConfirmHeader,
+    ResolveMissingConfirmPrompt,
+    ResolveMissingCancelled,
     ErrorPlanCalculation,
     ErrorFsckFailed,
     ErrorFsckClean,

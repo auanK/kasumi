@@ -667,6 +667,7 @@ add_library(kasumi_cli STATIC
     src/cli/app.cpp
     src/cli/credentials.cpp
     src/cli/i18n.cpp
+    src/cli/json_presenter.cpp
     src/cli/parser.cpp
     src/cli/presenter.cpp
     src/cli/wizard.cpp
@@ -689,6 +690,7 @@ target_link_libraries(
     PRIVATE
     kasumi_crypto
     kasumi_platform
+    nlohmann_json::nlohmann_json
     kasumi_warnings
     kasumi_release_optimizations
     kasumi_hardening
