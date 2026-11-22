@@ -127,7 +127,7 @@ The synchronization was a non-fatal **partial synchronization**. Remote commit m
 ### Safe Next Steps
 1. **Treat Exit Code 2 as Non-Fatal**: In automated scripts or pipelines, exit code `2` indicates that metadata was updated, but content remains unresolved until a verified payload becomes available.
 2. **Identify Pending Files**: Run `kasumi status <profile>` or `kasumi status <profile> --full` to inspect the list of pending paths.
-3. **Trigger Payload Upload from Source Client**: If another machine created or modified the pending files, run `kasumi sync <profile>` there. The repair check runs even when that machine's local tree is otherwise unchanged and no upload was otherwise planned.
+3. **Trigger Payload Repair from Source Client**: If another machine holds intact local files matching the pending paths, run `kasumi sync <profile> --repair` there (or normal `kasumi sync <profile>` when the object is already required by work on that machine). `--repair` scans the remote physical inventory in a single listing and re-uploads missing payloads after authenticating local file contents against the expected hash and size.
 4. **Subsequent Synchronization**: Once the missing content objects are present on remote storage, the next `kasumi sync <profile>` will download and materialize the pending files automatically. If a client holds intact bytes for the expected Content ID, its normal Sync can repair the physical object without publishing a new logical version.
 
 ### Related Documentation
@@ -151,7 +151,7 @@ A content payload referenced by the history DAG is absent from remote storage or
 2. Run `kasumi remote contents <profile> --audit` to inspect physical content states across the entire vault.
 3. **Repair from Intact Client**: If an intact version of the affected file exists locally on any client machine:
    * Verify the file content on that machine.
-   * Run `kasumi sync <profile>` from that machine. Even if no local file changed, the required-content probe detects the absent remote object, reuses the existing local source only after hash/size authentication, and restores the physical object without changing logical history.
+   * Run `kasumi sync <profile> --repair` from that machine. `--repair` lists the remote physical inventory once, detects missing objects referenced by the effective tree even when no local files changed, authenticates local sources against the expected hash and size, and restores the missing physical objects without changing logical history or downloading remote payloads.
 4. If the payload is permanently lost from remote storage and no client has a copy, restore the file from an external backup into the synchronized folder on one client and run `kasumi sync <profile>`.
 5. If Sync reports a transport failure or a LIST/PRESENCE disagreement instead of repairing, treat the content as unverified rather than logically deleted. Rerun after the backend is consistent and inspect with `kasumi remote contents <profile> --audit`. Do not delete protocol objects manually or run `resolve-missing` merely to silence the error.
 
@@ -285,16 +285,17 @@ Kasumi cannot establish a connection to the configured shared storage backend. T
 * The remote path syntax in `config.toml` is invalid.
 
 ### Safe Next Steps
-1. **Verify Rclone Installation**: Ensure `rclone` is installed and reachable in your terminal:
+1. **Run Read-Only Local Diagnostics First**: Run `kasumi diagnostics <profile>` (or `kasumi diagnostics` across all profiles) to verify `rclone` binary discovery, version compatibility (`>= v1.60.0`), disk space, lock status, and key accessibility without modifying files.
+2. **Verify Rclone Installation**: Ensure `rclone` (`v1.60.0` or newer) is installed and reachable in your terminal:
    ```bash
    rclone version
    ```
-2. **Verify Backend Connectivity Directly**: Test the configured remote using rclone:
+3. **Verify Backend Connectivity Directly**: Test the configured remote using rclone:
    ```bash
    rclone lsd drive:
    ```
    If this prompts for re-authentication, follow rclone's instructions to refresh credentials.
-3. **Verify Profile Configuration**: Check `config.toml` in Kasumi's data directory. For rclone remotes:
+4. **Verify Profile Configuration**: Check `config.toml` in Kasumi's data directory. For rclone remotes:
    * The destination must follow the format `remote:relative/path` (e.g., `drive:kasumi/vault`).
    * Do not include leading slashes after `:` (e.g., `drive:/kasumi` is invalid).
    * For local filesystem paths, paths must be absolute.

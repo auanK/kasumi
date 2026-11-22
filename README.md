@@ -28,8 +28,8 @@ Interactive runs show live progress on one terminal line. Sync reports physical 
 - **Offline and shared operational traceability** recording local execution outcomes and accepted commit provenance in `db.sqlite`, plus immutable `KACT` v1 maintenance records (`fsck`, `gc`, writer/barrier removal) inspectable via `show [--full]`, `config`, `remote heads`/`commits`, and `remote summary [--full]` with zero extra remote requests during `sync`.
 - **Interrupted-operation recovery** through an authenticated transaction journal.
 - **Persistent BLAKE3 hash cache** shared by sync and read-only plan observation.
-- **Integrity and maintenance tools** to audit referenced content, packs, and chunks (`fsck`), consolidate fragmented Micro-Packs locally without remote downloads or deletions (`repack`), preview or remove authenticated orphan physical objects and redundant CommitVariants (`gc [--dry-run]`), and guard missing-content resolution with preview/confirmation (`resolve-missing [--dry-run | --confirm]`).
-- **Automation-friendly CLI** supporting `--json` (`schema_version: 1` with language-independent `error.code`) and `--quiet` alongside `--full`.
+- **Integrity, diagnostics, and maintenance tools** to inspect local environment, disk space, `rclone >= v1.60.0` availability, and profile health (`diagnostics [<profile>]`), run fast single-listing missing-object repair from verified local files (`sync --repair`), audit referenced content, packs, and chunks (`fsck`), consolidate fragmented Micro-Packs locally without remote downloads or deletions (`repack`), preview or remove authenticated orphan physical objects and redundant CommitVariants (`gc [--dry-run]`), and guard missing-content resolution with preview/confirmation (`resolve-missing [--dry-run | --confirm]`).
+- **Automation-friendly CLI** supporting `--json` (`schema_version: 1` with language-independent `error.code`, including preflight `insufficient_disk_space` and `io_error`), `--quiet`, and `--log-file <path>` (clean ANSI-free UTF-8 logs or NDJSON with `--json`) alongside `--full`.
 
 ## Quick Start
 
