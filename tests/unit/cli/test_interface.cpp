@@ -291,6 +291,59 @@ TEST_F(CliInterfaceTest,
     EXPECT_NE(config.out.find("Ready"), std::string::npos);
     EXPECT_NE(config.out.find("(ok)"), std::string::npos);
 }
+
+TEST_F(CliInterfaceTest, QuietSuppressesProgressAndSuccessOutputButPreservesErrors) {
+    const auto root = kasumi::test::workspace_root(workspace);
+    const kasumi::application::ExecutionEnvironment environment{root / "kasumi"};
+    const kasumi::application::Profile profile{
+        "demo", root / "local", (root / "remote").string()};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment,
+        profile,
+        kasumi::application::MasterKeyHex{std::string(64, '7')}));
+    std::filesystem::create_directories(profile.local_dir);
+    kasumi::test::write_text(profile.local_dir / "doc.txt", "quiet payload");
+
+    const auto synced = run({"kasumi", "sync", "demo", "--quiet"});
+    EXPECT_EQ(synced.code, 0) << synced.err << synced.out;
+    EXPECT_TRUE(synced.out.empty()) << synced.out;
+    EXPECT_TRUE(synced.err.empty()) << synced.err;
+
+    const auto status_ok = run({"kasumi", "status", "demo", "--quiet"});
+    EXPECT_EQ(status_ok.code, 0) << status_ok.err << status_ok.out;
+    EXPECT_TRUE(status_ok.out.empty());
+    EXPECT_TRUE(status_ok.err.empty());
+
+    const auto gc_dry = run({"kasumi", "gc", "demo", "--dry-run", "--quiet"});
+    EXPECT_EQ(gc_dry.code, 0) << gc_dry.err << gc_dry.out;
+    EXPECT_TRUE(gc_dry.out.empty());
+    EXPECT_TRUE(gc_dry.err.empty());
+
+    const auto summary =
+        run({"kasumi", "remote", "summary", "demo", "--quiet"});
+    EXPECT_EQ(summary.code, 0) << summary.err;
+    EXPECT_TRUE(summary.err.empty());
+    EXPECT_NE(summary.out.find("Remote summary"), std::string::npos);
+    EXPECT_EQ(summary.out.find("Listing remote storage"), std::string::npos);
+    EXPECT_EQ(summary.out.find("Duration:"), std::string::npos);
+
+    const auto missing = run({"kasumi", "sync", "missing", "--quiet"});
+    EXPECT_EQ(missing.code, 1);
+    EXPECT_TRUE(missing.err.empty());
+    EXPECT_NE(missing.out.find("[ERROR]"), std::string::npos);
+    EXPECT_EQ(missing.out.find("Duration:"), std::string::npos);
+
+    for (const auto& invalid_args : std::vector<std::vector<std::string>>{
+             {"kasumi", "sync", "demo", "--quiet", "--quiet"},
+             {"kasumi", "config", "--quiet"},
+             {"kasumi", "key", "demo", "--quiet"},
+             {"kasumi", "--quiet", "status", "demo"},
+         }) {
+        const auto bad = run(invalid_args);
+        EXPECT_EQ(bad.code, 1);
+        EXPECT_NE(bad.err.find("[ERROR]"), std::string::npos);
+    }
+}
 class GeneralOptionTest : public CliInterfaceTest,
                           public testing::WithParamInterface<const char*> {};
 TEST_P(GeneralOptionTest, ConventionalOptionsSucceedWithoutExecution) {

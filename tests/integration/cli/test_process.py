@@ -784,6 +784,33 @@ class CliProcessTest(unittest.TestCase):
         summary = self.invoke("remote", "summary", "demo")
         self.assertIn(b"Recent operational activity: none", summary)
 
+    def test_quiet_suppresses_operational_stdout_while_keeping_errors(self):
+        local, remote = self.root / "local", self.root / "remote"
+        local.mkdir()
+        self.invoke("config", input=f"n\ndemo\n{local}\n{remote}\n\nq\n".encode())
+        (local / "item.txt").write_text("quiet-process", encoding="utf-8")
+
+        quiet_sync = self.invoke_raw("sync", "demo", "--quiet")
+        self.assertEqual(quiet_sync.returncode, 0, quiet_sync.stdout + quiet_sync.stderr)
+        self.assertEqual(quiet_sync.stdout, b"")
+        self.assertEqual(quiet_sync.stderr, b"")
+
+        quiet_status = self.invoke_raw("status", "demo", "--quiet")
+        self.assertEqual(quiet_status.returncode, 0)
+        self.assertEqual(quiet_status.stdout, b"")
+        self.assertEqual(quiet_status.stderr, b"")
+
+        quiet_summary = self.invoke_raw("remote", "summary", "demo", "--quiet")
+        self.assertEqual(quiet_summary.returncode, 0)
+        self.assertEqual(quiet_summary.stderr, b"")
+        self.assertIn(b"Remote summary", quiet_summary.stdout)
+        self.assertNotIn(b"Duration:", quiet_summary.stdout)
+
+        quiet_fail = self.invoke_raw("sync", "missing", "--quiet")
+        self.assertEqual(quiet_fail.returncode, 1)
+        self.assertIn(b"[ERROR]", quiet_fail.stdout)
+        self.assertNotIn(b"Duration:", quiet_fail.stdout)
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)
