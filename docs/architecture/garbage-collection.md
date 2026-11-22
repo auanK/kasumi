@@ -8,41 +8,24 @@ releases the maintenance barrier.
 
 The collector preserves this order:
 
-1. `application::execute` resolves the profile/key, validates retention, takes
-   the **local** profile lock, and opens the transport. Pending
-   [Sync transaction recovery](transactions-and-recovery.md) runs before GC.
-2. GC publishes a verified, token-owned remote **barrier**. Cooperative Sync
-   writers register a visible writer marker and are denied admission while the
-   barrier is present. GC rejects any active or abandoned writer marker before
-   analysis.
-3. GC publishes a temporary provider-visibility probe, requires it to be
-   visible in listings, removes it, and requires its absence. Probe errors fail
-   closed. The probe is a transport precondition, not a second history
-   observation.
-4. After these preconditions, GC performs **one complete authenticated
-   observation**: physical listing, HEAD/Commit/Epoch reachability, commit
-   variants, content references, and structural reachability classification
-   (without orphan payload downloads). Malformed history, unknown objects,
-   missing required content, invalid control state, or transport errors stop
-   collection before candidate deletion.
-5. GC builds the complete deletion plan and validates the plan as a set before
-   the first `REMOVE`. If online mutation cannot be established, the collector
-   returns `analysis_only` and performs no candidate deletion.
-6. Immediately before Apply, GC revalidates barrier ownership using remote
-   SHA-256 or the existing control-payload GET fallback. Replacement, absence,
-   or verification failure stops all candidate deletion and preserves the plan's
-   count for diagnostics. This is one additional ownership check per run.
+1. `application::execute` resolves the profile/key, validates retention and `--min-age` (`0..8760` hours), takes the **local** profile lock, and opens the transport. Pending [Sync transaction recovery](transactions-and-recovery.md) runs before live GC (dry-run inspects the journal read-only).
+2. **Pre-barrier read-only busy check (`CheckingControls`)**: Before acquiring or mutating the remote barrier, GC performs a read-only check of writer markers and barrier presence (using a single `control_read_batch` when supported, or sequential fallback). If active/abandoned writers or an existing barrier are present, GC bails out read-only with zero barrier writes (`remote_busy = true` when no uncertain mutation occurred).
+3. GC publishes a verified, token-owned remote **barrier** (`EstablishingBarrier`), re-verifies ownership, and re-checks active writers before observation. Cooperative Sync writers register a visible writer marker and are denied admission while the barrier is present.
+4. GC performs **one complete authenticated observation** using `transport::list_metadata` (`ListingRemote`, falling back to `list` when `Unsupported`), HEAD/Commit/Epoch reachability with batched Epoch/Marker prefetch (`AuthenticatingHistory`), content reachability (`AnalyzingReachability`), and `KACT` v1 activity loading (`LoadingActivities`) with zero orphan payload downloads. Malformed history, unknown objects, missing required content, invalid control state, or transport errors stop collection before candidate deletion.
+5. GC builds and validates the global deletion plan and filters candidates against the fail-safe grace period (`min_orphan_age`, defaulting to `runtime_data.min_history_age_hours` = 6h). When `candidates.empty()`, GC skips the online consistency probe and pre-Apply re-check and releases the barrier immediately (`Finalizing`).
+6. When `!candidates.empty()`, GC publishes and verifies a temporary provider-visibility probe (`ProbingConsistency`), requires listings to confirm creation and removal, and returns `analysis_only` if online visibility cannot be established. Probe errors fail closed.
+7. Immediately before Apply, GC revalidates barrier ownership using remote SHA-256 or the control-payload GET fallback (`RemovingObjects`). Replacement, absence, or verification failure stops all candidate deletion (`NotAttempted`).
 
 ## Global deletion plan
 
-The plan is an in-memory candidate list and a sorted set of protected object
-identifiers. It is discarded at the end of the run. Eligible candidates are:
+The plan is an in-memory candidate list (with byte sizes resolved from metadata listing) and a sorted set of protected object identifiers. It is discarded at the end of the run. Eligible candidates are:
 
 | Candidate | Eligibility |
 |---|---|
-| Orphan Content | Physically present Content not referenced by protected reachable history, eligible for deletion without downloading or auditing its payload |
-| Redundant CommitVariant | Valid ciphertext of a reachable Commit that is not a required variant |
-| Expired `KACT` v1 Activity | Valid remote activity records outside retention (`min_history_depth` and `min_history_age_hours`) and not the newest `Succeeded` record for their `(machine_id, operation)` pair |
+| Orphan Content | Physically present Content/Pack not referenced by protected reachable history, passing the grace-period check, eligible for deletion without downloading or auditing its payload |
+| Redundant CommitVariant | Valid ciphertext of a reachable Commit that is not a required variant, passing the remote `ModTime` grace check |
+| Expired Unreachable CommitVariant | Valid ciphertext of a valid unreachable Commit (e.g., superseded strictly behind `latest_epoch.anchors` or aged orphan commit) not in `PROTECTED_SET`, passing **both** `Commit.created_at` and remote `ModTime` grace checks |
+| Expired `KACT` v1 Activity | Valid remote activity records outside retention (`min_history_depth` and effective age window), not the newest `Succeeded` record for their `(machine_id, operation)` pair, and passing the remote `ModTime` grace check |
 
 GC loads and authenticates all objects under `<activity-ns>/<version-ns>/` before deletion; any unreadable, corrupt, or structurally invalid activity identifier/payload causes GC to fail closed before deleting any candidate. After completion, GC (as well as `gc remove-writer` and `gc remove-barrier`) publishes a best-effort `KACT` v1 activity record, and on successful GC refreshes the local `remote_activity_cache` in `db.sqlite` with retained records.
 
@@ -87,15 +70,15 @@ DELETE_SET ∩ PROTECTED_SET = ∅
 ```
 
 During candidate selection, the collector constructs a deterministically ordered,
-deduplicated deletion list (valid redundant reachable Commit variants followed
-by orphan Content identifiers) while excluding every identifier in
-`PROTECTED_SET` (which retains all HEAD-selected variants and at least one
-valid variant per unmarked reachable Commit) and failing closed if any
-candidate is empty, is a control object, or intersects `PROTECTED_SET`.
-
-Unreachable Commit variants remain out of scope: the collector does not delete
-whole unreachable Commits. Unknown, invalid, or ambiguously classified objects
-are not inferred safe to delete. Epoch objects are never candidates.
+deduplicated deletion list (passing fail-safe age checks and excluding every
+identifier in `PROTECTED_SET`), failing closed if any candidate is empty, is a
+control object, or intersects `PROTECTED_SET`. When `min_orphan_age > 0s`
+(default 6h), any candidate with a missing, non-positive (`<= 0`), future
+(`> now`), or `< min_orphan_age` remote `ModTime` (or missing `list_metadata`
+support) — and any unreachable commit whose `Commit.created_at` fails the same
+dual-clock check — is kept untouched and counted in `deferred_recent_objects`.
+Unknown, invalid, or ambiguously classified objects are not inferred safe to
+delete. Epoch objects are never candidates.
 
 ## Destructive phase
 
@@ -150,25 +133,27 @@ between verification and DELETE without conditional deletion/CAS.
 
 ## Operational contract
 
-**GC is not safe to run concurrently with Sync on the same vault.** Run only one
-destructive maintenance operation per vault at a time, across all machines.
-Stop scheduled and interactive Sync, including no-op runs that can repair
-Content, before starting GC. Resume Sync only after a healthy completion or
-after resolving all maintenance uncertainty. Manual writer removal must also be
-serialized with Sync and other maintenance.
+### Scheduled Automation and Grace Period
 
-Exclusivity is cooperative: the local profile lock, remote token-owned barrier,
-writer registration, and initial writer check coordinate participating clients.
-The local lock covers one profile on one machine; the remote protocol has no
-distributed CAS or fencing token. Non-cooperative mutation after observation
-can invalidate the deletion plan and cause data loss.
+Cooperative exclusivity uses the local profile lock, remote token-owned barrier,
+writer registration, and pre-/post-barrier writer checks. Because object storage
+lacks distributed CAS or fencing tokens, two safeguards make scheduled unattended
+`kasumi gc <profile>` safe alongside asynchronous Sync schedules:
 
-Pre-Apply and cleanup ownership checks do not guarantee distributed exclusivity.
-If ownership is lost after pre-Apply verification, Apply may continue deleting
-the frozen plan until another observed failure or cleanup detects the loss.
-This is an accepted limitation of cooperative exclusion, not an invitation to
-run Sync during GC. Running `gc remove-barrier --confirm-abandoned` while a GC
-is active can break exclusivity and allow data loss.
+1. **Pre-barrier read-only busy backoff**: Active Sync writers or an existing
+   barrier fail fast read-only (`remote_busy`) without creating or colliding on
+   control barriers.
+2. **Defense-in-depth grace period (`min_orphan_age` / `--min-age`, default 6h)**:
+   Even if a writer uploaded an in-flight payload or Commit variant without
+   coordination or immediately before timing out, any remote object newer than
+   `min_orphan_age` (or with missing/clock-skewed timestamps) is deferred intact
+   in `deferred_recent_objects`. For manual offline cleanups where all clients
+   are stopped, pass `--min-age 0` to collect fresh candidates immediately.
+
+Exclusivity remains cooperative rather than distributed locking: do not bypass
+coordination with `--min-age 0` while Sync is uploading recent unlinked objects,
+and do not run `gc remove-barrier --confirm-abandoned` while another GC process
+is actively deleting objects.
 
 The backend must expose completed control and namespace changes to protocol
 `LIST` and `PRESENCE` checks. The visibility probe tests its own temporary object;
@@ -300,4 +285,12 @@ storage backend.
 
 ## Removal progress
 
-GC reports confirmed removals and total candidates after every removal batch. Interactive output smooths the rate and estimates remaining time from confirmed removals. Progress observers do not participate in candidate selection or deletion.
+GC emits high-level stage events (`Preparing`, `Analyzing`, `Applying`,
+`Finalizing`) paired with granular `GarbageCollectSubStage` progress:
+`CheckingControls`, `EstablishingBarrier`, `ListingRemote`,
+`AuthenticatingHistory` (`commits_processed / commits_total`),
+`AnalyzingReachability`, `LoadingActivities`, `ProbingConsistency`,
+`RemovingObjects` (confirmed removals, `removed_bytes`, and `candidate_bytes`),
+and `ReleasingBarrier`. Interactive CLI output renders live sub-stage status,
+rates, byte totals, ETA, and elapsed time; plain logs emit spaced 10%
+milestones. Progress observers do not participate in candidate selection or deletion.

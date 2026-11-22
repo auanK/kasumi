@@ -161,7 +161,8 @@ replace the binary manually.
 
 When running Kasumi in automated scripts, cron jobs, or task schedulers:
 
-* **Structured Automation (`--json` and `--quiet`)**: Prefer `kasumi <command> <profile> --json` in unattended scripts to inspect `ok`, `exit_code`, and stable `error.code` (`lock_busy`, `partial_pending`, `confirmation_required`, etc.) without parsing localized text; use `--quiet` for cron/Task Scheduler jobs that want silent success and errors only.
+* **Structured Automation (`--json` and `--quiet`)**: Prefer `kasumi <command> <profile> --json` in unattended scripts to inspect `ok`, `exit_code`, and stable `error.code` (`lock_busy`, `remote_busy`, `partial_pending`, `confirmation_required`, etc.) without parsing localized text; use `--quiet` for cron/Task Scheduler jobs that want silent success and errors only.
+* **Scheduled Automatic Garbage Collection**: Unattended `kasumi gc <profile>` is safe to schedule periodically (such as daily or weekly cron / Task Scheduler runs). GC checks for active remote writers or barriers read-only before mutating the barrier (`error.code = "remote_busy"` and `[BUSY]` in `--log-file` when contention occurs) and enforces a fail-safe default 6-hour grace period (`min_history_age_hours`, overridable with `--min-age <hours>`) using remote `ModTime` and `Commit.created_at` so in-flight objects and recent unreachable commits are deferred intact. Reserve `--min-age 0` for manual offline maintenance when all clients are stopped.
 * **Process Exit Codes**: Handle every [documented exit code](configuration-and-usage.md#exit-codes). Code `2` means partial synchronization with pending materializations, not full success; retry once the missing content is restored. Never automatically run `resolve-missing --confirm` on pending paths without human review.
 * **Single-Process Profile Lock**: `status`, `sync --dry-run`, `sync`, `fsck`, `repack`, and `gc` use an OS file lock (`profile-<name>.lock`). If an automated script attempts one of these operations while another holds that profile lock, it exits with code `1`. Remote inspection uses a separate path without this lock. Ensure scheduled jobs do not overlap.
 * **External Scheduling**: Kasumi does not contain an internal background daemon. Use system scheduling tools:
@@ -174,9 +175,11 @@ When running Kasumi in automated scripts, cron jobs, or task schedulers:
 Choose synchronization and audit intervals from the vault's change rate, storage
 cost, and integrity requirements. Frequent synchronization reduces the time
 branches can diverge but does not prevent conflicts. Fsck downloads every
-referenced payload, while GC permanently deletes eligible objects and requires
-Sync and other maintenance to be stopped across clients; see the procedures
-above before scheduling either operation.
+referenced payload; scheduled `kasumi gc <profile>` safely reclaims aged orphans,
+expired unreachable commits behind Epochs, redundant CommitVariants, and pruned
+activities using its default 6-hour grace period and read-only `remote_busy`
+backoff, while manual `--min-age 0` cleanups require all Sync clients to be stopped
+first.
 
 ## Things Not To Do
 
