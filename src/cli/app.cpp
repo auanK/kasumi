@@ -624,7 +624,8 @@ int run(int argc, char* argv[]) {
         const auto summary =
             std::format("[{}] {}", json_error_code(err), err.detail);
         return log_text_entry(
-            {.status = err.lock_busy ? "LOCKED" : "ERROR",
+            {.status = err.lock_busy ? "LOCKED"
+                                     : (err.remote_busy ? "BUSY" : "ERROR"),
              .command = request_cmd,
              .profile = request.profile_name,
              .summary = summary,

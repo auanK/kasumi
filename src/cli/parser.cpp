@@ -5,6 +5,9 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
+#include <cstdint>
+#include <optional>
 #include <string_view>
 #include <utility>
 
@@ -196,14 +199,63 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 .profile_name = argv[3],
                 .confirm_abandoned = true};
         }
-        if (argc == 4 && operand(argv[2]) &&
-            std::string_view{argv[3]} == "--dry-run") {
-            return application::Request{
-                .operation = application::Operation::GarbageCollect,
-                .profile_name = argv[2],
-                .dry_run = true};
+        if (argc < 3 || !operand(argv[2])) {
+            return std::unexpected(ParseError{});
         }
-        return request(application::Operation::GarbageCollect, argc, argv);
+        bool dry_run = false;
+        std::optional<std::uint32_t> min_age_hours;
+        const auto parse_hours = [](std::string_view value)
+            -> std::optional<std::uint32_t> {
+            if (value.empty() ||
+                !std::ranges::all_of(value, [](char ch) {
+                    return ch >= '0' && ch <= '9';
+                })) {
+                return std::nullopt;
+            }
+            std::uint32_t hours = 0;
+            const auto [ptr, ec] = std::from_chars(
+                value.data(), value.data() + value.size(), hours);
+            if (ec != std::errc{} || ptr != value.data() + value.size() ||
+                hours > 8760U) {
+                return std::nullopt;
+            }
+            return hours;
+        };
+        for (int i = 3; i < argc; ++i) {
+            const std::string_view flag{argv[i]};
+            if (flag == "--dry-run") {
+                if (dry_run) {
+                    return std::unexpected(ParseError{});
+                }
+                dry_run = true;
+            } else if (flag == "--min-age" || flag.starts_with("--min-age=")) {
+                if (min_age_hours.has_value()) {
+                    return std::unexpected(ParseError{});
+                }
+                std::string_view value;
+                if (flag == "--min-age") {
+                    if (i + 1 >= argc) {
+                        return std::unexpected(ParseError{});
+                    }
+                    value = argv[++i];
+                } else {
+                    value =
+                        flag.substr(std::string_view{"--min-age="}.size());
+                }
+                const auto parsed = parse_hours(value);
+                if (!parsed.has_value()) {
+                    return std::unexpected(ParseError{});
+                }
+                min_age_hours = *parsed;
+            } else {
+                return std::unexpected(ParseError{});
+            }
+        }
+        return application::Request{
+            .operation = application::Operation::GarbageCollect,
+            .profile_name = argv[2],
+            .dry_run = dry_run,
+            .gc_min_age_hours = min_age_hours};
     }
     if (command == "repack") {
         if (argc < 3 || argc > 5 || !operand(argv[2])) {

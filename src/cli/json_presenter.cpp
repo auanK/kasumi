@@ -294,6 +294,9 @@ std::string_view error_code_string(const application::Error& error) noexcept {
     if (error.insufficient_disk_space) {
         return "insufficient_disk_space";
     }
+    if (error.remote_busy) {
+        return "remote_busy";
+    }
     if ((error.garbage_collection && error.garbage_collection->transport_error) ||
         (error.barrier_removal && error.barrier_removal->transport_error)) {
         return "transport_error";
@@ -814,8 +817,14 @@ int present_json(std::string_view profile_name,
                      payload.candidate_content_objects},
                     {"candidate_commit_variants",
                      payload.candidate_commit_variants},
+                    {"candidate_expired_commits",
+                     payload.candidate_expired_commits},
                     {"candidate_activities", payload.candidate_activities},
+                    {"deferred_recent_objects", payload.deferred_recent_objects},
+                    {"candidate_bytes", payload.candidate_bytes},
                     {"removed_objects", payload.removed_objects},
+                    {"removed_bytes", payload.removed_bytes},
+                    {"min_age_hours", payload.min_age_hours},
                 };
             } else if constexpr (std::is_same_v<T,
                                                 application::RepackCompleted>) {

@@ -27,6 +27,7 @@ struct FsckProgressDisplayState {
 
 struct GarbageCollectProgressDisplayState {
     std::optional<application::GarbageCollectStage> last_stage;
+    std::optional<std::size_t> last_listed_objects;
     std::optional<std::size_t> last_candidate_count;
 };
 
