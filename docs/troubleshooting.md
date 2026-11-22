@@ -16,10 +16,10 @@ An application operation can exit with this English error:
 Other lock failures report `could not lock profile:` followed by the operating system's error detail.
 
 ### Likely Meaning
-Another Kasumi process is currently running on the same machine using the specified profile. Kasumi acquires an exclusive OS file lock (`profile-<name>.lock` in Kasumi's data directory) to prevent concurrent execution on the same local profile state.
+Another Kasumi process is currently running on the same machine using the specified profile. Kasumi acquires an exclusive OS file lock (`profile-<name>.lock` in Kasumi's data directory) to prevent concurrent execution on the same local profile state. When an active operation is visible in local state, the error includes it (for example `(running gc)`), and read-only queries (`kasumi config`, `kasumi show <profile>`, `kasumi diagnostics`) report the profile as `Running` rather than `Problem`.
 
 ### Safe Next Steps
-1. Wait for the active operation (such as a large synchronization, Fsck, or GC) to complete.
+1. Run `kasumi show <profile>` or `kasumi diagnostics <profile>` to check which operation is currently `Running`, and wait for the active operation (such as a large synchronization, Fsck, or GC) to complete.
 2. Check your operating system process list for active Kasumi processes:
    * **Linux**: `pgrep -a kasumi`
    * **Windows**: `Get-Process kasumi`
