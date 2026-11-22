@@ -168,6 +168,231 @@ void present_duration(std::chrono::nanoseconds duration) {
         i18n::format(i18n::Key::OperationDuration, format_duration(duration)));
 }
 
+namespace {
+
+std::string join_summary_parts(const std::vector<std::string>& parts) {
+    std::string out;
+    for (std::size_t i = 0; i < parts.size(); ++i) {
+        if (i > 0) {
+            out += " | ";
+        }
+        out += parts[i];
+    }
+    return out;
+}
+
+std::string format_transfer_part(std::string_view arrow,
+                                 std::size_t count,
+                                 std::uint64_t bytes) {
+    return bytes > 0
+               ? std::format("{} {} ({})", arrow, count, format_size(bytes))
+               : std::format("{} {}", arrow, count);
+}
+
+} // namespace
+
+std::string format_compact_summary(const application::SyncCompleted& sync) {
+    if (sync.total == 0 && sync.repaired == 0 && !sync.partial) {
+        return "Everything in sync";
+    }
+    std::vector<std::string> parts;
+    if (sync.total > 0) {
+        parts.push_back(sync.total == 1
+                            ? "1 change"
+                            : std::format("{} changes", sync.total));
+    }
+    if (sync.uploaded > 0) {
+        parts.push_back(
+            format_transfer_part("↑", sync.uploaded, sync.upload_bytes));
+    }
+    if (sync.downloaded > 0) {
+        parts.push_back(
+            format_transfer_part("↓", sync.downloaded, sync.download_bytes));
+    }
+    if (sync.removed > 0) {
+        parts.push_back(std::format("- {}", sync.removed));
+    }
+    if (sync.renamed > 0) {
+        parts.push_back(std::format("→ {}", sync.renamed));
+    }
+    if (sync.created_dirs > 0) {
+        parts.push_back(sync.created_dirs == 1
+                            ? "+1 dir"
+                            : std::format("+{} dirs", sync.created_dirs));
+    }
+    if (sync.removed_dirs > 0) {
+        parts.push_back(sync.removed_dirs == 1
+                            ? "-1 dir"
+                            : std::format("-{} dirs", sync.removed_dirs));
+    }
+    if (sync.repaired > 0) {
+        parts.push_back(std::format("{} repaired", sync.repaired));
+    }
+    if (sync.partial) {
+        parts.push_back(std::format("{} pending", sync.pending));
+    }
+    return join_summary_parts(parts);
+}
+
+std::string format_compact_summary(const application::Response& response) {
+    return std::visit(
+        [&](const auto& payload) -> std::string {
+            using T = std::decay_t<decltype(payload)>;
+            if constexpr (std::is_same_v<T, application::SyncCompleted>) {
+                std::string summary = format_compact_summary(payload);
+                if (response.inventory_audit) {
+                    const auto& audit = *response.inventory_audit;
+                    if (audit.missing_content + audit.orphan_content +
+                            audit.unknown_objects >
+                        0) {
+                        summary += std::format(
+                            " | audit: {} missing, {} orphan, {} unknown",
+                            audit.missing_content,
+                            audit.orphan_content,
+                            audit.unknown_objects);
+                    }
+                }
+                return summary;
+            } else if constexpr (std::is_same_v<T, application::PlanReport>) {
+                if (payload.items.empty() && payload.pending_paths.empty()) {
+                    return "Everything in sync";
+                }
+                std::vector<std::string> parts;
+                if (!payload.items.empty()) {
+                    parts.push_back(
+                        std::format("{} planned", payload.items.size()));
+                }
+                if (payload.upload_bytes > 0) {
+                    parts.push_back(
+                        std::format("↑ {}", format_size(payload.upload_bytes)));
+                }
+                if (payload.download_bytes > 0) {
+                    parts.push_back(std::format(
+                        "↓ {}", format_size(payload.download_bytes)));
+                }
+                if (payload.has_conflicts) {
+                    parts.push_back("conflicts");
+                }
+                if (!payload.pending_paths.empty()) {
+                    parts.push_back(std::format(
+                        "{} pending", payload.pending_paths.size()));
+                }
+                return join_summary_parts(parts);
+            } else if constexpr (std::is_same_v<T,
+                                                 application::FsckCompleted>) {
+                std::string summary =
+                    payload.checked_objects == 1
+                        ? "1 object verified"
+                        : std::format(
+                              "{} objects verified", payload.checked_objects);
+                if (payload.checked_plaintext_bytes) {
+                    summary += std::format(
+                        " ({})", format_size(*payload.checked_plaintext_bytes));
+                }
+                return summary;
+            } else if constexpr (std::is_same_v<
+                                     T,
+                                     application::GarbageCollectCompleted>) {
+                if (payload.dry_run) {
+                    return payload.candidate_objects == 0
+                               ? "no eligible candidates"
+                               : std::format(
+                                     "{} candidates ({} content, {} commits, "
+                                     "{} activities)",
+                                     payload.candidate_objects,
+                                     payload.candidate_content_objects,
+                                     payload.candidate_commit_variants,
+                                     payload.candidate_activities);
+                }
+                if (payload.removed_objects == 0) {
+                    return "no eligible objects removed";
+                }
+                return payload.removed_objects == 1
+                           ? "1 object removed"
+                           : std::format(
+                                 "{} objects removed", payload.removed_objects);
+            } else if constexpr (std::is_same_v<
+                                     T,
+                                     application::RepackCompleted>) {
+                if (!payload.actionable) {
+                    return "nothing to repack";
+                }
+                return std::format(
+                    "{}{} {} ({}) into {} {}",
+                    payload.dry_run ? "plan: " : "repacked ",
+                    payload.repacked_blobs,
+                    payload.repacked_blobs == 1 ? "blob" : "blobs",
+                    format_size(payload.repacked_plaintext_bytes),
+                    payload.new_packs,
+                    payload.new_packs == 1 ? "pack" : "packs");
+            } else if constexpr (std::is_same_v<
+                                     T,
+                                     application::ResolveMissingCompleted>) {
+                if (payload.resolved_paths.empty()) {
+                    return "no pending missing paths";
+                }
+                if (payload.dry_run) {
+                    return std::format(
+                        "{} pending {} eligible",
+                        payload.resolved_paths.size(),
+                        payload.resolved_paths.size() == 1 ? "path" : "paths");
+                }
+                return std::format(
+                    "{} missing {} resolved",
+                    payload.resolved_count,
+                    payload.resolved_count == 1 ? "path" : "paths");
+            } else if constexpr (std::is_same_v<
+                                     T,
+                                     application::ManualWriterRemovalCompleted>) {
+                return "writer removed";
+            } else if constexpr (std::is_same_v<
+                                     T,
+                                     application::ManualBarrierRemovalCompleted>) {
+                return payload.outcome ==
+                               application::BarrierRemovalOutcome::Removed
+                           ? "barrier removed"
+                           : "barrier already absent";
+            } else {
+                return "ok";
+            }
+        },
+        response.data);
+}
+
+std::string
+format_compact_summary(const application::DiagnosticsReport& report) {
+    const std::size_t n = report.profiles.size();
+    const std::string_view rclone_state =
+        report.rclone.found
+            ? (report.rclone.version.empty() ? std::string_view{"found"}
+                                             : std::string_view{report.rclone.version})
+            : std::string_view{"missing"};
+    return std::format("{} {}, overall={}, rclone={}",
+                       n,
+                       n == 1 ? "profile" : "profiles",
+                       report.overall_ok ? "ok" : "issues",
+                       rclone_state);
+}
+
+std::string
+format_compact_summary(const application::InspectionResponse& response) {
+    if (const auto* s =
+            std::get_if<application::RemoteSummaryReport>(&response.payload)) {
+        std::string out = std::format("height={}, heads={}, commits={}",
+                                      s->observed_height,
+                                      s->logical_head_count,
+                                      s->reachable_commit_count);
+        if (s->has_conflicts) {
+            out += ", conflicts";
+        }
+        if (s->missing_content_count > 0) {
+            out += std::format(", missing={}", s->missing_content_count);
+        }
+        return out;
+    }
+    return "ok";
+}
+
 int present_cancellation(application::Operation operation) {
     print_status_line(style::yellow,
                       i18n::Key::LabelWarning,

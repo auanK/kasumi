@@ -1,6 +1,7 @@
 #include "cli/json_presenter.hpp"
 
 #include "cli/log_file.hpp"
+#include "cli/presenter.hpp"
 #include "platform/path.hpp"
 
 #include <nlohmann/json.hpp>
@@ -42,6 +43,9 @@ json make_envelope(std::string_view command,
     };
     if (!profile_name.empty()) {
         doc["profile"] = profile_name;
+    }
+    if (const auto ts = format_utc_iso8601_now(); !ts.empty()) {
+        doc["timestamp"] = ts;
     }
     if (duration.has_value()) {
         doc["duration_ms"] = to_duration_ms(*duration);
@@ -385,6 +389,7 @@ json serialize_sync_completed(const application::SyncCompleted& sync) {
         pending.push_back(platform::path::to_utf8(path));
     }
     return json{
+        {"summary", format_compact_summary(sync)},
         {"total", sync.total},
         {"uploaded", sync.uploaded},
         {"downloaded", sync.downloaded},
@@ -469,6 +474,19 @@ int present_json_io_error(std::string_view command,
                           std::string_view detail) {
     return emit_json_error(
         command.empty() ? "kasumi" : command, profile_name, 1, "io_error", detail);
+}
+
+std::string_view json_error_code(const application::Error& error) noexcept {
+    return error_code_string(error);
+}
+
+std::string_view
+json_error_code(const application::InspectionError& error) noexcept {
+    return inspection_error_code_string(error);
+}
+
+std::string_view json_error_code(application::ProfileErrorCode code) noexcept {
+    return profile_error_code_string(code);
 }
 
 int present_json_parse_error(std::string_view command,
@@ -635,6 +653,7 @@ int present_json_diagnostics(const application::DiagnosticsReport& report,
     }
 
     doc["data"] = json{
+        {"summary", format_compact_summary(report)},
         {"version", version},
         {"os", report.os_name},
         {"app_data_dir", platform::path::to_utf8(report.app_data_dir)},
@@ -856,6 +875,7 @@ int present_json(std::string_view profile_name,
         !response.activity_publish_warning->empty()) {
         doc["warning"] = *response.activity_publish_warning;
     }
+    data["summary"] = format_compact_summary(response);
     doc["data"] = std::move(data);
     emit_json(doc);
     return exit_code;
@@ -926,6 +946,7 @@ int present_json(std::string_view profile_name,
     } else {
         doc["data"] = json::object();
     }
+    doc["data"]["summary"] = format_compact_summary(response);
     emit_json(doc);
     return 0;
 }

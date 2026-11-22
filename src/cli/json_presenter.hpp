@@ -30,6 +30,11 @@ int present_json_io_error(std::string_view command,
                           std::string_view profile_name,
                           std::string_view detail);
 
+std::string_view json_error_code(const application::Error& error) noexcept;
+std::string_view
+json_error_code(const application::InspectionError& error) noexcept;
+std::string_view json_error_code(application::ProfileErrorCode code) noexcept;
+
 int present_json_parse_error(std::string_view command,
                              std::string_view detail);
 

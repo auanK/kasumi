@@ -3,6 +3,7 @@
 #include "platform/clock.hpp"
 #include "platform/path.hpp"
 
+#include <algorithm>
 #include <format>
 #include <fstream>
 #include <system_error>
@@ -99,6 +100,21 @@ std::string strip_ansi_sequences(std::string_view text) {
     return out;
 }
 
+std::string format_utc_iso8601_now() {
+    const auto now = platform::clock::unix_seconds();
+    if (!now) {
+        return {};
+    }
+    const std::string utc = platform::clock::format_utc_timestamp(*now, true);
+    if (utc.size() < 19 || utc[10] != ' ') {
+        return {};
+    }
+    return std::format(
+        "{}T{}Z",
+        std::string_view{utc}.substr(0, 10),
+        std::string_view{utc}.substr(11, 8));
+}
+
 std::expected<void, std::string>
 append_log_line(const std::filesystem::path& path, std::string_view line) {
     std::ofstream out(path, std::ios::binary | std::ios::app);
@@ -120,26 +136,69 @@ append_log_line(const std::filesystem::path& path, std::string_view line) {
 
 std::expected<void, std::string>
 append_text_log_entry(const std::filesystem::path& path,
-                      std::string_view command,
-                      int exit_code,
-                      std::string_view summary) {
+                      const TextLogEntry& entry) {
     const auto now = platform::clock::unix_seconds();
     const std::string timestamp =
-        now ? platform::clock::format_utc_timestamp(*now, true) : "-";
-    const std::string clean_command = strip_ansi_sequences(command);
-    const std::string clean_summary = strip_ansi_sequences(summary);
-    const std::string line =
+        now ? platform::clock::format_local_timestamp(*now, true) : "-";
+    const std::string clean_status = strip_ansi_sequences(entry.status);
+    const std::string clean_command = strip_ansi_sequences(entry.command);
+    const std::string clean_profile = strip_ansi_sequences(entry.profile);
+    const std::string clean_summary = strip_ansi_sequences(entry.summary);
+
+    const std::string_view final_status =
+        clean_status.empty() ? std::string_view{"INFO"} : clean_status;
+    const std::string_view final_command =
+        clean_command.empty() ? std::string_view{"kasumi"} : clean_command;
+    const std::string target = clean_profile.empty()
+                                   ? std::string{final_command}
+                                   : std::format("{} {}", final_command, clean_profile);
+
+    std::string dur_suffix;
+    if (entry.duration.has_value()) {
+        const double secs =
+            std::chrono::duration<double>(
+                std::max(*entry.duration, std::chrono::nanoseconds::zero()))
+                .count();
+        dur_suffix = std::format(" ({:.3f} s)", secs);
+    }
+
+    std::string buffer =
         clean_summary.empty()
-            ? std::format("[{}] command={} exit={}",
+            ? std::format("[{}] [{}] {}{}\n",
                           timestamp,
-                          clean_command.empty() ? "kasumi" : clean_command,
-                          exit_code)
-            : std::format("[{}] command={} exit={} {}",
+                          final_status,
+                          target,
+                          dur_suffix)
+            : std::format("[{}] [{}] {} | {}{}\n",
                           timestamp,
-                          clean_command.empty() ? "kasumi" : clean_command,
-                          exit_code,
-                          clean_summary);
-    return append_log_line(path, line);
+                          final_status,
+                          target,
+                          clean_summary,
+                          dur_suffix);
+
+    for (const auto& raw_detail : entry.detail_lines) {
+        const std::string clean_detail = strip_ansi_sequences(raw_detail);
+        if (!clean_detail.empty()) {
+            buffer += "    ";
+            buffer += clean_detail;
+            buffer += '\n';
+        }
+    }
+
+    std::ofstream out(path, std::ios::binary | std::ios::app);
+    if (!out.is_open()) {
+        return std::unexpected(std::format(
+            "cannot open log file '{}' for appending",
+            platform::path::to_utf8(path)));
+    }
+    out.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    out.flush();
+    if (!out.good()) {
+        return std::unexpected(std::format(
+            "failed to write log entry to '{}'",
+            platform::path::to_utf8(path)));
+    }
+    return {};
 }
 
 } // namespace kasumi::cli

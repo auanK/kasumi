@@ -923,7 +923,9 @@ class CliProcessTest(unittest.TestCase):
 
         repair_doc = run_json("sync", "demo", "--repair", "--json")
         self.assertTrue(repair_doc["ok"])
+        self.assertTrue(repair_doc["timestamp"].endswith("Z"))
         self.assertEqual(repair_doc["data"]["repaired"], 1)
+        self.assertIn("1 repaired", repair_doc["data"]["summary"])
         self.assertFalse(repair_doc["data"]["published"])
         self.assertTrue((remote / repair_cid).exists())
         self.invoke("fsck", "demo")
@@ -931,6 +933,8 @@ class CliProcessTest(unittest.TestCase):
         diag_doc = run_json("diagnostics", "--json")
         self.assertTrue(diag_doc["ok"])
         self.assertEqual(diag_doc["command"], "diagnostics")
+        self.assertTrue(diag_doc["timestamp"].endswith("Z"))
+        self.assertIn("overall=ok", diag_doc["data"]["summary"])
         self.assertTrue(diag_doc["data"]["config_exists"])
         self.assertTrue(diag_doc["data"]["overall_ok"])
         self.assertGreaterEqual(len(diag_doc["data"]["profiles"]), 1)
@@ -956,15 +960,20 @@ class CliProcessTest(unittest.TestCase):
         ]
         self.assertEqual(len(ndjson_lines), 2)
         self.assertEqual(ndjson_lines[0]["command"], "diagnostics")
+        self.assertTrue(ndjson_lines[0]["timestamp"].endswith("Z"))
+        self.assertIn("overall=ok", ndjson_lines[0]["data"]["summary"])
         self.assertEqual(ndjson_lines[1]["command"], "list")
+        self.assertTrue(ndjson_lines[1]["timestamp"].endswith("Z"))
 
         text_log = self.root / "logs" / "process.log"
         self.invoke("diagnostics", "demo", "--log-file", str(text_log))
+        self.invoke("sync", "demo", "--log-file", str(text_log))
         self.invoke("list", "--log-file", str(text_log))
         text_contents = text_log.read_text(encoding="utf-8")
         self.assertNotIn("\x1b", text_contents)
-        self.assertIn("command=diagnostics exit=0", text_contents)
-        self.assertIn("command=list exit=0", text_contents)
+        self.assertIn("] [OK] diagnostics demo | ", text_contents)
+        self.assertIn("] [OK] sync demo | Everything in sync (", text_contents)
+        self.assertIn("] [OK] list | completed", text_contents)
 
 
 if __name__ == "__main__":
