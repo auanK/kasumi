@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.21.0]
+
+### Added
+
+- Add `kasumi sync <profile> --repair` for fast missing-object recovery via a single physical listing across the effective `StorageManifest` (loose objects, `KPAK\x01` Micro-Packs, and FastCDC chunks), re-uploading missing payloads from verified local copies without downloading payloads (`fsck`) or publishing a new Commit when no logical changes occur (`data.repaired` in `--json`; incompatible with `--dry-run` and `--initial`).
+- Add preflight checks before remote transfers: local free disk-space verification ahead of `sync` downloads (`error.code: "insufficient_disk_space"`) and minimum `rclone` version (`v1.60.0`) validation via `core/version` and `probe_rclone_installation`.
+- Add read-only `kasumi diagnostics [<profile>] [--json] [--quiet]` to inspect OS, data/config status, disk space, `rclone` availability/version, profile local states, active locks, pending journals, and key accessibility without contacting remotes or exposing secrets.
+- Add `--log-file <path>` (`--log-file=<path>`) on non-interactive commands to append UTC-timestamped UTF-8 plain-text logs without ANSI escape sequences, or NDJSON lines when combined with `--json`, with upfront path validation (`error.code: "io_error"` in `--json`) and no file creation on `--help`.
+
+### Documentation
+
+- Document `sync --repair`, disk-space and `rclone >= v1.60.0` preflight checks, `kasumi diagnostics`, `--log-file`, `insufficient_disk_space`, and `io_error` across [configuration-and-usage.md](docs/configuration-and-usage.md), [synchronization.md](docs/architecture/synchronization.md), [transport.md](docs/architecture/transport.md), [troubleshooting.md](docs/troubleshooting.md), and [README.md](README.md).
+
+### Upgrade Notes
+
+- Protocol and local state formats remain `KCOM` v4, `KACT` v1, `KPAK\x01`, `state.db` schema v2, `transaction.bin.enc`, and `config.toml`, maintaining full drop-in compatibility with `v0.19.x` and `v0.20.0` vaults and local databases.
+
 ## [0.20.0]
 
 ### Added
