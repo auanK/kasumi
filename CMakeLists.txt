@@ -669,6 +669,7 @@ add_library(kasumi_cli STATIC
     src/cli/credentials.cpp
     src/cli/i18n.cpp
     src/cli/json_presenter.cpp
+    src/cli/log_file.cpp
     src/cli/parser.cpp
     src/cli/presenter.cpp
     src/cli/wizard.cpp

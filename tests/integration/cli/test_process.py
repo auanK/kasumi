@@ -945,6 +945,27 @@ class CliProcessTest(unittest.TestCase):
         diag_missing = run_json("diagnostics", "absent", "--json", expected=1)
         self.assertEqual(diag_missing["error"]["code"], "profile_not_found")
 
+        # Verify --log-file in both NDJSON (--json) and clean UTF-8 text modes.
+        ndjson_log = self.root / "logs" / "process.ndjson"
+        run_json("diagnostics", "--json", "--log-file", str(ndjson_log))
+        run_json("list", "--json", "--log-file", str(ndjson_log))
+        ndjson_lines = [
+            json.loads(line)
+            for line in ndjson_log.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(ndjson_lines), 2)
+        self.assertEqual(ndjson_lines[0]["command"], "diagnostics")
+        self.assertEqual(ndjson_lines[1]["command"], "list")
+
+        text_log = self.root / "logs" / "process.log"
+        self.invoke("diagnostics", "demo", "--log-file", str(text_log))
+        self.invoke("list", "--log-file", str(text_log))
+        text_contents = text_log.read_text(encoding="utf-8")
+        self.assertNotIn("\x1b", text_contents)
+        self.assertIn("command=diagnostics exit=0", text_contents)
+        self.assertIn("command=list exit=0", text_contents)
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)

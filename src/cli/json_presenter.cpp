@@ -1,20 +1,28 @@
 #include "cli/json_presenter.hpp"
 
+#include "cli/log_file.hpp"
 #include "platform/path.hpp"
 
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <print>
 #include <string>
+#include <utility>
 
 namespace kasumi::cli {
 namespace {
 
 using json = nlohmann::json;
 
+thread_local const std::filesystem::path* g_json_log_file = nullptr;
+
 void emit_json(const json& doc) {
-    std::println("{}",
-                 doc.dump(-1, ' ', false, json::error_handler_t::replace));
+    const auto line =
+        doc.dump(-1, ' ', false, json::error_handler_t::replace);
+    std::println("{}", line);
+    if (g_json_log_file != nullptr) {
+        (void)append_log_line(*g_json_log_file, line);
+    }
 }
 
 double to_duration_ms(std::chrono::nanoseconds duration) noexcept {
@@ -443,6 +451,25 @@ profile_local_state_name(application::ProfileLocalState state) noexcept {
 }
 
 } // namespace
+
+ScopedJsonLogFile::ScopedJsonLogFile(
+    std::optional<std::filesystem::path> path)
+    : path_(std::move(path)), previous_(g_json_log_file) {
+    if (path_.has_value()) {
+        g_json_log_file = &*path_;
+    }
+}
+
+ScopedJsonLogFile::~ScopedJsonLogFile() noexcept {
+    g_json_log_file = previous_;
+}
+
+int present_json_io_error(std::string_view command,
+                          std::string_view profile_name,
+                          std::string_view detail) {
+    return emit_json_error(
+        command.empty() ? "kasumi" : command, profile_name, 1, "io_error", detail);
+}
 
 int present_json_parse_error(std::string_view command,
                              std::string_view detail) {

@@ -6,10 +6,29 @@
 #include "application/result.hpp"
 
 #include <chrono>
+#include <filesystem>
+#include <optional>
 #include <string_view>
 #include <vector>
 
 namespace kasumi::cli {
+
+class ScopedJsonLogFile {
+public:
+    explicit ScopedJsonLogFile(std::optional<std::filesystem::path> path);
+    ~ScopedJsonLogFile() noexcept;
+
+    ScopedJsonLogFile(const ScopedJsonLogFile&) = delete;
+    ScopedJsonLogFile& operator=(const ScopedJsonLogFile&) = delete;
+
+private:
+    std::optional<std::filesystem::path> path_;
+    const std::filesystem::path* previous_ = nullptr;
+};
+
+int present_json_io_error(std::string_view command,
+                          std::string_view profile_name,
+                          std::string_view detail);
 
 int present_json_parse_error(std::string_view command,
                              std::string_view detail);
