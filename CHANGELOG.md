@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.20.0]
+
+### Added
+
+- Add `kasumi gc <profile> --dry-run` to inspect local transaction journals read-only, check maintenance barrier and active writer preconditions, and report eligible candidate counts (`candidate_content_objects`, `candidate_commit_variants`, `candidate_activities`) without establishing a barrier, deleting remote objects, or publishing a `KACT` activity record.
+- Add `--dry-run` preview and interactive confirmation guards (`[y/N]` / `[s/N]`) with `--confirm` automation bypass to `kasumi resolve-missing <profile>`.
+- Add `--quiet` flag on non-interactive CLI commands to suppress banners, live progress, `Duration:` lines, and non-error operational stdout while keeping query output and error/partial diagnostics visible.
+- Add `--json` structured output (`schema_version: 1`, language-independent keys and `error.code` values, empty `stderr`) across `list`, `show`, `status`, `sync`, `fsck`, `gc`, `repack`, `resolve-missing`, and `remote summary`, including `lock_busy` and `confirmation_required` distinction.
+
+### Changed
+
+- `kasumi resolve-missing <profile>` now previews eligible pending paths and requires explicit confirmation before publishing logical deletions (when pending paths exist); non-interactive scripts must pass `--confirm` (or run read-only with `--dry-run`).
+
+### Documentation
+
+- Document `gc --dry-run`, `resolve-missing [--dry-run | --confirm]`, `--quiet`, and `--json` (`schema_version: 1` and stable `error.code` reference) across [configuration-and-usage.md](docs/configuration-and-usage.md), [garbage-collection.md](docs/architecture/garbage-collection.md), [best-practices.md](docs/best-practices.md), and [README.md](README.md).
+
+### Upgrade Notes
+
+- Protocol and local state formats remain `KCOM` v4, `KACT` v1, `KPAK\x01`, `state.db` schema v2, and `config.toml`, staying compatible with `v0.19.x` vaults and local databases. Automated scripts invoking `kasumi resolve-missing <profile>` when pending paths exist must pass `--confirm`.
+
 ## [0.19.2]
 
 ### Added
