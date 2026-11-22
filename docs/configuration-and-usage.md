@@ -283,7 +283,8 @@ Pass `--quiet` after the profile (or after `kasumi list`, `kasumi diagnostics [<
 
 Pass `--json` on supported commands (`list`, `show`, `diagnostics`, `status`, `sync`, `fsck`, `gc <profile>`, `repack`, `resolve-missing`, and `remote summary`) to emit a single language-independent JSON object (`"schema_version": 1`) to `stdout` with empty `stderr`, suppressing banners, progress output, and localized text differences regardless of `--lang`:
 
-- Every response includes `schema_version`, `command`, `ok`, and `exit_code` (plus `profile`, `duration_ms`, `data`, `warning`, or `error` as applicable).
+- Every response includes `schema_version`, `command`, `ok`, `exit_code`, and `timestamp` (UTC ISO-8601 ending in `Z`), plus `profile`, `duration_ms`, `data`, `warning`, or `error` as applicable.
+- Command `data` objects retain all raw numeric/boolean/array fields alongside a concise language-independent `summary` string (such as `"Everything in sync"` or `"3 changes | ↑ 2 (2 KB) | ↓ 1 (512 bytes)"`).
 - `resolve-missing <profile> --json` without `--confirm` or `--dry-run` runs read-only and fails safely with `error.code = "confirmation_required"` and `data.resolved_paths` whenever unresolved paths exist (never blocking on `stdin`).
 - Stable `error.code` values: `invalid_arguments`, `profile_not_found`, `lock_busy`, `credentials_required`, `auth_failed`, `confirmation_required`, `insufficient_disk_space`, `io_error`, `cancelled`, `partial_pending`, `audit_findings`, `transport_error`, `plan_failed`, `sync_failed`, `recovery_failed`, `fsck_failed`, `gc_failed`, `repack_failed`, `writer_removal_failed`, `barrier_removal_failed`, `inventory_audit_failed`, `remote_observation_failed`, `config_error`, and `runtime_error`.
 
@@ -291,8 +292,8 @@ Pass `--json` on supported commands (`list`, `show`, `diagnostics`, `status`, `s
 
 Pass `--log-file <path>` (or `--log-file=<path>`) on supported non-interactive commands (`list`, `show`, `diagnostics`, `sync`, `status`, `fsck`, `gc`, `repack`, `resolve-missing`, and `remote ...`) to append durable logs without interrupting terminal output:
 
-- **With `--json`**: Appends the exact serialized JSON envelope as one NDJSON line per invocation.
-- **Without `--json`**: Appends UTF-8 plain-text lines with UTC timestamps, ANSI escape sequences stripped, command name, exit status, and a concise secret-free summary.
+- **With `--json`**: Appends the exact serialized JSON envelope (`timestamp`, `data.summary`, raw counts, and error codes) as one NDJSON line per invocation.
+- **Without `--json`**: Appends UTF-8 plain-text entries in one atomic write per command using local timestamps with UTC offset, status tags (`[OK]`, `[WARN]`, `[PARTIAL]`, `[LOCKED]`, `[CANCELLED]`, `[ERROR]`), command/profile target, ANSI-free compact summary (with human-readable sizes), duration (`(<seconds> s)`), and indented detail lines for pending paths, warnings, or unhealthy diagnostic items.
 - The log path is validated before execution (creating missing parent directories; rejecting directories, symlinks, and unwritable targets with exit code `1` or `error.code = "io_error"` under `--json`). Passing `--help` / `-h` never creates or modifies the log file, and cryptographic keys or passwords are never logged.
 
 ## `.kasumiignore`
