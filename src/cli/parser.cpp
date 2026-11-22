@@ -180,6 +180,13 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 .profile_name = argv[3],
                 .confirm_abandoned = true};
         }
+        if (argc == 4 && operand(argv[2]) &&
+            std::string_view{argv[3]} == "--dry-run") {
+            return application::Request{
+                .operation = application::Operation::GarbageCollect,
+                .profile_name = argv[2],
+                .dry_run = true};
+        }
         return request(application::Operation::GarbageCollect, argc, argv);
     }
     if (command == "repack") {

@@ -769,6 +769,21 @@ class CliProcessTest(unittest.TestCase):
         self.assertIn(b"Last sync", listed)
         self.assertRegex(listed, rb"\bdemo\s+Ready\s+.*\(ok\)")
 
+    def test_gc_dry_run_analyzes_without_mutating_or_publishing_activity(self):
+        local, remote = self.root / "local", self.root / "remote"
+        local.mkdir()
+        self.invoke("config", input=f"n\ndemo\n{local}\n{remote}\n\nq\n".encode())
+        (local / "item.txt").write_text("gc-dry-run-process", encoding="utf-8")
+        self.invoke("sync", "demo")
+
+        dry = self.invoke("gc", "demo", "--dry-run")
+        self.assertIn(b"Simulating garbage collection", dry)
+        self.assertIn(b"No garbage collection candidates found", dry)
+        self.assertIn(b"Garbage collection dry-run completed: no objects removed.", dry)
+
+        summary = self.invoke("remote", "summary", "demo")
+        self.assertIn(b"Recent operational activity: none", summary)
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)

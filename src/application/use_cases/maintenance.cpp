@@ -8,6 +8,7 @@
 #include "application/integrity/repack.hpp"
 #include "application/progress.hpp"
 #include "application/sync/coordinator.hpp"
+#include "application/sync/journal.hpp"
 #include "application/use_cases/context.hpp"
 #include "core/history.hpp"
 #include "platform/cancellation.hpp"
@@ -168,6 +169,20 @@ run_with_recovery(OperationContext& context,
     return make_response(context, std::move(*res));
 }
 
+GarbageCollectCompleted
+to_gc_completed(const integrity::GarbageCollectResult& collected) {
+    return GarbageCollectCompleted{
+        .candidate_objects = collected.candidate_objects,
+        .analysis_only = collected.analysis_only,
+        .dry_run = collected.dry_run,
+        .candidate_content_objects = collected.candidate_content_objects,
+        .candidate_commit_variants = collected.candidate_commit_variants,
+        .candidate_activities = collected.candidate_activities,
+        .removed_objects = collected.removed_objects,
+        .removal_elapsed = collected.removal_elapsed,
+    };
+}
+
 } // namespace
 
 std::expected<Response, Error> run_fsck(OperationContext& context) {
@@ -205,6 +220,41 @@ std::expected<Response, Error> run_fsck(OperationContext& context) {
 
 std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
     std::optional<GarbageCollectProgress> last_progress;
+    if (context.dry_run) {
+        const auto journal_paths = sync::journal::make_paths(
+            context.runtime.database_path.parent_path());
+        if (!journal_paths) {
+            return fail_app(context,
+                            ErrorCode::GarbageCollectionFailure,
+                            "cannot inspect local transaction journal: " +
+                                journal_paths.error());
+        }
+        const auto journal_state =
+            sync::journal::inspect(*journal_paths, context.key);
+        if (journal_state != sync::journal::InspectionResult::Absent) {
+            return fail_app(
+                context,
+                ErrorCode::GarbageCollectionFailure,
+                "pending or invalid local transaction journal exists; "
+                "complete recovery with sync before garbage collection");
+        }
+        auto callback =
+            make_progress_callback<integrity::GarbageCollectProgressCallback>(
+                context, GarbageCollectStage::Preparing, last_progress);
+        auto collected = integrity::garbage_collect(context.runtime,
+                                                    context.storage,
+                                                    context.key,
+                                                    true,
+                                                    std::move(callback));
+        if (!collected) {
+            auto error = make_error(context,
+                                    ErrorCode::GarbageCollectionFailure,
+                                    integrity::describe(collected.error()));
+            error.garbage_collection = collected.error().garbage_collection;
+            return std::unexpected(std::move(error));
+        }
+        return make_response(context, to_gc_completed(*collected));
+    }
     return run_with_recovery<integrity::GarbageCollectProgressCallback>(
         context,
         GarbageCollectStage::Preparing,
@@ -218,12 +268,7 @@ std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
             }
             context.remote_observed = true;
             context.gc_kept_activities = std::move(collected->kept_activities);
-            return GarbageCollectCompleted{
-                .candidate_objects = collected->candidate_objects,
-                .analysis_only = collected->analysis_only,
-                .removed_objects = collected->removed_objects,
-                .removal_elapsed = collected->removal_elapsed,
-            };
+            return to_gc_completed(*collected);
         });
 }
 

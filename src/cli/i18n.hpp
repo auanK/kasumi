@@ -217,6 +217,7 @@ enum class Key {
 
     // Garbage Collection
     GcStarting,
+    GcDryRunStarting,
     GcStagePreparing,
     GcStageAnalyzing,
     GcCandidatesNone,
@@ -226,6 +227,8 @@ enum class Key {
     GcStageFinalizing,
     GcCompleted,
     GcSummary,
+    GcDryRunSummary,
+    GcDryRunCompleted,
     GcListedObjects,
     GcConfirmedRemovals,
     ManualWriterRemovalWarning,

@@ -1466,4 +1466,72 @@ TEST(ApplicationExecuteTest,
               kasumi::application::ProfileRemotePublishState::Pending);
 }
 
+TEST(ApplicationExecuteTest,
+     GcDryRunAnalyzesCandidatesWithoutDeletingOrPublishingActivity) {
+    auto workspace = kasumi::test::make_temp_workspace("exec-gc-dry-run");
+    write_profile(workspace);
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto remote = kasumi::test::workspace_path(workspace, "remote");
+    const ExecutionEnvironment env{
+        kasumi::test::workspace_path(workspace, "app")};
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+    kasumi::test::write_text(local / "item.txt", "gc-dry-run-item");
+
+    const auto sync1 = kasumi::application::execute(
+        {Request{Operation::Sync, "demo"}, Credentials{key()}, env});
+    ASSERT_TRUE(sync1.has_value()) << sync1.error().detail;
+
+    auto opened = kasumi::transport::open_transport(remote.string());
+    ASSERT_TRUE(opened.has_value()) << opened.error().message;
+    const auto key_bytes = application_key();
+    const auto orphan_id = kasumi::crypto::content_identifier(
+        key_bytes, kasumi::hasher::hash_string("unreferenced-orphan-payload"));
+    const auto orphan_src =
+        kasumi::test::workspace_path(workspace, "orphan.bin");
+    kasumi::test::write_text(orphan_src, "unreferenced-orphan-bytes");
+    ASSERT_TRUE(kasumi::transport::put(*opened, orphan_src, orphan_id));
+
+    const auto dry = kasumi::application::execute(
+        {Request{.operation = Operation::GarbageCollect,
+                 .profile_name = "demo",
+                 .dry_run = true},
+         Credentials{key()},
+         env});
+    ASSERT_TRUE(dry.has_value()) << dry.error().detail;
+    const auto* gc = std::get_if<GarbageCollectCompleted>(&dry->data);
+    ASSERT_NE(gc, nullptr);
+    EXPECT_TRUE(gc->dry_run);
+    EXPECT_FALSE(gc->analysis_only);
+    EXPECT_EQ(gc->candidate_objects, 1U);
+    EXPECT_EQ(gc->candidate_content_objects, 1U);
+    EXPECT_EQ(gc->candidate_commit_variants, 0U);
+    EXPECT_EQ(gc->candidate_activities, 0U);
+    EXPECT_EQ(gc->removed_objects, 0U);
+
+    // Orphan remains present, no barrier remains, and no activity was published.
+    EXPECT_EQ(kasumi::transport::presence(*opened, orphan_id).value(),
+              kasumi::transport::Presence::Present);
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key_bytes);
+    EXPECT_EQ(
+        kasumi::transport::presence(*opened, layout.barrier_identifier).value(),
+        kasumi::transport::Presence::Absent);
+    const auto activity = kasumi::application::inspect_profile_activity(
+        env, "demo");
+    ASSERT_TRUE(activity.last_attempt.has_value());
+    EXPECT_EQ(activity.last_attempt->operation,
+              kasumi::application::ProfileOperationKind::Sync);
+
+    // Real GC still removes the orphan afterward.
+    const auto live_gc = kasumi::application::execute(
+        {Request{Operation::GarbageCollect, "demo"}, Credentials{key()}, env});
+    ASSERT_TRUE(live_gc.has_value()) << live_gc.error().detail;
+    const auto* live_data = std::get_if<GarbageCollectCompleted>(&live_gc->data);
+    ASSERT_NE(live_data, nullptr);
+    EXPECT_FALSE(live_data->dry_run);
+    EXPECT_EQ(live_data->removed_objects, 1U);
+    EXPECT_EQ(kasumi::transport::presence(*opened, orphan_id).value(),
+              kasumi::transport::Presence::Absent);
+}
+
 } // namespace

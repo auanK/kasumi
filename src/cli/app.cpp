@@ -320,6 +320,8 @@ int run(int argc, char* argv[]) {
         const auto display_key =
             (op == application::Operation::Repack && request.dry_run)
                 ? i18n::Key::RepackDryRunStarting
+            : (op == application::Operation::GarbageCollect && request.dry_run)
+                ? i18n::Key::GcDryRunStarting
                 : key;
         std::println("{}", i18n::format(display_key, request.profile_name));
         reports_progress = true;

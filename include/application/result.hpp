@@ -155,6 +155,10 @@ struct GarbageCollectFailure {
 struct GarbageCollectCompleted {
     std::size_t candidate_objects = 0;
     bool analysis_only = false;
+    bool dry_run = false;
+    std::size_t candidate_content_objects = 0;
+    std::size_t candidate_commit_variants = 0;
+    std::size_t candidate_activities = 0;
     std::size_t removed_objects = 0;
     std::chrono::nanoseconds removal_elapsed{};
 };

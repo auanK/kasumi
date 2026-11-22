@@ -206,7 +206,8 @@ std::expected<Response, Error> execute(ExecutionInput input) {
     const bool track_operation =
         input.request.operation != Operation::Status &&
         input.request.operation != Operation::Preview &&
-        !(input.request.operation == Operation::Repack &&
+        !((input.request.operation == Operation::Repack ||
+           input.request.operation == Operation::GarbageCollect) &&
           input.request.dry_run);
     std::expected<Response, Error> result =
         std::unexpected(Error{.operation = input.request.operation,

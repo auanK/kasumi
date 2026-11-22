@@ -320,6 +320,9 @@ required_variants(const history_storage::ReachabilityInventory& inventory,
 struct ObservePlan {
     std::vector<std::string> candidates;
     std::vector<history_storage::activity::LoadedActivity> kept_activities;
+    std::size_t candidate_content_objects = 0;
+    std::size_t candidate_commit_variants = 0;
+    std::size_t candidate_activities = 0;
     std::size_t pruned_activities = 0;
 };
 
@@ -430,6 +433,7 @@ observe(transport::Transport& storage,
         }
     }
     history_storage::detail::sort_unique(candidates);
+    const std::size_t candidate_commit_variants = candidates.size();
 
     const auto append_unprotected_candidate = [&](const std::string& identifier)
         -> std::expected<void, Error> {
@@ -459,6 +463,9 @@ observe(transport::Transport& storage,
     return ObservePlan{
         .candidates = std::move(candidates),
         .kept_activities = std::move(kept_activities),
+        .candidate_content_objects = orphan_ids.size(),
+        .candidate_commit_variants = candidate_commit_variants,
+        .candidate_activities = prunable_activities.size(),
         .pruned_activities = prunable_activities.size(),
     };
 }
@@ -496,6 +503,7 @@ std::expected<GarbageCollectResult, Error>
 garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                      transport::Transport& storage,
                      KeySpan key,
+                     bool dry_run,
                      GarbageCollectProgressCallback on_progress) {
     if (!transport::valid(storage)) {
         return std::unexpected(
@@ -526,6 +534,51 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
         return std::unexpected(
             make_error(ErrorCode::ConcurrentChange,
                        "another maintenance barrier is already present"));
+    }
+
+    if (dry_run) {
+        if (auto writers = require_no_writers(storage, layout); !writers) {
+            auto err = writers.error();
+            err.garbage_collection = failure_diagnostic;
+            return std::unexpected(std::move(err));
+        }
+
+        failure_diagnostic.stage = GarbageCollectStage::Analyzing;
+        notify(on_progress, GarbageCollectStage::Analyzing, std::nullopt, 0);
+        const history_storage::epoch::RetentionPolicy retention{
+            .min_history_depth = runtime_data.min_history_depth,
+            .min_history_age_hours = runtime_data.min_history_age_hours,
+        };
+        auto observed_plan =
+            observe(storage, key, retention, workspace_root, on_progress);
+        if (!observed_plan) {
+            auto err = observed_plan.error();
+            err.garbage_collection = failure_diagnostic;
+            return std::unexpected(std::move(err));
+        }
+
+        const auto candidate_count = observed_plan->candidates.size();
+        failure_diagnostic.candidate_objects = candidate_count;
+        notify(on_progress, GarbageCollectStage::Analyzing, candidate_count, 0);
+
+        failure_diagnostic.stage = GarbageCollectStage::Finalizing;
+        notify(on_progress,
+               GarbageCollectStage::Finalizing,
+               candidate_count,
+               0);
+        return GarbageCollectResult{
+            .candidate_objects = candidate_count,
+            .removed_objects = 0,
+            .analysis_only = false,
+            .dry_run = true,
+            .candidate_content_objects =
+                observed_plan->candidate_content_objects,
+            .candidate_commit_variants =
+                observed_plan->candidate_commit_variants,
+            .candidate_activities = observed_plan->candidate_activities,
+            .pruned_activities = observed_plan->pruned_activities,
+            .kept_activities = std::move(observed_plan->kept_activities),
+        };
     }
 
     auto barrier = protocol::establish_barrier(storage, layout, workspace_root);
@@ -640,6 +693,13 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                 .candidate_objects = candidate_count,
                 .removed_objects = 0,
                 .analysis_only = true,
+                .dry_run = false,
+                .candidate_content_objects =
+                    observed_plan->candidate_content_objects,
+                .candidate_commit_variants =
+                    observed_plan->candidate_commit_variants,
+                .candidate_activities = observed_plan->candidate_activities,
+                .pruned_activities = observed_plan->pruned_activities,
                 .kept_activities = std::move(observed_plan->kept_activities),
             });
         }
@@ -810,6 +870,12 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             .candidate_objects = candidate_count,
             .removed_objects = removed_objects,
             .analysis_only = false,
+            .dry_run = false,
+            .candidate_content_objects =
+                observed_plan->candidate_content_objects,
+            .candidate_commit_variants =
+                observed_plan->candidate_commit_variants,
+            .candidate_activities = observed_plan->candidate_activities,
             .removal_elapsed = removal_elapsed,
             .pruned_activities = observed_plan->pruned_activities,
             .kept_activities = std::move(observed_plan->kept_activities),
@@ -828,9 +894,19 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                 transport::Transport& storage,
                 std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                 GarbageCollectProgressCallback on_progress) {
+    return garbage_collect(
+        runtime_data, storage, key, false, std::move(on_progress));
+}
+
+std::expected<GarbageCollectResult, Error>
+garbage_collect(const runtime::RuntimeData& runtime_data,
+                transport::Transport& storage,
+                std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                bool dry_run,
+                GarbageCollectProgressCallback on_progress) {
     try {
         return garbage_collect_impl(
-            runtime_data, storage, key, std::move(on_progress));
+            runtime_data, storage, key, dry_run, std::move(on_progress));
     } catch (const std::bad_alloc&) {
         return std::unexpected(
             make_error(ErrorCode::StateFailure, "allocation failed"));

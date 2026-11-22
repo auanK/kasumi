@@ -2161,6 +2161,19 @@ int present(const application::Response& response, bool full) {
                 if (op != Op::GarbageCollect) {
                     return 1;
                 }
+                if (data.dry_run) {
+                    if (data.candidate_objects == 0) {
+                        print_ok_line(i18n::tr(i18n::Key::GcCandidatesNone));
+                    } else {
+                        i18n::println(i18n::Key::GcDryRunSummary,
+                                      data.candidate_objects,
+                                      data.candidate_content_objects,
+                                      data.candidate_commit_variants,
+                                      data.candidate_activities);
+                    }
+                    i18n::println(i18n::Key::GcDryRunCompleted);
+                    return 0;
+                }
                 if (data.analysis_only) {
                     const auto header =
                         format_plural(data.candidate_objects,

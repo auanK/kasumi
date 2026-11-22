@@ -51,8 +51,9 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         return invalid_request(
             "--audit-inventory cannot be combined with --initial");
     }
-    if (input.request.dry_run && operation != Operation::Repack) {
-        return invalid_request("--dry-run is only valid for repack");
+    if (input.request.dry_run && operation != Operation::Repack &&
+        operation != Operation::GarbageCollect) {
+        return invalid_request("--dry-run is only valid for repack and gc");
     }
     if (input.request.reclaim_dirty && operation != Operation::Repack) {
         return invalid_request("--reclaim-dirty is only valid for repack");
@@ -105,7 +106,9 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     }
     const bool needs_machine_identity =
         !(operation == Operation::Status || operation == Operation::Preview ||
-          (operation == Operation::Repack && input.request.dry_run));
+          ((operation == Operation::Repack ||
+            operation == Operation::GarbageCollect) &&
+           input.request.dry_run));
     if (needs_machine_identity) {
         auto identity = runtime::resolve_machine_identity(
             input.environment.app_data_dir, true);
