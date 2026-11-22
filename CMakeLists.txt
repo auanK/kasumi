@@ -558,6 +558,7 @@ add_library(kasumi_application STATIC
     src/application/inspection/inspect.cpp
     src/application/credentials.cpp
     src/application/concurrency.cpp
+    src/application/diagnostics.cpp
     src/application/environment.cpp
     src/application/execute.cpp
     src/application/profile.cpp

@@ -16,6 +16,9 @@ struct ListInvocation {};
 struct ShowInvocation {
     std::string profile_name;
 };
+struct DiagnosticsInvocation {
+    std::string profile_name;
+};
 struct KeyInvocation {
     std::string profile_name;
 };
@@ -29,6 +32,7 @@ using Invocation = std::variant<application::Request,
                                 ConfigureInvocation,
                                 ListInvocation,
                                 ShowInvocation,
+                                DiagnosticsInvocation,
                                 KeyInvocation,
                                 HelpInvocation>;
 

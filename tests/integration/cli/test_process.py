@@ -928,6 +928,23 @@ class CliProcessTest(unittest.TestCase):
         self.assertTrue((remote / repair_cid).exists())
         self.invoke("fsck", "demo")
 
+        diag_doc = run_json("diagnostics", "--json")
+        self.assertTrue(diag_doc["ok"])
+        self.assertEqual(diag_doc["command"], "diagnostics")
+        self.assertTrue(diag_doc["data"]["config_exists"])
+        self.assertTrue(diag_doc["data"]["overall_ok"])
+        self.assertGreaterEqual(len(diag_doc["data"]["profiles"]), 1)
+        self.assertIn("rclone", diag_doc["data"])
+
+        diag_single = run_json("diagnostics", "demo", "--json")
+        self.assertEqual(diag_single["profile"], "demo")
+        self.assertEqual(len(diag_single["data"]["profiles"]), 1)
+        self.assertEqual(diag_single["data"]["profiles"][0]["name"], "demo")
+        self.assertTrue(diag_single["data"]["profiles"][0]["healthy"])
+
+        diag_missing = run_json("diagnostics", "absent", "--json", expected=1)
+        self.assertEqual(diag_missing["error"]["code"], "profile_not_found")
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)

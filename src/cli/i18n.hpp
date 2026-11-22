@@ -114,6 +114,7 @@ enum class Key {
     HelpConfig,
     HelpList,
     HelpShow,
+    HelpDiagnostics,
     HelpKey,
     HelpRemoteHeads,
     HelpRemoteTree,
@@ -328,6 +329,23 @@ enum class Key {
     RemoteOrphansReadOnlyHint,
     RemoteWritersHeader,
     RemoteHealthHeader,
+
+    // Diagnostics
+    DiagnosticsHeader,
+    DiagnosticsVersion,
+    DiagnosticsOs,
+    DiagnosticsAppData,
+    DiagnosticsFreeSpace,
+    DiagnosticsConfigFound,
+    DiagnosticsConfigMissing,
+    DiagnosticsRcloneHeader,
+    DiagnosticsRcloneFound,
+    DiagnosticsRcloneMissing,
+    DiagnosticsRcloneOutdated,
+    DiagnosticsProfilesNone,
+    DiagnosticsProfileHeader,
+    DiagnosticsOverallOk,
+    DiagnosticsOverallIssues,
 
     // Inspection field labels
     FieldCommit,

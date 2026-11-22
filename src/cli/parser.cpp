@@ -106,6 +106,15 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                          argv[2]}}
                    : std::unexpected(ParseError{});
     }
+    if (command == "diagnostics") {
+        if (argc == 2) {
+            return DiagnosticsInvocation{};
+        }
+        if (argc == 3 && operand(argv[2])) {
+            return DiagnosticsInvocation{.profile_name = argv[2]};
+        }
+        return std::unexpected(ParseError{});
+    }
     if (command == "key") {
         return argc == 3 && operand(argv[2])
                    ? std::expected<Invocation, ParseError>{KeyInvocation{

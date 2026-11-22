@@ -3,6 +3,7 @@
 
 #include "application/execute.hpp"
 #include "application/inspection/result.hpp"
+#include "application/profile.hpp"
 #include "application/result.hpp"
 #include "platform/terminal.hpp"
 
@@ -131,6 +132,11 @@ void present(const application::FsckProgress& progress,
 // suppresses non-error status stdout while preserving stderr warnings.
 int present(const application::Response& response,
             bool full = false,
+            bool quiet = false);
+
+// Displays local environment and profile diagnostics and returns 0.
+int present(const application::DiagnosticsReport& report,
+            std::string_view version,
             bool quiet = false);
 
 // Displays the result of a remote inspection and returns 0.

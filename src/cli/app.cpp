@@ -180,24 +180,28 @@ int run(int argc, char* argv[]) {
         supports_remote_summary_full ? 4U : 3U;
 
     const bool supports_quiet =
-        cmd == "list" ||
+        cmd == "list" || cmd == "diagnostics" ||
         (has_profile_arg &&
          (cmd == "show" || cmd == "sync" || cmd == "status" ||
           cmd == "fsck" || cmd == "repack" || cmd == "resolve-missing" ||
           (cmd == "gc" && !is_gc_sub_kw))) ||
         is_gc_subcommand || is_remote_sub;
     const std::size_t quiet_start_index =
-        cmd == "list" ? 2U : ((is_gc_subcommand || is_remote_sub) ? 4U : 3U);
+        (cmd == "list" || (cmd == "diagnostics" && !has_profile_arg))
+            ? 2U
+            : ((is_gc_subcommand || is_remote_sub) ? 4U : 3U);
 
     const bool supports_json =
-        cmd == "list" ||
+        cmd == "list" || cmd == "diagnostics" ||
         (has_profile_arg &&
          (cmd == "show" || cmd == "sync" || cmd == "status" ||
           cmd == "fsck" || cmd == "repack" || cmd == "resolve-missing" ||
           (cmd == "gc" && !is_gc_sub_kw))) ||
         supports_remote_summary_full;
     const std::size_t json_start_index =
-        cmd == "list" ? 2U : (supports_remote_summary_full ? 4U : 3U);
+        (cmd == "list" || (cmd == "diagnostics" && !has_profile_arg))
+            ? 2U
+            : (supports_remote_summary_full ? 4U : 3U);
 
     std::size_t delimiter_index = sanitized.size();
     for (std::size_t index = 1; index < sanitized.size(); ++index) {
@@ -337,6 +341,23 @@ int run(int argc, char* argv[]) {
     }
     if (const auto* show = std::get_if<ShowInvocation>(&*parse_result)) {
         return run_profile_query(environment, show->profile_name, full, json);
+    }
+    if (const auto* diag = std::get_if<DiagnosticsInvocation>(&*parse_result)) {
+        auto report =
+            application::collect_diagnostics(environment, diag->profile_name);
+        if (!report) {
+            if (json) {
+                return present_json_profile_error(
+                    "diagnostics", diag->profile_name, report.error());
+            }
+            print_error_line(report.error().detail);
+            return 1;
+        }
+        if (json) {
+            return present_json_diagnostics(
+                *report, KASUMI_VERSION, diag->profile_name, elapsed());
+        }
+        return finish(present(*report, KASUMI_VERSION, quiet));
     }
 
     if (std::holds_alternative<ConfigureInvocation>(*parse_result)) {

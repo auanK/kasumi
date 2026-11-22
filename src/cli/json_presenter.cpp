@@ -427,6 +427,21 @@ json serialize_execution_summary(const application::ProfileExecutionSummary& e) 
     return out;
 }
 
+std::string_view
+profile_local_state_name(application::ProfileLocalState state) noexcept {
+    switch (state) {
+    case application::ProfileLocalState::Initialized:
+        return "initialized";
+    case application::ProfileLocalState::Ready:
+        return "ready";
+    case application::ProfileLocalState::Pending:
+        return "pending";
+    case application::ProfileLocalState::Problem:
+        return "problem";
+    }
+    return "problem";
+}
+
 } // namespace
 
 int present_json_parse_error(std::string_view command,
@@ -461,21 +476,7 @@ int present_json_show(const application::Profile& profile,
                       const application::ProfileActivityReport& activity,
                       bool full) {
     auto doc = make_envelope("show", profile.name, true, 0, std::nullopt);
-    std::string_view state_str = "initialized";
-    switch (state) {
-    case application::ProfileLocalState::Initialized:
-        state_str = "initialized";
-        break;
-    case application::ProfileLocalState::Ready:
-        state_str = "ready";
-        break;
-    case application::ProfileLocalState::Pending:
-        state_str = "pending";
-        break;
-    case application::ProfileLocalState::Problem:
-        state_str = "problem";
-        break;
-    }
+    const std::string_view state_str = profile_local_state_name(state);
 
     json data{
         {"name", profile.name},
@@ -548,6 +549,77 @@ int present_json_show(const application::Profile& profile,
         data["cached_remote_activities"] = std::move(cached);
     }
     doc["data"] = std::move(data);
+    emit_json(doc);
+    return 0;
+}
+
+int present_json_diagnostics(const application::DiagnosticsReport& report,
+                             std::string_view version,
+                             std::string_view requested_profile,
+                             std::chrono::nanoseconds duration) {
+    auto doc =
+        make_envelope("diagnostics", requested_profile, true, 0, duration);
+
+    json rclone{
+        {"found", report.rclone.found},
+        {"executable", platform::path::to_utf8(report.rclone.executable)},
+        {"version", report.rclone.version},
+        {"minimum_version", report.rclone.minimum_version},
+        {"meets_minimum", report.rclone.meets_minimum},
+        {"detail", report.rclone.detail},
+    };
+
+    json profiles = json::array();
+    for (const auto& item : report.profiles) {
+        json entry{
+            {"name", item.profile.name},
+            {"local_dir", platform::path::to_utf8(item.profile.local_dir)},
+            {"remote_dir", item.profile.remote_dir},
+            {"state", profile_local_state_name(item.local_state)},
+            {"problem", local_problem_name(item.local_problem)},
+            {"key_storage", application::to_string(item.profile.key_storage)},
+            {"local_dir_exists", item.local_dir_exists},
+            {"local_dir_writable", item.local_dir_writable},
+            {"local_free_bytes",
+             item.local_free_bytes ? json(*item.local_free_bytes)
+                                   : json(nullptr)},
+            {"local_capacity_bytes",
+             item.local_capacity_bytes ? json(*item.local_capacity_bytes)
+                                       : json(nullptr)},
+            {"uses_rclone", item.uses_rclone},
+            {"lock_active", item.lock_active},
+            {"journal_present", item.journal_present},
+            {"key_accessible", item.key_accessible},
+            {"database_present", item.activity.database_present},
+            {"healthy", item.healthy},
+            {"detail", item.detail},
+            {"last_attempt",
+             item.activity.last_attempt
+                 ? serialize_execution_summary(*item.activity.last_attempt)
+                 : json(nullptr)},
+        };
+        if (item.activity.accepted_commit) {
+            entry["accepted_commit_id"] =
+                item.activity.accepted_commit->commit_id;
+        } else {
+            entry["accepted_commit_id"] = nullptr;
+        }
+        profiles.push_back(std::move(entry));
+    }
+
+    doc["data"] = json{
+        {"version", version},
+        {"os", report.os_name},
+        {"app_data_dir", platform::path::to_utf8(report.app_data_dir)},
+        {"config_path", platform::path::to_utf8(report.config_path)},
+        {"config_exists", report.config_exists},
+        {"app_data_free_bytes",
+         report.app_data_free_bytes ? json(*report.app_data_free_bytes)
+                                    : json(nullptr)},
+        {"rclone", std::move(rclone)},
+        {"profiles", std::move(profiles)},
+        {"overall_ok", report.overall_ok},
+    };
     emit_json(doc);
     return 0;
 }
@@ -840,6 +912,21 @@ int present_json(std::string_view profile_name,
                            inspection_error_code_string(error),
                            error.detail,
                            duration);
+}
+
+std::string_view
+profile_local_state_name(application::ProfileLocalState state) noexcept {
+    switch (state) {
+    case application::ProfileLocalState::Initialized:
+        return "initialized";
+    case application::ProfileLocalState::Ready:
+        return "ready";
+    case application::ProfileLocalState::Pending:
+        return "pending";
+    case application::ProfileLocalState::Problem:
+        return "problem";
+    }
+    return "problem";
 }
 
 } // namespace kasumi::cli

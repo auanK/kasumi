@@ -26,6 +26,7 @@ inline constexpr auto help_topics = std::to_array<HelpTopic>({
     {"config", i18n::Key::HelpConfig},
     {"list", i18n::Key::HelpList},
     {"show", i18n::Key::HelpShow},
+    {"diagnostics", i18n::Key::HelpDiagnostics},
     {"key", i18n::Key::HelpKey},
     {"remote heads", i18n::Key::HelpRemoteHeads},
     {"remote tree", i18n::Key::HelpRemoteTree},

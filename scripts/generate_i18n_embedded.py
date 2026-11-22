@@ -29,6 +29,7 @@ PREFIXES = sorted(
     [
         ("Label", "labels."),
         ("Progress", "progress."),
+        ("Diagnostics", "diagnostics."),
         ("ResolveMissing", "resolve_missing."),
         ("Help", "command_help."),
         ("Error", "errors."),

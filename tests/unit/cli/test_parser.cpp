@@ -417,4 +417,29 @@ TEST(CliParserTest, ParsesRepackHelpTopic) {
                   "repack");
     }
 }
+
+TEST(CliParserTest, ParsesDiagnosticsWithOptionalProfileAndRejectsExtraOperands) {
+    const auto bare = parse({"diagnostics"});
+    ASSERT_TRUE(bare.has_value());
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::cli::DiagnosticsInvocation>(*bare));
+    EXPECT_TRUE(
+        std::get<kasumi::cli::DiagnosticsInvocation>(*bare).profile_name.empty());
+
+    const auto single = parse({"diagnostics", "demo"});
+    ASSERT_TRUE(single.has_value());
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::cli::DiagnosticsInvocation>(*single));
+    EXPECT_EQ(std::get<kasumi::cli::DiagnosticsInvocation>(*single).profile_name,
+              "demo");
+
+    const auto help = parse({"diagnostics", "--help"});
+    ASSERT_TRUE(help.has_value());
+    ASSERT_TRUE(std::holds_alternative<kasumi::cli::HelpInvocation>(*help));
+    EXPECT_EQ(std::get<kasumi::cli::HelpInvocation>(*help).topic,
+              "diagnostics");
+
+    EXPECT_FALSE(parse({"diagnostics", "--unknown"}).has_value());
+    EXPECT_FALSE(parse({"diagnostics", "demo", "extra"}).has_value());
+}
 } // namespace

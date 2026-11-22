@@ -25,6 +25,11 @@ int present_json_show(const application::Profile& profile,
                       const application::ProfileActivityReport& activity,
                       bool full);
 
+int present_json_diagnostics(const application::DiagnosticsReport& report,
+                             std::string_view version,
+                             std::string_view requested_profile,
+                             std::chrono::nanoseconds duration);
+
 int present_json_profile_error(std::string_view command,
                                std::string_view profile_name,
                                const application::ProfileError& error);

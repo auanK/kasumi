@@ -83,6 +83,8 @@ INSTANTIATE_TEST_SUITE_P(
     testing::ValuesIn(std::vector<std::vector<std::string>>{
         std::vector<std::string>{"sync"},
         {"status"},
+        {"show"},
+        {"diagnostics"},
         {"fsck"},
         {"gc"},
         {"gc", "remove-writer"},
@@ -388,6 +390,26 @@ TEST_F(CliInterfaceTest, JsonOutputsStructuredSchemaLockBusyAndErrorCodes) {
     EXPECT_NE(sync_dry.out.find("\"command\":\"sync\""), std::string::npos);
     EXPECT_NE(sync_dry.out.find("\"dry_run\":true"), std::string::npos);
     EXPECT_NE(sync_dry.out.find("\"upload\":1"), std::string::npos);
+
+    const auto diag_all = run({"kasumi", "diagnostics", "--json"});
+    EXPECT_EQ(diag_all.code, 0) << diag_all.out;
+    EXPECT_TRUE(diag_all.err.empty());
+    EXPECT_NE(diag_all.out.find("\"command\":\"diagnostics\""),
+              std::string::npos);
+    EXPECT_NE(diag_all.out.find("\"overall_ok\":true"), std::string::npos);
+    EXPECT_EQ(diag_all.out.find(std::string(64, '7')), std::string::npos);
+
+    const auto diag_missing =
+        run({"kasumi", "diagnostics", "absent", "--json"});
+    EXPECT_EQ(diag_missing.code, 1);
+    EXPECT_TRUE(diag_missing.err.empty());
+    EXPECT_NE(diag_missing.out.find("\"code\":\"profile_not_found\""),
+              std::string::npos);
+
+    const auto diag_quiet = run({"kasumi", "diagnostics", "--quiet"});
+    EXPECT_EQ(diag_quiet.code, 0);
+    EXPECT_TRUE(diag_quiet.out.empty());
+    EXPECT_TRUE(diag_quiet.err.empty());
 }
 class GeneralOptionTest : public CliInterfaceTest,
                           public testing::WithParamInterface<const char*> {};

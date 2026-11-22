@@ -240,6 +240,49 @@ ProfileActivityReport
 inspect_profile_activity(const ExecutionEnvironment& environment,
                          std::string_view profile_name);
 
+struct DiagnosticsRcloneInfo {
+    bool found = false;
+    std::filesystem::path executable;
+    std::string version;
+    std::string minimum_version;
+    bool meets_minimum = false;
+    std::string detail;
+};
+
+struct ProfileDiagnostic {
+    Profile profile;
+    ProfileLocalState local_state = ProfileLocalState::Problem;
+    ProfileLocalProblem local_problem = ProfileLocalProblem::None;
+    bool local_dir_exists = false;
+    bool local_dir_writable = false;
+    std::optional<std::uint64_t> local_free_bytes;
+    std::optional<std::uint64_t> local_capacity_bytes;
+    bool uses_rclone = false;
+    bool lock_active = false;
+    bool journal_present = false;
+    bool key_accessible = false;
+    bool healthy = false;
+    std::string detail;
+    ProfileActivityReport activity;
+};
+
+struct DiagnosticsReport {
+    std::string os_name;
+    std::filesystem::path app_data_dir;
+    std::filesystem::path config_path;
+    bool config_exists = false;
+    std::optional<std::uint64_t> app_data_free_bytes;
+    DiagnosticsRcloneInfo rclone;
+    std::vector<ProfileDiagnostic> profiles;
+    bool overall_ok = true;
+};
+
+// Inspects local environment, rclone toolchain, and profile health without
+// modifying state, exposing secrets, or contacting remote storage.
+std::expected<DiagnosticsReport, ProfileError>
+collect_diagnostics(const ExecutionEnvironment& environment,
+                    std::string_view profile_name = {});
+
 } // namespace kasumi::application
 
 #endif
