@@ -35,6 +35,7 @@ TEST_P(ApplicationGrammarTest, ParsesOperationAndArguments) {
     EXPECT_EQ(actual.profile_name, test.expected.profile_name);
     EXPECT_EQ(actual.initial, test.expected.initial);
     EXPECT_EQ(actual.audit_inventory, test.expected.audit_inventory);
+    EXPECT_EQ(actual.repair, test.expected.repair);
     EXPECT_EQ(actual.writer_identifier, test.expected.writer_identifier);
     EXPECT_EQ(actual.confirm_abandoned, test.expected.confirm_abandoned);
     EXPECT_EQ(actual.confirm, test.expected.confirm);
@@ -62,6 +63,17 @@ INSTANTIATE_TEST_SUITE_P(
                         {.operation = Operation::Sync,
                          .profile_name = "demo",
                          .audit_inventory = true}},
+        ApplicationCase{"SyncRepair",
+                        {"sync", "demo", "--repair"},
+                        {.operation = Operation::Sync,
+                         .profile_name = "demo",
+                         .repair = true}},
+        ApplicationCase{"SyncRepairWithAudit",
+                        {"sync", "demo", "--repair", "--audit-inventory"},
+                        {.operation = Operation::Sync,
+                         .profile_name = "demo",
+                         .audit_inventory = true,
+                         .repair = true}},
         ApplicationCase{
             "Status",
             {"status", "demo"},
@@ -344,6 +356,11 @@ INSTANTIATE_TEST_SUITE_P(
                     {"sync", "demo", "--dry-run", "--initial"}},
         InvalidCase{"AuditIncompatibleMode",
                     {"sync", "demo", "--audit-inventory", "--initial"}},
+        InvalidCase{"RepairDuplicate", {"sync", "demo", "--repair", "--repair"}},
+        InvalidCase{"RepairWithDryRun",
+                    {"sync", "demo", "--repair", "--dry-run"}},
+        InvalidCase{"RepairWithInitial",
+                    {"sync", "demo", "--repair", "--initial"}},
         InvalidCase{"RequiredConfirmation", {"gc", "remove-barrier", "demo"}},
         InvalidCase{"GcDuplicateDryRun", {"gc", "demo", "--dry-run", "--dry-run"}},
         InvalidCase{"GcDryRunOnSubcommand",

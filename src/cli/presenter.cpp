@@ -2098,6 +2098,12 @@ int present(const application::Response& response, bool full, bool quiet) {
                 } else {
                     print_ok_line(i18n::tr(i18n::Key::SyncCompleted));
                 }
+                if (data.repaired > 0) {
+                    i18n::println(data.repaired == 1
+                                      ? i18n::Key::SyncRepairedSingular
+                                      : i18n::Key::SyncRepairedPlural,
+                                  data.repaired);
+                }
                 if (data.physical_objects_uploaded ||
                     data.physical_objects_downloaded ||
                     data.local_delta_reused_bytes) {

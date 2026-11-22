@@ -37,6 +37,7 @@ struct ParseError {
     // Exit code returned to the operating system.
     int exit_code = 1;
     bool unsupported_sync_audit_combination = false;
+    bool unsupported_sync_repair_combination = false;
 };
 
 // Parses command-line arguments into an application invocation.

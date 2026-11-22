@@ -284,16 +284,21 @@ int run(int argc, char* argv[]) {
             const auto topic = topic_on_error();
             const std::string_view err_cmd =
                 !topic.empty() ? std::string_view{topic} : json_cmd_on_error();
-            return present_json_parse_error(
-                err_cmd,
+            const std::string_view detail =
                 parse_result.error().unsupported_sync_audit_combination
                     ? "--audit-inventory cannot be combined with --dry-run or "
                       "--initial"
-                    : "invalid arguments or options");
+                : parse_result.error().unsupported_sync_repair_combination
+                    ? "--repair cannot be combined with --dry-run or --initial"
+                    : "invalid arguments or options";
+            return present_json_parse_error(err_cmd, detail);
         }
         if (parse_result.error().unsupported_sync_audit_combination) {
             std::println(
                 stderr, "{}", i18n::tr(i18n::Key::ErrorSyncAuditCombination));
+        } else if (parse_result.error().unsupported_sync_repair_combination) {
+            std::println(
+                stderr, "{}", i18n::tr(i18n::Key::ErrorSyncRepairCombination));
         }
         present_parse_error(topic_on_error());
         return parse_result.error().exit_code;

@@ -1545,6 +1545,8 @@ ReconcileResult reconcile(const Input& input) {
         .has_conflicts = conflict || input.storage.history_has_conflicts,
         .requires_local_mutation = requires_local_mutation,
         .requires_storage_repair = requires_storage_repair,
+        .repair_uploads =
+            static_cast<std::uint32_t>(repair_upload_paths.size()),
         .candidate_shared_tree = candidate->tree,
         .shared_tree_changed = shared_tree_changed,
         .requires_publication = requires_publication,

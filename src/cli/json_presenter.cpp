@@ -381,6 +381,7 @@ json serialize_sync_completed(const application::SyncCompleted& sync) {
         {"renamed", sync.renamed},
         {"created_dirs", sync.created_dirs},
         {"removed_dirs", sync.removed_dirs},
+        {"repaired", sync.repaired},
         {"upload_bytes", sync.upload_bytes},
         {"download_bytes", sync.download_bytes},
         {"published", sync.published},

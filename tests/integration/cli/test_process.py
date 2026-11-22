@@ -908,6 +908,26 @@ class CliProcessTest(unittest.TestCase):
         self.assertEqual(rm_confirm["data"]["resolved_count"], 1)
         self.assertTrue(rm_confirm["data"]["published"])
 
+        # Exercise sync --repair on a missing remote object still present locally.
+        (local / "repair_me.bin").write_bytes(b"R" * (300 * 1024))
+        self.invoke("sync", "demo")
+        contents_after = self.invoke("remote", "contents", "demo").decode("utf-8")
+        repair_cid = None
+        for block in contents_after.split("Content ID:")[1:]:
+            if "repair_me.bin" in block:
+                repair_cid = block.strip().splitlines()[0].strip()
+                break
+        self.assertIsNotNone(repair_cid, contents_after)
+        self.assertTrue((remote / repair_cid).exists())
+        (remote / repair_cid).unlink()
+
+        repair_doc = run_json("sync", "demo", "--repair", "--json")
+        self.assertTrue(repair_doc["ok"])
+        self.assertEqual(repair_doc["data"]["repaired"], 1)
+        self.assertFalse(repair_doc["data"]["published"])
+        self.assertTrue((remote / repair_cid).exists())
+        self.invoke("fsck", "demo")
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)

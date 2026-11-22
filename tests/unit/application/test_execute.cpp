@@ -38,6 +38,7 @@ using kasumi::application::Profile;
 using kasumi::application::RepackCompleted;
 using kasumi::application::Request;
 using kasumi::application::RuntimeSummary;
+using kasumi::application::SyncCompleted;
 using kasumi::test::TempWorkspace;
 
 MasterKeyHex key() {
@@ -1539,6 +1540,120 @@ TEST(ApplicationExecuteTest,
     EXPECT_EQ(live_data->removed_objects, 1U);
     EXPECT_EQ(kasumi::transport::presence(*opened, orphan_id).value(),
               kasumi::transport::Presence::Absent);
+}
+
+TEST(ApplicationExecuteTest, SyncRepairRejectsInvalidCombinations) {
+    auto workspace = kasumi::test::make_temp_workspace("exec-repair-invalid");
+    write_profile(workspace);
+    const ExecutionEnvironment env{
+        kasumi::test::workspace_path(workspace, "app")};
+
+    for (const auto& req : {
+             Request{.operation = Operation::Status,
+                     .profile_name = "demo",
+                     .repair = true},
+             Request{.operation = Operation::Sync,
+                     .profile_name = "demo",
+                     .initial = true,
+                     .repair = true},
+         }) {
+        const auto res =
+            kasumi::application::execute({req, Credentials{key()}, env});
+        ASSERT_FALSE(res.has_value());
+        EXPECT_EQ(res.error().code, ErrorCode::RuntimeFailure);
+    }
+}
+
+TEST(ApplicationExecuteTest,
+     SyncRepairReuploadsMissingLooseAndPackedObjectsFromLocalFiles) {
+    auto workspace = kasumi::test::make_temp_workspace("exec-sync-repair");
+    write_profile(workspace);
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto remote = kasumi::test::workspace_path(workspace, "remote");
+    const ExecutionEnvironment env{
+        kasumi::test::workspace_path(workspace, "app")};
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+
+    // > 256 KiB file is stored as a loose Content object; 16 small files trigger
+    // Micro-Packing even on local transport (min_pack_blobs == 16 when no
+    // backend physical_hash_batch is present).
+    std::string loose_payload(300U * 1024U, 'L');
+    for (std::size_t i = 0; i < loose_payload.size(); i += 131U) {
+        loose_payload[i] = static_cast<char>('A' + (i % 26U));
+    }
+    kasumi::test::write_text(local / "loose.bin", loose_payload);
+    for (int i = 0; i < 16; ++i) {
+        kasumi::test::write_text(
+            local / ("small_" + std::to_string(i) + ".txt"),
+            "packed-repair-" + std::to_string(i));
+    }
+
+    const auto initial = kasumi::application::execute(
+        {Request{Operation::Sync, "demo"}, Credentials{key()}, env});
+    ASSERT_TRUE(initial.has_value()) << initial.error().detail;
+
+    const auto activity_before =
+        kasumi::application::inspect_profile_activity(env, "demo");
+    ASSERT_TRUE(activity_before.accepted_commit.has_value());
+    const auto head_before = activity_before.accepted_commit->commit_id;
+
+    // Delete both the loose Content object and the Micro-Pack from remote storage.
+    auto opened = kasumi::transport::open_transport(remote.string());
+    ASSERT_TRUE(opened.has_value()) << opened.error().message;
+    const auto key_bytes = application_key();
+    const auto loose_cid = kasumi::crypto::content_identifier(
+        key_bytes, kasumi::hasher::hash_string(loose_payload));
+    ASSERT_EQ(kasumi::transport::presence(*opened, loose_cid).value(),
+              kasumi::transport::Presence::Present);
+    ASSERT_TRUE(kasumi::transport::remove(*opened, loose_cid));
+
+    auto listed = kasumi::transport::list(*opened);
+    ASSERT_TRUE(listed.has_value());
+    std::vector<std::string> removed_packs;
+    for (const auto& id : *listed) {
+        if (id.size() == 64U && id.find('/') == std::string::npos &&
+            id != loose_cid) {
+            removed_packs.push_back(id);
+            ASSERT_TRUE(kasumi::transport::remove(*opened, id));
+        }
+    }
+    ASSERT_EQ(removed_packs.size(), 1U);
+
+    // Ordinary NOOP sync does not list the full vault or repair unreferenced objects.
+    const auto noop = kasumi::application::execute(
+        {Request{Operation::Sync, "demo"}, Credentials{key()}, env});
+    ASSERT_TRUE(noop.has_value()) << noop.error().detail;
+    const auto* noop_sync = std::get_if<SyncCompleted>(&noop->data);
+    ASSERT_NE(noop_sync, nullptr);
+    EXPECT_EQ(noop_sync->repaired, 0U);
+    EXPECT_EQ(kasumi::transport::presence(*opened, loose_cid).value(),
+              kasumi::transport::Presence::Absent);
+
+    // --repair lists remote storage, detects missing loose + pack objects, and repairs them.
+    const auto repaired = kasumi::application::execute(
+        {Request{.operation = Operation::Sync,
+                 .profile_name = "demo",
+                 .repair = true},
+         Credentials{key()},
+         env});
+    ASSERT_TRUE(repaired.has_value()) << repaired.error().detail;
+    const auto* repaired_sync = std::get_if<SyncCompleted>(&repaired->data);
+    ASSERT_NE(repaired_sync, nullptr);
+    EXPECT_EQ(repaired_sync->repaired, 17U);
+    EXPECT_FALSE(repaired_sync->published);
+    EXPECT_EQ(kasumi::transport::presence(*opened, loose_cid).value(),
+              kasumi::transport::Presence::Present);
+    EXPECT_EQ(kasumi::transport::presence(*opened, removed_packs.front()).value(),
+              kasumi::transport::Presence::Present);
+
+    const auto activity_after =
+        kasumi::application::inspect_profile_activity(env, "demo");
+    ASSERT_TRUE(activity_after.accepted_commit.has_value());
+    EXPECT_EQ(activity_after.accepted_commit->commit_id, head_before);
+
+    const auto audit = kasumi::application::execute(
+        {Request{Operation::Fsck, "demo"}, Credentials{key()}, env});
+    ASSERT_TRUE(audit.has_value()) << audit.error().detail;
 }
 
 } // namespace

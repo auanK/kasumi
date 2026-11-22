@@ -26,6 +26,7 @@ namespace {
 SyncCompleted compute_sync_summary(const reconciliation::Result& result) {
     SyncCompleted summary;
     summary.total = static_cast<std::uint32_t>(sync_plan_size(result.plan));
+    summary.repaired = result.repair_uploads;
     summary.published = result.requires_publication;
     summary.pending =
         static_cast<std::uint32_t>(result.pending_materializations.size());
@@ -228,7 +229,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                             context.key,
                             {},
                             allow_unreferenced_content_reuse,
-                            &meter);
+                            &meter,
+                            context.repair);
                     if (!available) {
                         return fail_app(
                             context,
@@ -312,7 +314,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     confirmed_missing,
                     initial_pass,
                     allow_unreferenced_content_reuse,
-                    true);
+                    true,
+                    context.repair);
                 if (!stabilized) {
                     return fail_app(
                         context,

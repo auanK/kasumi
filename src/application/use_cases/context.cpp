@@ -30,6 +30,7 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     output.app_data_dir = input.environment.app_data_dir;
     output.initial_sync = input.request.initial;
     output.audit_inventory = input.request.audit_inventory;
+    output.repair = input.request.repair;
     output.dry_run = input.request.dry_run;
     output.reclaim_dirty = input.request.reclaim_dirty;
     output.writer_identifier = input.request.writer_identifier;
@@ -47,9 +48,15 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     if (input.request.audit_inventory && operation != Operation::Sync) {
         return invalid_request("--audit-inventory is only valid for sync");
     }
+    if (input.request.repair && operation != Operation::Sync) {
+        return invalid_request("--repair is only valid for sync");
+    }
     if (input.request.audit_inventory && input.request.initial) {
         return invalid_request(
             "--audit-inventory cannot be combined with --initial");
+    }
+    if (input.request.repair && input.request.initial) {
+        return invalid_request("--repair cannot be combined with --initial");
     }
     if (input.request.dry_run && operation != Operation::Repack &&
         operation != Operation::GarbageCollect &&
