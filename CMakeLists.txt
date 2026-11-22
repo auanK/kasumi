@@ -24,6 +24,12 @@ option(
     OFF
 )
 
+option(
+    KASUMI_BUILD_FUZZERS
+    "Build standalone Clang libFuzzer targets under tests/fuzz"
+    OFF
+)
+
 add_library(kasumi_warnings INTERFACE)
 if(WIN32)
     add_compile_definitions(NOMINMAX _CRT_SECURE_NO_WARNINGS)

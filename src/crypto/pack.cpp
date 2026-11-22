@@ -320,6 +320,81 @@ write_encrypted_pack(std::span<const PackMemberSource> members,
 }
 
 std::expected<VerifiedPack, std::string>
+decode_verified_pack_plaintext(std::vector<std::uint8_t> plaintext,
+                               std::optional<Hash> expected_pack_hash) {
+    bool transferred = false;
+    secure_memory::WipeGuard plain_guard{plaintext, &transferred};
+
+    if (plaintext.size() < kpak_header_size ||
+        !std::equal(kpak_magic.begin(), kpak_magic.end(), plaintext.begin()) ||
+        plaintext[4] != kpak_version) {
+        return std::unexpected("invalid KPAK header");
+    }
+
+    const std::uint32_t count =
+        wire::decode_le<std::uint32_t>(plaintext.data() + 5);
+    if (count == 0 || count > MAXIMUM_PACK_MEMBERS) {
+        return std::unexpected("invalid KPAK member count");
+    }
+
+    const std::size_t data_offset =
+        kpak_header_size + static_cast<std::size_t>(count) * kpak_entry_size;
+    if (plaintext.size() < data_offset) {
+        return std::unexpected("truncated KPAK member table");
+    }
+
+    VerifiedPack pack;
+    pack.members.reserve(count);
+    pack.slices.reserve(count);
+
+    std::uint64_t expected_cursor = 0;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint8_t* entry =
+            plaintext.data() + kpak_header_size + i * kpak_entry_size;
+        Hash hash{};
+        std::memcpy(hash.data(), entry, HASH_SIZE);
+        const std::uint32_t offset =
+            wire::decode_le<std::uint32_t>(entry + HASH_SIZE);
+        const std::uint32_t size =
+            wire::decode_le<std::uint32_t>(entry + HASH_SIZE + 4);
+        if (i > 0 && !(pack.members.back().hash < hash)) {
+            return std::unexpected("KPAK member hashes are not strictly sorted");
+        }
+        if (offset != expected_cursor ||
+            size > MAXIMUM_PACK_PLAINTEXT_SIZE - expected_cursor) {
+            return std::unexpected("KPAK member offsets or sizes are invalid");
+        }
+        expected_cursor += size;
+        pack.members.push_back(PackMemberDescriptor{.hash = hash, .size = size});
+        pack.slices.push_back(
+            VerifiedPackSlice{.offset = data_offset + offset, .size = size});
+    }
+
+    if (data_offset + expected_cursor != plaintext.size()) {
+        return std::unexpected("KPAK payload size mismatch");
+    }
+
+    const auto pack_hash = compute_pack_hash(pack.members);
+    if (!pack_hash ||
+        (expected_pack_hash && *pack_hash != *expected_pack_hash)) {
+        return std::unexpected("KPAK pack hash verification failed");
+    }
+
+    for (std::size_t i = 0; i < pack.members.size(); ++i) {
+        const auto slice = std::span<const std::uint8_t>{
+            plaintext.data() + pack.slices[i].offset, pack.slices[i].size};
+        if (hash_span(slice) != pack.members[i].hash) {
+            return std::unexpected("KPAK member payload BLAKE3 mismatch");
+        }
+    }
+
+    pack.pack_hash = *pack_hash;
+    pack.plaintext = std::move(plaintext);
+    transferred = true;
+    return pack;
+}
+
+std::expected<VerifiedPack, std::string>
 load_verified_pack(const std::filesystem::path& encrypted_path,
                    std::span<const std::uint8_t, KEY_SIZE> master_key,
                    std::optional<Hash> expected_pack_hash) {
@@ -342,73 +417,7 @@ load_verified_pack(const std::filesystem::path& encrypted_path,
     if (!plain) {
         return std::unexpected("failed to authenticate and decrypt Micro-Pack");
     }
-    bool transferred = false;
-    secure_memory::WipeGuard plain_guard{*plain, &transferred};
-
-    if (plain->size() < kpak_header_size ||
-        !std::equal(kpak_magic.begin(), kpak_magic.end(), plain->begin()) ||
-        (*plain)[4] != kpak_version) {
-        return std::unexpected("invalid KPAK header");
-    }
-
-    const std::uint32_t count = wire::decode_le<std::uint32_t>(plain->data() + 5);
-    if (count == 0 || count > MAXIMUM_PACK_MEMBERS) {
-        return std::unexpected("invalid KPAK member count");
-    }
-
-    const std::size_t data_offset =
-        kpak_header_size + static_cast<std::size_t>(count) * kpak_entry_size;
-    if (plain->size() < data_offset) {
-        return std::unexpected("truncated KPAK member table");
-    }
-
-    VerifiedPack pack;
-    pack.members.reserve(count);
-    pack.slices.reserve(count);
-
-    std::uint64_t expected_cursor = 0;
-    for (std::uint32_t i = 0; i < count; ++i) {
-        const std::uint8_t* entry =
-            plain->data() + kpak_header_size + i * kpak_entry_size;
-        Hash hash{};
-        std::memcpy(hash.data(), entry, HASH_SIZE);
-        const std::uint32_t offset = wire::decode_le<std::uint32_t>(entry + HASH_SIZE);
-        const std::uint32_t size =
-            wire::decode_le<std::uint32_t>(entry + HASH_SIZE + 4);
-        if (i > 0 && !(pack.members.back().hash < hash)) {
-            return std::unexpected("KPAK member hashes are not strictly sorted");
-        }
-        if (offset != expected_cursor ||
-            size > MAXIMUM_PACK_PLAINTEXT_SIZE - expected_cursor) {
-            return std::unexpected("KPAK member offsets or sizes are invalid");
-        }
-        expected_cursor += size;
-        pack.members.push_back(PackMemberDescriptor{.hash = hash, .size = size});
-        pack.slices.push_back(
-            VerifiedPackSlice{.offset = data_offset + offset, .size = size});
-    }
-
-    if (data_offset + expected_cursor != plain->size()) {
-        return std::unexpected("KPAK payload size mismatch");
-    }
-
-    const auto pack_hash = compute_pack_hash(pack.members);
-    if (!pack_hash || (expected_pack_hash && *pack_hash != *expected_pack_hash)) {
-        return std::unexpected("KPAK pack hash verification failed");
-    }
-
-    for (std::size_t i = 0; i < pack.members.size(); ++i) {
-        const auto slice = std::span<const std::uint8_t>{
-            plain->data() + pack.slices[i].offset, pack.slices[i].size};
-        if (hash_span(slice) != pack.members[i].hash) {
-            return std::unexpected("KPAK member payload BLAKE3 mismatch");
-        }
-    }
-
-    pack.pack_hash = *pack_hash;
-    pack.plaintext = std::move(*plain);
-    transferred = true;
-    return pack;
+    return decode_verified_pack_plaintext(std::move(*plain), expected_pack_hash);
 }
 
 std::expected<std::vector<PackMemberDescriptor>, std::string>
