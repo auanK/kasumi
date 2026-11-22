@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.21.1]
+
+### Changed
+
+- Enrich `--log-file <path>` non-JSON text logs with local timestamps (`±HH:MM`), explicit status tags (`[OK]`, `[WARN]`, `[PARTIAL]`, `[LOCKED]`, `[CANCELLED]`, `[ERROR]`), language-independent compact operational summaries with human-readable transfer sizes, elapsed duration (`(<seconds> s)`), and indented detail lines (pending paths, warnings, unhealthy diagnostics), written in a single atomic append per command.
+
+### Added
+
+- Add top-level UTC ISO-8601 `timestamp` (`YYYY-MM-DDTHH:MM:SSZ`) to every `--json` response envelope (`schema_version: 1`) and `kasumi ... --json --log-file <path>` NDJSON line.
+- Add concise language-independent `data.summary` strings across `--json` operation, plan, diagnostics, and inspection payloads alongside all existing raw structured fields.
+
+### Documentation
+
+- Document enriched `--log-file` text format, `--json` `timestamp`, and `data.summary` in [configuration-and-usage.md](docs/configuration-and-usage.md).
+
+### Upgrade Notes
+
+- Protocol and local state formats remain `KCOM` v4, `KACT` v1, `KPAK\x01`, `state.db` schema v2, `transaction.bin.enc`, and `config.toml`, staying 100% compatible with `v0.19.x` and `v0.21.0`. Existing `--json` raw numeric/array/error fields are unchanged (`timestamp` and `data.summary` are additive).
+
 ## [0.21.0]
 
 ### Added
