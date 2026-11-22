@@ -179,6 +179,15 @@ An `analysis_only` result means no candidate removal occurred, although barrier
 and probe publication/cleanup may have occurred. It is not a selectable mode.
 Transport and protocol errors fail the operation.
 
+By contrast, `kasumi gc <profile> --dry-run` is an explicit read-only preview:
+it inspects the local transaction journal read-only (refusing active or invalid
+journals without running recovery), verifies that no maintenance barrier or
+active writer markers exist, runs the authenticated history/content/activity
+observation and global candidate validation, reports candidate totals broken
+down into content objects, redundant commit variants, and expired `KACT` v1
+activities, establishes no remote barrier, deletes zero objects, and publishes
+no `KACT` activity record.
+
 ### Maintenance procedure
 
 1. Stop Sync schedulers and active Sync processes on all clients using the

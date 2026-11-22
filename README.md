@@ -28,7 +28,8 @@ Interactive runs show live progress on one terminal line. Sync reports physical 
 - **Offline and shared operational traceability** recording local execution outcomes and accepted commit provenance in `db.sqlite`, plus immutable `KACT` v1 maintenance records (`fsck`, `gc`, writer/barrier removal) inspectable via `show [--full]`, `config`, `remote heads`/`commits`, and `remote summary [--full]` with zero extra remote requests during `sync`.
 - **Interrupted-operation recovery** through an authenticated transaction journal.
 - **Persistent BLAKE3 hash cache** shared by sync and read-only plan observation.
-- **Integrity and maintenance tools** to audit referenced content, packs, and chunks (`fsck`), consolidate fragmented Micro-Packs locally without remote downloads or deletions (`repack`), and directly remove authenticated orphan physical objects and redundant CommitVariants (`gc`).
+- **Integrity and maintenance tools** to audit referenced content, packs, and chunks (`fsck`), consolidate fragmented Micro-Packs locally without remote downloads or deletions (`repack`), preview or remove authenticated orphan physical objects and redundant CommitVariants (`gc [--dry-run]`), and guard missing-content resolution with preview/confirmation (`resolve-missing [--dry-run | --confirm]`).
+- **Automation-friendly CLI** supporting `--json` (`schema_version: 1` with language-independent `error.code`) and `--quiet` alongside `--full`.
 
 ## Quick Start
 

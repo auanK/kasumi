@@ -161,7 +161,8 @@ replace the binary manually.
 
 When running Kasumi in automated scripts, cron jobs, or task schedulers:
 
-* **Process Exit Codes**: Handle every [documented exit code](configuration-and-usage.md#exit-codes). Code `2` means partial synchronization with pending materializations, not full success; retry once the missing content is restored. Never automatically accept those files as deletions.
+* **Structured Automation (`--json` and `--quiet`)**: Prefer `kasumi <command> <profile> --json` in unattended scripts to inspect `ok`, `exit_code`, and stable `error.code` (`lock_busy`, `partial_pending`, `confirmation_required`, etc.) without parsing localized text; use `--quiet` for cron/Task Scheduler jobs that want silent success and errors only.
+* **Process Exit Codes**: Handle every [documented exit code](configuration-and-usage.md#exit-codes). Code `2` means partial synchronization with pending materializations, not full success; retry once the missing content is restored. Never automatically run `resolve-missing --confirm` on pending paths without human review.
 * **Single-Process Profile Lock**: `status`, `sync --dry-run`, `sync`, `fsck`, `repack`, and `gc` use an OS file lock (`profile-<name>.lock`). If an automated script attempts one of these operations while another holds that profile lock, it exits with code `1`. Remote inspection uses a separate path without this lock. Ensure scheduled jobs do not overlap.
 * **External Scheduling**: Kasumi does not contain an internal background daemon. Use system scheduling tools:
   * **Linux**: `cron` or `systemd` timers.
