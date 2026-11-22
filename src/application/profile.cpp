@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <monocypher.h>
 #include <optional>
 #include <thread>
 #include <utility>
@@ -999,7 +1000,8 @@ update_profile(const ExecutionEnvironment& environment, Profile profile) {
 std::expected<void, ProfileError>
 set_profile_key(const ExecutionEnvironment& environment,
                 std::string_view profile_name,
-                ProfileCredentials credentials) {
+                ProfileCredentials credentials,
+                bool allow_replace) {
     std::expected<runtime::vault::KeyBytes, runtime::Error> master_key_res =
         std::unexpected(runtime::Error{.code = runtime::ErrorCode::KeyInvalid,
                                        .detail = "uninitialized"});
@@ -1050,6 +1052,29 @@ set_profile_key(const ExecutionEnvironment& environment,
         if (auto ensure_res = runtime::ensure_profile_directory(*paths_res);
             !ensure_res) {
             return std::unexpected(map_runtime_error(ensure_res.error()));
+        }
+        auto existing_key =
+            it->key_storage == runtime::KeyStorage::Vault
+                ? runtime::vault::read_vault(paths_res->key_path)
+                : runtime::vault::read_only(paths_res->key_path);
+        if (existing_key) {
+            crypto::secure_memory::WipeGuard existing_guard{*existing_key};
+            if (crypto_verify32(existing_key->data(), master_key_res->data()) ==
+                0) {
+                return {};
+            }
+            if (!allow_replace) {
+                return fail_profile(
+                    ProfileErrorCode::AlreadyExists,
+                    "a different key is already stored for this profile; "
+                    "replacing it does not re-encrypt the vault and will break "
+                    "access unless the new key matches the vault");
+            }
+        } else if (existing_key.error().code !=
+                       runtime::ErrorCode::KeyNotFound &&
+                   existing_key.error().code !=
+                       runtime::ErrorCode::KeyInvalid) {
+            return std::unexpected(map_runtime_error(existing_key.error()));
         }
         std::expected<void, runtime::Error> write_res;
         if (it->key_storage == runtime::KeyStorage::Vault) {

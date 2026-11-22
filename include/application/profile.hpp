@@ -76,10 +76,14 @@ std::expected<void, ProfileError>
 update_profile(const ExecutionEnvironment& environment, Profile profile);
 
 // Derives or decodes credentials and saves them to the profile's key storage.
+// Succeeds without rewriting when the stored key already matches. If a
+// different valid key is already stored and allow_replace is false, fails with
+// ProfileErrorCode::AlreadyExists without modifying the stored key.
 std::expected<void, ProfileError>
 set_profile_key(const ExecutionEnvironment& environment,
                 std::string_view profile_name,
-                ProfileCredentials credentials);
+                ProfileCredentials credentials,
+                bool allow_replace = false);
 
 // Removes configuration, key, and state; preserves synchronized directory.
 std::expected<void, ProfileError>

@@ -460,7 +460,9 @@
     "problem_reason": "Motivo: {}",
     "invalid_profile_name": "Use apenas letras, números, '_' ou '-' no nome do perfil.",
     "invalid_remote_path": "Destino inválido. Use um caminho local absoluto ou remoto:pasta (sem '..' ou '/' no final da pasta remota).",
-    "confirm_edit": "\nAlterar caminhos do perfil '{0}'?\nLocal: {1} -> {2}\nDestino: {3} -> {4}\nArquivos não serão movidos; dados remotos não serão migrados.\nUma pasta local vazia pode causar exclusões no próximo Sync.\nConfira 'kasumi status {0}' antes de sincronizar.\nSalvar alterações [s/N]: "
+    "confirm_edit": "\nAlterar caminhos do perfil '{0}'?\nLocal: {1} -> {2}\nDestino: {3} -> {4}\nArquivos não serão movidos; dados remotos não serão migrados.\nUma pasta local vazia pode causar exclusões no próximo Sync.\nConfira 'kasumi status {0}' antes de sincronizar.\nSalvar alterações [s/N]: ",
+    "confirm_replace_key": "\nUma chave diferente já está armazenada para o perfil '{}'.\nSubstituí-la não recriptografa o cofre e quebrará o acesso se a nova chave não corresponder ao cofre.\nSubstituir chave armazenada [s/N]: ",
+    "key_replace_cancelled": "Substituição da chave cancelada; chave existente preservada."
   },
   "manual_barrier_removal": {
     "warning": "O Kasumi não pode determinar se uma coleta de lixo ou manutenção ainda está ativa em outros dispositivos. A verificação da barreira não pode garantir que nenhuma operação esteja em execução. Certifique-se de que nenhuma coleta ou manutenção esteja ativa antes da remoção.",
@@ -508,7 +510,7 @@
     "options": "\nOpção global: --lang <código>, antes do comando (en ou pt-BR).\nAjuda: -h, --help. Opções repetidas, desconhecidas ou sem valor são rejeitadas.\n",
     "list": "Uso: kasumi list\n\nLista os nomes dos perfis configurados, um por linha.\n",
     "show": "Uso: kasumi show <perfil> [--full]\n\nMostra configurações do perfil, último sync, autoria do commit aceito e atividade em cache sem acessar o remoto.\n--full exibe IDs completos de commit e máquina e o histórico local e em cache.\n",
-    "key": "Uso: kasumi key <perfil>\n\nReinsere e salva a chave criptográfica (senha e salto) de um perfil.\nUse após alterar key_storage no kasumi config ou config.toml.\nExemplo: kasumi key Programming\n"
+    "key": "Uso: kasumi key <perfil>\n\nReinsere ou substitui a chave criptográfica armazenada (senha e salto) de um perfil.\nNão recriptografa dados remotos; substituir uma chave existente diferente exige confirmação.\nUse após alterar key_storage no kasumi config ou config.toml.\nExemplo: kasumi key Programming\n"
   },
   "resolve_missing": {
     "singular": "1 caminho ausente resolvido",

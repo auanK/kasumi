@@ -516,6 +516,80 @@ void present_profile_activity(std::string_view profile_name,
     }
 }
 
+bool prompt_line(std::string_view label, std::string& value) {
+    std::print("{}", label);
+    std::fflush(stdout);
+    if (platform::cancellation::requested()) {
+        return false;
+    }
+#if !defined(_WIN32)
+    if (std::cin.rdbuf() == default_cin_buffer &&
+        ::isatty(STDIN_FILENO) != 0) {
+        return read_tty_line(value);
+    }
+#endif
+    if (!std::getline(std::cin, value)) {
+        platform::cancellation::request();
+        return false;
+    }
+    return !platform::cancellation::requested();
+}
+
+bool confirm_change(std::string_view message) {
+    std::string confirmation;
+    if (!prompt_line(message, confirmation)) {
+        return false;
+    }
+    std::ranges::transform(
+        confirmation, confirmation.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+    return confirmation == "y" || confirmation == "yes" ||
+           confirmation == "s" || confirmation == "sim";
+}
+
+int apply_profile_key_update(
+    const application::ExecutionEnvironment& environment,
+    std::string_view profile_name,
+    application::ProfileCredentials& creds,
+    bool print_decline_error) {
+    struct CredentialsGuard {
+        application::ProfileCredentials& value;
+        ~CredentialsGuard() noexcept {
+            application::wipe_credentials(value);
+        }
+    } guard{creds};
+
+    application::ProfileCredentials attempt = creds;
+    auto res = application::set_profile_key(
+        environment, profile_name, std::move(attempt), false);
+    application::wipe_credentials(attempt);
+    if (!res &&
+        res.error().code == application::ProfileErrorCode::AlreadyExists) {
+        if (!confirm_change(
+                i18n::format(i18n::Key::WizardConfirmReplaceKey,
+                             profile_name))) {
+            if (platform::cancellation::requested()) {
+                return 130;
+            }
+            if (print_decline_error) {
+                print_error_line(
+                    i18n::tr(i18n::Key::WizardKeyReplaceCancelled));
+            }
+            return 1;
+        }
+        res = application::set_profile_key(
+            environment, profile_name, std::move(creds), true);
+    }
+    if (!res) {
+        print_error_line(res.error().detail);
+        return 1;
+    }
+    print_ok_line(
+        i18n::format(i18n::Key::WizardProfileKeyUpdated, profile_name));
+    return 0;
+}
+
 } // namespace
 
 int run_profile_query(const application::ExecutionEnvironment& environment,
@@ -609,37 +683,10 @@ int run_profile_key(const application::ExecutionEnvironment& environment,
         application::wipe_credentials(creds);
         return 130;
     }
-    auto res = application::set_profile_key(
-        environment, profile_name, std::move(creds));
-    application::wipe_credentials(creds);
-    if (!res) {
-        print_error_line(res.error().detail);
-        return 1;
-    }
-    print_ok_line(
-        i18n::format(i18n::Key::WizardProfileKeyUpdated, profile_name));
-    return 0;
+    return apply_profile_key_update(environment, profile_name, creds, true);
 }
 
 int run_config_wizard(const application::ExecutionEnvironment& environment) {
-    const auto prompt_line = [](std::string_view label, std::string& value) {
-        std::print("{}", label);
-        std::fflush(stdout);
-        if (platform::cancellation::requested()) {
-            return false;
-        }
-#if !defined(_WIN32)
-        if (std::cin.rdbuf() == default_cin_buffer &&
-            ::isatty(STDIN_FILENO) != 0) {
-            return read_tty_line(value);
-        }
-#endif
-        if (!std::getline(std::cin, value)) {
-            platform::cancellation::request();
-            return false;
-        }
-        return !platform::cancellation::requested();
-    };
     bool back_hint_shown = false;
     const auto prompt_form_line = [&](std::string_view label,
                                       std::string& value) {
@@ -651,18 +698,6 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                    value != ":back";
         }
         return prompt_line(label, value) && value != ":back";
-    };
-    const auto confirm_change = [&](std::string_view message) {
-        std::string confirmation;
-        if (!prompt_line(message, confirmation)) {
-            return false;
-        }
-        std::ranges::transform(
-            confirmation, confirmation.begin(), [](unsigned char c) {
-                return static_cast<char>(std::tolower(c));
-            });
-        return confirmation == "y" || confirmation == "yes" ||
-               confirmation == "s" || confirmation == "sim";
     };
     const auto prompt_key_storage = [&](application::KeyStorage default_mode)
         -> std::optional<application::KeyStorage> {
@@ -974,11 +1009,10 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 application::wipe_credentials(creds);
                 break;
             }
-            auto res = application::set_profile_key(
-                environment, target, std::move(creds));
-            application::wipe_credentials(creds);
-            report_result(
-                res, i18n::format(i18n::Key::WizardProfileKeyUpdated, target));
+            if (apply_profile_key_update(environment, target, creds, false) ==
+                130) {
+                break;
+            }
 
         } else if (choice == "s") {
             std::string target;

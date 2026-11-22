@@ -460,7 +460,9 @@
     "problem_reason": "Reason: {}",
     "invalid_profile_name": "Use only letters, digits, '_' or '-' for the profile name.",
     "invalid_remote_path": "Invalid destination. Use an absolute local path or remote:folder (no '..' or trailing '/' in the remote folder).",
-    "confirm_edit": "\nChange paths for profile '{0}'?\nLocal: {1} -> {2}\nRemote: {3} -> {4}\nFiles will not be moved; remote data will not be migrated.\nAn empty local folder can cause deletions on the next Sync.\nReview 'kasumi status {0}' before syncing.\nSave changes [y/N]: "
+    "confirm_edit": "\nChange paths for profile '{0}'?\nLocal: {1} -> {2}\nRemote: {3} -> {4}\nFiles will not be moved; remote data will not be migrated.\nAn empty local folder can cause deletions on the next Sync.\nReview 'kasumi status {0}' before syncing.\nSave changes [y/N]: ",
+    "confirm_replace_key": "\nA different key is already stored for profile '{}'.\nReplacing it does not re-encrypt the vault and will break access if the new key does not match the vault.\nReplace stored key [y/N]: ",
+    "key_replace_cancelled": "Key replacement cancelled; existing key preserved."
   },
   "manual_barrier_removal": {
     "warning": "Kasumi cannot determine whether an active garbage collection or maintenance operation is still running on other devices. Its barrier check cannot guarantee that no operations are running. Verify that no garbage collection or maintenance operation is active before removal.",
@@ -508,7 +510,7 @@
     "options": "\nGlobal option: --lang <code>, before the command (en or pt-BR).\nHelp: -h, --help. Duplicate, unknown or valueless options are rejected.\n",
     "list": "Usage: kasumi list\n\nList configured profile names, one per line.\n",
     "show": "Usage: kasumi show <profile> [--full]\n\nShow local profile settings, last sync result, accepted commit authorship, and offline cached activity without contacting remote storage.\n--full shows complete commit IDs, machine IDs, and recorded local and cached histories.\n",
-    "key": "Usage: kasumi key <profile>\n\nRe-enter and save the cryptographic key (password and salt) for a profile.\nUse after switching key_storage in kasumi config or config.toml.\nExample: kasumi key Programming\n"
+    "key": "Usage: kasumi key <profile>\n\nRe-enter or replace the stored cryptographic key (password and salt) for a profile.\nDoes not re-encrypt remote data; replacing a different existing key requires confirmation.\nUse after switching key_storage in kasumi config or config.toml.\nExample: kasumi key Programming\n"
   },
   "resolve_missing": {
     "singular": "resolved 1 missing path",
