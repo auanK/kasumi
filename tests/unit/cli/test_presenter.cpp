@@ -2469,3 +2469,74 @@ TEST(CliPresenterTest, JsonMapsInsufficientDiskSpaceErrorCode) {
     EXPECT_NE(json_out.find("\"code\":\"insufficient_disk_space\""),
               std::string::npos);
 }
+
+TEST(CliPresenterTest, CompactSummariesStayLanguageIndependentAndDescriptive) {
+    using namespace kasumi::application;
+    const ScopedLanguage pt{Language::Portuguese};
+
+    EXPECT_EQ(kasumi::cli::format_compact_summary(SyncCompleted{}),
+              "Everything in sync");
+
+    SyncCompleted changed;
+    changed.total = 3;
+    changed.uploaded = 2;
+    changed.upload_bytes = 2048;
+    changed.downloaded = 1;
+    changed.download_bytes = 512;
+    changed.removed = 1;
+    changed.repaired = 1;
+    EXPECT_EQ(
+        kasumi::cli::format_compact_summary(changed),
+        "3 changes | ↑ 2 (2 KB) | ↓ 1 (512 bytes) | - 1 | 1 repaired");
+
+    PlanReport plan;
+    plan.items.push_back(PlanItem{});
+    plan.upload_bytes = 4096;
+    plan.pending_paths.push_back("lost.txt");
+    EXPECT_EQ(
+        kasumi::cli::format_compact_summary(response(plan, Operation::Status)),
+        "1 planned | ↑ 4 KB | 1 pending");
+
+    FsckCompleted fsck;
+    fsck.checked_objects = 4;
+    fsck.checked_plaintext_bytes = 1024 * 1024;
+    EXPECT_EQ(
+        kasumi::cli::format_compact_summary(response(fsck, Operation::Fsck)),
+        "4 objects verified (1 MB)");
+
+    GarbageCollectCompleted gc_dry;
+    gc_dry.dry_run = true;
+    gc_dry.candidate_objects = 5;
+    gc_dry.candidate_content_objects = 3;
+    gc_dry.candidate_commit_variants = 1;
+    gc_dry.candidate_activities = 1;
+    EXPECT_EQ(
+        kasumi::cli::format_compact_summary(
+            response(gc_dry, Operation::GarbageCollect)),
+        "5 candidates (3 content, 1 commits, 1 activities)");
+
+    RepackCompleted repack;
+    repack.actionable = true;
+    repack.repacked_blobs = 2;
+    repack.repacked_plaintext_bytes = 3072;
+    repack.new_packs = 1;
+    EXPECT_EQ(
+        kasumi::cli::format_compact_summary(
+            response(repack, Operation::Repack)),
+        "repacked 2 blobs (3 KB) into 1 pack");
+
+    ResolveMissingCompleted rm;
+    rm.resolved_paths = {"a.txt"};
+    rm.resolved_count = 1;
+    EXPECT_EQ(
+        kasumi::cli::format_compact_summary(
+            response(rm, Operation::ResolveMissing)),
+        "1 missing path resolved");
+
+    DiagnosticsReport diag;
+    diag.rclone.found = true;
+    diag.rclone.version = "v1.75.1";
+    diag.overall_ok = true;
+    EXPECT_EQ(kasumi::cli::format_compact_summary(diag),
+              "0 profiles, overall=ok, rclone=v1.75.1");
+}

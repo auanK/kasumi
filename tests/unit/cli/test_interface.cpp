@@ -453,6 +453,12 @@ TEST_F(CliInterfaceTest, LogFileWritesCleanTextAndAppendsNdjsonWithoutCreatingOn
     const auto json_list =
         run({"kasumi", "list", "--json", "--log-file", ndjson_log.string()});
     ASSERT_EQ(json_list.code, 0) << json_list.err;
+    const auto json_sync = run({"kasumi",
+                                "sync",
+                                "demo",
+                                "--json",
+                                "--log-file=" + ndjson_log.string()});
+    ASSERT_EQ(json_sync.code, 0) << json_sync.err;
     const auto json_diag = run({"kasumi",
                                 "diagnostics",
                                 "demo",
@@ -474,21 +480,39 @@ TEST_F(CliInterfaceTest, LogFileWritesCleanTextAndAppendsNdjsonWithoutCreatingOn
             }
         }
     }
-    ASSERT_EQ(ndjson_lines.size(), 2u);
+    ASSERT_EQ(ndjson_lines.size(), 3u);
     EXPECT_NE(ndjson_lines[0].find("\"command\":\"list\""), std::string::npos);
-    EXPECT_NE(ndjson_lines[1].find("\"command\":\"diagnostics\""),
+    EXPECT_NE(ndjson_lines[0].find("\"timestamp\":\""), std::string::npos);
+    EXPECT_NE(ndjson_lines[1].find("\"command\":\"sync\""), std::string::npos);
+    EXPECT_NE(ndjson_lines[1].find("\"summary\":\"1 change | ↑ 1"),
               std::string::npos);
-    EXPECT_EQ(ndjson_lines[1].find(master_key), std::string::npos);
+    EXPECT_NE(ndjson_lines[2].find("\"command\":\"diagnostics\""),
+              std::string::npos);
+    EXPECT_NE(ndjson_lines[2].find("\"summary\":\"1 profile"),
+              std::string::npos);
+    EXPECT_EQ(ndjson_lines[2].find(master_key), std::string::npos);
 
     const auto text_log = root / "logs" / "text.log";
-    const auto text_sync = run({"kasumi",
-                                "sync",
-                                "demo",
-                                "--dry-run",
-                                "--quiet",
-                                "--log-file",
-                                text_log.string()});
-    ASSERT_EQ(text_sync.code, 0) << text_sync.err;
+    const auto text_sync_noop = run({"kasumi",
+                                     "sync",
+                                     "demo",
+                                     "--quiet",
+                                     "--log-file",
+                                     text_log.string()});
+    ASSERT_EQ(text_sync_noop.code, 0) << text_sync_noop.err;
+
+    const auto lock_path = environment.app_data_dir / "profile-demo.lock";
+    auto held_lock = kasumi::platform::acquire_profile_lock(lock_path);
+    ASSERT_TRUE(held_lock.has_value()) << held_lock.error();
+    const auto text_locked = run({"kasumi",
+                                  "sync",
+                                  "demo",
+                                  "--quiet",
+                                  "--log-file",
+                                  text_log.string()});
+    kasumi::platform::release_profile_lock(*held_lock);
+    EXPECT_EQ(text_locked.code, 1);
+
     const auto text_diag = run({"kasumi",
                                 "diagnostics",
                                 "absent",
@@ -502,8 +526,11 @@ TEST_F(CliInterfaceTest, LogFileWritesCleanTextAndAppendsNdjsonWithoutCreatingOn
         text_content.assign(std::istreambuf_iterator<char>(in), {});
     }
     EXPECT_EQ(text_content.find('\x1b'), std::string::npos);
-    EXPECT_NE(text_content.find("command=sync exit=0"), std::string::npos);
-    EXPECT_NE(text_content.find("command=diagnostics exit=1"),
+    EXPECT_NE(text_content.find("] [OK] sync demo | Everything in sync ("),
+              std::string::npos);
+    EXPECT_NE(text_content.find("] [LOCKED] sync demo | [lock_busy] "),
+              std::string::npos);
+    EXPECT_NE(text_content.find("] [ERROR] diagnostics absent | [profile_not_found] "),
               std::string::npos);
     EXPECT_EQ(text_content.find(master_key), std::string::npos);
 

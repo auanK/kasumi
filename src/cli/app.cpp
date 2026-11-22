@@ -364,12 +364,10 @@ int run(int argc, char* argv[]) {
         }
     }
     const ScopedJsonLogFile scoped_json_log(json ? log_file : std::nullopt);
-    const auto log_text_result = [&](std::string_view command_name,
-                                     int exit_code,
-                                     std::string_view summary) -> int {
+    const auto log_text_entry = [&](const TextLogEntry& entry,
+                                    int exit_code) -> int {
         if (!json && log_file.has_value()) {
-            (void)append_text_log_entry(
-                *log_file, command_name, exit_code, summary);
+            (void)append_text_log_entry(*log_file, entry);
         }
         return exit_code;
     };
@@ -402,14 +400,22 @@ int run(int argc, char* argv[]) {
     if (std::holds_alternative<ListInvocation>(*parse_result)) {
         const int code = run_profile_query(environment, {}, false, json);
         return json ? code
-                    : log_text_result(
-                          "list", code, code == 0 ? "completed" : "failed");
+                    : log_text_entry(
+                          {.status = code == 0 ? "OK" : "ERROR",
+                           .command = "list",
+                           .summary = code == 0 ? "completed" : "failed"},
+                          code);
     }
     if (const auto* show = std::get_if<ShowInvocation>(&*parse_result)) {
         const int code =
             run_profile_query(environment, show->profile_name, full, json);
         return json ? code
-                    : log_text_result("show", code, show->profile_name);
+                    : log_text_entry(
+                          {.status = code == 0 ? "OK" : "ERROR",
+                           .command = "show",
+                           .profile = show->profile_name,
+                           .summary = code == 0 ? "completed" : "failed"},
+                          code);
     }
     if (const auto* diag = std::get_if<DiagnosticsInvocation>(&*parse_result)) {
         auto report =
@@ -420,17 +426,38 @@ int run(int argc, char* argv[]) {
                     "diagnostics", diag->profile_name, report.error());
             }
             print_error_line(report.error().detail);
-            return log_text_result("diagnostics", 1, report.error().detail);
+            const auto summary = std::format(
+                "[{}] {}",
+                json_error_code(report.error().code),
+                report.error().detail);
+            return log_text_entry(
+                {.status = "ERROR",
+                 .command = "diagnostics",
+                 .profile = diag->profile_name,
+                 .summary = summary},
+                1);
         }
         if (json) {
             return present_json_diagnostics(
                 *report, KASUMI_VERSION, diag->profile_name, elapsed());
         }
         const int code = finish(present(*report, KASUMI_VERSION, quiet));
-        return log_text_result(
-            "diagnostics",
-            code,
-            report->overall_ok ? "overall=ok" : "overall=issues");
+        const auto summary = format_compact_summary(*report);
+        std::vector<std::string> details;
+        for (const auto& entry : report->profiles) {
+            if (!entry.healthy && !entry.detail.empty()) {
+                details.push_back(
+                    std::format("{}: {}", entry.profile.name, entry.detail));
+            }
+        }
+        return log_text_entry(
+            {.status = report->overall_ok ? "OK" : "WARN",
+             .command = "diagnostics",
+             .profile = diag->profile_name,
+             .summary = summary,
+             .duration = elapsed(),
+             .detail_lines = std::move(details)},
+            code);
     }
 
     if (std::holds_alternative<ConfigureInvocation>(*parse_result)) {
@@ -447,6 +474,9 @@ int run(int argc, char* argv[]) {
     }
     if (std::holds_alternative<application::InspectionRequest>(*parse_result)) {
         auto request = std::get<application::InspectionRequest>(*parse_result);
+        const std::string remote_cmd =
+            sanitized.size() > 2 ? std::format("remote {}", sanitized[2])
+                                 : std::string{"remote"};
         auto creds =
             credentials::for_profile(environment, request.profile_name);
         if (platform::cancellation::requested()) {
@@ -455,10 +485,15 @@ int run(int argc, char* argv[]) {
                 return present_json_cancellation("remote summary",
                                                  request.profile_name);
             }
-            return log_text_result(
-                "remote",
-                finish(present_cancellation(application::Operation::Preview)),
-                "cancelled");
+            const int code =
+                finish(present_cancellation(application::Operation::Preview));
+            return log_text_entry(
+                {.status = "CANCELLED",
+                 .command = remote_cmd,
+                 .profile = request.profile_name,
+                 .summary = "cancelled",
+                 .duration = elapsed()},
+                code);
         }
         std::optional<CommandProgress> display;
         application::ProgressCallback on_progress;
@@ -485,10 +520,15 @@ int run(int argc, char* argv[]) {
                 return present_json_cancellation("remote summary",
                                                  request.profile_name);
             }
-            return log_text_result(
-                "remote",
-                finish(present_cancellation(application::Operation::Preview)),
-                "cancelled");
+            const int code =
+                finish(present_cancellation(application::Operation::Preview));
+            return log_text_entry(
+                {.status = "CANCELLED",
+                 .command = remote_cmd,
+                 .profile = request.profile_name,
+                 .summary = "cancelled",
+                 .duration = elapsed()},
+                code);
         }
 
         if (result) {
@@ -496,15 +536,30 @@ int run(int argc, char* argv[]) {
                 return present_json(
                     request.profile_name, *result, elapsed(), full);
             }
-            return log_text_result(
-                "remote", finish(present(*result, full)), request.profile_name);
+            const int code = finish(present(*result, full));
+            const auto summary = format_compact_summary(*result);
+            return log_text_entry(
+                {.status = "OK",
+                 .command = remote_cmd,
+                 .profile = request.profile_name,
+                 .summary = summary,
+                 .duration = elapsed()},
+                code);
         }
         if (json) {
             return present_json(
                 request.profile_name, result.error(), elapsed());
         }
-        return log_text_result(
-            "remote", finish(present(result.error())), result.error().detail);
+        const int code = finish(present(result.error()));
+        const auto summary = std::format(
+            "[{}] {}", json_error_code(result.error()), result.error().detail);
+        return log_text_entry(
+            {.status = "ERROR",
+             .command = remote_cmd,
+             .profile = request.profile_name,
+             .summary = summary,
+             .duration = elapsed()},
+            code);
     }
 
     auto request = std::get<application::Request>(*parse_result);
@@ -551,6 +606,66 @@ int run(int argc, char* argv[]) {
         break;
     }
 
+    const std::string request_cmd =
+        is_gc_subcommand ? std::format("gc {}", sanitized[2])
+                         : std::string{log_command_label};
+    const auto log_request_cancelled = [&](std::string_view reason,
+                                           int code) -> int {
+        return log_text_entry(
+            {.status = "CANCELLED",
+             .command = request_cmd,
+             .profile = request.profile_name,
+             .summary = reason,
+             .duration = elapsed()},
+            code);
+    };
+    const auto log_request_error = [&](const application::Error& err,
+                                       int code) -> int {
+        const auto summary =
+            std::format("[{}] {}", json_error_code(err), err.detail);
+        return log_text_entry(
+            {.status = err.lock_busy ? "LOCKED" : "ERROR",
+             .command = request_cmd,
+             .profile = request.profile_name,
+             .summary = summary,
+             .duration = elapsed()},
+            code);
+    };
+    const auto log_request_response = [&](const application::Response& res,
+                                          int code) -> int {
+        std::vector<std::string> details;
+        if (const auto* sync =
+                std::get_if<application::SyncCompleted>(&res.data)) {
+            for (const auto& p : sync->pending_paths) {
+                details.push_back(platform::path::to_utf8(p));
+            }
+        } else if (const auto* plan =
+                       std::get_if<application::PlanReport>(&res.data)) {
+            for (const auto& p : plan->pending_paths) {
+                details.push_back(platform::path::to_utf8(p));
+            }
+        }
+        if (res.activity_publish_warning &&
+            !res.activity_publish_warning->empty()) {
+            details.push_back("warning: " + *res.activity_publish_warning);
+        }
+        const std::string_view status =
+            code == 2 ? "PARTIAL"
+                      : ((res.activity_publish_warning &&
+                          !res.activity_publish_warning->empty())
+                             ? "WARN"
+                             : "OK");
+        const auto summary = format_compact_summary(res);
+        return log_text_entry(
+            {.status = status,
+             .command = request_cmd,
+             .profile = request.profile_name,
+             .summary = summary,
+             .duration = elapsed(),
+             .detail_lines = std::move(details)},
+            code);
+    };
+
     const auto cancel_json = [&]() -> int {
         return present_json_cancellation(
             cmd.empty() ? std::string_view{"kasumi"} : cmd,
@@ -566,10 +681,9 @@ int run(int argc, char* argv[]) {
     } creds_guard{creds};
     if (platform::cancellation::requested()) {
         return json ? cancel_json()
-                    : log_text_result(
-                          log_command_label,
-                          finish(present_cancellation(request.operation)),
-                          "cancelled");
+                    : log_request_cancelled(
+                          "cancelled",
+                          finish(present_cancellation(request.operation)));
     }
 
     if (request.operation == application::Operation::ResolveMissing &&
@@ -600,19 +714,17 @@ int run(int argc, char* argv[]) {
 
         if (platform::cancellation::requested()) {
             return json ? cancel_json()
-                        : log_text_result(
-                              "resolve-missing",
-                              finish(present_cancellation(request.operation)),
-                              "cancelled");
+                        : log_request_cancelled(
+                              "cancelled",
+                              finish(present_cancellation(request.operation)));
         }
         if (!preview_res) {
             return json
                        ? present_json(
                              request.profile_name, preview_res.error(), elapsed())
-                       : log_text_result(
-                             "resolve-missing",
-                             finish(present(preview_res.error())),
-                             preview_res.error().detail);
+                       : log_request_error(
+                             preview_res.error(),
+                             finish(present(preview_res.error())));
         }
         const auto* preview_data =
             std::get_if<application::ResolveMissingCompleted>(&preview_res->data);
@@ -620,10 +732,9 @@ int run(int argc, char* argv[]) {
             return json
                        ? present_json(
                              request.profile_name, *preview_res, elapsed(), full)
-                       : log_text_result(
-                             "resolve-missing",
-                             finish(present(*preview_res, full, quiet)),
-                             request.profile_name);
+                       : log_request_response(
+                             *preview_res,
+                             finish(present(*preview_res, full, quiet)));
         }
         if (json) {
             return present_json_confirmation_required(
@@ -638,14 +749,12 @@ int run(int argc, char* argv[]) {
                 i18n::Key::ResolveMissingConfirmPrompt,
                 preview_data->resolved_paths.size()))) {
             if (platform::cancellation::requested()) {
-                return log_text_result(
-                    "resolve-missing",
-                    finish(present_cancellation(request.operation)),
-                    "cancelled");
+                return log_request_cancelled(
+                    "cancelled",
+                    finish(present_cancellation(request.operation)));
             }
             print_error_line(i18n::tr(i18n::Key::ResolveMissingCancelled));
-            return log_text_result(
-                "resolve-missing", finish(1), "cancelled");
+            return log_request_cancelled("declined by user", finish(1));
         }
     }
 
@@ -669,10 +778,9 @@ int run(int argc, char* argv[]) {
 
     if (platform::cancellation::requested()) {
         return json ? cancel_json()
-                    : log_text_result(
-                          log_command_label,
-                          finish(present_cancellation(request.operation)),
-                          "cancelled");
+                    : log_request_cancelled(
+                          "cancelled",
+                          finish(present_cancellation(request.operation)));
     }
 
     if (result) {
@@ -680,23 +788,15 @@ int run(int argc, char* argv[]) {
             return present_json(
                 request.profile_name, *result, elapsed(), full);
         }
-        const int code = finish(present(*result, full, quiet));
-        const std::string summary = std::format(
-            "profile={} {}",
-            request.profile_name,
-            code == 0 ? "ok" : "partial");
-        return log_text_result(log_command_label, code, summary);
+        return log_request_response(
+            *result, finish(present(*result, full, quiet)));
     } else {
         if (json) {
             return present_json(
                 request.profile_name, result.error(), elapsed());
         }
-        const int code = finish(present(result.error()));
-        const std::string summary = std::format(
-            "profile={} error={}",
-            request.profile_name,
-            result.error().detail);
-        return log_text_result(log_command_label, code, summary);
+        return log_request_error(
+            result.error(), finish(present(result.error())));
     }
 }
 
