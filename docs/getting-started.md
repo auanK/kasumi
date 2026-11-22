@@ -13,16 +13,15 @@ compatibility across releases or automatically migrate existing data; see the
 
 Official [GitHub Releases](https://github.com/auanK/kasumi/releases) provide:
 
-- **Windows x86_64:** `kasumi-windows-x86_64.zip`. Extract it into a directory
-  you can run programs from; use PowerShell or CMD to invoke `kasumi.exe`.
-- **Linux x86_64:** `kasumi-linux-x86_64.tar.gz`. Extract it and run `kasumi`.
+- **Windows x86_64:** `kasumi-windows-x86_64.zip` (built on `windows-2022` with the MSVC static C/C++ runtime `/MT`). Extract it into a directory you can run programs from; use PowerShell or CMD to invoke `kasumi.exe`.
+- **Linux x86_64:** `kasumi-linux-x86_64.tar.gz` (built on GitHub `ubuntu-latest` with GCC 14 and dynamically linked against the host `glibc`; distributions with an older `glibc` should build from source). Extract it and run `kasumi`.
 
 Add the executable's directory to `PATH`, or use its full path in the commands
 below. Local storage requires no rclone installation. For a rclone remote,
 install `rclone` in a directory on `PATH` outside the synchronized folder and
 configure the provider's credentials with `rclone config` on each machine.
-See [Updating Kasumi](configuration-and-usage.md#updating-kasumi) for portable
-and managed installations.
+See [Updating Kasumi](configuration-and-usage.md#updating-kasumi) when replacing
+binaries on an existing installation.
 
 ### Verify Downloads
 
@@ -53,6 +52,18 @@ should download again and report a repeat failure. A matching checksum detects
 changed bytes but does not independently authenticate the publisher. The
 [release workflow](../.github/workflows/release.yml) generates GitHub build
 provenance attestations for both archives and the consolidated checksum list.
+
+Verify build provenance with the [GitHub CLI](https://cli.github.com/) (`gh`)
+before extracting or running an archive:
+
+```sh
+gh attestation verify kasumi-linux-x86_64.tar.gz --repo auanK/kasumi
+gh attestation verify kasumi-windows-x86_64.zip --repo auanK/kasumi
+```
+
+`gh attestation verify` cryptographically verifies that the archive was built
+by the official `auanK/kasumi` GitHub Actions release workflow. Release binaries
+are not currently OS-code-signed (Authenticode or GPG).
 
 ### Build from Source
 

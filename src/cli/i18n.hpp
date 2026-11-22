@@ -526,6 +526,8 @@ enum class Key {
     WizardShowCachedRemoteMoreHint,
     WizardShowCachedAt,
     WizardProfileKeyStorageUpdatedNeedKey,
+    WizardConfirmReplaceKey,
+    WizardKeyReplaceCancelled,
 };
 
 Language current_language() noexcept;

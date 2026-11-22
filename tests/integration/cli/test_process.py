@@ -615,6 +615,46 @@ class CliProcessTest(unittest.TestCase):
         eof_sync = self.invoke_raw("sync", "demo", input=b"", environment=without_passwords)
         self.assertEqual(eof_sync.returncode, 130)
 
+    def test_manual_key_command_and_wizard_guard_against_overwrite(self):
+        local, remote = self.root / "local", self.root / "remote"
+        local.mkdir()
+        (local / "item.txt").write_text("payload", encoding="utf-8")
+        self.invoke("config", input=f"n\ndemo\n{local}\n{remote}\nfile\nq\n".encode())
+        self.invoke("sync", "demo")
+
+        # Same key is idempotent and needs no confirmation.
+        same = self.invoke("key", "demo", input=b"")
+        self.assertIn(b"Key saved for profile 'demo'", same)
+
+        other_env = self.environment.copy()
+        other_env.update(
+            KASUMI_PASSWORD="other-password-999",
+            KASUMI_PASSWORD2="other-salt-value-999",
+        )
+
+        # Different key declined via prompt keeps the stored key intact.
+        declined = self.invoke("key", "demo", input=b"n\n", expected=1, environment=other_env)
+        self.assertIn(b"Replace stored key", declined)
+        self.assertIn(b"Key replacement cancelled", declined)
+        self.invoke("status", "demo")
+
+        # EOF on confirmation prompt exits 130 and keeps the stored key intact.
+        eof = self.invoke_raw("key", "demo", input=b"", environment=other_env)
+        self.assertEqual(eof.returncode, 130)
+        self.invoke("status", "demo")
+
+        # Wizard [k] Key also guards against silent overwrite.
+        wizard_declined = self.invoke("config", input=b"k\ndemo\nn\nq\n", environment=other_env)
+        self.assertIn(b"Replace stored key", wizard_declined)
+        self.assertNotIn(b"Key saved for profile 'demo'", wizard_declined)
+        self.invoke("status", "demo")
+
+        # Explicit confirmation replaces the key.
+        confirmed = self.invoke("key", "demo", input=b"y\n", environment=other_env)
+        self.assertIn(b"Key saved for profile 'demo'", confirmed)
+        idempotent_new = self.invoke("key", "demo", input=b"", environment=other_env)
+        self.assertIn(b"Key saved for profile 'demo'", idempotent_new)
+
     def test_repack_dry_run_and_execute_in_real_processes(self):
         import time
 

@@ -3565,6 +3565,63 @@ TEST(ApplicationProfileTest,
               ProfileLocalState::Initialized);
 }
 
+TEST(ApplicationProfileTest, SetProfileKeyGuardsAgainstSilentOverwrite) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("app-profile-key-guard");
+    const ExecutionEnvironment environment{
+        kasumi::test::workspace_path(workspace, "app")};
+    const std::string key_a_hex(64, 'a');
+    const std::string key_b_hex(64, 'b');
+    const std::string key_c_hex(64, 'c');
+    const Profile profile{
+        .name = "guard",
+        .local_dir = kasumi::test::workspace_path(workspace, "local"),
+        .remote_dir =
+            kasumi::test::workspace_path(workspace, "remote").string(),
+        .key_storage = KeyStorage::File};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment, profile, MasterKeyHex{key_a_hex}));
+
+    const auto paths =
+        kasumi::runtime::resolve_profile_paths(environment.app_data_dir, "guard");
+    ASSERT_TRUE(paths.has_value());
+    const auto expected_a = kasumi::runtime::vault::decode_hex(key_a_hex);
+    const auto expected_b = kasumi::runtime::vault::decode_hex(key_b_hex);
+    const auto expected_c = kasumi::runtime::vault::decode_hex(key_c_hex);
+    ASSERT_TRUE(expected_a.has_value());
+    ASSERT_TRUE(expected_b.has_value());
+    ASSERT_TRUE(expected_c.has_value());
+
+    // Idempotent re-entry with the identical key succeeds without allow_replace.
+    EXPECT_TRUE(kasumi::application::set_profile_key(
+        environment, "guard", MasterKeyHex{key_a_hex}));
+
+    // Different key without allow_replace fails with AlreadyExists and preserves key A.
+    const auto blocked = kasumi::application::set_profile_key(
+        environment, "guard", MasterKeyHex{key_b_hex});
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error().code, ProfileErrorCode::AlreadyExists);
+    const auto still_a = kasumi::runtime::vault::read_only(paths->key_path);
+    ASSERT_TRUE(still_a.has_value());
+    EXPECT_EQ(*still_a, *expected_a);
+
+    // Explicit allow_replace=true replaces key A with key B.
+    ASSERT_TRUE(kasumi::application::set_profile_key(
+        environment, "guard", MasterKeyHex{key_b_hex}, true));
+    const auto now_b = kasumi::runtime::vault::read_only(paths->key_path);
+    ASSERT_TRUE(now_b.has_value());
+    EXPECT_EQ(*now_b, *expected_b);
+
+    // Corrupt key.bin (invalid size) can still be recovered without allow_replace.
+    kasumi::test::write_text(paths->key_path,
+                             "this-corrupt-key-file-exceeds-32-bytes");
+    ASSERT_TRUE(kasumi::application::set_profile_key(
+        environment, "guard", MasterKeyHex{key_c_hex}));
+    const auto now_c = kasumi::runtime::vault::read_only(paths->key_path);
+    ASSERT_TRUE(now_c.has_value());
+    EXPECT_EQ(*now_c, *expected_c);
+}
+
 TEST(ApplicationProfileTest,
      InspectProfileActivityReportsOfflineExecutionInterruptedAndLifecycle) {
     ProfileFixture fixture{"app-profile-activity"};
