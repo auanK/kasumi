@@ -551,6 +551,7 @@ add_library(kasumi_application STATIC
     src/application/sync/reobservation.cpp
     src/application/sync/coordinator.cpp
     src/application/sync/coordinator_recovery.cpp
+    src/application/sync/coordinator_workspace.cpp
     src/application/integrity/maintenance.cpp
     src/application/integrity/garbage_collection.cpp
     src/application/integrity/repack_planner.cpp

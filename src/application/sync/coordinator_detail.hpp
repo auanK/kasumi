@@ -83,8 +83,24 @@ Error journal_error(std::string detail);
 // Indicates that the remote publication state could not be proven.
 Error indeterminate_publication(const publication::Error& error,
                                 std::string_view operation);
+// Maps a mutation failure into a coordinator error.
+Error mutation_error(const mutation::MutationError& error);
+// Maps a publication failure into a coordinator error.
+Error publication_error(const publication::Error& error);
 // Indicates that the file status represents a missing path.
 bool missing(std::filesystem::file_status status) noexcept;
+// Creates a filesystem/workspace error scoped to a local path.
+Error workspace_error(std::string_view operation,
+                      const std::filesystem::path& path,
+                      std::string detail);
+// Verifies that an observed status denotes a physical directory.
+std::expected<void, Error>
+require_physical_directory(std::filesystem::file_status status,
+                           const std::filesystem::path& path,
+                           std::string_view error_title);
+// Returns rollback failure first when rollback fails; otherwise original.
+std::unexpected<Error> fail_after_rollback(std::expected<void, Error> rolled,
+                                           Error original);
 
 // Reads path status and converts any failure.
 std::expected<std::filesystem::file_status, Error>
