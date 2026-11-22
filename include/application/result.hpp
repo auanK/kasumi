@@ -294,6 +294,7 @@ struct Error {
     std::optional<BarrierRemovalFailure> barrier_removal;
     // Sync succeeded before a subsequent inventory audit failed.
     std::optional<SyncCompleted> sync_completed;
+    bool lock_busy = false;
 };
 
 } // namespace kasumi::application

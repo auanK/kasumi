@@ -5,6 +5,7 @@
 #include "application/inspection/inspect.hpp"
 #include "cli/credentials.hpp"
 #include "cli/i18n.hpp"
+#include "cli/json_presenter.hpp"
 #include "cli/parser.hpp"
 #include "cli/presenter.hpp"
 #include "cli/wizard.hpp"
@@ -188,6 +189,16 @@ int run(int argc, char* argv[]) {
     const std::size_t quiet_start_index =
         cmd == "list" ? 2U : ((is_gc_subcommand || is_remote_sub) ? 4U : 3U);
 
+    const bool supports_json =
+        cmd == "list" ||
+        (has_profile_arg &&
+         (cmd == "show" || cmd == "sync" || cmd == "status" ||
+          cmd == "fsck" || cmd == "repack" || cmd == "resolve-missing" ||
+          (cmd == "gc" && !is_gc_sub_kw))) ||
+        supports_remote_summary_full;
+    const std::size_t json_start_index =
+        cmd == "list" ? 2U : (supports_remote_summary_full ? 4U : 3U);
+
     std::size_t delimiter_index = sanitized.size();
     for (std::size_t index = 1; index < sanitized.size(); ++index) {
         if (sanitized[index] == "--") {
@@ -196,8 +207,17 @@ int run(int argc, char* argv[]) {
         }
     }
 
+    bool saw_json_flag = false;
+    for (std::size_t index = 1; index < delimiter_index; ++index) {
+        if (sanitized[index] == "--json") {
+            saw_json_flag = true;
+            break;
+        }
+    }
+
     bool full = false;
     bool quiet = false;
+    bool json = false;
     bool invalid_options = false;
     std::vector<std::string> without_cli_flags;
     for (std::size_t index = 0; index < sanitized.size(); ++index) {
@@ -210,6 +230,10 @@ int run(int argc, char* argv[]) {
                    index >= quiet_start_index && argument == "--quiet") {
             invalid_options |= quiet;
             quiet = true;
+        } else if (index < delimiter_index && supports_json &&
+                   index >= json_start_index && argument == "--json") {
+            invalid_options |= json;
+            json = true;
         } else {
             without_cli_flags.push_back(argument);
         }
@@ -221,8 +245,21 @@ int run(int argc, char* argv[]) {
     }
     const int effective_argc = static_cast<int>(sanitized_ptrs.size());
     char** effective_argv = sanitized_ptrs.data();
+    const auto topic_on_error = [&] {
+        return help_topic(effective_argc, effective_argv);
+    };
+    const auto json_cmd_on_error = [&]() -> std::string_view {
+        const auto topic = topic_on_error();
+        return topic.empty() ? cmd : std::string_view{};
+    };
     if (invalid_options) {
-        return present_parse_error(help_topic(effective_argc, effective_argv));
+        if (saw_json_flag) {
+            const auto topic = topic_on_error();
+            return present_json_parse_error(
+                topic.empty() ? cmd : std::string_view{topic},
+                "invalid arguments or duplicate options");
+        }
+        return present_parse_error(topic_on_error());
     }
 
     const bool no_args = effective_argc == 1;
@@ -243,11 +280,22 @@ int run(int argc, char* argv[]) {
     }
     auto parse_result = parse(effective_argc, effective_argv);
     if (!parse_result) {
+        if (saw_json_flag) {
+            const auto topic = topic_on_error();
+            const std::string_view err_cmd =
+                !topic.empty() ? std::string_view{topic} : json_cmd_on_error();
+            return present_json_parse_error(
+                err_cmd,
+                parse_result.error().unsupported_sync_audit_combination
+                    ? "--audit-inventory cannot be combined with --dry-run or "
+                      "--initial"
+                    : "invalid arguments or options");
+        }
         if (parse_result.error().unsupported_sync_audit_combination) {
             std::println(
                 stderr, "{}", i18n::tr(i18n::Key::ErrorSyncAuditCombination));
         }
-        present_parse_error(help_topic(effective_argc, effective_argv));
+        present_parse_error(topic_on_error());
         return parse_result.error().exit_code;
     }
     if (const auto* help = std::get_if<HelpInvocation>(&*parse_result)) {
@@ -255,9 +303,12 @@ int run(int argc, char* argv[]) {
     }
 
     const auto started = std::chrono::steady_clock::now();
+    const auto elapsed = [&] {
+        return std::chrono::steady_clock::now() - started;
+    };
     const auto finish = [&](int code) {
-        if (!quiet) {
-            present_duration(std::chrono::steady_clock::now() - started);
+        if (!quiet && !json) {
+            present_duration(elapsed());
         }
         return code;
     };
@@ -277,10 +328,10 @@ int run(int argc, char* argv[]) {
     const auto environment = application::default_execution_environment();
 
     if (std::holds_alternative<ListInvocation>(*parse_result)) {
-        return run_profile_query(environment);
+        return run_profile_query(environment, {}, false, json);
     }
     if (const auto* show = std::get_if<ShowInvocation>(&*parse_result)) {
-        return run_profile_query(environment, show->profile_name, full);
+        return run_profile_query(environment, show->profile_name, full, json);
     }
 
     if (std::holds_alternative<ConfigureInvocation>(*parse_result)) {
@@ -301,12 +352,16 @@ int run(int argc, char* argv[]) {
             credentials::for_profile(environment, request.profile_name);
         if (platform::cancellation::requested()) {
             application::wipe_credentials(creds);
+            if (json) {
+                return present_json_cancellation("remote summary",
+                                                 request.profile_name);
+            }
             return finish(
                 present_cancellation(application::Operation::Preview));
         }
         std::optional<CommandProgress> display;
         application::ProgressCallback on_progress;
-        if (!quiet) {
+        if (!quiet && !json) {
             display.emplace(full);
             on_progress = [&](const auto& progress) {
                 display->update(progress);
@@ -325,18 +380,30 @@ int run(int argc, char* argv[]) {
         application::wipe_credentials(creds);
 
         if (platform::cancellation::requested()) {
+            if (json) {
+                return present_json_cancellation("remote summary",
+                                                 request.profile_name);
+            }
             return finish(
                 present_cancellation(application::Operation::Preview));
         }
 
         if (result) {
+            if (json) {
+                return present_json(
+                    request.profile_name, *result, elapsed(), full);
+            }
             return finish(present(*result, full));
+        }
+        if (json) {
+            return present_json(
+                request.profile_name, result.error(), elapsed());
         }
         return finish(present(result.error()));
     }
 
     auto request = std::get<application::Request>(*parse_result);
-    if (!quiet &&
+    if (!quiet && !json &&
         (request.operation == application::Operation::RemoveWriter ||
          request.operation == application::Operation::RemoveBarrier)) {
         std::println(
@@ -362,7 +429,7 @@ int run(int argc, char* argv[]) {
         if (op != request.operation) {
             continue;
         }
-        if (!quiet) {
+        if (!quiet && !json) {
             const auto display_key =
                 (op == application::Operation::Repack && request.dry_run)
                     ? i18n::Key::RepackDryRunStarting
@@ -375,9 +442,15 @@ int run(int argc, char* argv[]) {
                     : key;
             std::println("{}", i18n::format(display_key, request.profile_name));
         }
-        reports_progress = !quiet;
+        reports_progress = !quiet && !json;
         break;
     }
+
+    const auto cancel_json = [&]() -> int {
+        return present_json_cancellation(
+            cmd.empty() ? std::string_view{"kasumi"} : cmd,
+            request.profile_name);
+    };
 
     auto creds = credentials::for_profile(environment, request.profile_name);
     struct CredentialsGuard {
@@ -387,7 +460,7 @@ int run(int argc, char* argv[]) {
         }
     } creds_guard{creds};
     if (platform::cancellation::requested()) {
-        return finish(present_cancellation(request.operation));
+        return json ? cancel_json() : finish(present_cancellation(request.operation));
     }
 
     if (request.operation == application::Operation::ResolveMissing &&
@@ -417,15 +490,26 @@ int run(int argc, char* argv[]) {
         application::wipe_credentials(preview_creds);
 
         if (platform::cancellation::requested()) {
-            return finish(present_cancellation(request.operation));
+            return json ? cancel_json()
+                        : finish(present_cancellation(request.operation));
         }
         if (!preview_res) {
-            return finish(present(preview_res.error()));
+            return json
+                       ? present_json(
+                             request.profile_name, preview_res.error(), elapsed())
+                       : finish(present(preview_res.error()));
         }
         const auto* preview_data =
             std::get_if<application::ResolveMissingCompleted>(&preview_res->data);
         if (preview_data == nullptr || preview_data->resolved_paths.empty()) {
-            return finish(present(*preview_res, full, quiet));
+            return json
+                       ? present_json(
+                             request.profile_name, *preview_res, elapsed(), full)
+                       : finish(present(*preview_res, full, quiet));
+        }
+        if (json) {
+            return present_json_confirmation_required(
+                request.profile_name, *preview_data, elapsed());
         }
         i18n::println(i18n::Key::ResolveMissingConfirmHeader,
                       preview_data->resolved_paths.size());
@@ -462,13 +546,18 @@ int run(int argc, char* argv[]) {
     }
 
     if (platform::cancellation::requested()) {
-        return finish(present_cancellation(request.operation));
+        return json ? cancel_json()
+                    : finish(present_cancellation(request.operation));
     }
 
     if (result) {
-        return finish(present(*result, full, quiet));
+        return json ? present_json(
+                          request.profile_name, *result, elapsed(), full)
+                    : finish(present(*result, full, quiet));
     } else {
-        return finish(present(result.error()));
+        return json ? present_json(
+                          request.profile_name, result.error(), elapsed())
+                    : finish(present(result.error()));
     }
 }
 

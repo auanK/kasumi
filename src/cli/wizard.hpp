@@ -11,7 +11,8 @@ namespace kasumi::cli {
 int run_config_wizard(const application::ExecutionEnvironment& environment);
 int run_profile_query(const application::ExecutionEnvironment& environment,
                       std::string_view profile_name = {},
-                      bool full = false);
+                      bool full = false,
+                      bool json = false);
 int run_profile_key(const application::ExecutionEnvironment& environment,
                     std::string_view profile_name);
 bool prompt_confirmation(std::string_view message);

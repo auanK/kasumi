@@ -131,7 +131,16 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         input.environment.app_data_dir /
         ("profile-" + input.request.profile_name + ".lock"));
     if (!profile_lock) {
-        return fail(profile_lock.error());
+        const auto lock_detail = profile_lock.error();
+        const auto summary = output.summary;
+        wipe_operation(output);
+        return std::unexpected(Error{
+            .operation = operation,
+            .code = ErrorCode::RuntimeFailure,
+            .detail = lock_detail,
+            .runtime = summary,
+            .lock_busy = true,
+        });
     }
     output.profile_lock = *profile_lock;
 

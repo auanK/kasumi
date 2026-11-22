@@ -1,4 +1,5 @@
 #include "platform/cancellation.hpp"
+#include "platform/profile_lock.hpp"
 #include "application/profile.hpp"
 #include "cli/app.hpp"
 #include "kasumi/test/filesystem.hpp"
@@ -343,6 +344,50 @@ TEST_F(CliInterfaceTest, QuietSuppressesProgressAndSuccessOutputButPreservesErro
         EXPECT_EQ(bad.code, 1);
         EXPECT_NE(bad.err.find("[ERROR]"), std::string::npos);
     }
+}
+
+TEST_F(CliInterfaceTest, JsonOutputsStructuredSchemaLockBusyAndErrorCodes) {
+    const auto root = kasumi::test::workspace_root(workspace);
+    const kasumi::application::ExecutionEnvironment environment{root / "kasumi"};
+    const kasumi::application::Profile profile{
+        "demo", root / "local", (root / "remote").string()};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment,
+        profile,
+        kasumi::application::MasterKeyHex{std::string(64, '7')}));
+    std::filesystem::create_directories(profile.local_dir);
+    kasumi::test::write_text(profile.local_dir / "item.txt", "json payload");
+
+    const auto invalid = run({"kasumi", "config", "--json"});
+    EXPECT_EQ(invalid.code, 1);
+    EXPECT_TRUE(invalid.err.empty());
+    EXPECT_NE(invalid.out.find("\"schema_version\":1"), std::string::npos);
+    EXPECT_NE(invalid.out.find("\"code\":\"invalid_arguments\""),
+              std::string::npos);
+
+    const auto missing =
+        run({"kasumi", "--lang", "pt-BR", "show", "absent", "--json"});
+    EXPECT_EQ(missing.code, 1);
+    EXPECT_TRUE(missing.err.empty());
+    EXPECT_NE(missing.out.find("\"code\":\"profile_not_found\""),
+              std::string::npos);
+
+    const auto lock_path = environment.app_data_dir / "profile-demo.lock";
+    auto lock = kasumi::platform::acquire_profile_lock(lock_path);
+    ASSERT_TRUE(lock.has_value()) << lock.error();
+    const auto locked = run({"kasumi", "status", "demo", "--json"});
+    kasumi::platform::release_profile_lock(*lock);
+    EXPECT_EQ(locked.code, 1);
+    EXPECT_TRUE(locked.err.empty());
+    EXPECT_NE(locked.out.find("\"code\":\"lock_busy\""), std::string::npos);
+
+    const auto sync_dry =
+        run({"kasumi", "--lang", "pt-BR", "sync", "demo", "--dry-run", "--json"});
+    EXPECT_EQ(sync_dry.code, 0) << sync_dry.out;
+    EXPECT_TRUE(sync_dry.err.empty());
+    EXPECT_NE(sync_dry.out.find("\"command\":\"sync\""), std::string::npos);
+    EXPECT_NE(sync_dry.out.find("\"dry_run\":true"), std::string::npos);
+    EXPECT_NE(sync_dry.out.find("\"upload\":1"), std::string::npos);
 }
 class GeneralOptionTest : public CliInterfaceTest,
                           public testing::WithParamInterface<const char*> {};
