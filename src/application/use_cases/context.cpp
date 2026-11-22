@@ -3,6 +3,7 @@
 #include "application/detail.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
+#include "application/profile.hpp"
 #include "application/sync/journal.hpp"
 #include "core/history.hpp"
 #include "crypto/secure_memory.hpp"
@@ -14,6 +15,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <format>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -138,15 +140,25 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         input.environment.app_data_dir /
         ("profile-" + input.request.profile_name + ".lock"));
     if (!profile_lock) {
-        const auto lock_detail = profile_lock.error();
+        auto lock_detail = profile_lock.error();
+        const bool is_lock_busy =
+            lock_detail == "profile is already in use by another execution";
+        if (is_lock_busy) {
+            if (const auto active_op = active_profile_operation(
+                    inspect_profile_activity(input.environment,
+                                             input.request.profile_name))) {
+                lock_detail =
+                    std::format("{} (running {})", lock_detail, *active_op);
+            }
+        }
         const auto summary = output.summary;
         wipe_operation(output);
         return std::unexpected(Error{
             .operation = operation,
             .code = ErrorCode::RuntimeFailure,
-            .detail = lock_detail,
+            .detail = std::move(lock_detail),
             .runtime = summary,
-            .lock_busy = true,
+            .lock_busy = is_lock_busy,
         });
     }
     output.profile_lock = *profile_lock;

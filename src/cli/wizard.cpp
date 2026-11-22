@@ -218,6 +218,17 @@ std::string format_execution_extra(const application::ProfileExecutionSummary& e
     return extra;
 }
 
+std::string format_local_state_label(
+    application::ProfileLocalState state,
+    const application::ProfileActivityReport& activity) {
+    if (state == application::ProfileLocalState::Running) {
+        if (const auto op = application::active_profile_operation(activity)) {
+            return std::format("Running ({})", *op);
+        }
+    }
+    return std::string{application::to_string(state)};
+}
+
 std::string
 format_config_last_sync(const application::ProfileActivityReport& activity) {
     if (!activity.database_present) {
@@ -625,9 +636,9 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
             application::ProfileLocalProblem problem;
             const auto state = application::inspect_profile_local_state(
                 environment, profile.name, &problem);
+            const auto activity = application::inspect_profile_activity(
+                environment, profile.name);
             if (json) {
-                const auto activity = application::inspect_profile_activity(
-                    environment, profile.name);
                 return present_json_show(
                     profile, state, problem, activity, full);
             }
@@ -635,7 +646,7 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
                           profile.name,
                           platform::path::to_utf8(profile.local_dir),
                           profile.remote_dir,
-                          application::to_string(state),
+                          format_local_state_label(state, activity),
                           application::to_string(profile.key_storage),
                           profile.min_history_depth,
                           profile.min_history_age_hours);
@@ -661,11 +672,9 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
                     i18n::Key::WizardProblemReason,
                     i18n::tr(problem_keys[static_cast<std::size_t>(problem)]));
             }
-            const auto activity =
-                application::inspect_profile_activity(environment, profile.name);
-            if (activity.database_present) {
-                present_profile_activity(profile.name, activity, full);
-            }
+                if (activity.database_present) {
+                    present_profile_activity(profile.name, activity, full);
+                }
             return 0;
         }
     }
@@ -787,7 +796,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                     environment, prof.name);
                 i18n::println(i18n::Key::WizardProfileListEntry,
                               prof.name,
-                              application::to_string(state),
+                              format_local_state_label(state, activity),
                               format_config_last_sync(activity));
             }
         }

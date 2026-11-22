@@ -2610,12 +2610,40 @@ TEST(ApplicationProfileTest, InspectLockPathUnreadableIsProblem) {
     EXPECT_TRUE(denied.restore());
 }
 
-TEST(ApplicationProfileTest, InspectActiveProfileLockIsProblem) {
+TEST(ApplicationProfileTest, InspectActiveProfileLockIsRunning) {
     ProfileFixture fixture{"app-profile-state-lock-active"};
     auto held = kasumi::platform::acquire_profile_lock(
         fixture.environment.app_data_dir / "profile-main.lock");
     ASSERT_TRUE(held.has_value());
-    EXPECT_EQ(fixture.local_state(), ProfileLocalState::Problem);
+    auto problem = kasumi::application::ProfileLocalProblem::Lock;
+    EXPECT_EQ(inspect_profile_local_state(fixture.environment, "main", &problem),
+              ProfileLocalState::Running);
+    EXPECT_EQ(problem, kasumi::application::ProfileLocalProblem::None);
+    EXPECT_EQ(kasumi::application::to_string(ProfileLocalState::Running),
+              "Running");
+
+    // Recording an active InProgress gc execution enriches active_profile_operation
+    // and lock failure messages without altering healthy Running status.
+    ASSERT_TRUE(kasumi::state_storage::record_execution_start(
+        fixture.database_path(),
+        kasumi::state_storage::LocalExecutionRecord{
+            .execution_id = "active-gc",
+            .operation = kasumi::state_storage::LocalOperationKind::GarbageCollect,
+            .machine_id_hex = std::string(32, 'a'),
+            .machine_name = "BoxA",
+            .started_at = 1700000200,
+        }));
+    const auto activity =
+        kasumi::application::inspect_profile_activity(fixture.environment, "main");
+    EXPECT_EQ(kasumi::application::active_profile_operation(activity), "gc");
+    const auto del_blocked =
+        kasumi::application::delete_profile(fixture.environment, "main");
+    ASSERT_FALSE(del_blocked.has_value());
+    EXPECT_EQ(del_blocked.error().code,
+              kasumi::application::ProfileErrorCode::LockFailure);
+    EXPECT_NE(del_blocked.error().detail.find("(running gc)"),
+              std::string::npos);
+
     kasumi::platform::release_profile_lock(*held);
 }
 
@@ -3716,6 +3744,22 @@ TEST(ApplicationProfileTest, CollectDiagnosticsInspectsEnvironmentAndProfilesRea
     EXPECT_FALSE(all->profiles.front().journal_present);
     EXPECT_TRUE(all->profiles.front().key_accessible);
     EXPECT_TRUE(all->overall_ok);
+
+    // An actively held execution lock marks profile Running and healthy, not Problem.
+    auto held = kasumi::platform::acquire_profile_lock(
+        env.app_data_dir / "profile-main.lock");
+    ASSERT_TRUE(held.has_value()) << held.error();
+    const auto running = kasumi::application::collect_diagnostics(env, "main");
+    kasumi::platform::release_profile_lock(*held);
+    ASSERT_TRUE(running.has_value()) << running.error().detail;
+    ASSERT_EQ(running->profiles.size(), 1U);
+    EXPECT_EQ(running->profiles.front().local_state, ProfileLocalState::Running);
+    EXPECT_EQ(running->profiles.front().local_problem,
+              kasumi::application::ProfileLocalProblem::None);
+    EXPECT_TRUE(running->profiles.front().lock_active);
+    EXPECT_TRUE(running->profiles.front().healthy);
+    EXPECT_EQ(running->profiles.front().detail, "running");
+    EXPECT_TRUE(running->overall_ok);
 
     // Missing local directory marks profile unhealthy without mutating disk.
     std::filesystem::remove_all(local_dir);

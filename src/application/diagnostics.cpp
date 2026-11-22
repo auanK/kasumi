@@ -197,7 +197,7 @@ collect_diagnostics(const ExecutionEnvironment& environment,
         const auto lock_path = environment.app_data_dir /
                                ("profile-" + profile.name + ".lock");
         diag.lock_active =
-            diag.local_problem == ProfileLocalProblem::Lock ||
+            (diag.local_state == ProfileLocalState::Running) ||
             platform::is_profile_lock_held(lock_path);
 
         const auto profile_paths =
@@ -228,10 +228,12 @@ collect_diagnostics(const ExecutionEnvironment& environment,
         } else if (!diag.local_dir_writable) {
             append_reason(issues, "local directory not writable");
         }
-        if (diag.lock_active) {
-            append_reason(issues, "profile lock is currently held");
+        if (diag.local_problem == ProfileLocalProblem::Lock) {
+            append_reason(
+                issues,
+                "local profile lock is invalid or cannot be safely inspected");
         }
-        if (diag.journal_present) {
+        if (diag.journal_present && !diag.lock_active) {
             append_reason(issues, "pending local transaction journal");
         }
         if (!diag.key_accessible) {
@@ -252,8 +254,20 @@ collect_diagnostics(const ExecutionEnvironment& environment,
 
         diag.healthy = issues.empty() &&
                        (diag.local_state == ProfileLocalState::Ready ||
-                        diag.local_state == ProfileLocalState::Initialized);
-        diag.detail = diag.healthy ? "ok" : std::move(issues);
+                        diag.local_state == ProfileLocalState::Initialized ||
+                        diag.local_state == ProfileLocalState::Running);
+        if (diag.healthy) {
+            if (diag.local_state == ProfileLocalState::Running) {
+                const auto active_op = active_profile_operation(diag.activity);
+                diag.detail = active_op
+                                  ? std::format("running ({})", *active_op)
+                                  : "running";
+            } else {
+                diag.detail = "ok";
+            }
+        } else {
+            diag.detail = std::move(issues);
+        }
         report.overall_ok = report.overall_ok && diag.healthy;
         report.profiles.push_back(std::move(diag));
     }
