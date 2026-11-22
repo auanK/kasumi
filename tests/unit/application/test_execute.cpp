@@ -1267,6 +1267,13 @@ TEST(ApplicationExecuteTest, RepackRejectsInvalidFlagsOnOtherOperations) {
              Request{.operation = Operation::Sync,
                      .profile_name = "demo",
                      .reclaim_dirty = true},
+             Request{.operation = Operation::Sync,
+                     .profile_name = "demo",
+                     .confirm = true},
+             Request{.operation = Operation::ResolveMissing,
+                     .profile_name = "demo",
+                     .confirm = true,
+                     .dry_run = true},
          }) {
         const auto res = kasumi::application::execute(
             {req, Credentials{NoCredentials{}}, env});

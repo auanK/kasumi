@@ -37,6 +37,7 @@ TEST_P(ApplicationGrammarTest, ParsesOperationAndArguments) {
     EXPECT_EQ(actual.audit_inventory, test.expected.audit_inventory);
     EXPECT_EQ(actual.writer_identifier, test.expected.writer_identifier);
     EXPECT_EQ(actual.confirm_abandoned, test.expected.confirm_abandoned);
+    EXPECT_EQ(actual.confirm, test.expected.confirm);
     EXPECT_EQ(actual.dry_run, test.expected.dry_run);
     EXPECT_EQ(actual.reclaim_dirty, test.expected.reclaim_dirty);
 }
@@ -112,6 +113,16 @@ INSTANTIATE_TEST_SUITE_P(
             "ResolveMissing",
             {"resolve-missing", "demo"},
             {.operation = Operation::ResolveMissing, .profile_name = "demo"}},
+        ApplicationCase{"ResolveMissingConfirm",
+                        {"resolve-missing", "demo", "--confirm"},
+                        {.operation = Operation::ResolveMissing,
+                         .profile_name = "demo",
+                         .confirm = true}},
+        ApplicationCase{"ResolveMissingDryRun",
+                        {"resolve-missing", "demo", "--dry-run"},
+                        {.operation = Operation::ResolveMissing,
+                         .profile_name = "demo",
+                         .dry_run = true}},
         ApplicationCase{"UnicodeProfile",
                         {"status", "Programação-日本 com espaço"},
                         {.operation = Operation::Status,
@@ -346,7 +357,13 @@ INSTANTIATE_TEST_SUITE_P(
         InvalidCase{"RepackDuplicateReclaimDirty",
                     {"repack", "demo", "--reclaim-dirty", "--reclaim-dirty"}},
         InvalidCase{"RepackUnknownOption", {"repack", "demo", "--initial"}},
-        InvalidCase{"RepackExtraOperand", {"repack", "demo", "extra"}}),
+        InvalidCase{"RepackExtraOperand", {"repack", "demo", "extra"}},
+        InvalidCase{"ResolveMissingDuplicateConfirm",
+                    {"resolve-missing", "demo", "--confirm", "--confirm"}},
+        InvalidCase{"ResolveMissingConfirmWithDryRun",
+                    {"resolve-missing", "demo", "--confirm", "--dry-run"}},
+        InvalidCase{"ResolveMissingUnknownOption",
+                    {"resolve-missing", "demo", "--initial"}}),
     [](const auto& case_info) {
         return case_info.param.name;
     });

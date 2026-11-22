@@ -2214,6 +2214,19 @@ int present(const application::Response& response, bool full) {
                 if (op != Op::ResolveMissing) {
                     return 1;
                 }
+                if (data.dry_run) {
+                    if (data.resolved_count > 0) {
+                        i18n::println(i18n::Key::ResolveMissingDryRunHeader,
+                                      data.resolved_count);
+                        for (const auto& path : data.resolved_paths) {
+                            std::println("  {}", sanitize_terminal_text(path));
+                        }
+                        i18n::println(i18n::Key::ResolveMissingDryRunCompleted);
+                    } else {
+                        i18n::println(i18n::Key::ResolveMissingNone);
+                    }
+                    return 0;
+                }
                 if (data.resolved_count > 0) {
                     print_ok_line(
                         format_plural(data.resolved_count,

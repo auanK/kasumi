@@ -268,6 +268,12 @@ enum class Key {
     RepackRetentionHint,
 
     // Operations / Errors
+    ResolveMissingDryRunStarting,
+    ResolveMissingDryRunHeader,
+    ResolveMissingDryRunCompleted,
+    ResolveMissingConfirmHeader,
+    ResolveMissingConfirmPrompt,
+    ResolveMissingCancelled,
     ErrorPlanCalculation,
     ErrorFsckFailed,
     ErrorFsckClean,

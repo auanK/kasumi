@@ -52,8 +52,16 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
             "--audit-inventory cannot be combined with --initial");
     }
     if (input.request.dry_run && operation != Operation::Repack &&
-        operation != Operation::GarbageCollect) {
-        return invalid_request("--dry-run is only valid for repack and gc");
+        operation != Operation::GarbageCollect &&
+        operation != Operation::ResolveMissing) {
+        return invalid_request(
+            "--dry-run is only valid for repack, gc, and resolve-missing");
+    }
+    if (input.request.confirm && operation != Operation::ResolveMissing) {
+        return invalid_request("--confirm is only valid for resolve-missing");
+    }
+    if (input.request.confirm && input.request.dry_run) {
+        return invalid_request("--confirm cannot be combined with --dry-run");
     }
     if (input.request.reclaim_dirty && operation != Operation::Repack) {
         return invalid_request("--reclaim-dirty is only valid for repack");
@@ -64,7 +72,8 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
             "--confirm-abandoned is required to remove a maintenance barrier");
     }
     const auto access_mode =
-        (operation == Operation::Sync || operation == Operation::ResolveMissing)
+        (operation == Operation::Sync ||
+         (operation == Operation::ResolveMissing && !input.request.dry_run))
             ? runtime::AccessMode::ReadWrite
             : runtime::AccessMode::ReadOnly;
     const auto fail = [&](std::string detail,
@@ -107,7 +116,8 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     const bool needs_machine_identity =
         !(operation == Operation::Status || operation == Operation::Preview ||
           ((operation == Operation::Repack ||
-            operation == Operation::GarbageCollect) &&
+            operation == Operation::GarbageCollect ||
+            operation == Operation::ResolveMissing) &&
            input.request.dry_run));
     if (needs_machine_identity) {
         auto identity = runtime::resolve_machine_identity(

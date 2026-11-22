@@ -215,7 +215,27 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
             .reclaim_dirty = reclaim_dirty};
     }
     if (command == "resolve-missing") {
-        return request(application::Operation::ResolveMissing, argc, argv);
+        if (argc == 3 && operand(argv[2])) {
+            return application::Request{
+                .operation = application::Operation::ResolveMissing,
+                .profile_name = argv[2]};
+        }
+        if (argc == 4 && operand(argv[2])) {
+            const std::string_view flag{argv[3]};
+            if (flag == "--confirm") {
+                return application::Request{
+                    .operation = application::Operation::ResolveMissing,
+                    .profile_name = argv[2],
+                    .confirm = true};
+            }
+            if (flag == "--dry-run") {
+                return application::Request{
+                    .operation = application::Operation::ResolveMissing,
+                    .profile_name = argv[2],
+                    .dry_run = true};
+            }
+        }
+        return std::unexpected(ParseError{});
     }
     if (command == "remote") {
         if (argc < 4 || !operand(argv[3])) {

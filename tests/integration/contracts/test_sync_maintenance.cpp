@@ -29,6 +29,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <iostream>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -810,15 +812,37 @@ std::string content_id_for(const std::string& master_hex,
         *key, kasumi::hasher::hash_string(plaintext));
 }
 
-int run_resolve_missing_cli(std::string profile = "demo") {
-    char arg0[] = "kasumi";
-    char arg1[] = "resolve-missing";
-    char* argv[] = {arg0, arg1, profile.data()};
+int run_resolve_missing_cli(std::string profile = "demo",
+                            bool confirm = true,
+                            bool dry_run = false,
+                            std::string stdin_text = {},
+                            std::string* captured_out = nullptr) {
+    std::vector<std::string> args{
+        "kasumi", "resolve-missing", std::move(profile)};
+    if (dry_run) {
+        args.emplace_back("--dry-run");
+    } else if (confirm) {
+        args.emplace_back("--confirm");
+    }
+    std::vector<char*> argv;
+    argv.reserve(args.size());
+    for (auto& arg : args) {
+        argv.push_back(arg.data());
+    }
+    std::istringstream input{std::move(stdin_text)};
+    auto* previous =
+        (!confirm && !dry_run) ? std::cin.rdbuf(input.rdbuf()) : nullptr;
     int exit_code = -1;
     const auto output = kasumi::test::capture_stdout([&] {
-        exit_code = kasumi::cli::run(3, argv);
+        exit_code = kasumi::cli::run(static_cast<int>(argv.size()), argv.data());
     });
-    if (exit_code != 0) {
+    if (previous != nullptr) {
+        std::cin.rdbuf(previous);
+        std::cin.clear();
+    }
+    if (captured_out != nullptr) {
+        *captured_out = output;
+    } else if (exit_code != 0) {
         std::cerr << "CLI output (code " << exit_code << "): " << output
                   << "\n";
     }
@@ -976,6 +1000,76 @@ TEST(ApplicationRecoveryContract,
         kasumi::application::execute(request(Operation::Sync, f.env_a)));
     EXPECT_FALSE(std::filesystem::exists(f.local_a / "lost.txt"));
     EXPECT_TRUE(std::filesystem::exists(f.local_a / "retained.txt"));
+}
+
+TEST(ApplicationRecoveryContract,
+     ResolveMissingCliRequiresConfirmationAndSupportsDryRun) {
+    auto lang = kasumi::test::scoped_environment_variable("KASUMI_LANG", "en");
+    auto f = make_recovery_fixture("recovery-resolve-cli-guard");
+    ASSERT_TRUE(kasumi::application::create_profile(
+        f.env_a, f.profile_a, MasterKeyHex{f.master_hex}));
+    ASSERT_TRUE(kasumi::application::create_profile(
+        f.env_b, f.profile_b, MasterKeyHex{f.master_hex}));
+
+    auto opened = kasumi::transport::open_transport(f.remote_dir.string());
+    ASSERT_TRUE(opened.has_value());
+    ASSERT_TRUE(kasumi::transport::initialize(*opened));
+
+    kasumi::test::write_text(f.local_a / "lost.txt", "lost-cli-guard");
+    kasumi::test::write_text(f.local_a / "kept.txt", "kept-cli-guard");
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_a)));
+
+    const auto lost_cid = content_id_for(f.master_hex, "lost-cli-guard");
+    ASSERT_TRUE(kasumi::transport::remove(*opened, lost_cid));
+    ASSERT_TRUE(
+        kasumi::application::execute(request(Operation::Sync, f.env_b)));
+
+    const auto paths_b =
+        kasumi::runtime::resolve_profile_paths(f.env_b.app_data_dir, "demo");
+    ASSERT_TRUE(paths_b.has_value());
+
+    // --dry-run lists eligible paths without resolving them.
+    std::string dry_out;
+    EXPECT_EQ(run_resolve_missing_cli("demo", false, true, {}, &dry_out), 0);
+    EXPECT_NE(dry_out.find("Paths eligible for logical deletion (1):"),
+              std::string::npos);
+    EXPECT_NE(dry_out.find("lost.txt"), std::string::npos);
+    EXPECT_NE(
+        dry_out.find("Resolve-missing dry-run completed: no deletions published."),
+        std::string::npos);
+    auto state = kasumi::state_storage::load_state(paths_b->database_path);
+    ASSERT_TRUE(state.has_value() && *state);
+    ASSERT_EQ((*state)->pending_materializations.size(), 1U);
+
+    // Interactive decline ('n') exits 1 and preserves pending paths.
+    std::string decline_out;
+    EXPECT_EQ(
+        run_resolve_missing_cli("demo", false, false, "n\n", &decline_out), 1);
+    EXPECT_NE(decline_out.find("lost.txt"), std::string::npos);
+    EXPECT_NE(decline_out.find("Operation cancelled; pending paths preserved."),
+              std::string::npos);
+    state = kasumi::state_storage::load_state(paths_b->database_path);
+    ASSERT_TRUE(state.has_value() && *state &&
+                (*state)->pending_materializations.size() == 1U);
+
+    // EOF on confirmation exits 130 and preserves pending paths.
+    std::string eof_out;
+    EXPECT_EQ(run_resolve_missing_cli("demo", false, false, "", &eof_out),
+              130);
+    state = kasumi::state_storage::load_state(paths_b->database_path);
+    ASSERT_TRUE(state.has_value() && *state &&
+                (*state)->pending_materializations.size() == 1U);
+
+    // Interactive confirm ('y') publishes the logical deletion.
+    std::string confirm_out;
+    EXPECT_EQ(
+        run_resolve_missing_cli("demo", false, false, "y\n", &confirm_out), 0);
+    EXPECT_NE(confirm_out.find("resolved 1 missing path"), std::string::npos);
+    state = kasumi::state_storage::load_state(paths_b->database_path);
+    ASSERT_TRUE(state.has_value() && *state);
+    EXPECT_TRUE((*state)->pending_materializations.empty());
+    EXPECT_EQ(kasumi::find_row((*state)->tree, "lost.txt"), nullptr);
 }
 
 TEST(ApplicationRecoveryContract,

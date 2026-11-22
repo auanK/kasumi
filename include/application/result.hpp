@@ -169,6 +169,7 @@ struct ResolveMissingCompleted {
     std::size_t resolved_count = 0;
     std::vector<std::string> resolved_paths;
     bool published = false;
+    bool dry_run = false;
 };
 
 struct ManualWriterRemovalCompleted {

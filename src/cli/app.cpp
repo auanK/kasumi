@@ -322,6 +322,8 @@ int run(int argc, char* argv[]) {
                 ? i18n::Key::RepackDryRunStarting
             : (op == application::Operation::GarbageCollect && request.dry_run)
                 ? i18n::Key::GcDryRunStarting
+            : (op == application::Operation::ResolveMissing && request.dry_run)
+                ? i18n::Key::ResolveMissingDryRunStarting
                 : key;
         std::println("{}", i18n::format(display_key, request.profile_name));
         reports_progress = true;
@@ -329,9 +331,64 @@ int run(int argc, char* argv[]) {
     }
 
     auto creds = credentials::for_profile(environment, request.profile_name);
+    struct CredentialsGuard {
+        application::Credentials& value;
+        ~CredentialsGuard() noexcept {
+            application::wipe_credentials(value);
+        }
+    } creds_guard{creds};
     if (platform::cancellation::requested()) {
-        application::wipe_credentials(creds);
         return finish(present_cancellation(request.operation));
+    }
+
+    if (request.operation == application::Operation::ResolveMissing &&
+        !request.dry_run && !request.confirm) {
+        auto preview_request = request;
+        preview_request.dry_run = true;
+        auto preview_creds = creds;
+        CommandProgress preview_display(full);
+        application::ProgressCallback on_preview_progress;
+        if (reports_progress) {
+            on_preview_progress = [operation = request.operation,
+                                   &preview_display](const auto& progress) {
+                preview_display.update(progress, operation);
+            };
+        }
+        auto preview_res = application::execute({
+            .request = preview_request,
+            .credentials = std::move(preview_creds),
+            .environment = environment,
+            .on_progress = std::move(on_preview_progress),
+        });
+        preview_display.finish(preview_res.has_value() &&
+                               !platform::cancellation::requested());
+        application::wipe_credentials(preview_creds);
+
+        if (platform::cancellation::requested()) {
+            return finish(present_cancellation(request.operation));
+        }
+        if (!preview_res) {
+            return finish(present(preview_res.error()));
+        }
+        const auto* preview_data =
+            std::get_if<application::ResolveMissingCompleted>(&preview_res->data);
+        if (preview_data == nullptr || preview_data->resolved_paths.empty()) {
+            return finish(present(*preview_res, full));
+        }
+        i18n::println(i18n::Key::ResolveMissingConfirmHeader,
+                      preview_data->resolved_paths.size());
+        for (const auto& path : preview_data->resolved_paths) {
+            std::println("  {}", sanitize_terminal_text(path));
+        }
+        if (!prompt_confirmation(i18n::format(
+                i18n::Key::ResolveMissingConfirmPrompt,
+                preview_data->resolved_paths.size()))) {
+            if (platform::cancellation::requested()) {
+                return finish(present_cancellation(request.operation));
+            }
+            print_error_line(i18n::tr(i18n::Key::ResolveMissingCancelled));
+            return finish(1);
+        }
     }
 
     CommandProgress display(full);
@@ -347,7 +404,6 @@ int run(int argc, char* argv[]) {
                                         .environment = environment,
                                         .on_progress = std::move(on_progress)});
     display.finish(result.has_value() && !platform::cancellation::requested());
-    application::wipe_credentials(creds);
 
     if (platform::cancellation::requested()) {
         return finish(present_cancellation(request.operation));

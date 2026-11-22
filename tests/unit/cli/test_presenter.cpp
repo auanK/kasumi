@@ -2194,7 +2194,22 @@ TEST(CliPresenterTest, ResolveMissingSuccessIsLocalized) {
                              .data = ResolveMissingCompleted{}});
     EXPECT_NE(empty.find("Nenhum caminho ausente pendente para resolver"),
               std::string::npos);
+
     kasumi::cli::i18n::set_language(Language::English);
+    const auto dry = present_out(
+        Response{.operation = Operation::ResolveMissing,
+                 .data = ResolveMissingCompleted{
+                     .resolved_count = 2,
+                     .resolved_paths = {"alpha.txt", "sub/\x1b[31mbeta.txt"},
+                     .published = false,
+                     .dry_run = true}});
+    EXPECT_NE(dry.find("Paths eligible for logical deletion (2):"),
+              std::string::npos);
+    EXPECT_NE(dry.find("  alpha.txt"), std::string::npos);
+    EXPECT_NE(dry.find("  sub/?[31mbeta.txt"), std::string::npos);
+    EXPECT_NE(
+        dry.find("Resolve-missing dry-run completed: no deletions published."),
+        std::string::npos);
 }
 
 TEST(CliPresenterTest, SanitizesTerminalControlAndEscapeSequences) {

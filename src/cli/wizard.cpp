@@ -592,6 +592,10 @@ int apply_profile_key_update(
 
 } // namespace
 
+bool prompt_confirmation(std::string_view message) {
+    return confirm_change(message);
+}
+
 int run_profile_query(const application::ExecutionEnvironment& environment,
                       std::string_view profile_name,
                       bool full) {
