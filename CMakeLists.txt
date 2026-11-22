@@ -550,6 +550,7 @@ add_library(kasumi_application STATIC
     src/application/sync/publication.cpp
     src/application/sync/reobservation.cpp
     src/application/sync/coordinator.cpp
+    src/application/sync/coordinator_downloads.cpp
     src/application/sync/coordinator_recovery.cpp
     src/application/sync/coordinator_uploads.cpp
     src/application/sync/coordinator_workspace.cpp

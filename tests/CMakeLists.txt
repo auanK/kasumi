@@ -76,6 +76,7 @@ add_library(kasumi_application_fault_test_objects OBJECT
     ${PROJECT_SOURCE_DIR}/src/application/sync/mutation.cpp
     ${PROJECT_SOURCE_DIR}/src/application/sync/mutation_transaction.cpp
     ${PROJECT_SOURCE_DIR}/src/application/sync/coordinator.cpp
+    ${PROJECT_SOURCE_DIR}/src/application/sync/coordinator_downloads.cpp
     ${PROJECT_SOURCE_DIR}/src/application/sync/coordinator_workspace.cpp
     ${PROJECT_SOURCE_DIR}/src/application/sync/reobservation.cpp
     ${PROJECT_SOURCE_DIR}/src/platform/workspace.cpp
