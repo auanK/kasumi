@@ -334,6 +334,18 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 context.accepted_commit_id = stable->input.base_commit_id;
                 return finish_summary();
             }
+            if (auto space = check_sync_disk_space(
+                    context.runtime.local_dir,
+                    context.runtime.database_path.parent_path(),
+                    stable->result.plan);
+                !space) {
+                auto err = make_error(context,
+                                      ErrorCode::SynchronizationFailure,
+                                      space.error(),
+                                      SyncStage::Calculating);
+                err.insufficient_disk_space = true;
+                return std::unexpected(std::move(err));
+            }
 
             notify_stage(SyncStage::Applying, {}, summary.total);
 
@@ -419,6 +431,18 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 if (update_progress_after_stabilize()) {
                     synchronized = {};
                     break;
+                }
+                if (auto space = check_sync_disk_space(
+                        context.runtime.local_dir,
+                        context.runtime.database_path.parent_path(),
+                        stable->result.plan);
+                    !space) {
+                    auto err = make_error(context,
+                                          ErrorCode::SynchronizationFailure,
+                                          space.error(),
+                                          SyncStage::Calculating);
+                    err.insufficient_disk_space = true;
+                    return std::unexpected(std::move(err));
                 }
                 notify_stage(SyncStage::Applying, {}, summary.total);
             }

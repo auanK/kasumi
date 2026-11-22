@@ -279,6 +279,9 @@ std::string_view error_code_string(const application::Error& error) noexcept {
     if (error.lock_busy) {
         return "lock_busy";
     }
+    if (error.insufficient_disk_space) {
+        return "insufficient_disk_space";
+    }
     if ((error.garbage_collection && error.garbage_collection->transport_error) ||
         (error.barrier_removal && error.barrier_removal->transport_error)) {
         return "transport_error";

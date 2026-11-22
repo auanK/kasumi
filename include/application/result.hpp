@@ -296,6 +296,7 @@ struct Error {
     // Sync succeeded before a subsequent inventory audit failed.
     std::optional<SyncCompleted> sync_completed;
     bool lock_busy = false;
+    bool insufficient_disk_space = false;
 };
 
 } // namespace kasumi::application

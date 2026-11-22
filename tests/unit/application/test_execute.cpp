@@ -3,6 +3,7 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "application/profile.hpp"
 #include "application/use_cases/context.hpp"
+#include "application/use_cases/plan_support.hpp"
 #include "core/hasher.hpp"
 #include "core/history.hpp"
 #include "core/node.hpp"
@@ -1654,6 +1655,58 @@ TEST(ApplicationExecuteTest,
     const auto audit = kasumi::application::execute(
         {Request{Operation::Fsck, "demo"}, Credentials{key()}, env});
     ASSERT_TRUE(audit.has_value()) << audit.error().detail;
+}
+
+TEST(ApplicationExecuteTest, DiskSpacePreflightEnforcesDownloadAndStagingSpace) {
+    using kasumi::Action;
+    using kasumi::application::detail::check_sync_disk_space;
+
+    const auto local = std::filesystem::path{"C:/fake/local"};
+    const auto profile = std::filesystem::path{"C:/fake/profile"};
+
+    // Plan with Download (1000 bytes) + CopyLocal (500 bytes) requires
+    // 1500 + min(1500, 16 MiB) = 3000 bytes on local, and 1000 bytes on staging.
+    const auto plan = kasumi::make_sync_plan(
+        {
+            kasumi::Operation{.action = Action::Download,
+                              .path = "a.bin",
+                              .size = 1000},
+            kasumi::Operation{.action = Action::CopyLocal,
+                              .path = "b.bin",
+                              .size = 500},
+        },
+        1);
+
+    EXPECT_TRUE(check_sync_disk_space(local, profile, plan, [&](const auto&) {
+        return std::optional<std::uint64_t>{4096};
+    }).has_value());
+
+    const auto low_local = check_sync_disk_space(
+        local, profile, plan, [&](const auto& p) -> std::optional<std::uint64_t> {
+            return p == local ? 2999ULL : 4096ULL;
+        });
+    ASSERT_FALSE(low_local.has_value());
+    EXPECT_NE(low_local.error().find("insufficient local disk space"),
+              std::string::npos);
+
+    const auto low_staging = check_sync_disk_space(
+        local, profile, plan, [&](const auto& p) -> std::optional<std::uint64_t> {
+            return p == profile ? 999ULL : 10000ULL;
+        });
+    ASSERT_FALSE(low_staging.has_value());
+    EXPECT_NE(low_staging.error().find("insufficient disk space in profile"),
+              std::string::npos);
+
+    // Upload-only plan bypasses download space check even when free space is 0.
+    const auto upload_plan = kasumi::make_sync_plan(
+        {kasumi::Operation{.action = Action::Upload,
+                           .path = "up.bin",
+                           .size = 5000}},
+        1);
+    EXPECT_TRUE(check_sync_disk_space(
+                    local, profile, upload_plan,
+                    [](const auto&) { return std::optional<std::uint64_t>{0}; })
+                    .has_value());
 }
 
 } // namespace
