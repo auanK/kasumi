@@ -2,6 +2,7 @@
 #include "detail.hpp"
 #include "platform/cancellation.hpp"
 #include "platform/durability.hpp"
+#include "platform/metadata.hpp"
 #include "platform/path.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/random.hpp"
@@ -283,9 +284,10 @@ Result copy_file_overwrite(const std::filesystem::path& source,
     return {};
 }
 
-template <typename Iterator>
-ListingResult scan_directory(const std::filesystem::path& base,
-                             bool use_filename_only) {
+template <typename Iterator, typename Fn>
+std::expected<void, Error> scan_regular_entries(const std::filesystem::path& base,
+                                                bool use_filename_only,
+                                                Fn&& on_entry) {
     if (platform::private_storage::is_reparse_or_symlink(base)) {
         return std::unexpected(detail::make_error(
             ErrorCode::InvalidContext,
@@ -293,7 +295,6 @@ ListingResult scan_directory(const std::filesystem::path& base,
             0));
     }
     std::error_code error;
-    std::vector<std::string> identifiers;
     Iterator iterator{base, std::filesystem::directory_options::none, error};
     if (error) {
         return std::unexpected(make_error(error));
@@ -325,11 +326,31 @@ ListingResult scan_directory(const std::filesystem::path& base,
             if (error) {
                 return std::unexpected(make_error(error));
             }
-            identifiers.push_back(platform::path::to_logical_utf8(rel));
+            if (auto res = on_entry(*iterator, platform::path::to_logical_utf8(rel));
+                !res) {
+                return res;
+            }
         }
     }
     if (error) {
         return std::unexpected(make_error(error));
+    }
+    return {};
+}
+
+template <typename Iterator>
+ListingResult scan_directory(const std::filesystem::path& base,
+                             bool use_filename_only) {
+    std::vector<std::string> identifiers;
+    auto scanned = scan_regular_entries<Iterator>(
+        base, use_filename_only,
+        [&](const std::filesystem::directory_entry&, std::string identifier)
+            -> std::expected<void, Error> {
+            identifiers.push_back(std::move(identifier));
+            return {};
+        });
+    if (!scanned) {
+        return std::unexpected(scanned.error());
     }
     std::ranges::sort(identifiers);
     return identifiers;
@@ -423,6 +444,47 @@ ListingResult local_list(void* context) {
                                                                          false);
 }
 
+MetadataListingResult local_list_metadata(void* context) {
+    auto state = ready_local(context);
+    if (!state) {
+        return std::unexpected(state.error());
+    }
+    const auto base = objects_directory(**state);
+    std::error_code error;
+    if (!std::filesystem::exists(base, error)) {
+        return std::unexpected(error ? make_error(error) : storage_not_found());
+    }
+    std::vector<ObjectMetadata> entries;
+    auto scanned =
+        scan_regular_entries<std::filesystem::recursive_directory_iterator>(
+            base, false,
+            [&](const std::filesystem::directory_entry& entry,
+                std::string identifier) -> std::expected<void, Error> {
+                ObjectMetadata meta{.identifier = std::move(identifier)};
+                std::error_code attr_error;
+                const auto file_size = entry.file_size(attr_error);
+                if (!attr_error) {
+                    meta.size = static_cast<std::uint64_t>(file_size);
+                }
+                attr_error.clear();
+                const auto mtime = entry.last_write_time(attr_error);
+                if (!attr_error) {
+                    if (const auto ns =
+                            platform::metadata::unix_nanoseconds(mtime);
+                        ns && *ns > 0) {
+                        meta.modified_at_unix = *ns / 1'000'000'000LL;
+                    }
+                }
+                entries.push_back(std::move(meta));
+                return {};
+            });
+    if (!scanned) {
+        return std::unexpected(scanned.error());
+    }
+    std::ranges::sort(entries, {}, &ObjectMetadata::identifier);
+    return entries;
+}
+
 ListingResult local_list_prefix(void* context, std::string_view prefix) {
     auto state = ready_local(context);
     if (!state) {
@@ -512,6 +574,7 @@ StorageOperations make_storage_operations() noexcept {
         .get = local_get,
         .presence = local_presence,
         .list = local_list,
+        .list_metadata = local_list_metadata,
         .list_prefix = local_list_prefix,
         .remove = local_remove,
         .put_with_progress = local_put_progress,

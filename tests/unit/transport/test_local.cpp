@@ -401,4 +401,38 @@ TEST(LocalTransportTest, ControlReadBatchIsUnsupportedWithoutCapability) {
     EXPECT_EQ(result.error().code, kasumi::transport::ErrorCode::Unsupported);
 }
 
+TEST(LocalTransportTest,
+     ListMetadataReturnsSortedIdentifiersSizesAndTimestamps) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("transport-local-list-metadata");
+    auto opened = kasumi::transport::open_transport(
+        kasumi::test::workspace_path(workspace, "storage").string());
+    ASSERT_TRUE(opened.has_value());
+    auto& transport = *opened;
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+
+    const auto empty = kasumi::transport::list_metadata(transport);
+    ASSERT_TRUE(empty.has_value()) << empty.error().message;
+    EXPECT_TRUE(empty->empty());
+
+    const auto src_a = kasumi::test::workspace_path(workspace, "src_a");
+    const auto src_b = kasumi::test::workspace_path(workspace, "src_b");
+    kasumi::test::write_text(src_a, "alpha");
+    kasumi::test::write_text(src_b, "beta-nine");
+    ASSERT_TRUE(kasumi::transport::put(transport, src_b, "beta/two"));
+    ASSERT_TRUE(kasumi::transport::put(transport, src_a, "alpha/one"));
+
+    const auto listed = kasumi::transport::list_metadata(transport);
+    ASSERT_TRUE(listed.has_value()) << listed.error().message;
+    ASSERT_EQ(listed->size(), 2U);
+    EXPECT_EQ((*listed)[0].identifier, "alpha/one");
+    EXPECT_EQ((*listed)[0].size, std::optional<std::uint64_t>{5});
+    ASSERT_TRUE((*listed)[0].modified_at_unix.has_value());
+    EXPECT_GT(*(*listed)[0].modified_at_unix, 1'000'000'000);
+    EXPECT_EQ((*listed)[1].identifier, "beta/two");
+    EXPECT_EQ((*listed)[1].size, std::optional<std::uint64_t>{9});
+    ASSERT_TRUE((*listed)[1].modified_at_unix.has_value());
+    EXPECT_GT(*(*listed)[1].modified_at_unix, 1'000'000'000);
+}
+
 } // namespace

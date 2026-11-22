@@ -758,6 +758,15 @@ ListingResult list(Transport& transport) {
     return call_required(transport, transport.storage.list);
 }
 
+MetadataListingResult list_metadata(Transport& transport) {
+    if (!valid(transport)) {
+        return std::unexpected(invalid_transport_error());
+    }
+    return call_optional(transport,
+                         transport.storage.list_metadata,
+                         "transport does not support metadata listing");
+}
+
 ListingResult list(Transport& transport, std::string_view prefix) {
     if (!detail::valid_relative_identifier(prefix, true)) {
         return std::unexpected(

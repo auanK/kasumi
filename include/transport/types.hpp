@@ -2,7 +2,9 @@
 #define KASUMI_TRANSPORT_TYPES_HPP
 
 #include <cstddef>
+#include <cstdint>
 #include <expected>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -57,6 +59,15 @@ using RemovalResult = std::expected<Removal, Error>;
 
 // List of identifiers or transport error.
 using ListingResult = std::expected<std::vector<std::string>, Error>;
+
+// Lightweight physical object metadata returned by optional metadata listing.
+struct ObjectMetadata {
+    std::string identifier;
+    std::optional<std::int64_t> modified_at_unix;
+    std::optional<std::uint64_t> size;
+};
+
+using MetadataListingResult = std::expected<std::vector<ObjectMetadata>, Error>;
 
 // Returns the stable name of the error code category.
 std::string_view error_code_name(ErrorCode code) noexcept;

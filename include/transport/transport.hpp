@@ -95,6 +95,9 @@ using PresenceFunction = PresenceResult (*)(void* context,
 // Function signature for full storage listing.
 using ListFunction = ListingResult (*)(void* context);
 
+// Function signature for full storage listing with object timestamps and sizes.
+using ListMetadataFunction = MetadataListingResult (*)(void* context);
+
 // Function signature for direct listing under a validated relative prefix.
 using ListPrefixFunction = ListingResult (*)(void* context,
                                              std::string_view prefix);
@@ -183,6 +186,7 @@ struct StorageOperations {
     GetBatchFunction get_batch = nullptr;
     PresenceFunction presence = nullptr;
     ListFunction list = nullptr;
+    ListMetadataFunction list_metadata = nullptr;
     ListPrefixFunction list_prefix = nullptr;
     PhysicalHashFunction physical_hash = nullptr;
     PhysicalHashBatchFunction physical_hash_batch = nullptr;
@@ -294,6 +298,9 @@ PresenceResult presence(Transport& transport, std::string_view identifier);
 
 // Lists all identifiers in storage.
 ListingResult list(Transport& transport);
+
+// Lists all identifiers in storage with optional object timestamps and sizes.
+MetadataListingResult list_metadata(Transport& transport);
 
 // Lists names directly under a validated relative prefix.
 ListingResult list(Transport& transport, std::string_view prefix);
