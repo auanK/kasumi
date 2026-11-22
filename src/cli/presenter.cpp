@@ -2777,11 +2777,21 @@ int present(const application::DiagnosticsReport& report,
                               sanitize_terminal_text(entry.profile.name),
                               entry.healthy ? i18n::tr(i18n::Key::LabelOk)
                                             : i18n::tr(i18n::Key::LabelWarning));
+                std::string state_label{
+                    application::to_string(entry.local_state)};
+                if (entry.local_state ==
+                    application::ProfileLocalState::Running) {
+                    if (const auto active_op =
+                            application::active_profile_operation(
+                                entry.activity)) {
+                        state_label = std::format("Running ({})", *active_op);
+                    }
+                }
                 std::println("  {} -> {} ({})",
                              sanitize_terminal_text(
                                  platform::path::to_utf8(entry.profile.local_dir)),
                              sanitize_terminal_text(entry.profile.remote_dir),
-                             application::to_string(entry.local_state));
+                             state_label);
                 if (entry.local_free_bytes) {
                     i18n::println(i18n::Key::DiagnosticsFreeSpace,
                                   format_size(*entry.local_free_bytes));

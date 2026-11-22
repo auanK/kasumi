@@ -843,8 +843,26 @@ TEST(ApplicationExecuteTest, ProfileLockRejectsOverlappingExecution) {
         {Request{Operation::Status, "demo"}, Credentials{key()}, environment});
     ASSERT_FALSE(blocked.has_value());
     EXPECT_EQ(blocked.error().code, ErrorCode::RuntimeFailure);
+    EXPECT_TRUE(blocked.error().lock_busy);
     EXPECT_EQ(blocked.error().detail,
               "profile is already in use by another execution");
+
+    ASSERT_TRUE(kasumi::state_storage::record_execution_start(
+        environment.app_data_dir / "profiles/demo/db.sqlite",
+        kasumi::state_storage::LocalExecutionRecord{
+            .execution_id = "active-gc-exec",
+            .operation =
+                kasumi::state_storage::LocalOperationKind::GarbageCollect,
+            .machine_id_hex = std::string(32, 'b'),
+            .machine_name = "HostB",
+            .started_at = 1700000300,
+        }));
+    const auto blocked_with_op = kasumi::application::execute(
+        {Request{Operation::Status, "demo"}, Credentials{key()}, environment});
+    ASSERT_FALSE(blocked_with_op.has_value());
+    EXPECT_TRUE(blocked_with_op.error().lock_busy);
+    EXPECT_EQ(blocked_with_op.error().detail,
+              "profile is already in use by another execution (running gc)");
 
     kasumi::platform::release_profile_lock(held);
     const auto allowed = kasumi::application::execute(

@@ -537,6 +537,56 @@ TEST_F(CliInterfaceTest, LogFileWritesCleanTextAndAppendsNdjsonWithoutCreatingOn
     EXPECT_EQ(kasumi::cli::strip_ansi_sequences("\x1b[32m[OK]\x1b[0m\tOl\xC3\xA1\n"),
               "[OK] Ol\xC3\xA1");
 }
+
+TEST_F(CliInterfaceTest, ActiveLockShowsRunningAcrossShowConfigAndDiagnostics) {
+    const auto root = kasumi::test::workspace_root(workspace);
+    const kasumi::application::ExecutionEnvironment environment{root / "kasumi"};
+    const kasumi::application::Profile profile{
+        "demo", root / "local", (root / "remote").string()};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment,
+        profile,
+        kasumi::application::MasterKeyHex{std::string(64, '5')}));
+    std::filesystem::create_directories(profile.local_dir);
+
+    auto held = kasumi::platform::acquire_profile_lock(
+        environment.app_data_dir / "profile-demo.lock");
+    ASSERT_TRUE(held.has_value()) << held.error();
+
+    const auto show_text = run({"kasumi", "show", "demo"});
+    EXPECT_EQ(show_text.code, 0) << show_text.err;
+    EXPECT_NE(show_text.out.find("State: Running"), std::string::npos);
+    EXPECT_EQ(show_text.out.find("State: Problem"), std::string::npos);
+    EXPECT_EQ(show_text.out.find("Reason:"), std::string::npos);
+
+    const auto show_json = run({"kasumi", "show", "demo", "--json"});
+    EXPECT_EQ(show_json.code, 0) << show_json.err;
+    EXPECT_NE(show_json.out.find("\"state\":\"running\""), std::string::npos);
+    EXPECT_NE(show_json.out.find("\"problem\":\"none\""), std::string::npos);
+    EXPECT_NE(show_json.out.find("\"lock_active\":true"), std::string::npos);
+
+    const auto diag_json = run({"kasumi", "diagnostics", "demo", "--json"});
+    EXPECT_EQ(diag_json.code, 0) << diag_json.err;
+    EXPECT_NE(diag_json.out.find("\"state\":\"running\""), std::string::npos);
+    EXPECT_NE(diag_json.out.find("\"lock_active\":true"), std::string::npos);
+    EXPECT_NE(diag_json.out.find("\"healthy\":true"), std::string::npos);
+    EXPECT_NE(diag_json.out.find("\"overall_ok\":true"), std::string::npos);
+
+    const auto diag_quiet = run({"kasumi", "diagnostics", "demo", "--quiet"});
+    EXPECT_EQ(diag_quiet.code, 0);
+    EXPECT_TRUE(diag_quiet.out.empty());
+
+    std::istringstream quit_input("q\n");
+    auto* previous = std::cin.rdbuf(quit_input.rdbuf());
+    const auto config_out = run({"kasumi", "config"});
+    std::cin.rdbuf(previous);
+    std::cin.clear();
+    kasumi::platform::release_profile_lock(*held);
+
+    EXPECT_EQ(config_out.code, 0) << config_out.err;
+    EXPECT_NE(config_out.out.find("Running"), std::string::npos);
+    EXPECT_EQ(config_out.out.find("Problem"), std::string::npos);
+}
 class GeneralOptionTest : public CliInterfaceTest,
                           public testing::WithParamInterface<const char*> {};
 TEST_P(GeneralOptionTest, ConventionalOptionsSucceedWithoutExecution) {

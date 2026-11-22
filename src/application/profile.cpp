@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <format>
 #include <monocypher.h>
 #include <optional>
 #include <thread>
@@ -923,15 +924,29 @@ struct ScopedProfileLock {
     }
 };
 
+std::string format_profile_lock_error(const ExecutionEnvironment& environment,
+                                      std::string_view profile_name,
+                                      std::string_view lock_error) {
+    if (lock_error == "profile is already in use by another execution") {
+        if (const auto active_op = active_profile_operation(
+                inspect_profile_activity(environment, profile_name))) {
+            return std::format("{} (running {})", lock_error, *active_op);
+        }
+    }
+    return std::string{lock_error};
+}
+
 std::expected<ScopedProfileLock, ProfileError>
-acquire_target_profile_lock(const std::filesystem::path& app_data_dir,
+acquire_target_profile_lock(const ExecutionEnvironment& environment,
                             std::string_view profile_name) {
-    const auto lock_path =
-        app_data_dir / ("profile-" + std::string(profile_name) + ".lock");
+    const auto lock_path = environment.app_data_dir /
+                           ("profile-" + std::string(profile_name) + ".lock");
     auto profile_lock = platform::acquire_profile_lock(lock_path);
     if (!profile_lock) {
-        return fail_profile(ProfileErrorCode::LockFailure,
-                            profile_lock.error());
+        return fail_profile(
+            ProfileErrorCode::LockFailure,
+            format_profile_lock_error(
+                environment, profile_name, profile_lock.error()));
     }
     return ScopedProfileLock{*profile_lock};
 }
@@ -959,7 +974,7 @@ update_profile(const ExecutionEnvironment& environment, Profile profile) {
     const auto old_storage = it->key_storage;
     const auto new_storage = to_runtime_key_storage(profile.key_storage);
     auto profile_lock =
-        acquire_target_profile_lock(environment.app_data_dir, profile.name);
+        acquire_target_profile_lock(environment, profile.name);
     if (!profile_lock) {
         return std::unexpected(profile_lock.error());
     }
@@ -1039,8 +1054,10 @@ set_profile_key(const ExecutionEnvironment& environment,
             ("profile-" + std::string(profile_name) + ".lock");
         auto profile_lock = platform::acquire_profile_lock(lock_path);
         if (!profile_lock) {
-            return fail_profile(ProfileErrorCode::LockFailure,
-                                profile_lock.error());
+            return fail_profile(
+                ProfileErrorCode::LockFailure,
+                format_profile_lock_error(
+                    environment, profile_name, profile_lock.error()));
         }
         struct LockGuard {
             std::intptr_t handle;
@@ -1113,7 +1130,7 @@ delete_profile(const ExecutionEnvironment& environment,
     }
 
     auto profile_lock =
-        acquire_target_profile_lock(environment.app_data_dir, profile_name);
+        acquire_target_profile_lock(environment, profile_name);
     if (!profile_lock) {
         return std::unexpected(profile_lock.error());
     }
@@ -1179,8 +1196,8 @@ rename_profile(const ExecutionEnvironment& environment,
         current_name <= new_name ? current_name : new_name;
     const auto second_lock_name =
         current_name <= new_name ? new_name : current_name;
-    auto first_lock = acquire_target_profile_lock(
-        environment.app_data_dir, first_lock_name);
+    auto first_lock =
+        acquire_target_profile_lock(environment, first_lock_name);
     if (!first_lock) {
         return std::unexpected(first_lock.error());
     }
@@ -1195,8 +1212,8 @@ rename_profile(const ExecutionEnvironment& environment,
         platform::private_storage::is_reparse_or_symlink(second_lock_path) ||
         !std::filesystem::equivalent(
             lock_path(first_lock_name), second_lock_path, ec)) {
-        auto second = acquire_target_profile_lock(
-            environment.app_data_dir, second_lock_name);
+        auto second =
+            acquire_target_profile_lock(environment, second_lock_name);
         if (!second) {
             return std::unexpected(second.error());
         }
@@ -1783,7 +1800,11 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
 
     const auto lock_path = environment.app_data_dir /
                            ("profile-" + std::string(profile_name) + ".lock");
-    if (probe_profile_lock(lock_path) != LockProbe::Inactive) {
+    const auto lock_probe = probe_profile_lock(lock_path);
+    if (lock_probe == LockProbe::Active) {
+        return ProfileLocalState::Running;
+    }
+    if (lock_probe != LockProbe::Inactive) {
         return fail_inspection(ProfileLocalProblem::Lock);
     }
 
@@ -1997,10 +2018,41 @@ std::string_view to_string(ProfileLocalState state) noexcept {
             return "Ready";
         case ProfileLocalState::Pending:
             return "Pending";
+        case ProfileLocalState::Running:
+            return "Running";
         case ProfileLocalState::Problem:
             return "Problem";
     }
     return "Problem";
+}
+
+std::string_view to_string(ProfileOperationKind operation) noexcept {
+    switch (operation) {
+        case ProfileOperationKind::Sync:
+            return "sync";
+        case ProfileOperationKind::Fsck:
+            return "fsck";
+        case ProfileOperationKind::GarbageCollect:
+            return "gc";
+        case ProfileOperationKind::Repack:
+            return "repack";
+        case ProfileOperationKind::ResolveMissing:
+            return "resolve-missing";
+        case ProfileOperationKind::RemoveWriter:
+            return "gc remove-writer";
+        case ProfileOperationKind::RemoveBarrier:
+            return "gc remove-barrier";
+    }
+    return "unknown";
+}
+
+std::optional<std::string_view>
+active_profile_operation(const ProfileActivityReport& activity) noexcept {
+    if (activity.last_attempt &&
+        activity.last_attempt->status == ProfileExecutionStatus::InProgress) {
+        return to_string(activity.last_attempt->operation);
+    }
+    return std::nullopt;
 }
 
 namespace {

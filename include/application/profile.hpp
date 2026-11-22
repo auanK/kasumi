@@ -110,6 +110,7 @@ enum class ProfileLocalState {
     Initialized,
     Ready,
     Pending,
+    Running,
     Problem
 };
 
@@ -150,6 +151,9 @@ enum class ProfileOperationKind : std::uint8_t {
     RemoveWriter = 6,
     RemoveBarrier = 7,
 };
+
+// Returns a canonical CLI-aligned label for a recorded profile operation.
+std::string_view to_string(ProfileOperationKind operation) noexcept;
 
 enum class ProfileExecutionStatus : std::uint8_t {
     InProgress = 1,
@@ -239,6 +243,10 @@ struct ProfileActivityReport {
 ProfileActivityReport
 inspect_profile_activity(const ExecutionEnvironment& environment,
                          std::string_view profile_name);
+
+// Returns the active operation label when activity shows an InProgress attempt.
+std::optional<std::string_view>
+active_profile_operation(const ProfileActivityReport& activity) noexcept;
 
 struct DiagnosticsRcloneInfo {
     bool found = false;

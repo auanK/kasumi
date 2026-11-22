@@ -449,6 +449,8 @@ profile_local_state_name(application::ProfileLocalState state) noexcept {
         return "ready";
     case application::ProfileLocalState::Pending:
         return "pending";
+    case application::ProfileLocalState::Running:
+        return "running";
     case application::ProfileLocalState::Problem:
         return "problem";
     }
@@ -522,6 +524,10 @@ int present_json_show(const application::Profile& profile,
                       bool full) {
     auto doc = make_envelope("show", profile.name, true, 0, std::nullopt);
     const std::string_view state_str = profile_local_state_name(state);
+    const bool lock_active = state == application::ProfileLocalState::Running;
+    const auto active_op =
+        lock_active ? application::active_profile_operation(activity)
+                    : std::nullopt;
 
     json data{
         {"name", profile.name},
@@ -529,6 +535,8 @@ int present_json_show(const application::Profile& profile,
         {"remote_dir", profile.remote_dir},
         {"state", state_str},
         {"problem", local_problem_name(problem)},
+        {"lock_active", lock_active},
+        {"active_operation", active_op ? json(*active_op) : json(nullptr)},
         {"key_storage", application::to_string(profile.key_storage)},
         {"min_history_depth", profile.min_history_depth},
         {"min_history_age_hours", profile.min_history_age_hours},
@@ -616,6 +624,10 @@ int present_json_diagnostics(const application::DiagnosticsReport& report,
 
     json profiles = json::array();
     for (const auto& item : report.profiles) {
+        const auto active_op =
+            item.lock_active
+                ? application::active_profile_operation(item.activity)
+                : std::nullopt;
         json entry{
             {"name", item.profile.name},
             {"local_dir", platform::path::to_utf8(item.profile.local_dir)},
@@ -633,6 +645,7 @@ int present_json_diagnostics(const application::DiagnosticsReport& report,
                                        : json(nullptr)},
             {"uses_rclone", item.uses_rclone},
             {"lock_active", item.lock_active},
+            {"active_operation", active_op ? json(*active_op) : json(nullptr)},
             {"journal_present", item.journal_present},
             {"key_accessible", item.key_accessible},
             {"database_present", item.activity.database_present},
@@ -960,21 +973,6 @@ int present_json(std::string_view profile_name,
                            inspection_error_code_string(error),
                            error.detail,
                            duration);
-}
-
-std::string_view
-profile_local_state_name(application::ProfileLocalState state) noexcept {
-    switch (state) {
-    case application::ProfileLocalState::Initialized:
-        return "initialized";
-    case application::ProfileLocalState::Ready:
-        return "ready";
-    case application::ProfileLocalState::Pending:
-        return "pending";
-    case application::ProfileLocalState::Problem:
-        return "problem";
-    }
-    return "problem";
 }
 
 } // namespace kasumi::cli
