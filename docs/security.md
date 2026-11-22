@@ -43,7 +43,7 @@ The threat model distinguishes three threat scenarios:
 > An attacker who can read `key.bin` can recover the master key directly without breaking Argon2id.
 > Use `key_storage = "vault"` (the default for new profiles) to store the key in the OS credential vault, or `key_storage = "memory"` to require Password and Password Salt on every command without persisting the key.
 
-The profile creation wizard (`kasumi config`), key rotation/entry (`kasumi key <profile>`), and `memory`-mode runtime operations derive a 32-byte symmetric master key:
+The profile creation wizard (`kasumi config`), local key entry/replacement (`kasumi key <profile>`), and `memory`-mode runtime operations derive a 32-byte symmetric master key:
 
 ```text
 Password + Password Salt
@@ -52,6 +52,8 @@ Password + Password Salt
         ↓
      Master Key
 ```
+
+`kasumi key <profile>` only updates the locally stored key (and asks for confirmation before overwriting a different existing key); it does **not** re-encrypt remote vault data. Rotating a compromised key requires creating a new vault (see [Compromise Recovery](#compromise-recovery)).
 
 * **Password**: Minimum 12 characters.
 * **Password Salt**: Minimum 16 characters. A reproducible, user-provided passphrase that serves as the cryptographic salt for Argon2id key derivation (not an automatically generated or stored random salt). Machines that derive the same vault master key from Password and Password Salt must use the same two inputs. A machine may instead be provisioned with the same 32-byte master key directly (`KASUMI_MASTER_KEY`).
@@ -66,7 +68,7 @@ Each profile in `config.toml` requires `key_storage = "vault" | "file" | "memory
   * **Windows**: Windows Credential Manager (`CredWriteW` / `CredReadW` / `CredDeleteW` with `CRED_TYPE_GENERIC` and `CRED_PERSIST_LOCAL_MACHINE`).
   * **Linux**: Dynamically loads system shared libraries on demand via `dlopen` (verifying root ownership and non-writable permissions before loading) to communicate with the active desktop vault over D-Bus without hard binary dependencies on headless servers—using `libsecret-1.so.0` (Freedesktop Secret Service / GNOME Keyring) or `libdbus-1.so.3` (KDE KWallet `org.kde.kwalletd6` / `org.kde.kwalletd5`).
 * **`file`**: Persists the 32-byte master key in `profiles/<profile>/key.bin`, obscured using a fixed, reversible byte-wise XOR mask with the `KASUMI_EDGE_SYNC_V1_MASK` constant. Applying the same operation reverses the representation; this is **not cryptographic encryption**.
-* **`memory`**: Never writes the master key to `key.bin` or the OS vault. Every command requiring the key prompts on `/dev/tty` or `CONIN$` (or reads `KASUMI_PASSWORD` and `KASUMI_PASSWORD2`, or `KASUMI_MASTER_KEY` in `--non-interactive` mode). Switching a profile's `key_storage` mode automatically deletes the key from the previously configured storage backend.
+* **`memory`**: Never writes the master key to `key.bin` or the OS vault. Every command requiring the key prompts on `/dev/tty` or `CONIN$` (or reads `KASUMI_PASSWORD` and `KASUMI_PASSWORD2`, or `KASUMI_MASTER_KEY`). Switching a profile's `key_storage` mode automatically deletes the key from the previously configured storage backend.
 * **Access Control at Rest**: Operating system file permissions restrict read and write access to local profile directories and files:
   * **Windows**: Explicit, protected DACLs (`D:P(A;FA;;;SY)(A;FA;;;<user-sid>)`) disable inheritance and restrict access to the owner user and `SYSTEM`. Symlinks and reparse points are rejected.
   * **POSIX**: Mode `0600` for files and `0700` for private directories (`O_NOFOLLOW` and `lstat` checks reject symlinks).

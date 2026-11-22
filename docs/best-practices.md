@@ -154,8 +154,8 @@ Before replacing binaries:
 4. Preserve journals and diagnostics for partial or uncertain operations. Never
    delete SQLite, accepted state, or recovery evidence to force initialization.
 
-[Update portable installations manually](configuration-and-usage.md#updating-kasumi).
-For managed installations, use the package manager that installed Kasumi.
+Follow [Updating Kasumi](configuration-and-usage.md#updating-kasumi) to verify and
+replace the binary manually.
 
 ## Automation
 

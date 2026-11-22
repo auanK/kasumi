@@ -124,13 +124,11 @@ its current work; a no-op is not a full integrity audit. See
 
 ### Updating Kasumi
 
-For a portable installation, download the new archive and its SHA-256 checksum
-from [GitHub Releases](https://github.com/auanK/kasumi/releases), then
-[verify the archive](getting-started.md#verify-downloads). Stop Kasumi and
-replace the executable manually with the one from the verified archive.
-
-For a managed installation, update through the package manager that installed
-Kasumi. Read [Upgrading Kasumi](best-practices.md#upgrading-kasumi) for
+Download the new archive and its SHA-256 checksum from
+[GitHub Releases](https://github.com/auanK/kasumi/releases), then
+[verify the archive checksum and provenance attestation](getting-started.md#verify-downloads).
+Stop Kasumi and replace the executable manually with the one from the verified
+archive. Read [Upgrading Kasumi](best-practices.md#upgrading-kasumi) for
 compatibility and backup precautions before replacing binaries.
 
 ### Partial Synchronization and Explicit Data-Loss Operations
