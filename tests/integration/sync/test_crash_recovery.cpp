@@ -188,7 +188,11 @@ public:
                   kasumi::application::integrity::Error>
     collect() {
         return kasumi::application::integrity::garbage_collect(
-            runtime_, context_.storage, key_);
+            runtime_,
+            context_.storage,
+            key_,
+            kasumi::application::integrity::GarbageCollectOptions{
+                .min_orphan_age = std::chrono::seconds{0}});
     }
 
     std::expected<kasumi::application::integrity::FsckResult,

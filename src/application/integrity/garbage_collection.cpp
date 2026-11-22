@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -179,27 +180,52 @@ struct BarrierCleanup {
     }
 };
 
-void notify(const GarbageCollectProgressCallback& on_progress,
-            GarbageCollectStage stage,
-            std::optional<std::size_t> candidate_count,
-            std::size_t removed_objects,
-            std::chrono::nanoseconds elapsed = {},
-            std::optional<std::size_t> listed_objects = std::nullopt) noexcept {
-    if (!on_progress) {
-        return;
+struct ProgressState {
+    const GarbageCollectProgressCallback& on_progress;
+    std::uint32_t min_age_hours = 0;
+    std::optional<std::size_t> listed_objects;
+    std::optional<std::size_t> commits_processed;
+    std::optional<std::size_t> commits_total;
+    std::optional<std::size_t> candidate_count;
+    std::optional<std::size_t> candidate_content_objects;
+    std::optional<std::size_t> candidate_commit_variants;
+    std::optional<std::size_t> candidate_expired_commits;
+    std::optional<std::size_t> candidate_activities;
+    std::optional<std::size_t> deferred_recent_objects;
+    std::optional<std::uint64_t> candidate_bytes;
+    std::size_t removed_objects = 0;
+    std::uint64_t removed_bytes = 0;
+    std::chrono::nanoseconds removal_elapsed{};
+
+    void emit(GarbageCollectStage stage,
+              GarbageCollectSubStage sub_stage) const noexcept {
+        if (!on_progress) {
+            return;
+        }
+        try {
+            on_progress(GarbageCollectProgress{
+                .stage = stage,
+                .sub_stage = sub_stage,
+                .candidate_count = candidate_count,
+                .removed_objects = removed_objects,
+                .removal_elapsed = removal_elapsed,
+                .listed_objects = listed_objects,
+                .commits_processed = commits_processed,
+                .commits_total = commits_total,
+                .candidate_content_objects = candidate_content_objects,
+                .candidate_commit_variants = candidate_commit_variants,
+                .candidate_expired_commits = candidate_expired_commits,
+                .candidate_activities = candidate_activities,
+                .deferred_recent_objects = deferred_recent_objects,
+                .candidate_bytes = candidate_bytes,
+                .removed_bytes = removed_bytes,
+                .min_age_hours = min_age_hours,
+            });
+        } catch (...) {
+            // Progress is observational and must not alter the operation.
+        }
     }
-    try {
-        on_progress(GarbageCollectProgress{
-            .stage = stage,
-            .candidate_count = candidate_count,
-            .removed_objects = removed_objects,
-            .removal_elapsed = elapsed,
-            .listed_objects = listed_objects,
-        });
-    } catch (...) {
-        // Progress is observational and must not alter the operation.
-    }
-}
+};
 
 std::optional<Error> cancellation_error() {
     if (!platform::cancellation::requested()) {
@@ -319,10 +345,14 @@ required_variants(const history_storage::ReachabilityInventory& inventory,
 
 struct ObservePlan {
     std::vector<std::string> candidates;
+    std::vector<std::uint64_t> candidate_sizes;
     std::vector<history_storage::activity::LoadedActivity> kept_activities;
     std::size_t candidate_content_objects = 0;
     std::size_t candidate_commit_variants = 0;
+    std::size_t candidate_expired_commits = 0;
     std::size_t candidate_activities = 0;
+    std::size_t deferred_recent_objects = 0;
+    std::uint64_t candidate_bytes = 0;
     std::size_t pruned_activities = 0;
 };
 
@@ -330,24 +360,71 @@ std::expected<ObservePlan, Error>
 observe(transport::Transport& storage,
         KeySpan key,
         const history_storage::epoch::RetentionPolicy& retention,
+        std::chrono::seconds effective_grace,
+        std::uint32_t effective_min_age_hours,
         const std::filesystem::path& workspace_root,
-        const GarbageCollectProgressCallback& on_progress) {
-    auto listing = transport::list(storage);
-    if (!listing) {
-        return std::unexpected(
-            transport_error(listing.error(), "could not list remote objects"));
+        ProgressState& progress) {
+    progress.emit(GarbageCollectStage::Analyzing,
+                  GarbageCollectSubStage::ListingRemote);
+
+    std::vector<std::string> listing;
+    std::vector<transport::ObjectMetadata> metadata_entries;
+    bool list_done = false;
+    if (storage.storage.list_metadata != nullptr) {
+        auto meta = transport::list_metadata(storage);
+        if (meta) {
+            metadata_entries = std::move(*meta);
+            listing.reserve(metadata_entries.size());
+            for (const auto& obj : metadata_entries) {
+                listing.push_back(obj.identifier);
+            }
+            list_done = true;
+        } else if (meta.error().code != transport::ErrorCode::Unsupported) {
+            return std::unexpected(
+                transport_error(meta.error(), "could not list remote objects"));
+        }
     }
-    notify(on_progress,
-           GarbageCollectStage::Analyzing,
-           std::nullopt,
-           0,
-           {},
-           listing->size());
-    std::ranges::sort(*listing);
+    if (!list_done) {
+        auto plain = transport::list(storage);
+        if (!plain) {
+            return std::unexpected(transport_error(
+                plain.error(), "could not list remote objects"));
+        }
+        listing = std::move(*plain);
+    }
+
+    std::ranges::sort(listing);
+    std::ranges::sort(
+        metadata_entries, {}, &transport::ObjectMetadata::identifier);
+    progress.listed_objects = listing.size();
+    progress.emit(GarbageCollectStage::Analyzing,
+                  GarbageCollectSubStage::AuthenticatingHistory);
+
+    const auto find_metadata = [&](std::string_view identifier)
+        -> const transport::ObjectMetadata* {
+        const auto it = std::ranges::lower_bound(
+            metadata_entries,
+            identifier,
+            {},
+            &transport::ObjectMetadata::identifier);
+        if (it != metadata_entries.end() && it->identifier == identifier) {
+            return &*it;
+        }
+        return nullptr;
+    };
 
     const auto layout = history_storage::derive_remote_layout(key);
     auto history = history_storage::inventory_reachability(
-        storage, key, *listing, workspace_root);
+        storage,
+        key,
+        listing,
+        workspace_root,
+        [&](std::size_t done, std::size_t total) {
+            progress.commits_processed = done;
+            progress.commits_total = total;
+            progress.emit(GarbageCollectStage::Analyzing,
+                          GarbageCollectSubStage::AuthenticatingHistory);
+        });
     if (!history) {
         return std::unexpected(history_error(history.error()));
     }
@@ -355,9 +432,16 @@ observe(transport::Transport& storage,
         return std::unexpected(valid.error());
     }
 
+    progress.emit(GarbageCollectStage::Analyzing,
+                  GarbageCollectSubStage::AnalyzingReachability);
     auto content = history_storage::inventory_content_reachability(
-        storage, key, *listing, *history, workspace_root,
-        /*audit_payloads=*/false, /*include_references=*/false);
+        storage,
+        key,
+        listing,
+        *history,
+        workspace_root,
+        /*audit_payloads=*/false,
+        /*include_references=*/false);
     if (!content) {
         return std::unexpected(history_error(content.error()));
     }
@@ -365,8 +449,10 @@ observe(transport::Transport& storage,
         return std::unexpected(valid.error());
     }
 
+    progress.emit(GarbageCollectStage::Analyzing,
+                  GarbageCollectSubStage::LoadingActivities);
     auto activities = history_storage::activity::load_all(
-        storage, layout, key, workspace_root, *listing);
+        storage, layout, key, workspace_root, listing);
     if (!activities) {
         return std::unexpected(history_error(activities.error()));
     }
@@ -380,16 +466,47 @@ observe(transport::Transport& storage,
     if (!now_unix) {
         return std::unexpected(make_error(
             ErrorCode::StateFailure,
-            "failed to read system clock for activity retention: " +
+            "failed to read system clock for retention check: " +
                 now_unix.error()));
     }
-    auto prunable_activities = history_storage::activity::plan_pruning(
-        activities->valid, retention, *now_unix);
-    history_storage::detail::sort_unique(prunable_activities);
 
-    std::vector<std::string> orphan_ids = content->orphan_content_ids;
-    history_storage::detail::sort_unique(orphan_ids);
+    const auto is_old_enough = [&](std::string_view identifier,
+                                   std::optional<std::int64_t> commit_created_at)
+        -> bool {
+        if (effective_grace == std::chrono::seconds{0}) {
+            return true;
+        }
+        const auto* meta = find_metadata(identifier);
+        if (meta == nullptr || !meta->modified_at_unix.has_value()) {
+            return false;
+        }
+        const auto mtime = *meta->modified_at_unix;
+        if (mtime <= 0 || mtime > *now_unix ||
+            (*now_unix - mtime) < effective_grace.count()) {
+            return false;
+        }
+        if (commit_created_at.has_value()) {
+            const auto created = *commit_created_at;
+            if (created <= 0 || created > *now_unix ||
+                (*now_unix - created) < effective_grace.count()) {
+                return false;
+            }
+        }
+        return true;
+    };
 
+    auto activity_retention = retention;
+    if (effective_grace > std::chrono::seconds{0}) {
+        activity_retention.min_history_age_hours = std::max(
+            activity_retention.min_history_age_hours, effective_min_age_hours);
+    }
+    auto planned_activities = history_storage::activity::plan_pruning(
+        activities->valid, activity_retention, *now_unix);
+    history_storage::detail::sort_unique(planned_activities);
+
+    std::size_t deferred_recent_objects = 0;
+    std::vector<std::string> prunable_activities;
+    prunable_activities.reserve(planned_activities.size());
     std::vector<history_storage::activity::LoadedActivity> kept_activities;
     kept_activities.reserve(activities->valid.size());
 
@@ -404,18 +521,55 @@ observe(transport::Transport& storage,
                              history->orphan_epochs.begin(),
                              history->orphan_epochs.end());
     for (const auto& entry : activities->valid) {
-        if (!std::ranges::binary_search(prunable_activities, entry.identifier)) {
+        if (!std::ranges::binary_search(planned_activities, entry.identifier)) {
             kept_activities.push_back(entry);
             protected_objects.push_back(entry.identifier);
+        } else if (!is_old_enough(entry.identifier, std::nullopt)) {
+            ++deferred_recent_objects;
+            kept_activities.push_back(entry);
+            protected_objects.push_back(entry.identifier);
+        } else {
+            prunable_activities.push_back(entry.identifier);
         }
     }
     history_storage::detail::sort_unique(protected_objects);
+    history_storage::detail::sort_unique(prunable_activities);
 
-    std::vector<std::string> candidates;
+    std::vector<std::string> orphan_ids = content->orphan_content_ids;
+    history_storage::detail::sort_unique(orphan_ids);
+
+    std::vector<std::pair<std::string, std::uint64_t>> planned;
+    std::size_t candidate_content_objects = 0;
+    std::size_t candidate_commit_variants = 0;
+    std::size_t candidate_expired_commits = 0;
+    std::size_t candidate_activities = 0;
+
+    const auto validate_unprotected = [&](std::string_view identifier)
+        -> std::expected<void, Error> {
+        if (identifier.empty() ||
+            protocol::is_control_object(layout, identifier) ||
+            std::ranges::binary_search(protected_objects, identifier)) {
+            return std::unexpected(make_error(
+                ErrorCode::IntegrityFailure,
+                "deletion candidate intersects protected or control objects",
+                std::string{identifier}));
+        }
+        return {};
+    };
+    const auto object_size = [&](std::string_view identifier) -> std::uint64_t {
+        const auto* meta = find_metadata(identifier);
+        return (meta != nullptr && meta->size.has_value()) ? *meta->size : 0U;
+    };
+
     for (const auto& commit : history->commits) {
-        if (!commit.reachable) {
+        if (!commit.valid) {
             continue;
         }
+        const std::optional<std::int64_t> expired_created_at =
+            commit.reachable
+                ? std::nullopt
+                : (commit.tree ? std::optional{commit.tree->created_at}
+                               : std::optional<std::int64_t>{0});
         for (const auto& variant : commit.variants) {
             if (variant.identifier.empty() ||
                 variant.state != history_storage::detail::VariantState::Valid ||
@@ -429,45 +583,79 @@ observe(transport::Transport& storage,
                                "deletion candidate intersects control objects",
                                variant.identifier));
             }
-            candidates.push_back(variant.identifier);
+            if (!is_old_enough(variant.identifier, expired_created_at)) {
+                ++deferred_recent_objects;
+                continue;
+            }
+            planned.emplace_back(variant.identifier,
+                                 object_size(variant.identifier));
+            if (commit.reachable) {
+                ++candidate_commit_variants;
+            } else {
+                ++candidate_expired_commits;
+            }
         }
     }
-    history_storage::detail::sort_unique(candidates);
-    const std::size_t candidate_commit_variants = candidates.size();
 
-    const auto append_unprotected_candidate = [&](const std::string& identifier)
-        -> std::expected<void, Error> {
-        if (identifier.empty() ||
-            protocol::is_control_object(layout, identifier) ||
-            std::ranges::binary_search(protected_objects, identifier)) {
-            return std::unexpected(make_error(
-                ErrorCode::IntegrityFailure,
-                "deletion candidate intersects protected or control objects",
-                identifier));
-        }
-        candidates.push_back(identifier);
-        return {};
-    };
     for (const auto& identifier : orphan_ids) {
-        if (auto ok = append_unprotected_candidate(identifier); !ok) {
+        if (auto ok = validate_unprotected(identifier); !ok) {
             return std::unexpected(ok.error());
         }
+        if (!is_old_enough(identifier, std::nullopt)) {
+            ++deferred_recent_objects;
+            continue;
+        }
+        planned.emplace_back(identifier, object_size(identifier));
+        ++candidate_content_objects;
     }
+
     for (const auto& identifier : prunable_activities) {
-        if (auto ok = append_unprotected_candidate(identifier); !ok) {
+        if (auto ok = validate_unprotected(identifier); !ok) {
             return std::unexpected(ok.error());
         }
+        planned.emplace_back(identifier, object_size(identifier));
+        ++candidate_activities;
     }
-    history_storage::detail::sort_unique(candidates);
+
+    std::ranges::sort(planned, {}, &std::pair<std::string, std::uint64_t>::first);
+    const auto dup = std::ranges::unique(
+        planned, {}, &std::pair<std::string, std::uint64_t>::first);
+    planned.erase(dup.begin(), dup.end());
+
+    std::vector<std::string> candidates;
+    std::vector<std::uint64_t> candidate_sizes;
+    candidates.reserve(planned.size());
+    candidate_sizes.reserve(planned.size());
+    std::uint64_t candidate_bytes = 0;
+    for (auto& [id, size] : planned) {
+        candidate_bytes += size;
+        candidates.push_back(std::move(id));
+        candidate_sizes.push_back(size);
+    }
 
     return ObservePlan{
         .candidates = std::move(candidates),
+        .candidate_sizes = std::move(candidate_sizes),
         .kept_activities = std::move(kept_activities),
-        .candidate_content_objects = orphan_ids.size(),
+        .candidate_content_objects = candidate_content_objects,
         .candidate_commit_variants = candidate_commit_variants,
-        .candidate_activities = prunable_activities.size(),
-        .pruned_activities = prunable_activities.size(),
+        .candidate_expired_commits = candidate_expired_commits,
+        .candidate_activities = candidate_activities,
+        .deferred_recent_objects = deferred_recent_objects,
+        .candidate_bytes = candidate_bytes,
+        .pruned_activities = candidate_activities,
     };
+}
+
+std::expected<void, Error>
+reject_if_writers_present(const std::vector<std::string>& writers) {
+    if (!writers.empty()) {
+        return std::unexpected(
+            make_error(ErrorCode::ConcurrentChange,
+                       "active writers block garbage collection: " +
+                           join_values(writers)));
+    }
+    return {};
 }
 
 std::expected<void, Error>
@@ -477,13 +665,79 @@ require_no_writers(transport::Transport& storage,
     if (!writers) {
         return std::unexpected(protocol_error(writers.error()));
     }
-    if (!writers->empty()) {
+    return reject_if_writers_present(*writers);
+}
+
+std::expected<void, Error>
+check_pre_barrier_controls(transport::Transport& storage,
+                           const history_storage::RemoteLayout& layout) {
+    bool use_fallback = (storage.storage.control_read_batch == nullptr);
+    std::vector<std::string> listed_names;
+    transport::Presence barrier_state = transport::Presence::Absent;
+
+    if (!use_fallback) {
+        const auto writers_dir =
+            history_storage::detail::trim_trailing_slash(layout.writers_prefix);
+        auto batch = transport::control_read_batch(
+            storage,
+            transport::ControlReadBatchRequest{
+                .list_prefixes = {std::string{writers_dir}},
+                .presence_identifiers = {layout.barrier_identifier},
+            });
+        if (!batch) {
+            if (batch.error().code == transport::ErrorCode::Unsupported) {
+                use_fallback = true;
+            } else {
+                return std::unexpected(transport_error(
+                    batch.error(), "could not inspect maintenance controls"));
+            }
+        } else {
+            if (batch->listings.size() != 1 || batch->presences.size() != 1) {
+                return std::unexpected(make_error(
+                    ErrorCode::TransportFailure,
+                    "invalid control read batch response cardinality"));
+            }
+            listed_names = std::move(batch->listings.front());
+            barrier_state = batch->presences.front();
+        }
+    }
+
+    if (use_fallback) {
+        auto barrier_presence =
+            transport::presence(storage, layout.barrier_identifier);
+        if (!barrier_presence) {
+            return std::unexpected(transport_error(
+                barrier_presence.error(),
+                "could not inspect maintenance barrier"));
+        }
+        if (*barrier_presence == transport::Presence::Present) {
+            return std::unexpected(
+                make_error(ErrorCode::ConcurrentChange,
+                           "another maintenance barrier is already present"));
+        }
+        return require_no_writers(storage, layout);
+    }
+
+    if (barrier_state == transport::Presence::Present) {
         return std::unexpected(
             make_error(ErrorCode::ConcurrentChange,
-                       "active writers block garbage collection: " +
-                           join_values(*writers)));
+                       "another maintenance barrier is already present"));
     }
-    return {};
+
+    std::vector<std::string> writers;
+    writers.reserve(listed_names.size());
+    for (const auto& name : listed_names) {
+        const bool valid_hex32 =
+            name.size() == 32 && std::ranges::all_of(name, [](char c) {
+                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            });
+        if (!valid_hex32) {
+            return std::unexpected(make_error(
+                ErrorCode::IntegrityFailure, "invalid writer marker: " + name));
+        }
+        writers.push_back(layout.writers_prefix + name);
+    }
+    return reject_if_writers_present(writers);
 }
 
 std::expected<void, Error>
@@ -503,11 +757,17 @@ std::expected<GarbageCollectResult, Error>
 garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                      transport::Transport& storage,
                      KeySpan key,
-                     bool dry_run,
+                     const GarbageCollectOptions& options,
                      GarbageCollectProgressCallback on_progress) {
     if (!transport::valid(storage)) {
         return std::unexpected(
             make_error(ErrorCode::InvalidInput, "invalid transport"));
+    }
+    if (options.min_orphan_age.has_value() &&
+        *options.min_orphan_age < std::chrono::seconds{0}) {
+        return std::unexpected(
+            make_error(ErrorCode::InvalidInput,
+                       "garbage collection min_orphan_age must be non-negative"));
     }
     const auto workspace_root =
         application::detail::maintenance_workspace_root(runtime_data);
@@ -516,56 +776,80 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             make_error(ErrorCode::InvalidInput, "invalid workspace"));
     }
 
+    const std::chrono::seconds effective_grace =
+        options.min_orphan_age.has_value()
+            ? *options.min_orphan_age
+            : std::chrono::duration_cast<std::chrono::seconds>(
+                  std::chrono::hours{runtime_data.min_history_age_hours});
+    const std::uint32_t effective_min_age_hours =
+        static_cast<std::uint32_t>(effective_grace.count() / 3600);
+
     GarbageCollectFailure failure_diagnostic{};
     failure_diagnostic.stage = GarbageCollectStage::Preparing;
-    notify(on_progress, GarbageCollectStage::Preparing, std::nullopt, 0);
+    ProgressState progress{
+        .on_progress = on_progress,
+        .min_age_hours = effective_min_age_hours,
+    };
+    progress.emit(GarbageCollectStage::Preparing, GarbageCollectSubStage::None);
     if (auto cancelled = cancellation_error(); cancelled.has_value()) {
         return std::unexpected(std::move(*cancelled));
     }
 
     const auto layout = history_storage::derive_remote_layout(key);
-    auto barrier_presence =
-        transport::presence(storage, layout.barrier_identifier);
-    if (!barrier_presence) {
-        return std::unexpected(transport_error(
-            barrier_presence.error(), "could not inspect maintenance barrier"));
-    }
-    if (*barrier_presence == transport::Presence::Present) {
-        return std::unexpected(
-            make_error(ErrorCode::ConcurrentChange,
-                       "another maintenance barrier is already present"));
-    }
-
-    if (dry_run) {
-        if (auto writers = require_no_writers(storage, layout); !writers) {
-            auto err = writers.error();
-            err.garbage_collection = failure_diagnostic;
-            return std::unexpected(std::move(err));
+    progress.emit(GarbageCollectStage::Preparing,
+                  GarbageCollectSubStage::CheckingControls);
+    if (auto controls = check_pre_barrier_controls(storage, layout);
+        !controls) {
+        auto err = controls.error();
+        if (!failure_diagnostic.transport_error.has_value()) {
+            failure_diagnostic.transport_error = err.transport_failure;
         }
+        err.garbage_collection = failure_diagnostic;
+        return std::unexpected(std::move(err));
+    }
 
+    const history_storage::epoch::RetentionPolicy retention{
+        .min_history_depth = runtime_data.min_history_depth,
+        .min_history_age_hours = runtime_data.min_history_age_hours,
+    };
+
+    if (options.dry_run) {
         failure_diagnostic.stage = GarbageCollectStage::Analyzing;
-        notify(on_progress, GarbageCollectStage::Analyzing, std::nullopt, 0);
-        const history_storage::epoch::RetentionPolicy retention{
-            .min_history_depth = runtime_data.min_history_depth,
-            .min_history_age_hours = runtime_data.min_history_age_hours,
-        };
-        auto observed_plan =
-            observe(storage, key, retention, workspace_root, on_progress);
+        auto observed_plan = observe(storage,
+                                     key,
+                                     retention,
+                                     effective_grace,
+                                     effective_min_age_hours,
+                                     workspace_root,
+                                     progress);
         if (!observed_plan) {
             auto err = observed_plan.error();
+            if (!failure_diagnostic.transport_error.has_value()) {
+                failure_diagnostic.transport_error = err.transport_failure;
+            }
             err.garbage_collection = failure_diagnostic;
             return std::unexpected(std::move(err));
         }
 
         const auto candidate_count = observed_plan->candidates.size();
         failure_diagnostic.candidate_objects = candidate_count;
-        notify(on_progress, GarbageCollectStage::Analyzing, candidate_count, 0);
+        progress.candidate_count = candidate_count;
+        progress.candidate_content_objects =
+            observed_plan->candidate_content_objects;
+        progress.candidate_commit_variants =
+            observed_plan->candidate_commit_variants;
+        progress.candidate_expired_commits =
+            observed_plan->candidate_expired_commits;
+        progress.candidate_activities = observed_plan->candidate_activities;
+        progress.deferred_recent_objects =
+            observed_plan->deferred_recent_objects;
+        progress.candidate_bytes = observed_plan->candidate_bytes;
+        progress.emit(GarbageCollectStage::Analyzing,
+                      GarbageCollectSubStage::None);
 
         failure_diagnostic.stage = GarbageCollectStage::Finalizing;
-        notify(on_progress,
-               GarbageCollectStage::Finalizing,
-               candidate_count,
-               0);
+        progress.emit(GarbageCollectStage::Finalizing,
+                      GarbageCollectSubStage::None);
         return GarbageCollectResult{
             .candidate_objects = candidate_count,
             .removed_objects = 0,
@@ -575,12 +859,20 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                 observed_plan->candidate_content_objects,
             .candidate_commit_variants =
                 observed_plan->candidate_commit_variants,
+            .candidate_expired_commits =
+                observed_plan->candidate_expired_commits,
             .candidate_activities = observed_plan->candidate_activities,
+            .deferred_recent_objects = observed_plan->deferred_recent_objects,
+            .candidate_bytes = observed_plan->candidate_bytes,
+            .removed_bytes = 0,
+            .effective_min_age_hours = effective_min_age_hours,
             .pruned_activities = observed_plan->pruned_activities,
             .kept_activities = std::move(observed_plan->kept_activities),
         };
     }
 
+    progress.emit(GarbageCollectStage::Preparing,
+                  GarbageCollectSubStage::EstablishingBarrier);
     auto barrier = protocol::establish_barrier(storage, layout, workspace_root);
     if (!barrier) {
         return std::unexpected(protocol_error(barrier.error()));
@@ -660,35 +952,76 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             return finish(std::unexpected(writers.error()));
         }
 
+        failure_diagnostic.stage = GarbageCollectStage::Analyzing;
+        auto observed_plan = observe(storage,
+                                     key,
+                                     retention,
+                                     effective_grace,
+                                     effective_min_age_hours,
+                                     workspace_root,
+                                     progress);
+        if (!observed_plan) {
+            return finish(std::unexpected(observed_plan.error()));
+        }
+
+        const auto& candidates = observed_plan->candidates;
+        const auto& candidate_sizes = observed_plan->candidate_sizes;
+        const auto candidate_count = candidates.size();
+        failure_diagnostic.candidate_objects = candidate_count;
+        progress.candidate_count = candidate_count;
+        progress.candidate_content_objects =
+            observed_plan->candidate_content_objects;
+        progress.candidate_commit_variants =
+            observed_plan->candidate_commit_variants;
+        progress.candidate_expired_commits =
+            observed_plan->candidate_expired_commits;
+        progress.candidate_activities = observed_plan->candidate_activities;
+        progress.deferred_recent_objects =
+            observed_plan->deferred_recent_objects;
+        progress.candidate_bytes = observed_plan->candidate_bytes;
+        progress.emit(GarbageCollectStage::Analyzing,
+                      GarbageCollectSubStage::None);
+
+        if (candidates.empty()) {
+            failure_diagnostic.stage = GarbageCollectStage::Finalizing;
+            failure_diagnostic.mutation_state =
+                GarbageCollectMutationState::NotAttempted;
+            progress.emit(GarbageCollectStage::Finalizing,
+                          GarbageCollectSubStage::ReleasingBarrier);
+            return finish(GarbageCollectResult{
+                .candidate_objects = 0,
+                .removed_objects = 0,
+                .analysis_only = false,
+                .dry_run = false,
+                .candidate_content_objects =
+                    observed_plan->candidate_content_objects,
+                .candidate_commit_variants =
+                    observed_plan->candidate_commit_variants,
+                .candidate_expired_commits =
+                    observed_plan->candidate_expired_commits,
+                .candidate_activities = observed_plan->candidate_activities,
+                .deferred_recent_objects =
+                    observed_plan->deferred_recent_objects,
+                .candidate_bytes = observed_plan->candidate_bytes,
+                .removed_bytes = 0,
+                .effective_min_age_hours = effective_min_age_hours,
+                .pruned_activities = observed_plan->pruned_activities,
+                .kept_activities = std::move(observed_plan->kept_activities),
+            });
+        }
+
+        progress.emit(GarbageCollectStage::Analyzing,
+                      GarbageCollectSubStage::ProbingConsistency);
         auto online = protocol::supports_online_collection(
             storage, layout, workspace_root);
         if (!online) {
             return finish(std::unexpected(protocol_error(online.error())));
         }
 
-        failure_diagnostic.stage = GarbageCollectStage::Analyzing;
-        notify(on_progress, GarbageCollectStage::Analyzing, std::nullopt, 0);
-        const history_storage::epoch::RetentionPolicy retention{
-            .min_history_depth = runtime_data.min_history_depth,
-            .min_history_age_hours = runtime_data.min_history_age_hours,
-        };
-        auto observed_plan =
-            observe(storage, key, retention, workspace_root, on_progress);
-        if (!observed_plan) {
-            return finish(std::unexpected(observed_plan.error()));
-        }
-
-        const auto& candidates = observed_plan->candidates;
-        const auto candidate_count = candidates.size();
-        failure_diagnostic.candidate_objects = candidate_count;
-        notify(on_progress, GarbageCollectStage::Analyzing, candidate_count, 0);
-
         if (!*online) {
             failure_diagnostic.stage = GarbageCollectStage::Finalizing;
-            notify(on_progress,
-                   GarbageCollectStage::Finalizing,
-                   candidate_count,
-                   0);
+            progress.emit(GarbageCollectStage::Finalizing,
+                          GarbageCollectSubStage::ReleasingBarrier);
             return finish(GarbageCollectResult{
                 .candidate_objects = candidate_count,
                 .removed_objects = 0,
@@ -698,7 +1031,14 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                     observed_plan->candidate_content_objects,
                 .candidate_commit_variants =
                     observed_plan->candidate_commit_variants,
+                .candidate_expired_commits =
+                    observed_plan->candidate_expired_commits,
                 .candidate_activities = observed_plan->candidate_activities,
+                .deferred_recent_objects =
+                    observed_plan->deferred_recent_objects,
+                .candidate_bytes = observed_plan->candidate_bytes,
+                .removed_bytes = 0,
+                .effective_min_age_hours = effective_min_age_hours,
                 .pruned_activities = observed_plan->pruned_activities,
                 .kept_activities = std::move(observed_plan->kept_activities),
             });
@@ -706,7 +1046,8 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
 
         failure_diagnostic.stage = GarbageCollectStage::Applying;
         const auto removal_started = std::chrono::steady_clock::now();
-        notify(on_progress, GarbageCollectStage::Applying, candidate_count, 0);
+        progress.emit(GarbageCollectStage::Applying,
+                      GarbageCollectSubStage::RemovingObjects);
         auto apply = [&]() -> std::expected<std::size_t, Error> {
             auto verified = require_barrier_ownership(cleanup.registration);
             if (!verified) {
@@ -728,16 +1069,18 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                     GarbageCollectMutationState::Uncertain;
                 return std::unexpected(transport_error(error, detail));
             };
-            const auto record_acknowledged = [&](std::size_t count) {
+            const auto record_acknowledged = [&](std::size_t count,
+                                                 std::uint64_t bytes) {
                 acknowledged_removals += count;
                 failure_diagnostic.confirmed_removed = acknowledged_removals;
                 failure_diagnostic.mutation_state =
                     GarbageCollectMutationState::Confirmed;
-                notify(on_progress,
-                       GarbageCollectStage::Applying,
-                       candidate_count,
-                       acknowledged_removals,
-                       std::chrono::steady_clock::now() - removal_started);
+                progress.removed_objects = acknowledged_removals;
+                progress.removed_bytes += bytes;
+                progress.removal_elapsed =
+                    std::chrono::steady_clock::now() - removal_started;
+                progress.emit(GarbageCollectStage::Applying,
+                              GarbageCollectSubStage::RemovingObjects);
             };
 
             while (chunk_start < total_candidates) {
@@ -803,6 +1146,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                     }
 
                     std::size_t batch_acknowledged = 0;
+                    std::uint64_t batch_bytes = 0;
                     const transport::RemoveBatchItemResult* first_failure =
                         nullptr;
                     std::string first_failed_identifier;
@@ -815,6 +1159,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                             &transport::RemoveBatchItemResult::identifier);
                         if (res->result.has_value()) {
                             ++batch_acknowledged;
+                            batch_bytes += candidate_sizes[chunk_start + i];
                         } else if (first_failure == nullptr) {
                             first_failure = res;
                             first_failed_identifier = cand_id;
@@ -822,7 +1167,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                     }
 
                     if (batch_acknowledged > 0) {
-                        record_acknowledged(batch_acknowledged);
+                        record_acknowledged(batch_acknowledged, batch_bytes);
                     }
                     if (first_failure != nullptr) {
                         return fail_uncertain(first_failed_identifier,
@@ -841,7 +1186,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                                               removed.error(),
                                               "object removal failed");
                     }
-                    record_acknowledged(1);
+                    record_acknowledged(1, candidate_sizes[chunk_start]);
                     ++chunk_start;
                 }
             }
@@ -860,11 +1205,10 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
         failure_diagnostic.mutation_state =
             removed_objects == 0 ? GarbageCollectMutationState::NotAttempted
                                  : GarbageCollectMutationState::Confirmed;
-        notify(on_progress,
-               GarbageCollectStage::Finalizing,
-               candidate_count,
-               removed_objects,
-               removal_elapsed);
+        progress.removed_objects = removed_objects;
+        progress.removal_elapsed = removal_elapsed;
+        progress.emit(GarbageCollectStage::Finalizing,
+                      GarbageCollectSubStage::ReleasingBarrier);
 
         return finish(GarbageCollectResult{
             .candidate_objects = candidate_count,
@@ -875,7 +1219,13 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                 observed_plan->candidate_content_objects,
             .candidate_commit_variants =
                 observed_plan->candidate_commit_variants,
+            .candidate_expired_commits =
+                observed_plan->candidate_expired_commits,
             .candidate_activities = observed_plan->candidate_activities,
+            .deferred_recent_objects = observed_plan->deferred_recent_objects,
+            .candidate_bytes = observed_plan->candidate_bytes,
+            .removed_bytes = progress.removed_bytes,
+            .effective_min_age_hours = effective_min_age_hours,
             .removal_elapsed = removal_elapsed,
             .pruned_activities = observed_plan->pruned_activities,
             .kept_activities = std::move(observed_plan->kept_activities),
@@ -893,20 +1243,11 @@ std::expected<GarbageCollectResult, Error>
 garbage_collect(const runtime::RuntimeData& runtime_data,
                 transport::Transport& storage,
                 std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                GarbageCollectProgressCallback on_progress) {
-    return garbage_collect(
-        runtime_data, storage, key, false, std::move(on_progress));
-}
-
-std::expected<GarbageCollectResult, Error>
-garbage_collect(const runtime::RuntimeData& runtime_data,
-                transport::Transport& storage,
-                std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                bool dry_run,
+                GarbageCollectOptions options,
                 GarbageCollectProgressCallback on_progress) {
     try {
         return garbage_collect_impl(
-            runtime_data, storage, key, dry_run, std::move(on_progress));
+            runtime_data, storage, key, options, std::move(on_progress));
     } catch (const std::bad_alloc&) {
         return std::unexpected(
             make_error(ErrorCode::StateFailure, "allocation failed"));
@@ -918,6 +1259,28 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
         return std::unexpected(
             make_error(ErrorCode::StateFailure, "garbage collection failed"));
     }
+}
+
+std::expected<GarbageCollectResult, Error>
+garbage_collect(const runtime::RuntimeData& runtime_data,
+                transport::Transport& storage,
+                std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                GarbageCollectProgressCallback on_progress) {
+    return garbage_collect(
+        runtime_data, storage, key, GarbageCollectOptions{}, std::move(on_progress));
+}
+
+std::expected<GarbageCollectResult, Error>
+garbage_collect(const runtime::RuntimeData& runtime_data,
+                transport::Transport& storage,
+                std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                bool dry_run,
+                GarbageCollectProgressCallback on_progress) {
+    return garbage_collect(runtime_data,
+                           storage,
+                           key,
+                           GarbageCollectOptions{.dry_run = dry_run},
+                           std::move(on_progress));
 }
 
 std::expected<GarbageCollectResult, Error>

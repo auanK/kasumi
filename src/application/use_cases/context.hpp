@@ -33,6 +33,7 @@ struct OperationContext {
     bool repair = false;
     bool dry_run = false;
     bool reclaim_dirty = false;
+    std::optional<std::uint32_t> gc_min_age_hours = std::nullopt;
     bool has_remote_history_objects = false;
     bool recovered_transaction = false;
     bool sync_mutated = false;

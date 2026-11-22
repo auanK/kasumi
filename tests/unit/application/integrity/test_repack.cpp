@@ -658,7 +658,12 @@ TEST(RepackTest, OldDirtyPackIsCollectedByGcAfterEpochAdvances) {
     ASSERT_TRUE(history_storage::epoch::publish(
         *storage, key, *sealed, kasumi::test::workspace_root(ws)));
 
-    const auto gc_res = integrity::garbage_collect(runtime, *storage, key);
+    const auto gc_res = integrity::garbage_collect(
+        runtime,
+        *storage,
+        key,
+        integrity::GarbageCollectOptions{
+            .min_orphan_age = std::chrono::seconds{0}});
     ASSERT_TRUE(gc_res.has_value()) << gc_res.error().detail;
     EXPECT_GE(gc_res->removed_objects, 1U);
 

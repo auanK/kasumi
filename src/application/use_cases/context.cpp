@@ -35,6 +35,7 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     output.repair = input.request.repair;
     output.dry_run = input.request.dry_run;
     output.reclaim_dirty = input.request.reclaim_dirty;
+    output.gc_min_age_hours = input.request.gc_min_age_hours;
     output.writer_identifier = input.request.writer_identifier;
     output.on_progress = input.on_progress;
     const auto invalid_request = [&](std::string_view detail) {
@@ -74,6 +75,15 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     }
     if (input.request.reclaim_dirty && operation != Operation::Repack) {
         return invalid_request("--reclaim-dirty is only valid for repack");
+    }
+    if (input.request.gc_min_age_hours.has_value()) {
+        if (operation != Operation::GarbageCollect) {
+            return invalid_request("--min-age is only valid for gc");
+        }
+        if (*input.request.gc_min_age_hours > 8760U) {
+            return invalid_request(
+                "--min-age must be between 0 and 8760 hours");
+        }
     }
     if (operation == Operation::RemoveBarrier &&
         !input.request.confirm_abandoned) {
