@@ -96,6 +96,10 @@ void print_ok_line(std::string_view message) {
     print_status_line(style::green, i18n::Key::LabelOk, message);
 }
 
+void print_warning_line(std::string_view message) {
+    print_status_line(style::yellow, i18n::Key::LabelWarning, message);
+}
+
 void print_error_line(std::string_view message) {
     print_status_line(style::red, i18n::Key::LabelError, message);
 }
@@ -395,6 +399,32 @@ format_compact_summary(const application::DiagnosticsReport& report) {
 }
 
 std::string
+format_compact_summary(const application::LocalConflictsReport& report) {
+    if (report.total_artifacts == 0) {
+        return "0 conflicts";
+    }
+    return std::format("{} conflict(s) across {} path(s)",
+                       report.total_artifacts,
+                       report.groups.size());
+}
+
+std::string
+format_compact_summary(const application::ResolveConflictReport& report) {
+    const std::string_view kept =
+        report.selected_artifact ? std::string_view{*report.selected_artifact}
+                                 : std::string_view{"canonical"};
+    if (report.dry_run) {
+        return std::format("dry-run: keep={} ({} artifact(s))",
+                           kept,
+                           report.removed_artifacts.size());
+    }
+    return std::format("resolved {} (kept={}, removed={})",
+                       report.canonical_path,
+                       kept,
+                       report.removed_artifacts.size());
+}
+
+std::string
 format_compact_summary(const application::InspectionResponse& response) {
     if (const auto* s =
             std::get_if<application::RemoteSummaryReport>(&response.payload)) {
@@ -409,6 +439,19 @@ format_compact_summary(const application::InspectionResponse& response) {
             out += std::format(", missing={}", s->missing_content_count);
         }
         return out;
+    }
+    if (const auto* l =
+            std::get_if<application::RemoteLogReport>(&response.payload)) {
+        return std::format("{} entry/entries (height={})",
+                           l->entries.size(),
+                           l->observed_height);
+    }
+    if (const auto* r =
+            std::get_if<application::RemoteRestoreReport>(&response.payload)) {
+        return std::format("{}{} file(s) ({})",
+                           r->dry_run ? "dry-run: " : "",
+                           r->file_count,
+                           format_size(r->total_bytes));
     }
     return "ok";
 }
@@ -883,7 +926,11 @@ int present_remote_report(const application::RemoteSummaryReport& report,
 
 int present_remote_report(const application::RemoteStatReport& report) {
     i18n::println(i18n::Key::RemoteStatHeader);
-    i18n::println(i18n::Key::RemoteStatView);
+    if (report.commit_id) {
+        i18n::println(i18n::Key::FieldCommit, remote_text(*report.commit_id));
+    } else {
+        i18n::println(i18n::Key::RemoteStatView);
+    }
     i18n::println(i18n::Key::FieldHeight, report.observed_height);
     i18n::println(i18n::Key::FieldConflicts, yes_no(report.has_conflicts));
     i18n::println(i18n::Key::FieldPath, remote_text(report.path));
@@ -945,12 +992,90 @@ int present_remote_report(const application::RemoteCommitReport& report) {
 
 int present_remote_report(const application::RemoteFileReport& report) {
     i18n::println(i18n::Key::RemoteFileSavedHeader);
+    if (report.commit_id) {
+        i18n::println(i18n::Key::FieldCommit, remote_text(*report.commit_id));
+    }
     i18n::println(i18n::Key::FieldPath, remote_text(report.path));
     i18n::println(i18n::Key::FieldDestination,
                   remote_text(report.destination_path));
     i18n::println(i18n::Key::FieldLogicalHash,
                   remote_text(report.logical_hash));
     i18n::println(i18n::Key::FieldSize, format_size(report.size));
+    return 0;
+}
+
+int present_remote_report(const application::RemoteLogReport& report,
+                          bool full) {
+    const auto colliding = colliding_machine_names(
+        report.entries,
+        [](const application::RemoteLogEntry& e)
+            -> std::pair<std::string_view, std::string_view> {
+            if (!e.authorship) {
+                return {};
+            }
+            return {e.authorship->machine_name, e.authorship->machine_id_hex};
+        });
+    const auto change_label =
+        [](application::RemotePathChangeKind kind) -> std::string_view {
+        using K = application::RemotePathChangeKind;
+        switch (kind) {
+            case K::Added:
+                return i18n::tr(i18n::Key::RemoteLogChangeAdded);
+            case K::Modified:
+                return i18n::tr(i18n::Key::RemoteLogChangeModified);
+            case K::Deleted:
+                return i18n::tr(i18n::Key::RemoteLogChangeDeleted);
+            case K::Observed:
+                return i18n::tr(i18n::Key::RemoteLogChangeObserved);
+        }
+        return i18n::tr(i18n::Key::RemoteLogChangeObserved);
+    };
+
+    i18n::println(i18n::Key::RemoteLogHeader,
+                  remote_text(report.path),
+                  report.entries.size(),
+                  report.observed_height);
+    render_indexed(report.entries, [&](const auto& entry) {
+        std::println("  [{}] {} | #{} | {}",
+                     change_label(entry.change),
+                     remote_text(entry.commit_id),
+                     entry.height,
+                     platform::clock::format_local_timestamp(entry.created_at));
+        if (entry.change != application::RemotePathChangeKind::Deleted) {
+            if (entry.type == application::RemoteTreeEntryType::Directory) {
+                i18n::println(i18n::Key::RemoteStatDirectory);
+            } else {
+                std::println("  {}", format_size(entry.size));
+                if (full && !entry.logical_hash.empty()) {
+                    i18n::println(i18n::Key::FieldLogicalHash,
+                                  remote_text(entry.logical_hash));
+                }
+            }
+        }
+        present_commit_authorship(entry.authorship, colliding, full);
+    });
+    return 0;
+}
+
+int present_remote_report(const application::RemoteRestoreReport& report) {
+    if (report.dry_run) {
+        i18n::println(i18n::Key::RemoteRestoreDryRunHeader,
+                      remote_text(report.source_prefix));
+    } else {
+        i18n::println(i18n::Key::RemoteRestoreHeader,
+                      remote_text(report.source_prefix));
+    }
+    if (report.commit_id) {
+        i18n::println(i18n::Key::FieldCommit, remote_text(*report.commit_id));
+    }
+    i18n::println(i18n::Key::FieldHeight, report.observed_height);
+    i18n::println(i18n::Key::RemoteRestoreSource,
+                  remote_text(report.source_prefix));
+    i18n::println(i18n::Key::FieldDestination,
+                  remote_text(report.destination_path));
+    i18n::println(i18n::Key::FieldFiles, report.file_count);
+    i18n::println(i18n::Key::FieldDirectories, report.directory_count);
+    i18n::println(i18n::Key::FieldSize, format_size(report.total_bytes));
     return 0;
 }
 
@@ -1234,7 +1359,9 @@ bool inspection_op_matches(
                                     Op::RemoteObjects,
                                     Op::RemoteOrphans,
                                     Op::RemoteWriters,
-                                    Op::RemoteHealth};
+                                    Op::RemoteHealth,
+                                    Op::RemoteLog,
+                                    Op::RemoteRestore};
     static_assert(operations.size() ==
                   std::variant_size_v<application::InspectionPayload>);
     return response.operation == operations[response.payload.index()] ||
@@ -2407,6 +2534,11 @@ int present_remote_dispatch(const application::RemoteSummaryReport& report,
     return present_remote_report(report, full);
 }
 
+int present_remote_dispatch(const application::RemoteLogReport& report,
+                            bool full) {
+    return present_remote_report(report, full);
+}
+
 template <typename Report>
 int present_remote_dispatch(const Report& report, bool) {
     return present_remote_report(report);
@@ -3000,6 +3132,88 @@ int present(const application::DiagnosticsReport& report,
         print_status_line(style::yellow,
                           i18n::Key::LabelWarning,
                           i18n::tr(i18n::Key::DiagnosticsOverallIssues));
+    }
+    return 0;
+}
+
+int present(const application::LocalConflictsReport& report, bool quiet) {
+    if (quiet) {
+        return 0;
+    }
+    i18n::println(i18n::Key::ConflictsHeader,
+                  sanitize_terminal_text(report.profile_name),
+                  report.total_artifacts);
+    if (report.groups.empty()) {
+        i18n::println(i18n::Key::ConflictsNone);
+        return 0;
+    }
+    for (const auto& group : report.groups) {
+        if (group.canonical_exists) {
+            i18n::println(i18n::Key::ConflictsCanonicalPresent,
+                          sanitize_terminal_text(group.canonical_path),
+                          format_size(group.canonical_size),
+                          platform::clock::format_local_timestamp(
+                              group.canonical_modified_at));
+        } else {
+            i18n::println(i18n::Key::ConflictsCanonicalMissing,
+                          sanitize_terminal_text(group.canonical_path));
+        }
+        for (const auto& art : group.artifacts) {
+            std::string origin_label;
+            if (art.origin == application::ConflictOrigin::Local) {
+                origin_label =
+                    std::string{i18n::tr(i18n::Key::ConflictsOriginLocal)};
+            } else if (art.origin == application::ConflictOrigin::Remote) {
+                origin_label =
+                    std::string{i18n::tr(i18n::Key::ConflictsOriginRemote)};
+            } else {
+                origin_label =
+                    i18n::format(i18n::Key::ConflictsOriginBranch,
+                                 sanitize_terminal_text(art.origin_tag));
+            }
+            i18n::println(
+                i18n::Key::ConflictsArtifactItem,
+                sanitize_terminal_text(art.path),
+                origin_label,
+                format_size(art.size),
+                platform::clock::format_local_timestamp(art.modified_at));
+        }
+    }
+    i18n::println(i18n::Key::ConflictsTotalSummary,
+                  report.total_artifacts,
+                  report.groups.size());
+    return 0;
+}
+
+int present(const application::ResolveConflictReport& report, bool quiet) {
+    if (quiet) {
+        return 0;
+    }
+    if (report.dry_run) {
+        const std::string kept =
+            report.selected_artifact
+                ? sanitize_terminal_text(*report.selected_artifact)
+                : "canonical";
+        i18n::println(i18n::Key::ConflictsResolveDryRunHeader,
+                      sanitize_terminal_text(report.canonical_path),
+                      kept);
+        for (const auto& art : report.removed_artifacts) {
+            i18n::println(i18n::Key::ConflictsResolveRemovedList,
+                          sanitize_terminal_text(art));
+        }
+        return 0;
+    }
+    if (report.choice == application::ConflictResolutionChoice::KeepCanonical) {
+        print_ok_line(
+            i18n::format(i18n::Key::ConflictsResolveCompletedKeepCanonical,
+                         sanitize_terminal_text(report.canonical_path),
+                         report.removed_artifacts.size()));
+    } else {
+        print_ok_line(i18n::format(
+            i18n::Key::ConflictsResolveCompletedKeepArtifact,
+            sanitize_terminal_text(report.canonical_path),
+            sanitize_terminal_text(report.selected_artifact.value_or("")),
+            report.removed_artifacts.size()));
     }
     return 0;
 }

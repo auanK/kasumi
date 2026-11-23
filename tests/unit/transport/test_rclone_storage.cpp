@@ -2925,4 +2925,11 @@ TEST(RcloneSessionTest, ProbeReportsMissingRcloneWhenPathIsEmpty) {
     EXPECT_FALSE(probed.detail.empty());
 }
 
+TEST(RcloneSessionTest, ParsesListremotesOutputIntoSortedUniqueNames) {
+    const auto parsed = kasumi::transport::parse_rclone_listremotes(
+        "s3:\r\n  gdrive:  \n\ninvalid_without_colon\ns3:\nbackup-1:\n");
+    EXPECT_EQ(parsed, (std::vector<std::string>{"backup-1", "gdrive", "s3"}));
+    EXPECT_TRUE(kasumi::transport::parse_rclone_listremotes("").empty());
+}
+
 } // namespace

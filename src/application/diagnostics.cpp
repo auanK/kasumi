@@ -277,4 +277,15 @@ collect_diagnostics(const ExecutionEnvironment& environment,
     return report;
 }
 
+RcloneRemotesInfo discover_rclone_remotes(
+    const std::filesystem::path& forbidden_executable_root) {
+    const auto result =
+        transport::list_rclone_remotes(forbidden_executable_root);
+    return RcloneRemotesInfo{
+        .available = result.available,
+        .remotes = result.remotes,
+        .detail = result.detail,
+    };
+}
+
 } // namespace kasumi::application

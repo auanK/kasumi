@@ -179,10 +179,10 @@ Concurrent modifications were made to the same file across multiple machines or 
   * If remote `mtime` is newer or equal, the remote file keeps the canonical path, and the local file is renamed to `<path>.kasumiconflict_local` and uploaded.
 
 ### Safe Next Steps
-1. Open and compare the canonical file and the conflict file.
-2. Manually merge the desired changes into the canonical file.
-3. Delete the conflict file (`.kasumiconflict_*`) once merged.
-4. Run `kasumi sync <profile>` to synchronize the resolved canonical file and record the deletion of the conflict file.
+1. List preserved conflict groups with `kasumi conflicts <profile>` (or `--json`).
+2. Compare the canonical file and the conflict file(s).
+3. Resolve cleanly with `kasumi conflicts resolve <profile> <path> --keep-canonical` (keep current canonical) or `kasumi conflicts resolve <profile> <path> --keep <artifact>` (atomically promote that artifact over canonical and remove the artifacts; add `--dry-run` to preview first), or manually merge into the canonical file and delete `.kasumiconflict_*`.
+4. Run `kasumi sync <profile>` to synchronize the resolved canonical file and record the deletion of the conflict file(s).
 
 ### Related Documentation
 * [History DAG, Concurrency, and Retention](architecture/history-and-concurrency.md#conflict-handling)

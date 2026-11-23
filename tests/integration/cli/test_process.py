@@ -1119,6 +1119,189 @@ class CliProcessTest(unittest.TestCase):
         self.assertEqual(rm2["data"]["remaining_barriers_count"], 0)
         self.assertFalse((barriers_dir / t2).exists())
 
+    def test_profile_cli_conflicts_completions_and_historical_restore(self):
+        local, remote = self.root / "local", self.root / "remote"
+        local.mkdir()
+        remote.mkdir()
+
+        # profile create in --json without env credentials fails cleanly with credentials_required.
+        no_cred_env = dict(self.environment)
+        no_cred_env.pop("KASUMI_PASSWORD", None)
+        no_cred_env.pop("KASUMI_PASSWORD2", None)
+        no_cred_env.pop("KASUMI_MASTER_KEY", None)
+        no_cred = self.invoke_raw(
+            "profile",
+            "create",
+            "work",
+            "--local",
+            str(local),
+            "--remote",
+            str(remote),
+            "--key-storage",
+            "file",
+            "--json",
+            environment=no_cred_env,
+        )
+        self.assertEqual(no_cred.returncode, 1)
+        no_cred_json = json.loads(no_cred.stdout.decode("utf-8"))
+        self.assertEqual(no_cred_json["error"]["code"], "credentials_required")
+
+        create_proc = self.invoke_raw(
+            "profile",
+            "create",
+            "work",
+            "--local",
+            str(local),
+            "--remote",
+            str(remote),
+            "--key-storage",
+            "file",
+            "--min-depth",
+            "7",
+            "--min-age",
+            "12",
+            "--json",
+        )
+        self.assertEqual(
+            create_proc.returncode, 0, create_proc.stdout + create_proc.stderr
+        )
+        created = json.loads(create_proc.stdout.decode("utf-8"))
+        self.assertTrue(created["ok"])
+        self.assertEqual(created["command"], "profile create")
+        self.assertEqual(created["data"]["profile"]["min_history_depth"], 7)
+
+        (local / "note.txt").write_text("version-one", encoding="utf-8")
+        self.invoke("sync", "work")
+        heads_v1 = self.invoke("remote", "heads", "work").decode("utf-8")
+        commit_v1 = next(
+            line.split()[-1].strip()
+            for line in heads_v1.splitlines()
+            if "Commit:" in line
+        )
+        self.assertEqual(len(commit_v1), 64)
+
+        (local / "note.txt").write_text("version-two", encoding="utf-8")
+        self.invoke("sync", "work")
+
+        restored = self.root / "restored-note.txt"
+        stat_v1 = self.invoke(
+            "remote", "stat", "work", "note.txt", "--commit", commit_v1
+        ).decode("utf-8")
+        self.assertIn(commit_v1, stat_v1)
+        log_v1 = json.loads(
+            self.invoke_raw("remote", "log", "work", "note.txt", "--json").stdout.decode("utf-8")
+        )
+        self.assertTrue(log_v1["ok"])
+        self.assertEqual(log_v1["data"]["entry_count"], 2)
+        self.invoke(
+            "remote",
+            "get",
+            "work",
+            "note.txt",
+            str(restored),
+            "--commit",
+            commit_v1,
+        )
+        self.assertEqual(restored.read_text(encoding="utf-8"), "version-one")
+
+        restore_dir = self.root / "restore-v1-tree"
+        restore_dry = json.loads(
+            self.invoke_raw(
+                "remote",
+                "restore",
+                "work",
+                str(restore_dir),
+                "--commit",
+                commit_v1,
+                "--dry-run",
+                "--json",
+            ).stdout.decode("utf-8")
+        )
+        self.assertTrue(restore_dry["data"]["dry_run"])
+        self.assertFalse(restore_dir.exists())
+        restore_real = json.loads(
+            self.invoke_raw(
+                "remote",
+                "restore",
+                "work",
+                str(restore_dir),
+                "--commit",
+                commit_v1,
+                "--json",
+            ).stdout.decode("utf-8")
+        )
+        self.assertEqual(restore_real["data"]["file_count"], 1)
+        self.assertEqual(
+            (restore_dir / "note.txt").read_text(encoding="utf-8"), "version-one"
+        )
+
+        # Conflicts detection and resolution via CLI --json
+        clean_conflicts = json.loads(
+            self.invoke_raw("conflicts", "work", "--json").stdout.decode("utf-8")
+        )
+        self.assertEqual(clean_conflicts["data"]["total_artifacts"], 0)
+        (local / "note.txt.kasumiconflict_local").write_text(
+            "resolved-from-local-conflict", encoding="utf-8"
+        )
+        found_conflicts = json.loads(
+            self.invoke_raw("conflicts", "work", "--json").stdout.decode("utf-8")
+        )
+        self.assertEqual(found_conflicts["data"]["total_artifacts"], 1)
+        self.assertEqual(
+            found_conflicts["data"]["groups"][0]["canonical_path"], "note.txt"
+        )
+        resolved_json = json.loads(
+            self.invoke_raw(
+                "conflicts", "resolve", "work", "note.txt", "--keep", "local", "--json"
+            ).stdout.decode("utf-8")
+        )
+        self.assertTrue(resolved_json["ok"])
+        self.assertEqual(resolved_json["data"]["removed_count"], 1)
+        self.assertEqual(
+            (local / "note.txt").read_text(encoding="utf-8"),
+            "resolved-from-local-conflict",
+        )
+        self.assertFalse((local / "note.txt.kasumiconflict_local").exists())
+        self.invoke("sync", "work")
+
+        # Edit, clone, storage, rename, and delete non-interactively
+        self.assertEqual(
+            self.invoke_raw(
+                "profile", "edit", "work", "--min-age", "24", "--json"
+            ).returncode,
+            0,
+        )
+        self.assertEqual(
+            self.invoke_raw("profile", "clone", "work", "work2", "--json").returncode,
+            0,
+        )
+        storage_res = json.loads(
+            self.invoke_raw(
+                "profile", "storage", "work2", "memory", "--json"
+            ).stdout.decode("utf-8")
+        )
+        self.assertEqual(storage_res["data"]["profile"]["key_storage"], "memory")
+        self.assertEqual(
+            self.invoke_raw(
+                "profile", "rename", "work2", "work3", "--json"
+            ).returncode,
+            0,
+        )
+        self.assertEqual(
+            self.invoke_raw(
+                "profile", "delete", "work3", "--confirm", "--json"
+            ).returncode,
+            0,
+        )
+
+        # Shell completions emit scripts directly without Duration lines
+        for shell in ("bash", "zsh", "fish", "powershell"):
+            comp = self.invoke_raw("completion", shell)
+            self.assertEqual(comp.returncode, 0, comp.stderr)
+            text = comp.stdout.decode("utf-8")
+            self.assertIn("kasumi", text)
+            self.assertNotIn("Duration:", text)
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)

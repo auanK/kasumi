@@ -99,6 +99,12 @@ cmake --build --preset default
 The executable is `build/kasumi.exe` on Windows or `build/kasumi` on Linux.
 See [Build and Test](build-and-test.md) for toolchain setup and tests.
 
+Optionally generate shell tab-completions for commands, flags, and profile names:
+
+```sh
+source <(kasumi completion bash)   # or zsh / fish / powershell
+```
+
 ### Windows Path Lengths
 
 Kasumi embeds a `longPathAware` manifest. Long Win32 paths also depend on the
@@ -125,13 +131,14 @@ backups outside this destination; do not edit Kasumi's remote objects manually.
 ## 3. Create the First Profile
 
 On Machine A, create the local folder containing the files you want to sync,
-then launch the wizard:
+then launch the wizard (or use `kasumi profile create` for non-interactive setup):
 
 ```sh
 kasumi config
 ```
 
-Select **New (`n`)** and supply:
+When `rclone` is configured on the machine, the wizard lists discovered remotes
+from `rclone listremotes` before prompting for the destination. Select **New (`n`)** and supply:
 
 1. **Profile name:** `work` (letters, digits, `_`, or `-`).
 2. **Local directory:** an absolute path, such as `/home/user/documents` or `D:/Documents`.

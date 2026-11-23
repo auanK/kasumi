@@ -3,6 +3,7 @@
 #include "application/environment.hpp"
 #include "application/execute.hpp"
 #include "application/inspection/inspect.hpp"
+#include "cli/completion.hpp"
 #include "cli/credentials.hpp"
 #include "cli/i18n.hpp"
 #include "cli/json_presenter.hpp"
@@ -170,32 +171,52 @@ int run(int argc, char* argv[]) {
     const bool is_gc_subcommand = is_gc_sub_kw && sanitized.size() > 3 &&
                                   !sanitized[3].empty() &&
                                   sanitized[3].front() != '-';
+    const bool is_profile_sub_kw =
+        cmd == "profile" && sanitized.size() > 2 &&
+        (sanitized[2] == "create" || sanitized[2] == "edit" ||
+         sanitized[2] == "clone" || sanitized[2] == "storage" ||
+         sanitized[2] == "rename" || sanitized[2] == "delete");
+    const bool is_profile_subcommand =
+        is_profile_sub_kw && sanitized.size() > 3 && !sanitized[3].empty() &&
+        sanitized[3].front() != '-';
+    const bool is_conflicts_sub_kw =
+        cmd == "conflicts" && sanitized.size() > 2 && sanitized[2] == "resolve";
+    const bool is_conflicts_subcommand =
+        is_conflicts_sub_kw && sanitized.size() > 3 && !sanitized[3].empty() &&
+        sanitized[3].front() != '-';
     const bool is_remote_sub = cmd == "remote" && sanitized.size() > 3 &&
                                !sanitized[3].empty() &&
                                sanitized[3].front() != '-';
     const bool supports_command_full =
         has_profile_arg &&
         (cmd == "sync" || cmd == "status" || cmd == "repack" || cmd == "show");
-    const bool supports_remote_summary_full =
-        is_remote_sub && sanitized[2] == "summary";
-    const bool supports_full =
-        supports_command_full || supports_remote_summary_full;
-    const std::size_t full_start_index = supports_remote_summary_full ? 4U : 3U;
+    const bool supports_remote_full =
+        is_remote_sub && (sanitized[2] == "summary" || sanitized[2] == "log");
+    const bool supports_full = supports_command_full || supports_remote_full;
+    const std::size_t full_start_index = supports_remote_full ? 4U : 3U;
 
     const bool supports_quiet =
         cmd == "list" || cmd == "diagnostics" ||
         (has_profile_arg &&
          (cmd == "show" || cmd == "sync" || cmd == "status" || cmd == "fsck" ||
           cmd == "repack" || cmd == "resolve-missing" ||
+          (cmd == "conflicts" && !is_conflicts_sub_kw) ||
           (cmd == "gc" && !is_gc_sub_kw))) ||
-        is_gc_subcommand || is_remote_sub;
+        is_gc_subcommand || is_profile_subcommand || is_conflicts_subcommand ||
+        is_remote_sub;
     const std::size_t quiet_start_index =
         (cmd == "list" || (cmd == "diagnostics" && !has_profile_arg))
             ? 2U
-            : ((is_gc_subcommand || is_remote_sub) ? 4U : 3U);
+            : ((is_gc_subcommand || is_profile_subcommand ||
+                is_conflicts_subcommand || is_remote_sub)
+                   ? 4U
+                   : 3U);
 
-    const bool supports_remote_writers =
-        is_remote_sub && sanitized[2] == "writers";
+    const bool supports_remote_summary_or_writers =
+        is_remote_sub &&
+        (sanitized[2] == "summary" || sanitized[2] == "writers" ||
+         sanitized[2] == "stat" || sanitized[2] == "get" ||
+         sanitized[2] == "log" || sanitized[2] == "restore");
     const bool supports_gc_remove_barrier =
         is_gc_subcommand && sanitized[2] == "remove-barrier";
 
@@ -204,13 +225,15 @@ int run(int argc, char* argv[]) {
         (has_profile_arg &&
          (cmd == "show" || cmd == "sync" || cmd == "status" || cmd == "fsck" ||
           cmd == "repack" || cmd == "resolve-missing" ||
+          (cmd == "conflicts" && !is_conflicts_sub_kw) ||
           (cmd == "gc" && !is_gc_sub_kw))) ||
-        supports_remote_summary_full || supports_remote_writers ||
-        supports_gc_remove_barrier;
+        is_profile_subcommand || is_conflicts_subcommand ||
+        supports_remote_summary_or_writers || supports_gc_remove_barrier;
     const std::size_t json_start_index =
         (cmd == "list" || (cmd == "diagnostics" && !has_profile_arg))
             ? 2U
-            : ((supports_remote_summary_full || supports_remote_writers ||
+            : ((is_profile_subcommand || is_conflicts_subcommand ||
+                supports_remote_summary_or_writers ||
                 supports_gc_remove_barrier)
                    ? 4U
                    : 3U);
@@ -352,6 +375,11 @@ int run(int argc, char* argv[]) {
     if (const auto* help = std::get_if<HelpInvocation>(&*parse_result)) {
         return present_help(help->topic);
     }
+    if (const auto* completion =
+            std::get_if<CompletionInvocation>(&*parse_result)) {
+        std::print("{}", generate_completion_script(completion->shell));
+        return 0;
+    }
 
     const std::string_view log_command_label =
         cmd.empty() ? std::string_view{"kasumi"} : cmd;
@@ -359,7 +387,8 @@ int run(int argc, char* argv[]) {
         if (const auto valid = validate_log_file_path(*log_file); !valid) {
             if (json) {
                 const std::string_view err_profile =
-                    (is_gc_subcommand || is_remote_sub)
+                    (is_gc_subcommand || is_profile_subcommand ||
+                     is_conflicts_subcommand || is_remote_sub)
                         ? std::string_view{sanitized[3]}
                         : (has_profile_arg ? std::string_view{sanitized[2]}
                                            : std::string_view{});
@@ -480,6 +509,122 @@ int run(int argc, char* argv[]) {
                    ? present_cancellation(application::Operation::Preview)
                    : code;
     }
+    if (const auto* prof_inv = std::get_if<ProfileInvocation>(&*parse_result)) {
+        std::string summary;
+        const int code =
+            run_profile_command(environment, *prof_inv, quiet, json, &summary);
+        const std::string prof_cmd =
+            is_profile_subcommand ? std::format("profile {}", sanitized[2])
+                                  : std::string{"profile"};
+        if (code == 130) {
+            if (json) {
+                return present_json_cancellation(prof_cmd,
+                                                 prof_inv->profile_name);
+            }
+            const int exit_code =
+                finish(present_cancellation(application::Operation::Preview));
+            return log_text_entry({.status = "CANCELLED",
+                                   .command = prof_cmd,
+                                   .profile = prof_inv->profile_name,
+                                   .summary = "cancelled",
+                                   .duration = elapsed()},
+                                  exit_code);
+        }
+        if (json) {
+            return code;
+        }
+        const int exit_code = finish(code);
+        return log_text_entry(
+            {.status = exit_code == 0 ? "OK" : "ERROR",
+             .command = prof_cmd,
+             .profile = prof_inv->profile_name,
+             .summary = summary.empty()
+                            ? (exit_code == 0 ? "completed" : "failed")
+                            : summary,
+             .duration = elapsed()},
+            exit_code);
+    }
+    if (const auto* conflicts =
+            std::get_if<ConflictsInvocation>(&*parse_result)) {
+        if (conflicts->resolve) {
+            const application::ResolveConflictRequest req{
+                .profile_name = conflicts->profile_name,
+                .canonical_path = conflicts->canonical_path,
+                .choice = conflicts->choice,
+                .artifact_selector = conflicts->artifact_selector,
+                .dry_run = conflicts->dry_run,
+            };
+            auto resolved =
+                application::resolve_local_conflict(environment, req);
+            if (!resolved) {
+                if (json) {
+                    return present_json_profile_error("conflicts resolve",
+                                                      conflicts->profile_name,
+                                                      resolved.error(),
+                                                      elapsed());
+                }
+                print_error_line(resolved.error().detail);
+                const auto summary =
+                    std::format("[{}] {}",
+                                json_error_code(resolved.error().code),
+                                resolved.error().detail);
+                const std::string_view status =
+                    resolved.error().code ==
+                            application::ProfileErrorCode::LockFailure
+                        ? "LOCKED"
+                        : "ERROR";
+                return log_text_entry({.status = status,
+                                       .command = "conflicts resolve",
+                                       .profile = conflicts->profile_name,
+                                       .summary = summary,
+                                       .duration = elapsed()},
+                                      finish(1));
+            }
+            if (json) {
+                return present_json_conflict_resolved(*resolved, elapsed());
+            }
+            const int code = finish(present(*resolved, quiet));
+            const auto summary = format_compact_summary(*resolved);
+            return log_text_entry({.status = "OK",
+                                   .command = "conflicts resolve",
+                                   .profile = conflicts->profile_name,
+                                   .summary = summary,
+                                   .duration = elapsed()},
+                                  code);
+        }
+        auto report = application::list_local_conflicts(
+            environment, conflicts->profile_name);
+        if (!report) {
+            if (json) {
+                return present_json_profile_error("conflicts",
+                                                  conflicts->profile_name,
+                                                  report.error(),
+                                                  elapsed());
+            }
+            print_error_line(report.error().detail);
+            const auto summary =
+                std::format("[{}] {}",
+                            json_error_code(report.error().code),
+                            report.error().detail);
+            return log_text_entry({.status = "ERROR",
+                                   .command = "conflicts",
+                                   .profile = conflicts->profile_name,
+                                   .summary = summary,
+                                   .duration = elapsed()},
+                                  finish(1));
+        }
+        if (json) {
+            return present_json_conflicts(*report, elapsed());
+        }
+        const int code = finish(present(*report, quiet));
+        const auto summary = format_compact_summary(*report);
+        return log_text_entry({.status = "OK",
+                               .command = "conflicts",
+                               .profile = conflicts->profile_name,
+                               .summary = summary,
+                               .duration = elapsed()},
+                              code);
+    }
     if (std::holds_alternative<application::InspectionRequest>(*parse_result)) {
         auto request = std::get<application::InspectionRequest>(*parse_result);
         const std::string remote_cmd =
@@ -490,7 +635,7 @@ int run(int argc, char* argv[]) {
         if (platform::cancellation::requested()) {
             application::wipe_credentials(creds);
             if (json) {
-                return present_json_cancellation("remote summary",
+                return present_json_cancellation(remote_cmd,
                                                  request.profile_name);
             }
             const int code =
@@ -524,7 +669,7 @@ int run(int argc, char* argv[]) {
 
         if (platform::cancellation::requested()) {
             if (json) {
-                return present_json_cancellation("remote summary",
+                return present_json_cancellation(remote_cmd,
                                                  request.profile_name);
             }
             const int code =

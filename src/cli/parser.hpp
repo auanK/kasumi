@@ -2,9 +2,13 @@
 #define KASUMI_CLI_PARSER_HPP
 
 #include "application/inspection/request.hpp"
+#include "application/profile.hpp"
 #include "application/request.hpp"
+#include "cli/completion.hpp"
 
+#include <cstdint>
 #include <expected>
+#include <optional>
 #include <string>
 #include <variant>
 
@@ -22,6 +26,37 @@ struct DiagnosticsInvocation {
 struct KeyInvocation {
     std::string profile_name;
 };
+struct ConflictsInvocation {
+    std::string profile_name;
+    bool resolve = false;
+    std::string canonical_path;
+    application::ConflictResolutionChoice choice =
+        application::ConflictResolutionChoice::KeepCanonical;
+    std::string artifact_selector;
+    bool dry_run = false;
+};
+struct CompletionInvocation {
+    CompletionShell shell = CompletionShell::Bash;
+};
+enum class ProfileAction {
+    Create,
+    Edit,
+    Clone,
+    Storage,
+    Rename,
+    Delete,
+};
+struct ProfileInvocation {
+    ProfileAction action = ProfileAction::Create;
+    std::string profile_name;
+    std::optional<std::string> target_name;
+    std::optional<std::string> local_dir;
+    std::optional<std::string> remote_dir;
+    std::optional<application::KeyStorage> key_storage;
+    std::optional<std::uint32_t> min_history_depth;
+    std::optional<std::uint32_t> min_history_age_hours;
+    bool confirm = false;
+};
 struct HelpInvocation {
     std::string topic;
 };
@@ -34,6 +69,9 @@ using Invocation = std::variant<application::Request,
                                 ShowInvocation,
                                 DiagnosticsInvocation,
                                 KeyInvocation,
+                                ConflictsInvocation,
+                                CompletionInvocation,
+                                ProfileInvocation,
                                 HelpInvocation>;
 
 // Command-line argument parsing failure.

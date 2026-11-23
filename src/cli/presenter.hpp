@@ -119,6 +119,10 @@ std::string format_compact_summary(const application::Response& response);
 std::string
 format_compact_summary(const application::DiagnosticsReport& report);
 std::string
+format_compact_summary(const application::LocalConflictsReport& report);
+std::string
+format_compact_summary(const application::ResolveConflictReport& report);
+std::string
 format_compact_summary(const application::InspectionResponse& response);
 
 // Displays cancellation message and returns 130.
@@ -148,6 +152,14 @@ int present(const application::DiagnosticsReport& report,
             std::string_view version,
             bool quiet = false);
 
+// Displays local conflict artifacts for a profile and returns 0.
+int present(const application::LocalConflictsReport& report,
+            bool quiet = false);
+
+// Displays resolved local conflict result for a profile and returns 0.
+int present(const application::ResolveConflictReport& report,
+            bool quiet = false);
+
 // Displays the result of a remote inspection and returns 0.
 int present(const application::InspectionResponse& response, bool full = false);
 
@@ -158,6 +170,7 @@ int present(const application::Error& error);
 int present(const application::InspectionError& error);
 
 void print_ok_line(std::string_view message);
+void print_warning_line(std::string_view message);
 void print_error_line(std::string_view message);
 std::string sanitize_terminal_text(std::string_view text);
 

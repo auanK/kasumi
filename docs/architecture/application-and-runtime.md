@@ -3,18 +3,13 @@
 The CLI handles profile management, application operations, and remote
 inspection. Application operations include Sync, Preview, Status, Fsck, Garbage
 Collection, Repack, Resolve Missing, and manual writer/barrier removal. Preview
-and Status share a planner; remote inspection has a separate flow. The CLI
-selects language from a global `--lang <code>` prefix, recognizes `--full`
-on `sync`, `status`, `repack`, `show`, and `remote summary`,
-installs interruption handlers, obtains environment credentials, and presents
-results and errors. Syntax and environment variables are in
-[Configuration and Usage](../configuration-and-usage.md).
+and Status share a planner; remote inspection has a separate flow. The CLI selects language from a global `--lang <code>` prefix, recognizes `--full` on `sync`, `status`, `repack`, `show`, `remote summary`, and `remote log`, installs interruption handlers, obtains environment credentials, and presents results and errors. Syntax and environment variables are in [Configuration and Usage](../configuration-and-usage.md).
 
 ## Profiles and Resolution
 
 The execution environment supplies an application data root. By default this is `%APPDATA%/kasumi` on Windows or `$XDG_CONFIG_HOME/kasumi` (falling back to `$HOME/.config/kasumi`) on Linux; if unavailable, Kasumi uses `.kasumi_data` under the current directory. `config.toml` contains named profiles with an absolute local directory, a local path or rclone remote destination, positive retention depth and age, and `key_storage` (`vault`, `file`, or `memory`). Profile names are restricted to letters, digits, `_`, and `-`; resolved state paths must remain beneath `profiles/`.
 
-`kasumi config` and `kasumi key <profile>` manage the local configuration, OS credential vault entries, and isolated private profile directories, without changing synchronized or remote data. Their list/create/clone/edit/key/storage/rename/delete ordering, rollback behavior, and key lifecycle are in [Profile Management](profile-management.md); key protection limits are in [Security](../security.md).
+`kasumi config`, `kasumi profile ...`, `kasumi conflicts <profile>`, `kasumi conflicts resolve ...`, `kasumi completion <shell>`, and `kasumi key <profile>` manage local configuration, read-only local conflict inspection, atomic local conflict resolution (under `profile-<name>.lock` unless `--dry-run`), shell completions, OS credential vault entries, and isolated private profile directories, without changing remote data. Their validation, list/create/clone/edit/key/storage/rename/delete ordering, rollback behavior, and key lifecycle are in [Profile Management](profile-management.md); key protection limits are in [Security](../security.md).
 
 Before an application operation, runtime resolution validates the profile and paths. Sync and ResolveMissing use writable resolution, which can create a missing local directory and private profile directory; other operations use read-only path resolution. The application validates retention settings, takes an exclusive `profile-<name>.lock`, and validates the existing SQLite schema read-only before resolving credentials or opening transport. A missing, corrupt, or unsupported database is rejected without recreation. It then resolves the master key according to `key_storage` (`vault` OS credential vault, `file` `key.bin`, or `memory` runtime prompt / `KASUMI_PASSWORD` + `KASUMI_PASSWORD2`) or `KASUMI_MASTER_KEY`, and opens a local or rclone [transport](transport.md). When a profile has a persisted key (`vault` or `file`), any supplied `KASUMI_MASTER_KEY` must agree with it. The lock serializes operations on one local profile, not clients on separate machines. On exit, transport state closes, the lock releases, and key/credential buffers are wiped at defined cleanup points.
 

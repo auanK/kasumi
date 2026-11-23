@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <gtest/gtest.h>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -171,6 +173,66 @@ TEST(VaultTest, ProfileRemovalKeepsVaultKeyWhenDirectoryCannotBeRemoved) {
     const auto missing = kasumi::runtime::vault::read_vault(paths->key_path);
     ASSERT_FALSE(missing);
     EXPECT_EQ(missing.error().code, kasumi::runtime::ErrorCode::KeyNotFound);
+}
+
+TEST(VaultTest, ConcurrentOsVaultWritesAndDeletesSucceed) {
+    auto workspace = kasumi::test::make_temp_workspace("vault-os-concurrent");
+    constexpr std::size_t worker_count = 4;
+    std::vector<std::filesystem::path> key_paths;
+    key_paths.reserve(worker_count);
+    for (std::size_t index = 0; index < worker_count; ++index) {
+        key_paths.push_back(kasumi::test::workspace_path(
+            workspace,
+            "app/profiles/worker-" + std::to_string(index) + "/key.bin"));
+    }
+
+    struct BatchVaultCleanup {
+        const std::vector<std::filesystem::path>& paths;
+        ~BatchVaultCleanup() {
+            for (const auto& path : paths) {
+                static_cast<void>(kasumi::runtime::vault::delete_vault(path));
+            }
+        }
+    } const cleanup{key_paths};
+
+    std::atomic<std::size_t> ready{0};
+    std::atomic<bool> start{false};
+    std::atomic<bool> ok{true};
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+
+    for (std::size_t index = 0; index < worker_count; ++index) {
+        workers.emplace_back([&, index] {
+            KeyBytes key{};
+            key.fill(static_cast<std::uint8_t>(0x21U + index));
+            ready.fetch_add(1, std::memory_order_acq_rel);
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            if (!kasumi::runtime::vault::write_vault(key_paths[index], key)) {
+                ok.store(false, std::memory_order_release);
+                return;
+            }
+            const auto restored =
+                kasumi::runtime::vault::read_vault(key_paths[index]);
+            if (!restored || *restored != key) {
+                ok.store(false, std::memory_order_release);
+                return;
+            }
+            if (!kasumi::runtime::vault::delete_vault(key_paths[index])) {
+                ok.store(false, std::memory_order_release);
+            }
+        });
+    }
+
+    while (ready.load(std::memory_order_acquire) < worker_count) {
+        std::this_thread::yield();
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    EXPECT_TRUE(ok.load(std::memory_order_acquire));
 }
 #endif
 

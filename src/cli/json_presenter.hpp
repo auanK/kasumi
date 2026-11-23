@@ -53,9 +53,31 @@ int present_json_diagnostics(const application::DiagnosticsReport& report,
                              std::string_view requested_profile,
                              std::chrono::nanoseconds duration);
 
-int present_json_profile_error(std::string_view command,
-                               std::string_view profile_name,
-                               const application::ProfileError& error);
+int present_json_conflicts(const application::LocalConflictsReport& report,
+                           std::chrono::nanoseconds duration);
+
+int present_json_conflict_resolved(
+    const application::ResolveConflictReport& report,
+    std::chrono::nanoseconds duration);
+
+int present_json_profile_action(std::string_view command,
+                                const application::Profile* profile,
+                                std::string_view profile_name,
+                                std::string_view summary,
+                                bool needs_key,
+                                std::chrono::nanoseconds duration);
+
+int present_json_credentials_required(
+    std::string_view command,
+    std::string_view profile_name,
+    std::string_view detail,
+    std::chrono::nanoseconds duration = std::chrono::nanoseconds{0});
+
+int present_json_profile_error(
+    std::string_view command,
+    std::string_view profile_name,
+    const application::ProfileError& error,
+    std::optional<std::chrono::nanoseconds> duration = std::nullopt);
 
 int present_json_confirmation_required(
     std::string_view profile_name,

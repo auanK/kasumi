@@ -3785,4 +3785,183 @@ TEST(ApplicationProfileTest,
               kasumi::application::ProfileErrorCode::NotFound);
 }
 
+TEST(ApplicationProfileTest,
+     ListLocalConflictsGroupsArtifactsAndRespectsIgnore) {
+    const auto workspace =
+        kasumi::test::make_temp_workspace("application-local-conflicts");
+    const ExecutionEnvironment env{
+        .app_data_dir = kasumi::test::workspace_path(workspace, "app")};
+    const auto local_dir = kasumi::test::workspace_path(workspace, "local");
+    const auto remote_dir = kasumi::test::workspace_path(workspace, "remote");
+    std::filesystem::create_directories(local_dir);
+    std::filesystem::create_directories(remote_dir);
+
+    const auto created = create_profile(
+        env,
+        Profile{.name = "demo",
+                .local_dir = local_dir,
+                .remote_dir = kasumi::platform::path::to_utf8(remote_dir),
+                .key_storage = KeyStorage::File},
+        ProfileCredentials{MasterKeyHex{std::string(64, 'a')}});
+    ASSERT_TRUE(created.has_value()) << created.error().detail;
+
+    kasumi::test::write_text(local_dir / ".kasumiignore", "ignored/\n");
+    kasumi::test::write_text(local_dir / "doc.txt", "canonical");
+    kasumi::test::write_text(local_dir / "doc.txt.kasumiconflict_local",
+                             "local-edit");
+    kasumi::test::write_text(local_dir / "doc.txt.kasumiconflict_remote.1",
+                             "remote-edit");
+    kasumi::test::write_text(local_dir / "sub" /
+                                 "note.md.kasumiconflict_0123456789ab",
+                             "branch-edit");
+    kasumi::test::write_text(local_dir / "ignored" /
+                                 "skip.txt.kasumiconflict_local",
+                             "ignored-conflict");
+    kasumi::test::write_text(local_dir / "bad.txt.kasumiconflict_invalidtag",
+                             "not-a-conflict");
+
+    const auto report = kasumi::application::list_local_conflicts(env, "demo");
+    ASSERT_TRUE(report.has_value()) << report.error().detail;
+    EXPECT_EQ(report->profile_name, "demo");
+    EXPECT_EQ(report->total_artifacts, 3U);
+    ASSERT_EQ(report->groups.size(), 2U);
+
+    EXPECT_EQ(report->groups[0].canonical_path, "doc.txt");
+    EXPECT_TRUE(report->groups[0].canonical_exists);
+    EXPECT_EQ(report->groups[0].canonical_size, 9U);
+    ASSERT_EQ(report->groups[0].artifacts.size(), 2U);
+    EXPECT_EQ(report->groups[0].artifacts[0].origin,
+              kasumi::application::ConflictOrigin::Local);
+    EXPECT_EQ(report->groups[0].artifacts[0].origin_tag, "local");
+    EXPECT_EQ(report->groups[0].artifacts[1].origin,
+              kasumi::application::ConflictOrigin::Remote);
+    EXPECT_EQ(report->groups[0].artifacts[1].origin_tag, "remote");
+
+    EXPECT_EQ(report->groups[1].canonical_path, "sub/note.md");
+    EXPECT_FALSE(report->groups[1].canonical_exists);
+    ASSERT_EQ(report->groups[1].artifacts.size(), 1U);
+    EXPECT_EQ(report->groups[1].artifacts[0].origin,
+              kasumi::application::ConflictOrigin::BranchCommit);
+    EXPECT_EQ(report->groups[1].artifacts[0].origin_tag, "0123456789ab");
+
+    const auto not_found =
+        kasumi::application::list_local_conflicts(env, "missing");
+    ASSERT_FALSE(not_found.has_value());
+    EXPECT_EQ(not_found.error().code, ProfileErrorCode::NotFound);
+}
+
+TEST(ApplicationProfileTest,
+     ResolveLocalConflictPromotesArtifactsAndHonorsDryRunAndLocks) {
+    const auto workspace =
+        kasumi::test::make_temp_workspace("application-resolve-conflicts");
+    const ExecutionEnvironment env{
+        .app_data_dir = kasumi::test::workspace_path(workspace, "app")};
+    const auto local_dir = kasumi::test::workspace_path(workspace, "local");
+    const auto remote_dir = kasumi::test::workspace_path(workspace, "remote");
+    std::filesystem::create_directories(local_dir);
+    std::filesystem::create_directories(remote_dir);
+
+    const auto created = create_profile(
+        env,
+        Profile{.name = "demo",
+                .local_dir = local_dir,
+                .remote_dir = kasumi::platform::path::to_utf8(remote_dir),
+                .key_storage = KeyStorage::File},
+        ProfileCredentials{MasterKeyHex{std::string(64, 'a')}});
+    ASSERT_TRUE(created.has_value()) << created.error().detail;
+
+    kasumi::test::write_text(local_dir / "doc.txt", "canonical-v1");
+    kasumi::test::write_text(local_dir / "doc.txt.kasumiconflict_local",
+                             "local-v2");
+    kasumi::test::write_text(local_dir / "doc.txt.kasumiconflict_remote",
+                             "remote-v3");
+    kasumi::test::write_text(local_dir / "sub" /
+                                 "note.md.kasumiconflict_0123456789ab",
+                             "branch-only");
+
+    // Lock contention blocks real mutation with LockFailure.
+    {
+        auto held = kasumi::platform::acquire_profile_lock(env.app_data_dir /
+                                                           "profile-demo.lock");
+        ASSERT_TRUE(held.has_value());
+        const auto locked = kasumi::application::resolve_local_conflict(
+            env,
+            kasumi::application::ResolveConflictRequest{
+                .profile_name = "demo",
+                .canonical_path = "doc.txt",
+                .choice = kasumi::application::ConflictResolutionChoice::
+                    KeepCanonical,
+            });
+        ASSERT_FALSE(locked.has_value());
+        EXPECT_EQ(locked.error().code, ProfileErrorCode::LockFailure);
+        kasumi::platform::release_profile_lock(*held);
+    }
+
+    // Dry-run reports the plan without modifying files or artifacts.
+    const auto dry = kasumi::application::resolve_local_conflict(
+        env,
+        kasumi::application::ResolveConflictRequest{
+            .profile_name = "demo",
+            .canonical_path = "doc.txt",
+            .choice =
+                kasumi::application::ConflictResolutionChoice::KeepArtifact,
+            .artifact_selector = "local",
+            .dry_run = true,
+        });
+    ASSERT_TRUE(dry.has_value()) << dry.error().detail;
+    EXPECT_TRUE(dry->dry_run);
+    EXPECT_EQ(dry->selected_artifact, "doc.txt.kasumiconflict_local");
+    EXPECT_EQ(dry->removed_artifacts.size(), 2U);
+    EXPECT_EQ(kasumi::test::read_text(local_dir / "doc.txt"), "canonical-v1");
+    EXPECT_TRUE(
+        std::filesystem::exists(local_dir / "doc.txt.kasumiconflict_local"));
+
+    // KeepCanonical leaves canonical untouched, deletes doc.txt artifacts only.
+    const auto keep_can = kasumi::application::resolve_local_conflict(
+        env,
+        kasumi::application::ResolveConflictRequest{
+            .profile_name = "demo",
+            .canonical_path = "doc.txt",
+            .choice =
+                kasumi::application::ConflictResolutionChoice::KeepCanonical,
+        });
+    ASSERT_TRUE(keep_can.has_value()) << keep_can.error().detail;
+    EXPECT_EQ(keep_can->removed_artifacts.size(), 2U);
+    EXPECT_EQ(kasumi::test::read_text(local_dir / "doc.txt"), "canonical-v1");
+    EXPECT_FALSE(
+        std::filesystem::exists(local_dir / "doc.txt.kasumiconflict_local"));
+    EXPECT_FALSE(
+        std::filesystem::exists(local_dir / "doc.txt.kasumiconflict_remote"));
+    EXPECT_TRUE(std::filesystem::exists(local_dir / "sub" /
+                                        "note.md.kasumiconflict_0123456789ab"));
+
+    // KeepCanonical fails closed when canonical file does not exist.
+    const auto missing_can = kasumi::application::resolve_local_conflict(
+        env,
+        kasumi::application::ResolveConflictRequest{
+            .profile_name = "demo",
+            .canonical_path = "sub/note.md",
+            .choice =
+                kasumi::application::ConflictResolutionChoice::KeepCanonical,
+        });
+    ASSERT_FALSE(missing_can.has_value());
+    EXPECT_EQ(missing_can.error().code, ProfileErrorCode::InvalidPath);
+
+    // KeepArtifact promotes orphan branch conflict into absent canonical path.
+    const auto keep_art = kasumi::application::resolve_local_conflict(
+        env,
+        kasumi::application::ResolveConflictRequest{
+            .profile_name = "demo",
+            .canonical_path = "sub/note.md",
+            .choice =
+                kasumi::application::ConflictResolutionChoice::KeepArtifact,
+            .artifact_selector = "0123456789ab",
+        });
+    ASSERT_TRUE(keep_art.has_value()) << keep_art.error().detail;
+    EXPECT_EQ(kasumi::test::read_text(local_dir / "sub" / "note.md"),
+              "branch-only");
+    EXPECT_FALSE(std::filesystem::exists(
+        local_dir / "sub" / "note.md.kasumiconflict_0123456789ab"));
+}
+
 } // namespace

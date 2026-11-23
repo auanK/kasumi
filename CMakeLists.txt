@@ -598,6 +598,7 @@ add_library(kasumi_application STATIC
     src/application/inspection/inspect.cpp
     src/application/credentials.cpp
     src/application/concurrency.cpp
+    src/application/conflicts.cpp
     src/application/diagnostics.cpp
     src/application/environment.cpp
     src/application/execute.cpp
@@ -706,6 +707,7 @@ add_custom_command(
 
 add_library(kasumi_cli STATIC
     src/cli/app.cpp
+    src/cli/completion.cpp
     src/cli/credentials.cpp
     src/cli/i18n.cpp
     src/cli/json_presenter.cpp
