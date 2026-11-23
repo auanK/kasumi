@@ -411,7 +411,8 @@ format_compact_summary(const application::LocalConflictsReport& report) {
 std::string
 format_compact_summary(const application::ResolveConflictReport& report) {
     const std::string_view kept =
-        report.selected_artifact ? *report.selected_artifact : "canonical";
+        report.selected_artifact ? std::string_view{*report.selected_artifact}
+                                 : std::string_view{"canonical"};
     if (report.dry_run) {
         return std::format("dry-run: keep={} ({} artifact(s))",
                            kept,
