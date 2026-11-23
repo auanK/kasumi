@@ -41,7 +41,7 @@ Machine C ───┘
 
 ## Highlights
 
-- **Multi-master sync & conflict tooling**: Independent clients reconcile via an immutable Commit DAG without a central server or global sync lock; conflicting edits are preserved and easily inspected via `kasumi conflicts`, and older retained versions can be queried or restored via `kasumi remote stat/get --commit <id>`.
+- **Multi-master sync & conflict tooling**: Independent clients reconcile via an immutable Commit DAG without a central server or global sync lock; conflicting edits are preserved, listed via `kasumi conflicts`, and resolved in-place via `kasumi conflicts resolve`, while older retained versions can be queried with `kasumi remote log` and restored individually or in bulk via `kasumi remote get/restore --commit <id>`.
 - **Adaptive encrypted storage**: Combines loose objects, `KPAK\x01` Micro-Packs (`<= 256 KiB`), and FastCDC chunking (`> 8 MiB`) with Zstandard compression, **XChaCha20-Poly1305** AEAD, Argon2id key derivation, and a persistent BLAKE3 hash cache.
 - **Flexible key storage (`vault`, `file`, `memory`)**: Persist derived keys in Windows Credential Manager / Linux Secret Service & KWallet, local `key.bin`, or stateless RAM-only derivation.
 - **Crash-resilient & auditable**: Encrypted local transaction journals safely recover interrupted runs; built-in `diagnostics`, `sync --repair`, `fsck`, `repack`, `resolve-missing`, and hardened `gc` (6h remote-clock-clamped grace period, `remote_busy` backoff, multi-barrier checks, periodic mid-`Apply` revalidation) keep vaults healthy.
@@ -107,12 +107,13 @@ cmake --preset default && cmake --build --preset default
 | `kasumi status <profile>` | Preview synchronization changes read-only (`sync --dry-run`) |
 | `kasumi sync <profile> [--repair]` | Synchronize bidirectionally or re-upload missing remote objects |
 | `kasumi conflicts <profile>` | Scan local folder read-only and group preserved `.kasumiconflict_*` artifacts |
+| `kasumi conflicts resolve <profile> <path>` | Resolve a conflict group (`--keep-canonical` or `--keep <artifact>`, optional `--dry-run`) |
 | `kasumi diagnostics [<profile>]` | Inspect local environment, `rclone >= v1.60.0`, disk space, and profile health |
 | `kasumi fsck <profile>` | Download and cryptographically audit every referenced payload |
 | `kasumi repack <profile> [--dry-run]` | Consolidate fragmented `KPAK\x01` Micro-Packs locally without remote downloads/deletions |
 | `kasumi gc <profile> [--dry-run] [--min-age <hours>]` | Reclaim eligible orphans, expired commits, redundant variants, and old activities |
 | `kasumi resolve-missing <profile> [--dry-run \| --confirm]` | Explicitly resolve permanently missing remote content as logical deletions |
-| `kasumi remote <subcommand> <profile>` | Read-only inspection (`summary`, `heads`, `tree`, `stat`/`get [--commit]`, `writers`, `health`, ...) |
+| `kasumi remote <subcommand> <profile>` | Read-only inspection & restore (`summary`, `heads`, `tree`, `log`, `stat`/`get`/`restore [--commit]`, `writers`, `health`, ...) |
 | `kasumi completion <shell>` | Output shell completion script (`bash`, `zsh`, `fish`, `powershell`) |
 
 Run `kasumi --help` or `kasumi <command> --help` for full syntax and options.

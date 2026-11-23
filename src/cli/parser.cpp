@@ -158,7 +158,8 @@ std::string help_topic(int argc, char* argv[]) {
     if (std::ranges::find(help_topics, command, &HelpTopic::name) ==
         help_topics.end())
         return {};
-    if ((command == "remote" || command == "gc" || command == "profile") &&
+    if ((command == "remote" || command == "gc" || command == "profile" ||
+         command == "conflicts") &&
         argc > 2 && argv[2] != nullptr) {
         const auto topic = command + " " + argv[2];
         if (std::ranges::find(help_topics, topic, &HelpTopic::name) !=
@@ -233,10 +234,75 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                          : std::unexpected(ParseError{});
     }
     if (command == "conflicts") {
-        return argc == 3 && operand(argv[2])
-                   ? std::expected<Invocation, ParseError>{ConflictsInvocation{
-                         argv[2]}}
-                   : std::unexpected(ParseError{});
+        if (argc == 3 && operand(argv[2]) &&
+            std::string_view{argv[2]} != "resolve") {
+            return ConflictsInvocation{.profile_name = argv[2]};
+        }
+        if (argc >= 4 && argv[2] != nullptr &&
+            std::string_view{argv[2]} == "resolve" && operand(argv[3])) {
+            ConflictsInvocation inv{
+                .profile_name = argv[3],
+                .resolve = true,
+            };
+            bool saw_keep_canonical = false;
+            bool saw_keep_artifact = false;
+            bool after_delimiter = false;
+            std::vector<std::string_view> positionals;
+            for (int i = 4; i < argc; ++i) {
+                const std::string_view arg{argv[i]};
+                if (!after_delimiter && arg == "--") {
+                    after_delimiter = true;
+                    continue;
+                }
+                if (!after_delimiter && arg == "--keep-canonical") {
+                    if (saw_keep_canonical || saw_keep_artifact) {
+                        return std::unexpected(ParseError{});
+                    }
+                    saw_keep_canonical = true;
+                    inv.choice =
+                        application::ConflictResolutionChoice::KeepCanonical;
+                    continue;
+                }
+                if (!after_delimiter &&
+                    (arg == "--keep" || arg.starts_with("--keep="))) {
+                    if (saw_keep_canonical || saw_keep_artifact) {
+                        return std::unexpected(ParseError{});
+                    }
+                    const auto val = read_flag_value(i, argc, argv, "--keep");
+                    if (!val) {
+                        return std::unexpected(ParseError{});
+                    }
+                    saw_keep_artifact = true;
+                    inv.choice =
+                        application::ConflictResolutionChoice::KeepArtifact;
+                    inv.artifact_selector = std::string{val->value};
+                    if (val->consumed_next) {
+                        ++i;
+                    }
+                    continue;
+                }
+                if (!after_delimiter && arg == "--dry-run") {
+                    if (inv.dry_run) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.dry_run = true;
+                    continue;
+                }
+                if (after_delimiter ? literal_operand(argv[i])
+                                    : operand(argv[i])) {
+                    positionals.push_back(arg);
+                    continue;
+                }
+                return std::unexpected(ParseError{});
+            }
+            if (positionals.size() != 1U ||
+                (!saw_keep_canonical && !saw_keep_artifact)) {
+                return std::unexpected(ParseError{});
+            }
+            inv.canonical_path = std::string{positionals[0]};
+            return inv;
+        }
+        return std::unexpected(ParseError{});
     }
     if (command == "completion") {
         if (argc != 3 || argv[2] == nullptr) {
@@ -627,6 +693,30 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 .logical_path = std::string{parsed->positionals[0]},
                 .commit_id = parsed->commit_id};
         }
+        if (inspection == "log") {
+            std::vector<std::string_view> positionals;
+            bool after_delimiter = false;
+            for (int i = 4; i < argc; ++i) {
+                const std::string_view arg{argv[i]};
+                if (!after_delimiter && arg == "--") {
+                    after_delimiter = true;
+                    continue;
+                }
+                if (after_delimiter ? literal_operand(argv[i])
+                                    : operand(argv[i])) {
+                    positionals.push_back(arg);
+                    continue;
+                }
+                return std::unexpected(ParseError{});
+            }
+            if (positionals.size() != 1U) {
+                return std::unexpected(ParseError{});
+            }
+            return application::InspectionRequest{
+                .operation = application::InspectionOperation::RemoteLog,
+                .profile_name = argv[3],
+                .logical_path = std::string{positionals[0]}};
+        }
         if (inspection == "commit" && argc == 5 &&
             application::history_storage::valid_hex_hash(argv[4])) {
             return application::InspectionRequest{
@@ -645,6 +735,68 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 .logical_path = std::string{parsed->positionals[0]},
                 .commit_id = parsed->commit_id,
                 .destination_path = std::string{parsed->positionals[1]}};
+        }
+        if (inspection == "restore") {
+            std::vector<std::string_view> positionals;
+            std::optional<std::string> commit_id;
+            bool dry_run = false;
+            bool after_delimiter = false;
+            for (int i = 4; i < argc; ++i) {
+                const std::string_view arg{argv[i]};
+                if (!after_delimiter && arg == "--") {
+                    after_delimiter = true;
+                    continue;
+                }
+                if (!after_delimiter &&
+                    (arg == "--commit" || arg.starts_with("--commit="))) {
+                    if (commit_id.has_value()) {
+                        return std::unexpected(ParseError{});
+                    }
+                    const auto val = read_flag_value(i, argc, argv, "--commit");
+                    if (!val || !application::history_storage::valid_hex_hash(
+                                    val->value)) {
+                        return std::unexpected(ParseError{});
+                    }
+                    commit_id = std::string{val->value};
+                    if (val->consumed_next) {
+                        ++i;
+                    }
+                    continue;
+                }
+                if (!after_delimiter && arg == "--dry-run") {
+                    if (dry_run) {
+                        return std::unexpected(ParseError{});
+                    }
+                    dry_run = true;
+                    continue;
+                }
+                if (after_delimiter ? literal_operand(argv[i])
+                                    : operand(argv[i])) {
+                    positionals.push_back(arg);
+                    continue;
+                }
+                return std::unexpected(ParseError{});
+            }
+            if (positionals.size() == 1U) {
+                return application::InspectionRequest{
+                    .operation =
+                        application::InspectionOperation::RemoteRestore,
+                    .profile_name = argv[3],
+                    .commit_id = commit_id,
+                    .destination_path = std::string{positionals[0]},
+                    .dry_run = dry_run};
+            }
+            if (positionals.size() == 2U) {
+                return application::InspectionRequest{
+                    .operation =
+                        application::InspectionOperation::RemoteRestore,
+                    .profile_name = argv[3],
+                    .logical_path = std::string{positionals[0]},
+                    .commit_id = commit_id,
+                    .destination_path = std::string{positionals[1]},
+                    .dry_run = dry_run};
+            }
+            return std::unexpected(ParseError{});
         }
         if (inspection == "epoch" && argc == 5 && operand(argv[4])) {
             return application::InspectionRequest{

@@ -16,6 +16,8 @@
 #include "crypto/key_derivation.hpp"
 #include "crypto/pack.hpp"
 #include "crypto/secure_memory.hpp"
+#include "platform/cancellation.hpp"
+#include "platform/metadata.hpp"
 #include "platform/path.hpp"
 #include "platform/perf_trace.hpp"
 #include "platform/private_storage.hpp"
@@ -43,6 +45,13 @@
 #include <unordered_set>
 #include <utility>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 namespace kasumi::application {
 namespace {
 
@@ -62,7 +71,8 @@ bool requires_complete_history(InspectionOperation operation) noexcept {
            operation == InspectionOperation::RemoteCommit ||
            operation == InspectionOperation::RemoteContents ||
            operation == InspectionOperation::RemoteContentsAudit ||
-           operation == InspectionOperation::RemoteContent;
+           operation == InspectionOperation::RemoteContent ||
+           operation == InspectionOperation::RemoteLog;
 }
 
 InspectionError error(InspectionOperation operation,
@@ -162,7 +172,8 @@ make_observation_hints(const runtime::RuntimeData& runtime_data,
 
     const bool use_frontier = operation == InspectionOperation::RemoteTree ||
                               operation == InspectionOperation::RemoteStat ||
-                              operation == InspectionOperation::RemoteGet;
+                              operation == InspectionOperation::RemoteGet ||
+                              operation == InspectionOperation::RemoteRestore;
     return observation::history::make_observation_hints(
         std::move(**persisted), layout, use_frontier);
 }
@@ -813,6 +824,621 @@ download_remote_file(const InspectionRequest& request,
                             .logical_hash = logical_hash,
                             .content_id = content_id,
                             .size = row->size};
+}
+
+bool is_link_or_reparse(const std::filesystem::path& path,
+                        const std::filesystem::file_status& status) noexcept {
+    if (std::filesystem::is_symlink(status)) {
+        return true;
+    }
+#if defined(_WIN32)
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES &&
+        (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return true;
+    }
+#else
+    static_cast<void>(path);
+#endif
+    return false;
+}
+
+bool same_node_version(const NodeRow* left, const NodeRow* right) noexcept {
+    if (left == nullptr || right == nullptr) {
+        return left == right;
+    }
+    if (left->is_directory != right->is_directory) {
+        return false;
+    }
+    if (left->is_directory) {
+        return true;
+    }
+    return left->hash == right->hash && left->size == right->size;
+}
+
+std::expected<RemoteLogReport, InspectionError>
+make_log_report(const InspectionRequest& request,
+                const observation::history::StorageView& observed,
+                InspectionOperation operation) {
+    const auto path = request.logical_path.value_or("");
+    if (!observed.history_present) {
+        return fail(operation,
+                    InspectionErrorCode::RemotePathNotFound,
+                    "path was not found in reachable remote history");
+    }
+
+    auto commits =
+        index_observed_commits(observed.reachable_commits, operation);
+    if (!commits) {
+        return std::unexpected(commits.error());
+    }
+    const std::unordered_set<std::string_view> logical_head_ids(
+        observed.logical_heads.begin(), observed.logical_heads.end());
+
+    RemoteLogReport report{
+        .path = path,
+        .observed_height = observed.observed_height,
+        .present_in_current_tree =
+            find_row(observed.effective_tree, path) != nullptr,
+    };
+
+    for (const auto& loaded : observed.reachable_commits) {
+        if (!valid_commit_snapshot(loaded)) {
+            return obs_fail(operation,
+                            "remote commit does not have a valid tree");
+        }
+        const auto* curr = find_row(loaded.commit.tree, path);
+        std::optional<RemotePathChangeKind> change;
+        if (loaded.commit.parents.empty()) {
+            if (curr != nullptr) {
+                change = RemotePathChangeKind::Added;
+            }
+        } else {
+            std::vector<const NodeRow*> parent_nodes;
+            std::size_t missing_parents = 0;
+            for (const auto& parent_id : loaded.commit.parents) {
+                const auto it = commits->find(parent_id);
+                if (it == commits->end()) {
+                    ++missing_parents;
+                } else {
+                    parent_nodes.push_back(
+                        find_row(it->second->commit.tree, path));
+                }
+            }
+            if (parent_nodes.empty()) {
+                if (curr != nullptr) {
+                    change = RemotePathChangeKind::Observed;
+                }
+            } else if (missing_parents == 0 &&
+                       std::ranges::all_of(
+                           parent_nodes, [&](const NodeRow* parent_row) {
+                               return same_node_version(parent_row, curr);
+                           })) {
+                change = std::nullopt;
+            } else if (curr == nullptr) {
+                if (std::ranges::any_of(parent_nodes,
+                                        [](const NodeRow* parent_row) {
+                                            return parent_row != nullptr;
+                                        })) {
+                    change = RemotePathChangeKind::Deleted;
+                }
+            } else if (missing_parents == 0 &&
+                       std::ranges::all_of(parent_nodes,
+                                           [](const NodeRow* parent_row) {
+                                               return parent_row == nullptr;
+                                           })) {
+                change = RemotePathChangeKind::Added;
+            } else if (std::ranges::any_of(
+                           parent_nodes, [&](const NodeRow* parent_row) {
+                               return !same_node_version(parent_row, curr);
+                           })) {
+                change = RemotePathChangeKind::Modified;
+            } else {
+                change = RemotePathChangeKind::Observed;
+            }
+        }
+
+        if (!change.has_value()) {
+            continue;
+        }
+        report.entries.push_back(RemoteLogEntry{
+            .commit_id = loaded.id,
+            .height = loaded.commit.height,
+            .created_at = loaded.commit.created_at,
+            .logical_head = logical_head_ids.contains(loaded.id),
+            .change = *change,
+            .type =
+                curr == nullptr
+                    ? std::nullopt
+                    : std::optional<
+                          RemoteTreeEntryType>{curr->is_directory
+                                                   ? RemoteTreeEntryType::
+                                                         Directory
+                                                   : RemoteTreeEntryType::File},
+            .logical_hash = (curr == nullptr || curr->is_directory)
+                                ? std::string{}
+                                : hash_hex(curr->hash),
+            .size = curr == nullptr ? 0ULL : curr->size,
+            .modified_at_unix_nanoseconds = curr == nullptr ? 0LL : curr->mtime,
+            .authorship = make_remote_authorship(loaded.commit.authorship),
+        });
+    }
+
+    if (report.entries.empty() && !report.present_in_current_tree) {
+        return fail(operation,
+                    InspectionErrorCode::RemotePathNotFound,
+                    "path was not found in reachable remote history");
+    }
+
+    std::ranges::sort(report.entries, [](const auto& left, const auto& right) {
+        return std::tie(right.height, right.created_at, left.commit_id) <
+               std::tie(left.height, left.created_at, right.commit_id);
+    });
+    return report;
+}
+
+bool path_components_equal(const std::filesystem::path& left,
+                           const std::filesystem::path& right) noexcept {
+#if defined(_WIN32)
+    const auto l = left.wstring();
+    const auto r = right.wstring();
+    return CompareStringOrdinal(l.c_str(), -1, r.c_str(), -1, TRUE) ==
+           CSTR_EQUAL;
+#else
+    return left == right;
+#endif
+}
+
+bool is_path_prefix(const std::filesystem::path& prefix,
+                    const std::filesystem::path& target) {
+    auto target_it = target.begin();
+    for (auto prefix_it = prefix.begin(); prefix_it != prefix.end();
+         ++prefix_it, ++target_it) {
+        if (target_it == target.end() ||
+            !path_components_equal(*prefix_it, *target_it)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool paths_overlap(const std::filesystem::path& left,
+                   const std::filesystem::path& right) {
+    std::error_code ec;
+    const auto norm_left = std::filesystem::weakly_canonical(
+        std::filesystem::absolute(left, ec), ec);
+    if (ec) {
+        return true;
+    }
+    const auto norm_right = std::filesystem::weakly_canonical(
+        std::filesystem::absolute(right, ec), ec);
+    if (ec) {
+        return true;
+    }
+    return is_path_prefix(norm_left, norm_right) ||
+           is_path_prefix(norm_right, norm_left);
+}
+
+std::expected<std::filesystem::path, InspectionError>
+resolve_restore_destination(const InspectionRequest& request,
+                            const std::filesystem::path& local_dir,
+                            InspectionOperation operation) {
+    const auto requested = request.destination_path.value_or("");
+    if (requested.empty()) {
+        return fail(operation,
+                    InspectionErrorCode::InvalidRequest,
+                    "requested destination is invalid");
+    }
+    std::error_code ec;
+    auto destination =
+        std::filesystem::absolute(platform::path::from_utf8(requested), ec)
+            .lexically_normal();
+    if (ec || destination.empty()) {
+        return dest_fail(operation, "failed to resolve restore destination");
+    }
+    if (!destination.has_filename() && destination != destination.root_path()) {
+        destination = destination.parent_path();
+    }
+    if (destination.empty() || destination == destination.root_path() ||
+        !destination.has_filename()) {
+        return dest_fail(operation, "restore destination cannot be root path");
+    }
+    if (paths_overlap(destination, local_dir)) {
+        return dest_fail(
+            operation,
+            "restore destination cannot overlap the profile synchronized "
+            "directory");
+    }
+
+    const auto dst_status = std::filesystem::symlink_status(destination, ec);
+    if (ec == std::errc::no_such_file_or_directory) {
+        ec.clear();
+        const auto parent = destination.parent_path();
+        const auto parent_status = std::filesystem::symlink_status(parent, ec);
+        if (ec || is_link_or_reparse(parent, parent_status) ||
+            !std::filesystem::is_directory(parent_status)) {
+            return dest_fail(
+                operation,
+                "restore destination parent directory does not exist or is "
+                "not safe");
+        }
+        return destination;
+    }
+    if (ec || is_link_or_reparse(destination, dst_status) ||
+        !std::filesystem::is_directory(dst_status)) {
+        return dest_fail(operation,
+                         "restore destination is not a safe empty directory");
+    }
+    std::filesystem::directory_iterator dir_it(destination, ec);
+    if (ec || dir_it != std::filesystem::directory_iterator{}) {
+        return dest_fail(operation,
+                         "restore destination directory must be empty");
+    }
+    return destination;
+}
+
+std::expected<RemoteRestoreReport, InspectionError>
+restore_remote_tree(const InspectionRequest& request,
+                    const observation::history::StorageView& observed,
+                    InspectionContext& context,
+                    InspectionOperation operation) {
+    auto target = resolve_commit_target(request, observed, operation);
+    if (!target) {
+        return std::unexpected(target.error());
+    }
+
+    const auto requested = request.logical_path.value_or("");
+    const std::string canonical_prefix =
+        (requested.empty() || requested == "/") ? std::string{} : requested;
+    const bool tree_available = observed.history_present &&
+                                target->tree != nullptr &&
+                                target->manifest != nullptr;
+    const auto* root_row =
+        tree_available ? find_row(*target->tree, canonical_prefix) : nullptr;
+    if (root_row == nullptr) {
+        return fail(operation,
+                    InspectionErrorCode::RemotePathNotFound,
+                    target->commit_id
+                        ? "path does not exist in requested remote commit"
+                        : "path does not exist in remote logical tree");
+    }
+
+    auto destination = resolve_restore_destination(
+        request, context.runtime.local_dir, operation);
+    if (!destination) {
+        return std::unexpected(destination.error());
+    }
+
+    struct RestoreFileTarget {
+        const NodeRow* row = nullptr;
+        std::string rel_path;
+    };
+    std::vector<std::string> rel_dirs;
+    std::vector<RestoreFileTarget> files;
+    std::uint64_t total_bytes = 0;
+
+    if (canonical_prefix.empty()) {
+        for (std::size_t i = 1; i < target->tree->rows.size(); ++i) {
+            const auto& row = target->tree->rows[i];
+            if (row.is_directory) {
+                rel_dirs.push_back(row.path);
+            } else {
+                total_bytes += row.size;
+                files.push_back(
+                    RestoreFileTarget{.row = &row, .rel_path = row.path});
+            }
+        }
+    } else if (!root_row->is_directory) {
+        const auto slash = root_row->path.rfind('/');
+        const auto base_name = slash == std::string::npos
+                                   ? root_row->path
+                                   : root_row->path.substr(slash + 1U);
+        total_bytes = root_row->size;
+        files.push_back(
+            RestoreFileTarget{.row = root_row, .rel_path = base_name});
+    } else {
+        const std::string prefix_slash = canonical_prefix + "/";
+        for (std::size_t i = 1; i < target->tree->rows.size(); ++i) {
+            const auto& row = target->tree->rows[i];
+            if (!row.path.starts_with(prefix_slash)) {
+                continue;
+            }
+            const auto rel = row.path.substr(prefix_slash.size());
+            if (row.is_directory) {
+                rel_dirs.push_back(rel);
+            } else {
+                total_bytes += row.size;
+                files.push_back(
+                    RestoreFileTarget{.row = &row, .rel_path = rel});
+            }
+        }
+    }
+
+    RemoteRestoreReport report{
+        .dry_run = request.dry_run,
+        .commit_id = target->commit_id,
+        .observed_height = target->observed_height,
+        .source_prefix = canonical_prefix.empty() ? "/" : canonical_prefix,
+        .destination_path = platform::path::to_utf8(*destination),
+        .file_count = static_cast<std::uint64_t>(files.size()),
+        .directory_count = static_cast<std::uint64_t>(rel_dirs.size()),
+        .total_bytes = total_bytes,
+    };
+    if (request.dry_run) {
+        return report;
+    }
+
+    {
+        std::error_code dir_ec;
+        if (!std::filesystem::exists(*destination, dir_ec) &&
+            !std::filesystem::create_directory(*destination, dir_ec)) {
+            return dest_fail(operation,
+                             "failed to create restore destination directory");
+        }
+        const auto st = std::filesystem::symlink_status(*destination, dir_ec);
+        if (dir_ec || is_link_or_reparse(*destination, st) ||
+            !std::filesystem::is_directory(st)) {
+            return dest_fail(operation,
+                             "restore destination is not a safe directory");
+        }
+    }
+
+    for (const auto& rel_dir : rel_dirs) {
+        const auto target_dir =
+            *destination / platform::path::from_utf8(rel_dir);
+        std::error_code dir_ec;
+        std::filesystem::create_directories(target_dir, dir_ec);
+        const auto st = std::filesystem::symlink_status(target_dir, dir_ec);
+        if (dir_ec || is_link_or_reparse(target_dir, st) ||
+            !std::filesystem::is_directory(st)) {
+            return dest_fail(operation, "failed to prepare restored directory");
+        }
+    }
+
+    const auto& manifest = *target->manifest;
+    std::unordered_map<std::string, std::filesystem::path> extracted_packs;
+    std::unordered_map<std::string, std::filesystem::path> verified_chunks;
+    std::unordered_map<std::string, std::filesystem::path> verified_files;
+
+    std::size_t download_units = 0;
+    {
+        std::unordered_set<std::string> counted_hashes;
+        for (const auto& item : files) {
+            const auto lhex = hash_hex(item.row->hash);
+            if (!counted_hashes.insert(lhex).second) {
+                continue;
+            }
+            if (const auto* chunked =
+                    history::find_chunked_file(manifest, item.row->hash)) {
+                download_units += chunked->chunks.size();
+            } else {
+                ++download_units;
+            }
+        }
+    }
+    context.progress->phase(Activity::Downloading, download_units);
+
+    std::vector<std::uint8_t> copy_buf(256U * 1024U);
+    crypto::secure_memory::WipeGuard copy_buf_guard{copy_buf};
+
+    const auto materialize_plain = [&](const NodeRow& row)
+        -> std::expected<std::filesystem::path, InspectionError> {
+        const auto lhex = hash_hex(row.hash);
+        if (const auto cached = verified_files.find(lhex);
+            cached != verified_files.end()) {
+            return cached->second;
+        }
+        if (platform::cancellation::requested()) {
+            return obs_fail(operation, "restore cancelled by user");
+        }
+
+        if (const auto* packed =
+                history::find_packed_blob(manifest, row.hash)) {
+            const auto pack_hex = hash_hex(packed->pack_hash);
+            std::filesystem::path extract_dir;
+            if (const auto pack_it = extracted_packs.find(pack_hex);
+                pack_it != extracted_packs.end()) {
+                extract_dir = pack_it->second;
+            } else {
+                const auto content_id =
+                    crypto::pack_identifier(context.key, packed->pack_hash);
+                const auto encrypted =
+                    context.workspace->root / "restore-pack.enc";
+                extract_dir = context.workspace->root / ("pack-" + pack_hex);
+                auto downloaded =
+                    transport::get(context.storage, content_id, encrypted);
+                if (!downloaded) {
+                    const bool not_found = downloaded.error().code ==
+                                           transport::ErrorCode::ObjectNotFound;
+                    return fail(
+                        operation,
+                        not_found
+                            ? InspectionErrorCode::RemoteContentNotFound
+                            : InspectionErrorCode::RemoteObservationFailure,
+                        not_found ? "remote file content not found"
+                                  : "failed to download remote content");
+                }
+                auto verified = crypto::pack::decrypt_and_verify_pack(
+                    encrypted, context.key, packed->pack_hash, &extract_dir);
+                if (!verified) {
+                    return fail(
+                        operation,
+                        InspectionErrorCode::RemoteContentInvalid,
+                        "remote pack failed cryptographic authentication");
+                }
+                extracted_packs.emplace(pack_hex, extract_dir);
+            }
+            const auto extracted = extract_dir / (lhex + ".plain");
+            if (!crypto::content::verify_file(extracted, lhex, row.size)) {
+                return fail(
+                    operation,
+                    InspectionErrorCode::RemoteContentInvalid,
+                    "extracted member failed cryptographic authentication");
+            }
+            ProgressMeter::add(context.progress->work);
+            verified_files.emplace(lhex, extracted);
+            return extracted;
+        }
+
+        const auto plaintext = context.workspace->root / ("plain-" + lhex);
+        if (const auto* chunked =
+                history::find_chunked_file(manifest, row.hash)) {
+            const auto enc = context.workspace->root / "restore-chunk.enc";
+            std::error_code rm_ec;
+            std::filesystem::remove(plaintext, rm_ec);
+            auto private_out =
+                platform::private_storage::create_private_file(plaintext);
+            if (!private_out) {
+                return dest_fail(operation,
+                                 "failed to open temporary download file");
+            }
+            for (const auto& chunk : chunked->chunks) {
+                if (platform::cancellation::requested()) {
+                    static_cast<void>(
+                        platform::private_storage::remove_private_file_if_owned(
+                            *private_out));
+                    return obs_fail(operation, "restore cancelled by user");
+                }
+                const auto chex = hash_hex(chunk.hash);
+                std::filesystem::path chunk_plain;
+                if (const auto chunk_it = verified_chunks.find(chex);
+                    chunk_it != verified_chunks.end()) {
+                    chunk_plain = chunk_it->second;
+                } else {
+                    const auto cid =
+                        crypto::content_identifier(context.key, chunk.hash);
+                    chunk_plain =
+                        context.workspace->root / ("chunk-" + chex + ".plain");
+                    auto downloaded = transport::get(context.storage, cid, enc);
+                    if (!downloaded) {
+                        static_cast<void>(
+                            platform::private_storage::
+                                remove_private_file_if_owned(*private_out));
+                        const bool not_found =
+                            downloaded.error().code ==
+                            transport::ErrorCode::ObjectNotFound;
+                        return fail(
+                            operation,
+                            not_found
+                                ? InspectionErrorCode::RemoteContentNotFound
+                                : InspectionErrorCode::RemoteObservationFailure,
+                            not_found ? "remote file chunk not found"
+                                      : "failed to download remote chunk");
+                    }
+                    if (!crypto::decrypt_file(enc, chunk_plain, context.key) ||
+                        !crypto::content::verify_file(
+                            chunk_plain, chex, chunk.size)) {
+                        static_cast<void>(
+                            platform::private_storage::
+                                remove_private_file_if_owned(*private_out));
+                        return fail(
+                            operation,
+                            InspectionErrorCode::RemoteContentInvalid,
+                            "remote chunk failed cryptographic authentication");
+                    }
+                    verified_chunks.emplace(chex, chunk_plain);
+                }
+                ProgressMeter::add(context.progress->work);
+                bool write_failed = false;
+                auto streamed = platform::private_storage::stream_regular_file(
+                    chunk_plain,
+                    copy_buf,
+                    [&](std::span<const std::uint8_t> slab) {
+                        if (!slab.empty() &&
+                            !platform::private_storage::write_private_file(
+                                *private_out, slab.data(), slab.size())) {
+                            write_failed = true;
+                            return false;
+                        }
+                        return true;
+                    },
+                    chunk.size);
+                if (!streamed || write_failed) {
+                    static_cast<void>(
+                        platform::private_storage::remove_private_file_if_owned(
+                            *private_out));
+                    return dest_fail(operation,
+                                     "failed to assemble remote chunks");
+                }
+            }
+            platform::private_storage::close_private_file(*private_out);
+            if (!crypto::content::verify_file(plaintext, lhex, row.size)) {
+                return fail(operation,
+                            InspectionErrorCode::RemoteContentInvalid,
+                            "assembled remote content failed verification");
+            }
+            verified_files.emplace(lhex, plaintext);
+            return plaintext;
+        }
+
+        const auto content_id =
+            crypto::content_identifier(context.key, row.hash);
+        const auto encrypted = context.workspace->root / "restore-content.enc";
+        auto downloaded =
+            transport::get(context.storage, content_id, encrypted);
+        if (!downloaded) {
+            const bool not_found =
+                downloaded.error().code == transport::ErrorCode::ObjectNotFound;
+            return fail(operation,
+                        not_found
+                            ? InspectionErrorCode::RemoteContentNotFound
+                            : InspectionErrorCode::RemoteObservationFailure,
+                        not_found ? "remote file content not found"
+                                  : "failed to download remote content");
+        }
+        if (!crypto::decrypt_file(encrypted, plaintext, context.key) ||
+            !crypto::content::verify_file(plaintext, lhex, row.size)) {
+            return fail(operation,
+                        InspectionErrorCode::RemoteContentInvalid,
+                        "remote content failed cryptographic authentication");
+        }
+        ProgressMeter::add(context.progress->work);
+        verified_files.emplace(lhex, plaintext);
+        return plaintext;
+    };
+
+    std::vector<std::pair<const RestoreFileTarget*, std::filesystem::path>>
+        materialized;
+    materialized.reserve(files.size());
+    for (const auto& item : files) {
+        auto plain = materialize_plain(*item.row);
+        if (!plain) {
+            return std::unexpected(plain.error());
+        }
+        materialized.emplace_back(&item, std::move(*plain));
+    }
+
+    context.progress->phase(Activity::Installing, files.size());
+    for (const auto& [item_ptr, src_plain] : materialized) {
+        if (platform::cancellation::requested()) {
+            return obs_fail(operation, "restore cancelled by user");
+        }
+        const auto dst_file =
+            *destination / platform::path::from_utf8(item_ptr->rel_path);
+        const auto parent_st =
+            std::filesystem::symlink_status(dst_file.parent_path());
+        if (is_link_or_reparse(dst_file.parent_path(), parent_st) ||
+            !std::filesystem::is_directory(parent_st)) {
+            return dest_fail(
+                operation, "restore destination parent directory is not safe");
+        }
+        if (auto installed =
+                install_remote_file(src_plain, dst_file, operation);
+            !installed) {
+            return std::unexpected(installed.error());
+        }
+        if (item_ptr->row->mtime != 0) {
+            if (const auto ft =
+                    platform::metadata::file_time_from_unix_nanoseconds(
+                        item_ptr->row->mtime)) {
+                static_cast<void>(
+                    platform::metadata::set_last_write_time(dst_file, *ft));
+            }
+        }
+        ProgressMeter::add(context.progress->work);
+    }
+
+    return report;
 }
 
 std::optional<std::uint64_t> epoch_sequence(std::string_view selector) {
@@ -1677,7 +2303,7 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
             operation, InspectionErrorCode::InvalidRequest, std::move(msg));
     };
     if (static_cast<std::size_t>(operation) >
-        static_cast<std::size_t>(InspectionOperation::RemoteHealth)) {
+        static_cast<std::size_t>(InspectionOperation::RemoteRestore)) {
         return fail(operation,
                     InspectionErrorCode::RuntimeFailure,
                     "unknown inspection operation");
@@ -1686,12 +2312,16 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     const bool allowed_selectors =
         (!req.head_commit_id || operation == Op::RemoteTree) &&
         (!req.logical_path || operation == Op::RemoteStat ||
-         operation == Op::RemoteGet) &&
+         operation == Op::RemoteGet || operation == Op::RemoteLog ||
+         operation == Op::RemoteRestore) &&
         (!req.commit_id || operation == Op::RemoteCommit ||
-         operation == Op::RemoteStat || operation == Op::RemoteGet) &&
-        (!req.destination_path || operation == Op::RemoteGet) &&
+         operation == Op::RemoteStat || operation == Op::RemoteGet ||
+         operation == Op::RemoteRestore) &&
+        (!req.destination_path || operation == Op::RemoteGet ||
+         operation == Op::RemoteRestore) &&
         (!req.epoch_selector || operation == Op::RemoteEpoch) &&
-        (!req.content_id || operation == Op::RemoteContent);
+        (!req.content_id || operation == Op::RemoteContent) &&
+        (!req.dry_run || operation == Op::RemoteRestore);
     if (!allowed_selectors) {
         return invalid(
             "selector does not belong to requested inspection operation");
@@ -1700,16 +2330,26 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
         (!req.logical_path || !valid_logical_path(*req.logical_path))) {
         return invalid("requested logical path is invalid");
     }
+    if (operation == Op::RemoteLog &&
+        (!req.logical_path || !kasumi::valid_logical_path(*req.logical_path))) {
+        return invalid("requested logical path is invalid");
+    }
     if (operation == Op::RemoteGet &&
         (!req.logical_path || !kasumi::valid_logical_path(*req.logical_path) ||
          !req.destination_path || req.destination_path->empty())) {
         return invalid("remote path or destination is invalid");
     }
+    if (operation == Op::RemoteRestore &&
+        (!req.destination_path || req.destination_path->empty() ||
+         (req.logical_path && !valid_logical_path(*req.logical_path)))) {
+        return invalid("remote prefix or destination is invalid");
+    }
     if (operation == Op::RemoteCommit &&
         (!req.commit_id || !history::valid_commit_id(*req.commit_id))) {
         return invalid("requested commit ID is invalid");
     }
-    if ((operation == Op::RemoteStat || operation == Op::RemoteGet) &&
+    if ((operation == Op::RemoteStat || operation == Op::RemoteGet ||
+         operation == Op::RemoteRestore) &&
         req.commit_id && !history::valid_commit_id(*req.commit_id)) {
         return invalid("requested commit ID is invalid");
     }
@@ -1778,7 +2418,8 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
         operation == Op::RemoteContentsAudit || operation == Op::RemoteContent;
     const bool need_complete_history =
         requires_complete_history(operation) ||
-        ((operation == Op::RemoteStat || operation == Op::RemoteGet) &&
+        ((operation == Op::RemoteStat || operation == Op::RemoteGet ||
+          operation == Op::RemoteRestore) &&
          input.request.commit_id.has_value());
     meter.phase(Activity::Authenticating);
     auto observed = observation::history::observe(
@@ -1905,6 +2546,10 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
         return make_response(
             operation, make_stat_report(input.request, *observed, operation));
     }
+    if (operation == Op::RemoteLog) {
+        return make_response(
+            operation, make_log_report(input.request, *observed, operation));
+    }
     if (operation == Op::RemoteCommit) {
         return make_response(
             operation,
@@ -1914,6 +2559,11 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
         return make_response(
             operation,
             download_remote_file(input.request, *observed, context, operation));
+    }
+    if (operation == Op::RemoteRestore) {
+        return make_response(
+            operation,
+            restore_remote_tree(input.request, *observed, context, operation));
     }
     return make_response(operation, make_commits_report(*observed, operation));
 }

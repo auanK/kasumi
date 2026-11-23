@@ -98,10 +98,23 @@ std::string_view operation_command_name(application::Operation op) noexcept {
 
 std::string_view
 inspection_command_name(application::InspectionOperation op) noexcept {
-    if (op == application::InspectionOperation::RemoteSummary) {
-        return "remote summary";
+    using Op = application::InspectionOperation;
+    switch (op) {
+        case Op::RemoteSummary:
+            return "remote summary";
+        case Op::RemoteWriters:
+            return "remote writers";
+        case Op::RemoteStat:
+            return "remote stat";
+        case Op::RemoteGet:
+            return "remote get";
+        case Op::RemoteLog:
+            return "remote log";
+        case Op::RemoteRestore:
+            return "remote restore";
+        default:
+            return "remote";
     }
-    return "remote";
 }
 
 std::string_view plan_action_name(application::PlanAction action) noexcept {
@@ -372,6 +385,8 @@ profile_error_code_string(application::ProfileErrorCode code) noexcept {
     switch (code) {
         case C::InvalidName:
             return "invalid_arguments";
+        case C::InvalidPath:
+            return "invalid_path";
         case C::NotFound:
             return "profile_not_found";
         case C::LockFailure:
@@ -725,6 +740,34 @@ int present_json_conflicts(const application::LocalConflictsReport& report,
         {"total_artifacts", report.total_artifacts},
         {"group_count", report.groups.size()},
         {"groups", std::move(groups)},
+    };
+    emit_json(doc);
+    return 0;
+}
+
+int present_json_conflict_resolved(
+    const application::ResolveConflictReport& report,
+    std::chrono::nanoseconds duration) {
+    auto doc = make_envelope(
+        "conflicts resolve", report.profile_name, true, 0, duration);
+    json removed = json::array();
+    for (const auto& art : report.removed_artifacts) {
+        removed.push_back(art);
+    }
+    const std::string_view choice =
+        report.choice == application::ConflictResolutionChoice::KeepCanonical
+            ? "canonical"
+            : "artifact";
+    doc["data"] = json{
+        {"summary", format_compact_summary(report)},
+        {"canonical_path", report.canonical_path},
+        {"dry_run", report.dry_run},
+        {"choice", choice},
+        {"selected_artifact",
+         report.selected_artifact ? json(*report.selected_artifact)
+                                  : json(nullptr)},
+        {"removed_count", report.removed_artifacts.size()},
+        {"removed_artifacts", std::move(removed)},
     };
     emit_json(doc);
     return 0;
@@ -1112,6 +1155,124 @@ int present_json(std::string_view profile_name,
             {"protocol_consistent", writers_report->protocol_consistent},
             {"barriers", std::move(barriers)},
             {"writers", std::move(writers)},
+        };
+    } else if (const auto* stat_report =
+                   std::get_if<application::RemoteStatReport>(
+                       &response.payload)) {
+        doc["data"] = json{
+            {"commit_id",
+             stat_report->commit_id ? json(*stat_report->commit_id)
+                                    : json(nullptr)},
+            {"observed_height", stat_report->observed_height},
+            {"has_conflicts", stat_report->has_conflicts},
+            {"path", stat_report->path},
+            {"type",
+             stat_report->type == application::RemoteTreeEntryType::Directory
+                 ? "directory"
+                 : "file"},
+            {"logical_hash", stat_report->logical_hash},
+            {"size", stat_report->size},
+            {"modified_at_unix_nanoseconds",
+             stat_report->modified_at_unix_nanoseconds},
+        };
+    } else if (const auto* file_report =
+                   std::get_if<application::RemoteFileReport>(
+                       &response.payload)) {
+        doc["data"] = json{
+            {"commit_id",
+             file_report->commit_id ? json(*file_report->commit_id)
+                                    : json(nullptr)},
+            {"path", file_report->path},
+            {"destination_path", file_report->destination_path},
+            {"logical_hash", file_report->logical_hash},
+            {"content_id", file_report->content_id},
+            {"size", file_report->size},
+        };
+    } else if (const auto* log_report =
+                   std::get_if<application::RemoteLogReport>(
+                       &response.payload)) {
+        const auto change_name =
+            [](application::RemotePathChangeKind kind) -> std::string_view {
+            using K = application::RemotePathChangeKind;
+            switch (kind) {
+                case K::Added:
+                    return "added";
+                case K::Modified:
+                    return "modified";
+                case K::Deleted:
+                    return "deleted";
+                case K::Observed:
+                    return "observed";
+            }
+            return "observed";
+        };
+        const auto origin_name =
+            [](application::RemoteCommitOrigin op) -> std::string_view {
+            using O = application::RemoteCommitOrigin;
+            switch (op) {
+                case O::Sync:
+                    return "sync";
+                case O::Repack:
+                    return "repack";
+                case O::ResolveMissing:
+                    return "resolve-missing";
+                case O::Unknown:
+                    return "unknown";
+            }
+            return "unknown";
+        };
+        json entries = json::array();
+        for (const auto& entry : log_report->entries) {
+            json item{
+                {"commit_id", entry.commit_id},
+                {"height", entry.height},
+                {"created_at", entry.created_at},
+                {"logical_head", entry.logical_head},
+                {"change", change_name(entry.change)},
+                {"type",
+                 entry.type
+                     ? json(*entry.type ==
+                                    application::RemoteTreeEntryType::Directory
+                                ? "directory"
+                                : "file")
+                     : json(nullptr)},
+                {"logical_hash", entry.logical_hash},
+                {"size", entry.size},
+                {"modified_at_unix_nanoseconds",
+                 entry.modified_at_unix_nanoseconds},
+            };
+            if (entry.authorship) {
+                item["authorship"] = json{
+                    {"operation", origin_name(entry.authorship->operation)},
+                    {"machine_id", entry.authorship->machine_id_hex},
+                    {"machine_name", entry.authorship->machine_name},
+                };
+            } else {
+                item["authorship"] = nullptr;
+            }
+            entries.push_back(std::move(item));
+        }
+        doc["data"] = json{
+            {"path", log_report->path},
+            {"observed_height", log_report->observed_height},
+            {"present_in_current_tree", log_report->present_in_current_tree},
+            {"entry_count", log_report->entries.size()},
+            {"entries", std::move(entries)},
+        };
+    } else if (const auto* restore_report =
+                   std::get_if<application::RemoteRestoreReport>(
+                       &response.payload)) {
+        doc["data"] = json{
+            {"dry_run", restore_report->dry_run},
+            {"commit_id",
+             restore_report->commit_id ? json(*restore_report->commit_id)
+                                       : json(nullptr)},
+            {"observed_height", restore_report->observed_height},
+            {"source_prefix", restore_report->source_prefix},
+            {"destination_path", restore_report->destination_path},
+            {"file_count", restore_report->file_count},
+            {"directory_count", restore_report->directory_count},
+            {"total_bytes", restore_report->total_bytes},
         };
     } else {
         doc["data"] = json::object();

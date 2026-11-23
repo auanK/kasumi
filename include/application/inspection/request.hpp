@@ -29,6 +29,8 @@ enum class InspectionOperation {
     RemoteOrphans,
     RemoteWriters,
     RemoteHealth,
+    RemoteLog,
+    RemoteRestore,
 };
 
 struct InspectionRequest {
@@ -40,6 +42,7 @@ struct InspectionRequest {
     std::optional<std::string> destination_path;
     std::optional<std::string> epoch_selector;
     std::optional<std::string> content_id;
+    bool dry_run = false;
 };
 
 struct InspectionInput {

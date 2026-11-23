@@ -121,6 +121,8 @@ format_compact_summary(const application::DiagnosticsReport& report);
 std::string
 format_compact_summary(const application::LocalConflictsReport& report);
 std::string
+format_compact_summary(const application::ResolveConflictReport& report);
+std::string
 format_compact_summary(const application::InspectionResponse& response);
 
 // Displays cancellation message and returns 130.
@@ -152,6 +154,10 @@ int present(const application::DiagnosticsReport& report,
 
 // Displays local conflict artifacts for a profile and returns 0.
 int present(const application::LocalConflictsReport& report,
+            bool quiet = false);
+
+// Displays resolved local conflict result for a profile and returns 0.
+int present(const application::ResolveConflictReport& report,
             bool quiet = false);
 
 // Displays the result of a remote inspection and returns 0.

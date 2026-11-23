@@ -2780,3 +2780,99 @@ TEST(CliPresenterTest, PresentsHistoricalStatGetConflictsAndProfileJson) {
               std::string::npos);
     EXPECT_NE(prof_json.find("\"key_storage\":\"file\""), std::string::npos);
 }
+
+TEST(CliPresenterTest,
+     PresentsRemoteLogRemoteRestoreStatGetAndConflictResolutionJson) {
+    const ScopedLanguage en{Language::English};
+    const std::string cid(64, 'a');
+
+    RemoteLogReport log_report{
+        .path = "docs/guide.md",
+        .observed_height = 5,
+        .present_in_current_tree = true,
+        .entries = {RemoteLogEntry{
+            .commit_id = cid,
+            .height = 5,
+            .created_at = 1700000100,
+            .logical_head = true,
+            .change = RemotePathChangeKind::Modified,
+            .type = RemoteTreeEntryType::File,
+            .logical_hash = std::string(64, 'b'),
+            .size = 128,
+        }},
+    };
+    const auto log_text = present_out(InspectionResponse{
+        .operation = InspectionOperation::RemoteLog,
+        .payload = log_report,
+    });
+    EXPECT_NE(log_text.find(cid), std::string::npos);
+    EXPECT_NE(log_text.find("[modified]"), std::string::npos);
+
+    const auto log_json = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present_json(
+                      "demo",
+                      InspectionResponse{
+                          .operation = InspectionOperation::RemoteLog,
+                          .payload = log_report,
+                      },
+                      std::chrono::milliseconds{3},
+                      false),
+                  0);
+    });
+    EXPECT_NE(log_json.find("\"command\":\"remote log\""), std::string::npos);
+    EXPECT_NE(log_json.find("\"entry_count\":1"), std::string::npos);
+
+    RemoteRestoreReport restore_report{
+        .dry_run = true,
+        .commit_id = cid,
+        .observed_height = 5,
+        .source_prefix = "docs",
+        .destination_path = "/tmp/restored",
+        .file_count = 2,
+        .directory_count = 1,
+        .total_bytes = 512,
+    };
+    const auto restore_text = present_out(InspectionResponse{
+        .operation = InspectionOperation::RemoteRestore,
+        .payload = restore_report,
+    });
+    EXPECT_NE(restore_text.find("Restore preview for docs"), std::string::npos);
+
+    const auto restore_json = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present_json(
+                      "demo",
+                      InspectionResponse{
+                          .operation = InspectionOperation::RemoteRestore,
+                          .payload = restore_report,
+                      },
+                      std::chrono::milliseconds{5},
+                      false),
+                  0);
+    });
+    EXPECT_NE(restore_json.find("\"command\":\"remote restore\""),
+              std::string::npos);
+    EXPECT_NE(restore_json.find("\"dry_run\":true"), std::string::npos);
+
+    ResolveConflictReport resolved{
+        .profile_name = "demo",
+        .canonical_path = "docs/guide.md",
+        .choice = ConflictResolutionChoice::KeepArtifact,
+        .selected_artifact = "docs/guide.md.kasumiconflict_local",
+        .dry_run = false,
+        .removed_artifacts = {"docs/guide.md.kasumiconflict_local"},
+    };
+    const auto res_text = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present(resolved, false), 0);
+    });
+    EXPECT_NE(res_text.find("docs/guide.md.kasumiconflict_local"),
+              std::string::npos);
+
+    const auto res_json = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present_json_conflict_resolved(
+                      resolved, std::chrono::milliseconds{2}),
+                  0);
+    });
+    EXPECT_NE(res_json.find("\"command\":\"conflicts resolve\""),
+              std::string::npos);
+    EXPECT_NE(res_json.find("\"removed_count\":1"), std::string::npos);
+}

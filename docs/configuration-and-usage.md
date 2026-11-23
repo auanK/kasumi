@@ -86,6 +86,7 @@ Use `kasumi <command> --help` for the complete arguments, options and examples.
 | Inspect local environment, `rclone`, and profile health | `kasumi diagnostics [<profile>]` |
 | Inspect the current plan | `kasumi status <profile>` or `kasumi sync <profile> --dry-run` |
 | List preserved local conflict artifacts | `kasumi conflicts <profile>` |
+| Resolve a preserved local conflict group | `kasumi conflicts resolve <profile> <path> (--keep-canonical \| --keep <artifact>) [--dry-run]` |
 | Synchronize (or fast-repair missing remote objects) | `kasumi sync <profile> [--repair]` |
 | Audit referenced payloads | `kasumi fsck <profile>` |
 | Consolidate fragmented Micro-Packs | `kasumi repack <profile> [--dry-run] [--reclaim-dirty] [--full]` |
@@ -93,7 +94,7 @@ Use `kasumi <command> --help` for the complete arguments, options and examples.
 | Resolve permanently missing content as logical deletion | `kasumi resolve-missing <profile> [--dry-run \| --confirm]` |
 | Output shell completion script | `kasumi completion <bash\|zsh\|fish\|powershell>` |
 
-`--full` applies to `sync`, `status`, `repack`, `show`, and `remote summary`, after the profile. In `sync` and `status` it displays every plan and pending-path item (otherwise lists longer than ten items show the first and last five) and keeps detailed progress lines for each activity; in `repack` it displays the full pack inventory summary and published Commit/height details; in `show` it displays full Commit/machine IDs plus recorded local execution and cached remote maintenance histories (noting offline cache limits for other machines); in `remote summary` it expands full machine IDs and the complete operational activity timeline. Preview and Status do not execute the plan, recover transactions, or persist file-hash cache changes. See
+`--full` applies to `sync`, `status`, `repack`, `show`, `remote summary`, and `remote log`, after the profile. In `sync` and `status` it displays every plan and pending-path item (otherwise lists longer than ten items show the first and last five) and keeps detailed progress lines for each activity; in `repack` it displays the full pack inventory summary and published Commit/height details; in `show` it displays full Commit/machine IDs plus recorded local execution and cached remote maintenance histories (noting offline cache limits for other machines); in `remote summary` it expands full machine IDs and the complete operational activity timeline; and in `remote log` it expands logical hashes and machine IDs. Preview and Status do not execute the plan, recover transactions, or persist file-hash cache changes. See
 [Preview and Status](architecture/planning-and-status.md).
 
 `sync --initial` requires no SQLite sidecars or unfinished transaction evidence.
@@ -208,7 +209,7 @@ For the recovery state transitions, see [Transactions and Recovery](architecture
 
 ## Remote Inspection
 
-These commands do not publish synchronization changes or run garbage collection. `remote get` writes the requested destination after authenticating the payload. See [Remote Inspection](architecture/remote-inspection.md) for each family's data flow and failure behavior.
+These commands do not publish synchronization changes or run garbage collection. `remote get` writes the requested destination file and `remote restore` reconstructs a verified snapshot or subtree into an empty non-overlapping directory. See [Remote Inspection](architecture/remote-inspection.md) for each family's data flow and failure behavior.
 
 Use `kasumi remote --help` to choose a view, and
 `kasumi remote <subcommand> --help` for its required arguments. For example:
@@ -216,6 +217,8 @@ Use `kasumi remote --help` to choose a view, and
 ```sh
 kasumi remote summary Programming [--full]
 kasumi remote tree Programming --head <commit>
+kasumi remote log Programming docs/report.md [--full]
+kasumi remote restore Programming docs /tmp/restored-docs [--commit <commit>] [--dry-run]
 kasumi remote contents Programming --audit
 ```
 
@@ -225,11 +228,15 @@ Fsck instead audits referenced content and has its own checkpoint/recovery flow.
 See [Content Inspection](architecture/remote-content-inspection.md).
 
 Commit and Content selectors require 64 lowercase hex characters. `tree --head`
-selects a current logical head and is required for multiple heads. `stat` and
-`get` use the resolved effective tree by default, or an earlier retained snapshot
-when `--commit <id>` is specified; `get` authenticates the requested file and
-writes its explicit destination, whose parent must exist. Health diagnostics
-are observations rather than a substitute for a payload audit.
+selects a current logical head and is required for multiple heads. `stat`, `get`,
+and `restore` use the resolved effective tree by default, or an earlier retained
+snapshot when `--commit <id>` is specified; `get` authenticates the requested
+file and writes its explicit destination (whose parent must exist), while `restore`
+reconstructs root `/` (when `<prefix>` is omitted) or a subtree into a safe, empty
+directory without overwriting `local_dir`. `log` walks complete reachable history
+(ignoring `cached_anchor`) to list every commit that added, modified, deleted, or
+observed `<path>`. Health diagnostics are observations rather than a substitute
+for a payload audit.
 
 ## General Options
 
@@ -238,7 +245,7 @@ kasumi [--lang <code>] <command> [subcommand] [arguments] [options]
 ```
 
 `--lang <code>` is the optional global prefix, before the command. Command
-options follow required arguments; `--full` is available to `sync`, `status`, `repack`, `show`, and `remote summary`. `config` and `list` take no profile.
+options follow required arguments; `--full` is available to `sync`, `status`, `repack`, `show`, `remote summary`, and `remote log`. `config` and `list` take no profile.
 
 `kasumi --help` (`-h`) shows global Help. Add `--help` or `-h` after a command,
 subcommand or otherwise valid invocation for contextual Help. Help returns 0
@@ -304,20 +311,20 @@ content, and retry; do not turn it automatically into deletions. See
 
 ### Quiet Mode (`--quiet`)
 
-Pass `--quiet` after the profile (or after `kasumi list`, `kasumi diagnostics [<profile>]`, `kasumi profile <subcommand> <profile>`, or `kasumi remote <subcommand> <profile>`) to suppress banners, live progress, `Duration:` lines, and non-error operational stdout on `sync`, `status`, `conflicts`, `profile ...`, `fsck`, `gc`, `repack`, `resolve-missing`, and healthy `diagnostics` runs. Query commands (`list`, `show`, `remote ...`) retain their query output without progress or duration lines, and errors, partial-pending lists (exit `2`), unhealthy `diagnostics` summaries, and `stderr` warnings remain visible.
+Pass `--quiet` after the profile (or after `kasumi list`, `kasumi diagnostics [<profile>]`, `kasumi profile <subcommand> <profile>`, `kasumi conflicts resolve <profile>`, or `kasumi remote <subcommand> <profile>`) to suppress banners, live progress, `Duration:` lines, and non-error operational stdout on `sync`, `status`, `conflicts`, `conflicts resolve`, `profile ...`, `fsck`, `gc`, `repack`, `resolve-missing`, and healthy `diagnostics` runs. Query commands (`list`, `show`, `remote ...`) retain their query output without progress or duration lines, and errors, partial-pending lists (exit `2`), unhealthy `diagnostics` summaries, and `stderr` warnings remain visible.
 
 ### Machine-Readable Output (`--json`)
 
-Pass `--json` on supported commands (`list`, `show`, `diagnostics`, `profile ...`, `conflicts`, `status`, `sync`, `fsck`, `gc <profile>`, `gc remove-barrier`, `repack`, `resolve-missing`, `remote summary`, and `remote writers`) to emit a single language-independent JSON object (`"schema_version": 1`) to `stdout` with empty `stderr`, suppressing banners, progress output, and localized text differences regardless of `--lang`:
+Pass `--json` on supported commands (`list`, `show`, `diagnostics`, `profile ...`, `conflicts`, `conflicts resolve`, `status`, `sync`, `fsck`, `gc <profile>`, `gc remove-barrier`, `repack`, `resolve-missing`, `remote summary`, `remote writers`, `remote stat`, `remote get`, `remote log`, and `remote restore`) to emit a single language-independent JSON object (`"schema_version": 1`) to `stdout` with empty `stderr`, suppressing banners, progress output, and localized text differences regardless of `--lang`:
 
 - Every response includes `schema_version`, `command`, `ok`, `exit_code`, and `timestamp` (UTC ISO-8601 ending in `Z`), plus `profile`, `duration_ms`, `data`, `warning`, or `error` as applicable.
 - Command `data` objects retain all raw numeric/boolean/array fields alongside a concise language-independent `summary` string (such as `"Everything in sync"` or `"3 changes | ↑ 2 (2 KB) | ↓ 1 (512 bytes)"`). On `gc`, `data` also exposes `candidate_expired_commits`, `deferred_recent_objects`, `candidate_bytes`, `removed_bytes`, and `min_age_hours`.
 - `resolve-missing <profile> --json` without `--confirm` or `--dry-run` runs read-only and fails safely with `error.code = "confirmation_required"` and `data.resolved_paths` whenever unresolved paths exist (never blocking on `stdin`).
-- Stable `error.code` values: `invalid_arguments`, `profile_not_found`, `lock_busy`, `remote_busy`, `credentials_required`, `auth_failed`, `confirmation_required`, `insufficient_disk_space`, `io_error`, `cancelled`, `partial_pending`, `audit_findings`, `transport_error`, `plan_failed`, `sync_failed`, `recovery_failed`, `fsck_failed`, `gc_failed`, `repack_failed`, `writer_removal_failed`, `barrier_removal_failed`, `inventory_audit_failed`, `remote_observation_failed`, `config_error`, and `runtime_error`.
+- Stable `error.code` values: `invalid_arguments`, `invalid_path`, `profile_not_found`, `lock_busy`, `remote_busy`, `credentials_required`, `auth_failed`, `confirmation_required`, `insufficient_disk_space`, `io_error`, `cancelled`, `partial_pending`, `audit_findings`, `transport_error`, `plan_failed`, `sync_failed`, `recovery_failed`, `fsck_failed`, `gc_failed`, `repack_failed`, `writer_removal_failed`, `barrier_removal_failed`, `inventory_audit_failed`, `remote_observation_failed`, `config_error`, and `runtime_error`.
 
 ### Persistent Log File (`--log-file <path>`)
 
-Pass `--log-file <path>` (or `--log-file=<path>`) on supported non-interactive commands (`list`, `show`, `diagnostics`, `profile ...`, `conflicts`, `sync`, `status`, `fsck`, `gc`, `repack`, `resolve-missing`, and `remote ...`) to append durable logs without interrupting terminal output:
+Pass `--log-file <path>` (or `--log-file=<path>`) on supported non-interactive commands (`list`, `show`, `diagnostics`, `profile ...`, `conflicts`, `conflicts resolve`, `sync`, `status`, `fsck`, `gc`, `repack`, `resolve-missing`, and `remote ...`) to append durable logs without interrupting terminal output:
 
 - **With `--json`**: Appends the exact serialized JSON envelope (`timestamp`, `data.summary`, raw counts, and error codes) as one NDJSON line per invocation.
 - **Without `--json`**: Appends UTF-8 plain-text entries in one atomic write per command using local timestamps with UTC offset, status tags (`[OK]`, `[WARN]`, `[PARTIAL]`, `[LOCKED]`, `[BUSY]`, `[CANCELLED]`, `[ERROR]`), command/profile target, ANSI-free compact summary (with human-readable sizes), duration (`(<seconds> s)`), and indented detail lines for pending paths, warnings, or unhealthy diagnostic items.

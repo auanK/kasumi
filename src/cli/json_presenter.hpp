@@ -56,6 +56,10 @@ int present_json_diagnostics(const application::DiagnosticsReport& report,
 int present_json_conflicts(const application::LocalConflictsReport& report,
                            std::chrono::nanoseconds duration);
 
+int present_json_conflict_resolved(
+    const application::ResolveConflictReport& report,
+    std::chrono::nanoseconds duration);
+
 int present_json_profile_action(std::string_view command,
                                 const application::Profile* profile,
                                 std::string_view profile_name,

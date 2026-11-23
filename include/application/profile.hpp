@@ -39,6 +39,7 @@ std::string_view to_string(KeyStorage storage) noexcept;
 // Possible failures in profile management.
 enum class ProfileErrorCode {
     InvalidName,
+    InvalidPath,
     AlreadyExists,
     NotFound,
     ConfigFailure,
@@ -336,6 +337,35 @@ struct LocalConflictsReport {
 std::expected<LocalConflictsReport, ProfileError>
 list_local_conflicts(const ExecutionEnvironment& environment,
                      std::string_view profile_name);
+
+enum class ConflictResolutionChoice : std::uint8_t {
+    KeepCanonical,
+    KeepArtifact,
+};
+
+struct ResolveConflictRequest {
+    std::string profile_name;
+    std::string canonical_path;
+    ConflictResolutionChoice choice = ConflictResolutionChoice::KeepCanonical;
+    std::string artifact_selector;
+    bool dry_run = false;
+};
+
+struct ResolveConflictReport {
+    std::string profile_name;
+    std::string canonical_path;
+    ConflictResolutionChoice choice = ConflictResolutionChoice::KeepCanonical;
+    std::optional<std::string> selected_artifact;
+    bool dry_run = false;
+    std::vector<std::string> removed_artifacts;
+};
+
+// Resolves one preserved conflict group by keeping either the canonical file or
+// one named `.kasumiconflict_*` artifact, atomically promoting the chosen file
+// before deleting any conflict artifacts in the group.
+std::expected<ResolveConflictReport, ProfileError>
+resolve_local_conflict(const ExecutionEnvironment& environment,
+                       const ResolveConflictRequest& request);
 
 } // namespace kasumi::application
 

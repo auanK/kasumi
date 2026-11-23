@@ -28,6 +28,12 @@ struct KeyInvocation {
 };
 struct ConflictsInvocation {
     std::string profile_name;
+    bool resolve = false;
+    std::string canonical_path;
+    application::ConflictResolutionChoice choice =
+        application::ConflictResolutionChoice::KeepCanonical;
+    std::string artifact_selector;
+    bool dry_run = false;
 };
 struct CompletionInvocation {
     CompletionShell shell = CompletionShell::Bash;

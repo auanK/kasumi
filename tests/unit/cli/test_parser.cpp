@@ -594,5 +594,75 @@ TEST(CliParserTest, ParsesProfileConflictsAndCompletionCommands) {
     EXPECT_EQ(std::get<kasumi::cli::ProfileInvocation>(*del).action,
               kasumi::cli::ProfileAction::Delete);
     EXPECT_TRUE(std::get<kasumi::cli::ProfileInvocation>(*del).confirm);
+
+    // remote log & remote restore
+    const auto rlog = parse({"remote", "log", "demo", "docs/a.txt"});
+    ASSERT_TRUE(rlog.has_value());
+    const auto& rlog_req =
+        std::get<kasumi::application::InspectionRequest>(*rlog);
+    EXPECT_EQ(rlog_req.operation,
+              kasumi::application::InspectionOperation::RemoteLog);
+    EXPECT_EQ(rlog_req.logical_path, "docs/a.txt");
+    EXPECT_FALSE(parse({"remote",
+                        "log",
+                        "demo",
+                        "docs/a.txt",
+                        "--commit",
+                        std::string(64, 'a')})
+                     .has_value());
+
+    const auto rrestore_root =
+        parse({"remote", "restore", "demo", "/tmp/restore", "--dry-run"});
+    ASSERT_TRUE(rrestore_root.has_value());
+    const auto& rr_req =
+        std::get<kasumi::application::InspectionRequest>(*rrestore_root);
+    EXPECT_EQ(rr_req.operation,
+              kasumi::application::InspectionOperation::RemoteRestore);
+    EXPECT_FALSE(rr_req.logical_path.has_value());
+    EXPECT_EQ(rr_req.destination_path, "/tmp/restore");
+    EXPECT_TRUE(rr_req.dry_run);
+
+    const std::string cid(64, 'a');
+    const auto rrestore_sub = parse(
+        {"remote", "restore", "demo", "docs", "/tmp/out", "--commit", cid});
+    ASSERT_TRUE(rrestore_sub.has_value());
+    const auto& rrs_req =
+        std::get<kasumi::application::InspectionRequest>(*rrestore_sub);
+    EXPECT_EQ(rrs_req.logical_path, "docs");
+    EXPECT_EQ(rrs_req.destination_path, "/tmp/out");
+    EXPECT_EQ(rrs_req.commit_id, cid);
+
+    // conflicts resolve
+    const auto cres_can =
+        parse({"conflicts", "resolve", "demo", "a.txt", "--keep-canonical"});
+    ASSERT_TRUE(cres_can.has_value());
+    const auto& cres_inv =
+        std::get<kasumi::cli::ConflictsInvocation>(*cres_can);
+    EXPECT_TRUE(cres_inv.resolve);
+    EXPECT_EQ(cres_inv.profile_name, "demo");
+    EXPECT_EQ(cres_inv.canonical_path, "a.txt");
+    EXPECT_EQ(cres_inv.choice,
+              kasumi::application::ConflictResolutionChoice::KeepCanonical);
+
+    const auto cres_art = parse(
+        {"conflicts", "resolve", "demo", "a.txt", "--keep=local", "--dry-run"});
+    ASSERT_TRUE(cres_art.has_value());
+    const auto& cres_art_inv =
+        std::get<kasumi::cli::ConflictsInvocation>(*cres_art);
+    EXPECT_EQ(cres_art_inv.choice,
+              kasumi::application::ConflictResolutionChoice::KeepArtifact);
+    EXPECT_EQ(cres_art_inv.artifact_selector, "local");
+    EXPECT_TRUE(cres_art_inv.dry_run);
+
+    EXPECT_FALSE(parse({"conflicts", "resolve"}).has_value());
+    EXPECT_FALSE(parse({"conflicts", "resolve", "demo", "a.txt"}).has_value());
+    EXPECT_FALSE(parse({"conflicts",
+                        "resolve",
+                        "demo",
+                        "a.txt",
+                        "--keep-canonical",
+                        "--keep",
+                        "local"})
+                     .has_value());
 }
 } // namespace

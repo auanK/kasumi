@@ -18,8 +18,9 @@ _kasumi() {
 
     local top_commands="config list show diagnostics key profile sync status fsck gc repack resolve-missing conflicts remote completion"
     local profile_cmds="create edit clone storage rename delete"
+    local conflicts_cmds="resolve"
     local gc_cmds="remove-writer remove-barrier"
-    local remote_cmds="heads tree commits summary stat commit get epochs epoch contents content markers objects orphans writers health"
+    local remote_cmds="heads tree commits summary stat log commit get restore epochs epoch contents content markers objects orphans writers health"
     local shells="bash zsh fish powershell"
 
     if [[ ${COMP_CWORD} -eq 1 ]]; then
@@ -77,7 +78,16 @@ _kasumi() {
             elif [[ ${COMP_CWORD} -eq 3 ]]; then
                 COMPREPLY=( $(compgen -W "$(_kasumi_profiles)" -- "${cur}") )
             elif [[ ${cur} == -* ]]; then
-                COMPREPLY=( $(compgen -W "--head --commit --audit --full --quiet --json --log-file --help" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--head --commit --audit --dry-run --full --quiet --json --log-file --help" -- "${cur}") )
+            fi
+            ;;
+        conflicts)
+            if [[ ${COMP_CWORD} -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "${conflicts_cmds} $(_kasumi_profiles)" -- "${cur}") )
+            elif [[ ${COMP_CWORD} -eq 3 && "${COMP_WORDS[2]}" == "resolve" ]]; then
+                COMPREPLY=( $(compgen -W "$(_kasumi_profiles)" -- "${cur}") )
+            elif [[ ${cur} == -* ]]; then
+                COMPREPLY=( $(compgen -W "--keep-canonical --keep --dry-run --quiet --json --log-file --help" -- "${cur}") )
             fi
             ;;
         completion)
@@ -85,7 +95,7 @@ _kasumi() {
                 COMPREPLY=( $(compgen -W "${shells}" -- "${cur}") )
             fi
             ;;
-        show|diagnostics|key|sync|status|fsck|repack|resolve-missing|conflicts)
+        show|diagnostics|key|sync|status|fsck|repack|resolve-missing)
             if [[ ${COMP_CWORD} -eq 2 && ${cur} != -* ]]; then
                 COMPREPLY=( $(compgen -W "$(_kasumi_profiles)" -- "${cur}") )
             elif [[ ${cur} == -* ]]; then
@@ -144,7 +154,8 @@ _kasumi() {
         'completion:Output shell completion script'
     )
     profile_cmds=(create edit clone storage rename delete)
-    remote_cmds=(heads tree commits summary stat commit get epochs epoch contents content markers objects orphans writers health)
+    remote_cmds=(heads tree commits summary stat log commit get restore epochs epoch contents content markers objects orphans writers health)
+    conflicts_cmds=(resolve)
     gc_cmds=(remove-writer remove-barrier)
     shells=(bash zsh fish powershell)
 
@@ -171,7 +182,17 @@ _kasumi() {
             elif (( CURRENT == 4 )); then
                 _kasumi_profiles
             else
-                compadd -- --head --commit --audit --full --quiet --json --log-file --help
+                compadd -- --head --commit --audit --dry-run --full --quiet --json --log-file --help
+            fi
+            ;;
+        conflicts)
+            if (( CURRENT == 3 )); then
+                compadd -- $conflicts_cmds
+                _kasumi_profiles
+            elif (( CURRENT == 4 )) && [[ "${words[3]}" == "resolve" ]]; then
+                _kasumi_profiles
+            else
+                compadd -- --keep-canonical --keep --dry-run --quiet --json --log-file --help
             fi
             ;;
         gc)
@@ -187,7 +208,7 @@ _kasumi() {
         completion)
             (( CURRENT == 3 )) && compadd -- $shells
             ;;
-        show|diagnostics|key|sync|status|fsck|repack|resolve-missing|conflicts)
+        show|diagnostics|key|sync|status|fsck|repack|resolve-missing)
             if (( CURRENT == 3 )); then
                 _kasumi_profiles
             else
@@ -223,10 +244,11 @@ complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "conflic
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "remote" -d "Read-only remote inspection"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "completion" -d "Output shell completion script"
 
-complete -c kasumi -f -n "__fish_seen_subcommand_from show diagnostics key sync status fsck repack resolve-missing conflicts" -a "(__kasumi_profiles)"
+complete -c kasumi -f -n "__fish_seen_subcommand_from show diagnostics key sync status fsck repack resolve-missing" -a "(__kasumi_profiles)"
+complete -c kasumi -f -n "__fish_seen_subcommand_from conflicts" -a "resolve (__kasumi_profiles)"
 complete -c kasumi -f -n "__fish_seen_subcommand_from profile; and not __fish_seen_subcommand_from create edit clone storage rename delete" -a "create edit clone storage rename delete"
 complete -c kasumi -f -n "__fish_seen_subcommand_from profile; and __fish_seen_subcommand_from edit clone storage rename delete" -a "(__kasumi_profiles)"
-complete -c kasumi -f -n "__fish_seen_subcommand_from remote; and not __fish_seen_subcommand_from heads tree commits summary stat commit get epochs epoch contents content markers objects orphans writers health" -a "heads tree commits summary stat commit get epochs epoch contents content markers objects orphans writers health"
+complete -c kasumi -f -n "__fish_seen_subcommand_from remote; and not __fish_seen_subcommand_from heads tree commits summary stat log commit get restore epochs epoch contents content markers objects orphans writers health" -a "heads tree commits summary stat log commit get restore epochs epoch contents content markers objects orphans writers health"
 complete -c kasumi -f -n "__fish_seen_subcommand_from remote" -a "(__kasumi_profiles)"
 complete -c kasumi -f -n "__fish_seen_subcommand_from gc" -a "remove-writer remove-barrier (__kasumi_profiles)"
 complete -c kasumi -f -n "__fish_seen_subcommand_from completion" -a "bash zsh fish powershell"
@@ -237,6 +259,8 @@ complete -c kasumi -l quiet -d "Suppress progress output"
 complete -c kasumi -l json -d "Emit JSON output"
 complete -c kasumi -l full -d "Show full details"
 complete -c kasumi -l dry-run -d "Preview without mutating"
+complete -c kasumi -l keep-canonical -d "Keep canonical file on conflict resolve"
+complete -c kasumi -l keep -d "Select conflict artifact to promote"
 complete -c kasumi -l commit -d "Target reachable commit ID"
 )fish";
 
@@ -251,7 +275,8 @@ Register-ArgumentCompleter -Native -CommandName kasumi -ScriptBlock {
 
     $topCommands = @('config', 'list', 'show', 'diagnostics', 'key', 'profile', 'sync', 'status', 'fsck', 'gc', 'repack', 'resolve-missing', 'conflicts', 'remote', 'completion')
     $profileSubs = @('create', 'edit', 'clone', 'storage', 'rename', 'delete')
-    $remoteSubs = @('heads', 'tree', 'commits', 'summary', 'stat', 'commit', 'get', 'epochs', 'epoch', 'contents', 'content', 'markers', 'objects', 'orphans', 'writers', 'health')
+    $remoteSubs = @('heads', 'tree', 'commits', 'summary', 'stat', 'log', 'commit', 'get', 'restore', 'epochs', 'epoch', 'contents', 'content', 'markers', 'objects', 'orphans', 'writers', 'health')
+    $conflictsSubs = @('resolve')
     $gcSubs = @('remove-writer', 'remove-barrier')
     $shells = @('bash', 'zsh', 'fish', 'powershell')
 
@@ -286,7 +311,16 @@ Register-ArgumentCompleter -Native -CommandName kasumi -ScriptBlock {
                 } elseif ($count -eq 4) {
                     $candidates = & $getProfiles
                 } elseif ($wordToComplete -like '-*') {
-                    $candidates = @('--head', '--commit', '--audit', '--full', '--quiet', '--json', '--log-file', '--help')
+                    $candidates = @('--head', '--commit', '--audit', '--dry-run', '--full', '--quiet', '--json', '--log-file', '--help')
+                }
+            }
+            'conflicts' {
+                if ($count -eq 3) {
+                    $candidates = $conflictsSubs + (& $getProfiles)
+                } elseif ($count -eq 4 -and $tokens[2] -eq 'resolve') {
+                    $candidates = & $getProfiles
+                } elseif ($wordToComplete -like '-*') {
+                    $candidates = @('--keep-canonical', '--keep', '--dry-run', '--quiet', '--json', '--log-file', '--help')
                 }
             }
             'gc' {
@@ -302,7 +336,7 @@ Register-ArgumentCompleter -Native -CommandName kasumi -ScriptBlock {
                 if ($count -eq 3) { $candidates = $shells }
             }
             default {
-                if ($count -eq 3 -and $cmd -in @('show', 'diagnostics', 'key', 'sync', 'status', 'fsck', 'repack', 'resolve-missing', 'conflicts')) {
+                if ($count -eq 3 -and $cmd -in @('show', 'diagnostics', 'key', 'sync', 'status', 'fsck', 'repack', 'resolve-missing')) {
                     $candidates = & $getProfiles
                 } elseif ($wordToComplete -like '-*') {
                     $candidates = @('--dry-run', '--initial', '--audit-inventory', '--repair', '--reclaim-dirty', '--confirm', '--full', '--quiet', '--json', '--log-file', '--help')

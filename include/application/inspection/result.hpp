@@ -360,6 +360,44 @@ struct RemoteHealthReport {
     std::vector<std::string> reasons;
 };
 
+enum class RemotePathChangeKind : std::uint8_t {
+    Added,
+    Modified,
+    Deleted,
+    Observed,
+};
+
+struct RemoteLogEntry {
+    std::string commit_id;
+    std::uint64_t height = 0;
+    std::int64_t created_at = 0;
+    bool logical_head = false;
+    RemotePathChangeKind change = RemotePathChangeKind::Modified;
+    std::optional<RemoteTreeEntryType> type;
+    std::string logical_hash;
+    std::uint64_t size = 0;
+    std::int64_t modified_at_unix_nanoseconds = 0;
+    std::optional<RemoteCommitAuthorship> authorship;
+};
+
+struct RemoteLogReport {
+    std::string path;
+    std::uint64_t observed_height = 0;
+    bool present_in_current_tree = false;
+    std::vector<RemoteLogEntry> entries;
+};
+
+struct RemoteRestoreReport {
+    bool dry_run = false;
+    std::optional<std::string> commit_id;
+    std::uint64_t observed_height = 0;
+    std::string source_prefix;
+    std::string destination_path;
+    std::uint64_t file_count = 0;
+    std::uint64_t directory_count = 0;
+    std::uint64_t total_bytes = 0;
+};
+
 using InspectionPayload = std::variant<RemoteHeadsReport,
                                        RemoteTreeReport,
                                        RemoteCommitsReport,
@@ -375,7 +413,9 @@ using InspectionPayload = std::variant<RemoteHeadsReport,
                                        RemoteObjectsReport,
                                        RemoteOrphansReport,
                                        RemoteWritersReport,
-                                       RemoteHealthReport>;
+                                       RemoteHealthReport,
+                                       RemoteLogReport,
+                                       RemoteRestoreReport>;
 
 struct InspectionResponse {
     InspectionOperation operation = InspectionOperation::RemoteHeads;

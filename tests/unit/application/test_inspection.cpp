@@ -2437,4 +2437,216 @@ TEST(ApplicationInspectionTest,
     EXPECT_EQ(malformed.error().code, InspectionErrorCode::InvalidRequest);
 }
 
+TEST(ApplicationInspectionTest,
+     RemoteLogTracksChangesAcrossHistoryAndMissingPaths) {
+    auto fixture = make_local_storage();
+    auto workspace =
+        kasumi::test::make_temp_workspace("application-remote-log");
+    const auto remote_root =
+        kasumi::test::workspace_path(fixture.workspace, "storage");
+    write_profile(workspace, remote_root);
+
+    const auto commit_tree =
+        [](std::vector<std::pair<std::string, std::string>> files) {
+            kasumi::Snapshot tree{
+                .rows = {kasumi::NodeRow{.path = "", .is_directory = true}}};
+            for (const auto& [p, body] : files) {
+                tree.rows.push_back(kasumi::NodeRow{
+                    .path = p,
+                    .hash = kasumi::hasher::hash_string(body),
+                    .size = body.size(),
+                    .mtime = 1700000000000000000LL,
+                    .is_directory = false,
+                });
+            }
+            kasumi::finalize_snapshot(tree);
+            return tree;
+        };
+
+    const auto c1 =
+        kasumi::history::make_commit(
+            0, {}, commit_tree({{"alpha.txt", "v1"}, {"keep.txt", "k"}}), 100)
+            .value();
+    const auto h1 = publish(fixture, c1);
+
+    // c2 modifies keep.txt only; alpha.txt is unchanged so RemoteLog skips c2.
+    const auto c2 = kasumi::history::make_commit(
+                        1,
+                        {h1.head.commit_id},
+                        commit_tree({{"alpha.txt", "v1"}, {"keep.txt", "k2"}}),
+                        200)
+                        .value();
+    const auto h2 = publish(fixture, c2);
+
+    const auto c3 = kasumi::history::make_commit(
+                        2,
+                        {h2.head.commit_id},
+                        commit_tree({{"alpha.txt", "v2"}, {"keep.txt", "k2"}}),
+                        300)
+                        .value();
+    const auto h3 = publish(fixture, c3);
+
+    const auto c4 =
+        kasumi::history::make_commit(
+            3, {h3.head.commit_id}, commit_tree({{"keep.txt", "k2"}}), 400)
+            .value();
+    const auto h4 = publish(fixture, c4);
+    persist_state(workspace, c4, h4.head);
+
+    const auto logged =
+        inspect(workspace,
+                InspectionRequest{.operation = InspectionOperation::RemoteLog,
+                                  .profile_name = "demo",
+                                  .logical_path = "alpha.txt"});
+    const auto report =
+        require_report<kasumi::application::RemoteLogReport>(logged);
+    ASSERT_TRUE(report.has_value());
+    EXPECT_EQ(report->path, "alpha.txt");
+    EXPECT_EQ(report->observed_height, 3U);
+    EXPECT_FALSE(report->present_in_current_tree);
+    ASSERT_EQ(report->entries.size(), 3U);
+
+    EXPECT_EQ(report->entries[0].commit_id, h4.head.commit_id);
+    EXPECT_EQ(report->entries[0].change,
+              kasumi::application::RemotePathChangeKind::Deleted);
+    EXPECT_TRUE(report->entries[0].logical_head);
+
+    EXPECT_EQ(report->entries[1].commit_id, h3.head.commit_id);
+    EXPECT_EQ(report->entries[1].change,
+              kasumi::application::RemotePathChangeKind::Modified);
+    EXPECT_EQ(report->entries[1].size, 2U);
+
+    EXPECT_EQ(report->entries[2].commit_id, h1.head.commit_id);
+    EXPECT_EQ(report->entries[2].change,
+              kasumi::application::RemotePathChangeKind::Added);
+    EXPECT_EQ(report->entries[2].size, 2U);
+
+    const auto never_existed =
+        inspect(workspace,
+                InspectionRequest{.operation = InspectionOperation::RemoteLog,
+                                  .profile_name = "demo",
+                                  .logical_path = "never-there.txt"});
+    ASSERT_FALSE(never_existed.has_value());
+    EXPECT_EQ(never_existed.error().code,
+              InspectionErrorCode::RemotePathNotFound);
+}
+
+TEST(ApplicationInspectionTest,
+     RemoteRestoreReconstructsSubtreesAndRejectsUnsafeDestinations) {
+    auto fixture = make_local_storage();
+    auto workspace =
+        kasumi::test::make_temp_workspace("application-remote-restore");
+    const auto remote_root =
+        kasumi::test::workspace_path(fixture.workspace, "storage");
+    write_profile(workspace, remote_root);
+
+    kasumi::Snapshot t1{
+        .rows = {
+            kasumi::NodeRow{.path = "", .is_directory = true},
+            kasumi::NodeRow{.path = "docs", .is_directory = true},
+            kasumi::NodeRow{.path = "docs/guide.md",
+                            .hash = kasumi::hasher::hash_string("guide-v1"),
+                            .size = 8,
+                            .mtime = 1700000100000000000LL,
+                            .is_directory = false},
+            kasumi::NodeRow{.path = "empty", .is_directory = true},
+            kasumi::NodeRow{.path = "top.txt",
+                            .hash = kasumi::hasher::hash_string("top-v1"),
+                            .size = 6,
+                            .mtime = 1700000100000000000LL,
+                            .is_directory = false},
+        }};
+    kasumi::finalize_snapshot(t1);
+    const auto c1 = kasumi::history::make_commit(0, {}, t1, 100).value();
+    const auto h1 = publish(fixture, c1);
+    static_cast<void>(put_content(fixture, "guide-v1"));
+    static_cast<void>(put_content(fixture, "top-v1"));
+
+    kasumi::Snapshot t2{
+        .rows = {
+            kasumi::NodeRow{.path = "", .is_directory = true},
+            kasumi::NodeRow{.path = "docs", .is_directory = true},
+            kasumi::NodeRow{.path = "docs/guide.md",
+                            .hash = kasumi::hasher::hash_string("guide-v2"),
+                            .size = 8,
+                            .mtime = 1700000200000000000LL,
+                            .is_directory = false},
+        }};
+    kasumi::finalize_snapshot(t2);
+    const auto c2 =
+        kasumi::history::make_commit(1, {h1.head.commit_id}, t2, 200).value();
+    const auto h2 = publish(fixture, c2);
+    static_cast<void>(put_content(fixture, "guide-v2"));
+    persist_state(workspace, c2, h2.head);
+
+    // Dry-run does not create destination or files.
+    const auto dry_dst = kasumi::test::workspace_path(workspace, "restore-dry");
+    const auto dry_res = inspect(
+        workspace,
+        InspectionRequest{.operation = InspectionOperation::RemoteRestore,
+                          .profile_name = "demo",
+                          .commit_id = h1.head.commit_id,
+                          .destination_path =
+                              kasumi::platform::path::to_utf8(dry_dst),
+                          .dry_run = true});
+    const auto dry_report =
+        require_report<kasumi::application::RemoteRestoreReport>(dry_res);
+    ASSERT_TRUE(dry_report.has_value());
+    EXPECT_TRUE(dry_report->dry_run);
+    EXPECT_EQ(dry_report->file_count, 2U);
+    EXPECT_EQ(dry_report->directory_count, 2U);
+    EXPECT_FALSE(std::filesystem::exists(dry_dst));
+
+    // Historical full restore into new empty directory.
+    const auto full_dst =
+        kasumi::test::workspace_path(workspace, "restore-full");
+    const auto full_res = inspect(
+        workspace,
+        InspectionRequest{.operation = InspectionOperation::RemoteRestore,
+                          .profile_name = "demo",
+                          .commit_id = h1.head.commit_id,
+                          .destination_path =
+                              kasumi::platform::path::to_utf8(full_dst)});
+    const auto full_report =
+        require_report<kasumi::application::RemoteRestoreReport>(full_res);
+    ASSERT_TRUE(full_report.has_value());
+    EXPECT_EQ(kasumi::test::read_text(full_dst / "docs" / "guide.md"),
+              "guide-v1");
+    EXPECT_EQ(kasumi::test::read_text(full_dst / "top.txt"), "top-v1");
+    EXPECT_TRUE(std::filesystem::is_directory(full_dst / "empty"));
+
+    // Subtree restore places subtree contents directly under destination.
+    const auto sub_dst = kasumi::test::workspace_path(workspace, "restore-sub");
+    const auto sub_res = inspect(
+        workspace,
+        InspectionRequest{.operation = InspectionOperation::RemoteRestore,
+                          .profile_name = "demo",
+                          .logical_path = "docs",
+                          .destination_path =
+                              kasumi::platform::path::to_utf8(sub_dst)});
+    ASSERT_TRUE(sub_res.has_value()) << sub_res.error().detail;
+    EXPECT_EQ(kasumi::test::read_text(sub_dst / "guide.md"), "guide-v2");
+
+    // Non-empty destination fails cleanly.
+    const auto non_empty = inspect(
+        workspace,
+        InspectionRequest{.operation = InspectionOperation::RemoteRestore,
+                          .profile_name = "demo",
+                          .destination_path =
+                              kasumi::platform::path::to_utf8(full_dst)});
+    ASSERT_FALSE(non_empty.has_value());
+    EXPECT_EQ(non_empty.error().code, InspectionErrorCode::DestinationFailure);
+
+    // Destination overlapping profile local_dir fails cleanly.
+    const auto overlap =
+        inspect(workspace,
+                InspectionRequest{
+                    .operation = InspectionOperation::RemoteRestore,
+                    .profile_name = "demo",
+                    .destination_path = kasumi::platform::path::to_utf8(
+                        kasumi::test::workspace_path(workspace, "local/sub"))});
+    ASSERT_FALSE(overlap.has_value());
+    EXPECT_EQ(overlap.error().code, InspectionErrorCode::DestinationFailure);
+}
+
 } // namespace

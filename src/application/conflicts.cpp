@@ -1,7 +1,11 @@
 #include "application/profile.hpp"
 #include "core/ignore.hpp"
+#include "core/node.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
+#include "platform/private_storage.hpp"
+#include "platform/profile_lock.hpp"
+#include "platform/random.hpp"
 #include "runtime/profile.hpp"
 
 #include <algorithm>
@@ -305,6 +309,277 @@ list_local_conflicts(const ExecutionEnvironment& environment,
         }
         report.groups.push_back(std::move(group));
     }
+    return report;
+}
+
+namespace {
+
+bool verify_relative_parent_dirs(const std::filesystem::path& local_dir,
+                                 std::string_view canonical_path) {
+    std::filesystem::path cur = local_dir;
+    std::size_t start = 0;
+    while (true) {
+        const auto slash = canonical_path.find('/', start);
+        if (slash == std::string_view::npos) {
+            break;
+        }
+        cur /= platform::path::from_utf8(
+            canonical_path.substr(start, slash - start));
+        std::error_code ec;
+        const auto st = std::filesystem::symlink_status(cur, ec);
+        if (ec || is_link_or_reparse(cur, st) ||
+            !std::filesystem::is_directory(st)) {
+            return false;
+        }
+        start = slash + 1U;
+    }
+    return true;
+}
+
+bool matches_artifact_selector(const LocalConflictGroup& group,
+                               const LocalConflictArtifact& artifact,
+                               std::string_view selector) {
+    if (artifact.path == selector) {
+        return true;
+    }
+    const auto slash = artifact.path.rfind('/');
+    const auto filename =
+        slash == std::string::npos
+            ? std::string_view{artifact.path}
+            : std::string_view{artifact.path}.substr(slash + 1U);
+    if (filename == selector) {
+        return true;
+    }
+    const std::string prefix = group.canonical_path + ".kasumiconflict_";
+    return artifact.path.starts_with(prefix) &&
+           std::string_view{artifact.path}.substr(prefix.size()) == selector;
+}
+
+} // namespace
+
+std::expected<ResolveConflictReport, ProfileError>
+resolve_local_conflict(const ExecutionEnvironment& environment,
+                       const ResolveConflictRequest& request) {
+    if (!runtime::is_valid_profile_name(request.profile_name)) {
+        return std::unexpected(ProfileError{
+            .code = ProfileErrorCode::InvalidName,
+            .detail = "invalid profile name",
+        });
+    }
+    if (!kasumi::valid_logical_path(request.canonical_path)) {
+        return std::unexpected(ProfileError{
+            .code = ProfileErrorCode::InvalidPath,
+            .detail = "invalid conflict canonical path",
+        });
+    }
+    if (request.choice == ConflictResolutionChoice::KeepArtifact &&
+        request.artifact_selector.empty()) {
+        return std::unexpected(ProfileError{
+            .code = ProfileErrorCode::InvalidPath,
+            .detail = "artifact selector cannot be empty",
+        });
+    }
+
+    struct ScopedProfileLock {
+        std::intptr_t handle = platform::invalid_profile_lock;
+        ~ScopedProfileLock() {
+            platform::release_profile_lock(handle);
+        }
+    } lock_guard;
+
+    if (!request.dry_run) {
+        std::error_code dir_ec;
+        std::filesystem::create_directories(environment.app_data_dir, dir_ec);
+        const auto lock_path = environment.app_data_dir /
+                               ("profile-" + request.profile_name + ".lock");
+        auto acquired = platform::acquire_profile_lock(lock_path);
+        if (!acquired) {
+            return std::unexpected(ProfileError{
+                .code = ProfileErrorCode::LockFailure,
+                .detail =
+                    "profile is currently in use by another Kasumi process",
+            });
+        }
+        lock_guard.handle = *acquired;
+    }
+
+    auto listed = list_local_conflicts(environment, request.profile_name);
+    if (!listed) {
+        return std::unexpected(listed.error());
+    }
+
+    const auto group_it =
+        std::ranges::find(listed->groups,
+                          request.canonical_path,
+                          &LocalConflictGroup::canonical_path);
+    if (group_it == listed->groups.end()) {
+        return std::unexpected(ProfileError{
+            .code = ProfileErrorCode::NotFound,
+            .detail = "no conflict artifacts found for path",
+        });
+    }
+
+    const auto& local_dir = listed->local_dir;
+    if (!verify_relative_parent_dirs(local_dir, group_it->canonical_path)) {
+        return std::unexpected(ProfileError{
+            .code = ProfileErrorCode::StorageFailure,
+            .detail = "conflict parent directory is missing or redirected",
+        });
+    }
+
+    const auto canonical_fs =
+        local_dir / platform::path::from_utf8(group_it->canonical_path);
+    std::error_code can_ec;
+    const auto can_status =
+        std::filesystem::symlink_status(canonical_fs, can_ec);
+    const bool canonical_absent =
+        can_ec == std::errc::no_such_file_or_directory;
+    if (!canonical_absent &&
+        (can_ec || is_link_or_reparse(canonical_fs, can_status) ||
+         !std::filesystem::is_regular_file(can_status))) {
+        return std::unexpected(ProfileError{
+            .code = ProfileErrorCode::StorageFailure,
+            .detail = "canonical path is not a safe regular file",
+        });
+    }
+
+    std::optional<std::string> selected_artifact;
+    std::filesystem::path selected_fs;
+    if (request.choice == ConflictResolutionChoice::KeepCanonical) {
+        if (!group_it->canonical_exists || canonical_absent) {
+            return std::unexpected(ProfileError{
+                .code = ProfileErrorCode::InvalidPath,
+                .detail =
+                    "canonical file does not exist; select an artifact with "
+                    "--keep",
+            });
+        }
+    } else {
+        std::vector<const LocalConflictArtifact*> matches;
+        for (const auto& art : group_it->artifacts) {
+            if (matches_artifact_selector(
+                    *group_it, art, request.artifact_selector)) {
+                matches.push_back(&art);
+            }
+        }
+        if (matches.empty()) {
+            return std::unexpected(ProfileError{
+                .code = ProfileErrorCode::NotFound,
+                .detail = "requested conflict artifact was not found",
+            });
+        }
+        if (matches.size() > 1U) {
+            return std::unexpected(ProfileError{
+                .code = ProfileErrorCode::InvalidPath,
+                .detail =
+                    "artifact selector matched multiple conflict artifacts; "
+                    "specify the full artifact path or filename",
+            });
+        }
+        selected_artifact = matches.front()->path;
+        selected_fs = local_dir / platform::path::from_utf8(*selected_artifact);
+    }
+
+    std::vector<std::filesystem::path> artifact_paths;
+    artifact_paths.reserve(group_it->artifacts.size());
+    std::vector<std::string> removed_paths;
+    removed_paths.reserve(group_it->artifacts.size());
+    for (const auto& art : group_it->artifacts) {
+        const auto p = local_dir / platform::path::from_utf8(art.path);
+        std::error_code art_ec;
+        const auto art_st = std::filesystem::symlink_status(p, art_ec);
+        if (art_ec || is_link_or_reparse(p, art_st) ||
+            !std::filesystem::is_regular_file(art_st)) {
+            return std::unexpected(ProfileError{
+                .code = ProfileErrorCode::StorageFailure,
+                .detail = "conflict artifact is missing or not a regular file",
+            });
+        }
+        artifact_paths.push_back(p);
+        removed_paths.push_back(art.path);
+    }
+
+    ResolveConflictReport report{
+        .profile_name = listed->profile_name,
+        .canonical_path = group_it->canonical_path,
+        .choice = request.choice,
+        .selected_artifact = selected_artifact,
+        .dry_run = request.dry_run,
+        .removed_artifacts = std::move(removed_paths),
+    };
+    if (request.dry_run) {
+        return report;
+    }
+
+    if (request.choice == ConflictResolutionChoice::KeepArtifact) {
+        const auto src_mtime = platform::metadata::last_write_time(selected_fs);
+        const auto token = platform::random::hex_id();
+        if (!token) {
+            return std::unexpected(ProfileError{
+                .code = ProfileErrorCode::StorageFailure,
+                .detail = "failed to prepare temporary file for resolution",
+            });
+        }
+        const auto temp_path =
+            canonical_fs.parent_path() / (".kasumi-resolve-" + *token + ".tmp");
+        auto temp_out =
+            platform::private_storage::create_private_file(temp_path);
+        if (!temp_out) {
+            return std::unexpected(ProfileError{
+                .code = ProfileErrorCode::StorageFailure,
+                .detail = "failed to create temporary resolution file",
+            });
+        }
+        std::vector<std::uint8_t> buffer(65536U);
+        bool write_failed = false;
+        const auto streamed = platform::private_storage::stream_regular_file(
+            selected_fs, buffer, [&](std::span<const std::uint8_t> chunk) {
+                if (!chunk.empty() &&
+                    !platform::private_storage::write_private_file(
+                        *temp_out, chunk.data(), chunk.size())) {
+                    write_failed = true;
+                    return false;
+                }
+                return true;
+            });
+        if (!streamed || write_failed) {
+            static_cast<void>(
+                platform::private_storage::remove_private_file_if_owned(
+                    *temp_out));
+            return std::unexpected(ProfileError{
+                .code = ProfileErrorCode::StorageFailure,
+                .detail = "failed to copy selected conflict artifact",
+            });
+        }
+        if (const auto published =
+                platform::private_storage::publish_private_file(*temp_out,
+                                                                canonical_fs);
+            !published) {
+            static_cast<void>(
+                platform::private_storage::remove_private_file_if_owned(
+                    *temp_out));
+            return std::unexpected(ProfileError{
+                .code = ProfileErrorCode::StorageFailure,
+                .detail = "failed to promote selected conflict artifact",
+            });
+        }
+        if (src_mtime) {
+            static_cast<void>(platform::metadata::set_last_write_time(
+                canonical_fs, *src_mtime));
+        }
+    }
+
+    for (const auto& art_path : artifact_paths) {
+        std::error_code rm_ec;
+        const bool removed = std::filesystem::remove(art_path, rm_ec);
+        if (rm_ec || !removed) {
+            return std::unexpected(ProfileError{
+                .code = ProfileErrorCode::StorageFailure,
+                .detail = "failed to remove conflict artifact",
+            });
+        }
+    }
+
     return report;
 }
 

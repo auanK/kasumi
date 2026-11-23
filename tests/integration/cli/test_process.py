@@ -1188,6 +1188,11 @@ class CliProcessTest(unittest.TestCase):
             "remote", "stat", "work", "note.txt", "--commit", commit_v1
         ).decode("utf-8")
         self.assertIn(commit_v1, stat_v1)
+        log_v1 = json.loads(
+            self.invoke_raw("remote", "log", "work", "note.txt", "--json").stdout.decode("utf-8")
+        )
+        self.assertTrue(log_v1["ok"])
+        self.assertEqual(log_v1["data"]["entry_count"], 2)
         self.invoke(
             "remote",
             "get",
@@ -1199,13 +1204,44 @@ class CliProcessTest(unittest.TestCase):
         )
         self.assertEqual(restored.read_text(encoding="utf-8"), "version-one")
 
-        # Conflicts detection via CLI --json
+        restore_dir = self.root / "restore-v1-tree"
+        restore_dry = json.loads(
+            self.invoke_raw(
+                "remote",
+                "restore",
+                "work",
+                str(restore_dir),
+                "--commit",
+                commit_v1,
+                "--dry-run",
+                "--json",
+            ).stdout.decode("utf-8")
+        )
+        self.assertTrue(restore_dry["data"]["dry_run"])
+        self.assertFalse(restore_dir.exists())
+        restore_real = json.loads(
+            self.invoke_raw(
+                "remote",
+                "restore",
+                "work",
+                str(restore_dir),
+                "--commit",
+                commit_v1,
+                "--json",
+            ).stdout.decode("utf-8")
+        )
+        self.assertEqual(restore_real["data"]["file_count"], 1)
+        self.assertEqual(
+            (restore_dir / "note.txt").read_text(encoding="utf-8"), "version-one"
+        )
+
+        # Conflicts detection and resolution via CLI --json
         clean_conflicts = json.loads(
             self.invoke_raw("conflicts", "work", "--json").stdout.decode("utf-8")
         )
         self.assertEqual(clean_conflicts["data"]["total_artifacts"], 0)
         (local / "note.txt.kasumiconflict_local").write_text(
-            "local-conflict", encoding="utf-8"
+            "resolved-from-local-conflict", encoding="utf-8"
         )
         found_conflicts = json.loads(
             self.invoke_raw("conflicts", "work", "--json").stdout.decode("utf-8")
@@ -1214,6 +1250,19 @@ class CliProcessTest(unittest.TestCase):
         self.assertEqual(
             found_conflicts["data"]["groups"][0]["canonical_path"], "note.txt"
         )
+        resolved_json = json.loads(
+            self.invoke_raw(
+                "conflicts", "resolve", "work", "note.txt", "--keep", "local", "--json"
+            ).stdout.decode("utf-8")
+        )
+        self.assertTrue(resolved_json["ok"])
+        self.assertEqual(resolved_json["data"]["removed_count"], 1)
+        self.assertEqual(
+            (local / "note.txt").read_text(encoding="utf-8"),
+            "resolved-from-local-conflict",
+        )
+        self.assertFalse((local / "note.txt.kasumiconflict_local").exists())
+        self.invoke("sync", "work")
 
         # Edit, clone, storage, rename, and delete non-interactively
         self.assertEqual(
