@@ -798,7 +798,8 @@ select_disposable_operations(const Input& input,
     std::ranges::sort(candidate_paths, path_less);
     std::unordered_map<std::string_view, const IgnoredEntryEvidence*>
         ignored_by_path;
-    ignored_by_path.reserve(input.local_physical_evidence.ignored_entries.size());
+    ignored_by_path.reserve(
+        input.local_physical_evidence.ignored_entries.size());
     for (const auto& entry : input.local_physical_evidence.ignored_entries) {
         ignored_by_path.try_emplace(entry.path, &entry);
     }
@@ -809,11 +810,12 @@ select_disposable_operations(const Input& input,
             continue;
         }
         const auto evidence_it = ignored_by_path.find(path);
-        const auto* evidence =
-            evidence_it == ignored_by_path.end() ? nullptr : evidence_it->second;
+        const auto* evidence = evidence_it == ignored_by_path.end()
+                                   ? nullptr
+                                   : evidence_it->second;
         const auto hash = hash_from_hex(found->second->hash);
-        if (evidence == nullptr ||
-            !hash || hash_hex(*hash) != found->second->hash ||
+        if (evidence == nullptr || !hash ||
+            hash_hex(*hash) != found->second->hash ||
             found->second->size != evidence->size ||
             found->second->identity != evidence->identity ||
             !found->second->identity.valid) {

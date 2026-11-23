@@ -264,9 +264,8 @@ verify_synchronized_state(reconciliation::Input& collected,
     }
     auto reconciled = reconciliation::reconcile(collected);
     if (!reconciled) {
-        return std::unexpected(
-            make_error(integrity::ErrorCode::StateFailure,
-                       reconciled.error().detail));
+        return std::unexpected(make_error(integrity::ErrorCode::StateFailure,
+                                          reconciled.error().detail));
     }
     if (reconciled->requires_publication ||
         reconciled->requires_local_mutation ||
@@ -289,8 +288,8 @@ resolve_pack_sources(const std::filesystem::path& local_root,
         std::string path;
         std::uint64_t size = 0;
     };
-    std::unordered_map<Hash, LocalSourceEntry, decltype(&hash_key)>
-        by_hash{0, hash_key};
+    std::unordered_map<Hash, LocalSourceEntry, decltype(&hash_key)> by_hash{
+        0, hash_key};
     by_hash.reserve(local_tree.rows.size());
     for (const auto& row : local_tree.rows) {
         if (row.is_directory || row.path == ".kasumiignore") {
@@ -319,18 +318,18 @@ resolve_pack_sources(const std::filesystem::path& local_root,
         for (const auto& member : pack.members) {
             const auto found = by_hash.find(member.hash);
             if (found == by_hash.end() || found->second.size != member.size) {
-                return std::unexpected(make_error(
-                    integrity::ErrorCode::StateFailure,
-                    "required local file is missing for repack"));
+                return std::unexpected(
+                    make_error(integrity::ErrorCode::StateFailure,
+                               "required local file is missing for repack"));
             }
             auto physical = sync::mutation::detail::resolve_local_path(
                 local_root,
                 platform::path::from_utf8(found->second.path),
                 pack_idx);
             if (!physical) {
-                return std::unexpected(make_error(
-                    integrity::ErrorCode::StateFailure,
-                    physical.error().detail));
+                return std::unexpected(
+                    make_error(integrity::ErrorCode::StateFailure,
+                               physical.error().detail));
             }
             sources.push_back(crypto::pack::PackMemberSource{
                 .hash = member.hash,
@@ -347,13 +346,12 @@ std::expected<std::int64_t, integrity::Error>
 choose_repack_commit_time(const reconciliation::StorageState& storage) {
     const auto local_now = platform::clock::unix_seconds();
     if (!local_now || *local_now <= 0) {
-        return std::unexpected(
-            make_error(integrity::ErrorCode::StateFailure,
-                       "invalid local commit timestamp"));
+        return std::unexpected(make_error(integrity::ErrorCode::StateFailure,
+                                          "invalid local commit timestamp"));
     }
     if (storage.logical_heads.empty()) {
-        return std::unexpected(make_error(
-            integrity::ErrorCode::StateFailure, "history has no logical head"));
+        return std::unexpected(make_error(integrity::ErrorCode::StateFailure,
+                                          "history has no logical head"));
     }
     const auto found = std::ranges::find(storage.reachable_commits,
                                          storage.logical_heads.front(),
@@ -424,11 +422,10 @@ execute(const runtime::RuntimeData& runtime_data,
         return std::unexpected(cancelled_error());
     }
     if (!collected) {
-        const auto code =
-            collected.error().code ==
-                    reconciliation::ErrorCode::InvalidStorageTree
-                ? integrity::ErrorCode::TransportFailure
-                : integrity::ErrorCode::StateFailure;
+        const auto code = collected.error().code ==
+                                  reconciliation::ErrorCode::InvalidStorageTree
+                              ? integrity::ErrorCode::TransportFailure
+                              : integrity::ErrorCode::StateFailure;
         return std::unexpected(make_error(code, collected.error().detail));
     }
 
@@ -481,9 +478,9 @@ execute(const runtime::RuntimeData& runtime_data,
         1U,
         options.max_parallelism > 0 ? options.max_parallelism
                                     : application::content_concurrency());
-    const std::size_t window_packs =
-        options.upload_window_packs > 0 ? options.upload_window_packs
-                                        : DEFAULT_UPLOAD_WINDOW_PACKS;
+    const std::size_t window_packs = options.upload_window_packs > 0
+                                         ? options.upload_window_packs
+                                         : DEFAULT_UPLOAD_WINDOW_PACKS;
     const std::size_t total_packs = planned->new_packs.size();
 
     for (std::size_t offset = 0; offset < total_packs;) {
@@ -585,13 +582,13 @@ execute(const runtime::RuntimeData& runtime_data,
         if (meter) {
             meter->phase(Activity::Verifying, batch.objects.size());
         }
-        if (auto verified = sync::mutation::verify_upload_batch(
-                batch,
-                storage,
-                key,
-                *workspace_guard.workspace,
-                parallelism,
-                meter);
+        if (auto verified =
+                sync::mutation::verify_upload_batch(batch,
+                                                    storage,
+                                                    key,
+                                                    *workspace_guard.workspace,
+                                                    parallelism,
+                                                    meter);
             !verified) {
             return std::unexpected(map_mutation_error(verified.error()));
         }
@@ -633,15 +630,15 @@ execute(const runtime::RuntimeData& runtime_data,
     if (!created_at) {
         return std::unexpected(created_at.error());
     }
-    auto prepared = sync::publication::prepare_commit(
-        collected->storage.tree,
-        true,
-        collected->storage.generation,
-        collected->storage.logical_heads,
-        *created_at,
-        key,
-        planned->target_manifest,
-        options.authorship);
+    auto prepared =
+        sync::publication::prepare_commit(collected->storage.tree,
+                                          true,
+                                          collected->storage.generation,
+                                          collected->storage.logical_heads,
+                                          *created_at,
+                                          key,
+                                          planned->target_manifest,
+                                          options.authorship);
     if (!prepared) {
         return std::unexpected(map_history_error(prepared.error()));
     }

@@ -2616,25 +2616,28 @@ TEST(ApplicationProfileTest, InspectActiveProfileLockIsRunning) {
         fixture.environment.app_data_dir / "profile-main.lock");
     ASSERT_TRUE(held.has_value());
     auto problem = kasumi::application::ProfileLocalProblem::Lock;
-    EXPECT_EQ(inspect_profile_local_state(fixture.environment, "main", &problem),
-              ProfileLocalState::Running);
+    EXPECT_EQ(
+        inspect_profile_local_state(fixture.environment, "main", &problem),
+        ProfileLocalState::Running);
     EXPECT_EQ(problem, kasumi::application::ProfileLocalProblem::None);
     EXPECT_EQ(kasumi::application::to_string(ProfileLocalState::Running),
               "Running");
 
-    // Recording an active InProgress gc execution enriches active_profile_operation
-    // and lock failure messages without altering healthy Running status.
+    // Recording an active InProgress gc execution enriches
+    // active_profile_operation and lock failure messages without altering
+    // healthy Running status.
     ASSERT_TRUE(kasumi::state_storage::record_execution_start(
         fixture.database_path(),
         kasumi::state_storage::LocalExecutionRecord{
             .execution_id = "active-gc",
-            .operation = kasumi::state_storage::LocalOperationKind::GarbageCollect,
+            .operation =
+                kasumi::state_storage::LocalOperationKind::GarbageCollect,
             .machine_id_hex = std::string(32, 'a'),
             .machine_name = "BoxA",
             .started_at = 1700000200,
         }));
-    const auto activity =
-        kasumi::application::inspect_profile_activity(fixture.environment, "main");
+    const auto activity = kasumi::application::inspect_profile_activity(
+        fixture.environment, "main");
     EXPECT_EQ(kasumi::application::active_profile_operation(activity), "gc");
     const auto del_blocked =
         kasumi::application::delete_profile(fixture.environment, "main");
@@ -3594,8 +3597,7 @@ TEST(ApplicationProfileTest,
 }
 
 TEST(ApplicationProfileTest, SetProfileKeyGuardsAgainstSilentOverwrite) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("app-profile-key-guard");
+    auto workspace = kasumi::test::make_temp_workspace("app-profile-key-guard");
     const ExecutionEnvironment environment{
         kasumi::test::workspace_path(workspace, "app")};
     const std::string key_a_hex(64, 'a');
@@ -3610,8 +3612,8 @@ TEST(ApplicationProfileTest, SetProfileKeyGuardsAgainstSilentOverwrite) {
     ASSERT_TRUE(kasumi::application::create_profile(
         environment, profile, MasterKeyHex{key_a_hex}));
 
-    const auto paths =
-        kasumi::runtime::resolve_profile_paths(environment.app_data_dir, "guard");
+    const auto paths = kasumi::runtime::resolve_profile_paths(
+        environment.app_data_dir, "guard");
     ASSERT_TRUE(paths.has_value());
     const auto expected_a = kasumi::runtime::vault::decode_hex(key_a_hex);
     const auto expected_b = kasumi::runtime::vault::decode_hex(key_b_hex);
@@ -3620,11 +3622,13 @@ TEST(ApplicationProfileTest, SetProfileKeyGuardsAgainstSilentOverwrite) {
     ASSERT_TRUE(expected_b.has_value());
     ASSERT_TRUE(expected_c.has_value());
 
-    // Idempotent re-entry with the identical key succeeds without allow_replace.
+    // Idempotent re-entry with the identical key succeeds without
+    // allow_replace.
     EXPECT_TRUE(kasumi::application::set_profile_key(
         environment, "guard", MasterKeyHex{key_a_hex}));
 
-    // Different key without allow_replace fails with AlreadyExists and preserves key A.
+    // Different key without allow_replace fails with AlreadyExists and
+    // preserves key A.
     const auto blocked = kasumi::application::set_profile_key(
         environment, "guard", MasterKeyHex{key_b_hex});
     ASSERT_FALSE(blocked.has_value());
@@ -3640,7 +3644,8 @@ TEST(ApplicationProfileTest, SetProfileKeyGuardsAgainstSilentOverwrite) {
     ASSERT_TRUE(now_b.has_value());
     EXPECT_EQ(*now_b, *expected_b);
 
-    // Corrupt key.bin (invalid size) can still be recovered without allow_replace.
+    // Corrupt key.bin (invalid size) can still be recovered without
+    // allow_replace.
     kasumi::test::write_text(paths->key_path,
                              "this-corrupt-key-file-exceeds-32-bytes");
     ASSERT_TRUE(kasumi::application::set_profile_key(
@@ -3666,8 +3671,9 @@ TEST(ApplicationProfileTest,
             .machine_name = "BoxA",
             .started_at = 1700000100,
         }));
-    const auto interrupted_report = kasumi::application::inspect_profile_activity(
-        fixture.environment, "main");
+    const auto interrupted_report =
+        kasumi::application::inspect_profile_activity(fixture.environment,
+                                                      "main");
     EXPECT_TRUE(interrupted_report.database_present);
     EXPECT_FALSE(std::filesystem::exists(lock_path));
     ASSERT_TRUE(interrupted_report.last_attempt.has_value());
@@ -3705,9 +3711,9 @@ TEST(ApplicationProfileTest,
     ASSERT_TRUE(delete_profile(fixture.environment, "moved"));
 }
 
-TEST(ApplicationProfileTest, CollectDiagnosticsInspectsEnvironmentAndProfilesReadOnly) {
-    const auto empty_ws =
-        kasumi::test::make_temp_workspace("app-diag-empty");
+TEST(ApplicationProfileTest,
+     CollectDiagnosticsInspectsEnvironmentAndProfilesReadOnly) {
+    const auto empty_ws = kasumi::test::make_temp_workspace("app-diag-empty");
     const ExecutionEnvironment empty_env{
         kasumi::test::workspace_path(empty_ws, "app")};
     const auto empty_diag = kasumi::application::collect_diagnostics(empty_env);
@@ -3745,15 +3751,17 @@ TEST(ApplicationProfileTest, CollectDiagnosticsInspectsEnvironmentAndProfilesRea
     EXPECT_TRUE(all->profiles.front().key_accessible);
     EXPECT_TRUE(all->overall_ok);
 
-    // An actively held execution lock marks profile Running and healthy, not Problem.
-    auto held = kasumi::platform::acquire_profile_lock(
-        env.app_data_dir / "profile-main.lock");
+    // An actively held execution lock marks profile Running and healthy, not
+    // Problem.
+    auto held = kasumi::platform::acquire_profile_lock(env.app_data_dir /
+                                                       "profile-main.lock");
     ASSERT_TRUE(held.has_value()) << held.error();
     const auto running = kasumi::application::collect_diagnostics(env, "main");
     kasumi::platform::release_profile_lock(*held);
     ASSERT_TRUE(running.has_value()) << running.error().detail;
     ASSERT_EQ(running->profiles.size(), 1U);
-    EXPECT_EQ(running->profiles.front().local_state, ProfileLocalState::Running);
+    EXPECT_EQ(running->profiles.front().local_state,
+              ProfileLocalState::Running);
     EXPECT_EQ(running->profiles.front().local_problem,
               kasumi::application::ProfileLocalProblem::None);
     EXPECT_TRUE(running->profiles.front().lock_active);
@@ -3770,7 +3778,8 @@ TEST(ApplicationProfileTest, CollectDiagnosticsInspectsEnvironmentAndProfilesRea
     EXPECT_FALSE(broken->profiles.front().healthy);
     EXPECT_FALSE(broken->overall_ok);
 
-    const auto missing = kasumi::application::collect_diagnostics(env, "missing");
+    const auto missing =
+        kasumi::application::collect_diagnostics(env, "missing");
     ASSERT_FALSE(missing.has_value());
     EXPECT_EQ(missing.error().code,
               kasumi::application::ProfileErrorCode::NotFound);

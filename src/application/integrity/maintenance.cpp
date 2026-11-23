@@ -210,13 +210,14 @@ audit_object(transport::Transport& storage,
             combined = AuditState::Missing;
         }
         if (combined == AuditState::Healthy && chunked != nullptr) {
-            const auto streamed = platform::private_storage::stream_regular_file(
-                unit->retained_chunk,
-                buffer,
-                [&](std::span<const std::uint8_t> slab) {
-                    blake3_hasher_update(&hasher, slab.data(), slab.size());
-                },
-                chunked->chunks[i].size);
+            const auto streamed =
+                platform::private_storage::stream_regular_file(
+                    unit->retained_chunk,
+                    buffer,
+                    [&](std::span<const std::uint8_t> slab) {
+                        blake3_hasher_update(&hasher, slab.data(), slab.size());
+                    },
+                    chunked->chunks[i].size);
             if (!streamed) {
                 if (streamed.error().kind ==
                     platform::private_storage::StreamErrorKind::SizeMismatch) {
@@ -237,7 +238,8 @@ audit_object(transport::Transport& storage,
         blake3_hasher_finalize(&hasher,
                                reinterpret_cast<std::uint8_t*>(digest.data()),
                                digest.size());
-        if (size != reference.size || hash_hex(digest) != reference.identifier) {
+        if (size != reference.size ||
+            hash_hex(digest) != reference.identifier) {
             return AuditState::Corrupt;
         }
     }
@@ -428,8 +430,10 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
 
             std::deque<PhysicalAuditUnit> physical_units;
             std::unordered_map<std::string, std::size_t> unit_index_by_id;
-            std::vector<std::vector<std::size_t>> ref_unit_indices(total_objects);
-            std::vector<const history::ChunkedFileEntry*> ref_chunks(total_objects);
+            std::vector<std::vector<std::size_t>> ref_unit_indices(
+                total_objects);
+            std::vector<const history::ChunkedFileEntry*> ref_chunks(
+                total_objects);
 
             for (std::size_t i = 0; i < total_objects; ++i) {
                 const auto& ref = inventory->referenced_objects[i];
@@ -456,8 +460,10 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                     auto& unit = physical_units[it->second];
                     ++unit.remaining_uses;
                     if (retain_chunk && unit.retained_chunk.empty()) {
-                        unit.retained_chunk = workspace->root /
-                            ("fsck-chunk-" + std::to_string(it->second) + ".plain");
+                        unit.retained_chunk =
+                            workspace->root /
+                            ("fsck-chunk-" + std::to_string(it->second) +
+                             ".plain");
                     }
                     ref_unit_indices[i].push_back(it->second);
                 };
@@ -468,8 +474,7 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                              std::nullopt,
                              true);
                 } else if (const auto* chunked = history::find_chunked_file(
-                               storage_state.storage_manifest,
-                               *logical_hash)) {
+                               storage_state.storage_manifest, *logical_hash)) {
                     ref_chunks[i] = chunked;
                     for (const auto& chunk : chunked->chunks) {
                         add_unit(crypto::content_identifier(key, chunk.hash),

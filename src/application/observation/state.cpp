@@ -341,8 +341,7 @@ collect_reconciliation_input(
         if (local_observation && input.base_state_present &&
             input.pending_materializations.empty() &&
             !local_observation->snapshot.rows.empty() &&
-            !input.base_tree.rows.empty() &&
-            on_proven_local_change) {
+            !input.base_tree.rows.empty() && on_proven_local_change) {
             bool changed = local_observation->snapshot.rows.front().hash !=
                            input.base_tree.rows.front().hash;
             if (changed) {

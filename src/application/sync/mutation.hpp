@@ -102,21 +102,21 @@ apply_operation(const Operation& operation,
                 DownloadCacheMode download_cache = DownloadCacheMode::None,
                 const DestinationPrecondition* destination = nullptr);
 
-using DownloadCandidatePopulator = std::function<MutationResult(
-    const std::filesystem::path& candidate_path,
-    const std::filesystem::path& destination_path,
-    const std::filesystem::path* backup_path)>;
+using DownloadCandidatePopulator =
+    std::function<MutationResult(const std::filesystem::path& candidate_path,
+                                 const std::filesystem::path& destination_path,
+                                 const std::filesystem::path* backup_path)>;
 
 // Streams/writes verified download content directly into a transaction-owned
 // staging candidate at the destination, then installs and syncs atomically.
-MutationResult apply_streamed_download(
-    const Operation& operation,
-    std::size_t operation_index,
-    const std::filesystem::path& local_root,
-    const platform::Workspace& workspace,
-    const transaction::OperationProgress& progress,
-    const DestinationPrecondition* destination,
-    const DownloadCandidatePopulator& populate);
+MutationResult
+apply_streamed_download(const Operation& operation,
+                        std::size_t operation_index,
+                        const std::filesystem::path& local_root,
+                        const platform::Workspace& workspace,
+                        const transaction::OperationProgress& progress,
+                        const DestinationPrecondition* destination,
+                        const DownloadCandidatePopulator& populate);
 
 // Writes already-authenticated plaintext bytes into the local staging
 // candidate and atomically installs and syncs the destination.

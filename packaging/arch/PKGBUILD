@@ -2,10 +2,11 @@
 pkgname=kasumi
 pkgver=0.23.0
 pkgrel=1
-pkgdesc="Multi-client encrypted bidirectional file synchronization without a dedicated server"
+pkgdesc="Multi-device encrypted bidirectional file synchronization without a dedicated server"
 arch=('x86_64')
 url="https://github.com/auanK/kasumi"
 license=('MIT')
+install=kasumi.install
 depends=('glibc' 'gcc-libs')
 optdepends=(
   'rclone: remote cloud storage backends'

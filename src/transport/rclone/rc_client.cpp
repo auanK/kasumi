@@ -170,12 +170,12 @@ void watcher_loop(RcRuntime& runtime) {
                                            : "remote response";
                 notices.push_back(PendingNotice{
                     .callback = request->report_status,
-                    .message = std::format(
-                        "[Network] waiting for {} (RC attempt {}/{}, endpoint={})",
-                        operation,
-                        request->attempt,
-                        request->attempts,
-                        request->endpoint),
+                    .message = std::format("[Network] waiting for {} (RC "
+                                           "attempt {}/{}, endpoint={})",
+                                           operation,
+                                           request->attempt,
+                                           request->attempts,
+                                           request->endpoint),
                 });
                 request->reported = true;
             }
@@ -212,8 +212,7 @@ std::unique_ptr<httplib::Client> acquire_client(State& state,
         while (!runtime.idle_clients.empty()) {
             auto entry = std::move(runtime.idle_clients.back());
             runtime.idle_clients.pop_back();
-            if (entry.client &&
-                now - entry.last_used < idle_client_ttl &&
+            if (entry.client && now - entry.last_used < idle_client_ttl &&
                 entry.client->is_socket_open()) {
                 return std::move(entry.client);
             }
@@ -545,8 +544,11 @@ post_rc_read_only(State& state,
 }
 
 std::expected<void, Error> verify_rclone_version(State& state) {
-    const auto response = post_rc(
-        state, "core/version", "{}", maximum_response_size, default_read_timeout);
+    const auto response = post_rc(state,
+                                  "core/version",
+                                  "{}",
+                                  maximum_response_size,
+                                  default_read_timeout);
     if (!response) {
         return std::unexpected(response.error());
     }
@@ -578,8 +580,8 @@ std::expected<void, Error> verify_rclone_version(State& state) {
                 json["version"].get_ref<const std::string&>());
         }
         if (!parsed) {
-            return std::unexpected(make_error(
-                ErrorCode::ProtocolFailure, "invalid core/version response"));
+            return std::unexpected(make_error(ErrorCode::ProtocolFailure,
+                                              "invalid core/version response"));
         }
         if (!meets_minimum_rclone_version(*parsed)) {
             return std::unexpected(make_error(
@@ -592,9 +594,9 @@ std::expected<void, Error> verify_rclone_version(State& state) {
                             minimum_rclone_patch)));
         }
     } catch (const std::exception&) {
-        return std::unexpected(make_error(
-            ErrorCode::ProtocolFailure,
-            "invalid core/version JSON; body omitted"));
+        return std::unexpected(
+            make_error(ErrorCode::ProtocolFailure,
+                       "invalid core/version JSON; body omitted"));
     }
     return {};
 }

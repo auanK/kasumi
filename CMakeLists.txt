@@ -35,6 +35,9 @@ if(WIN32)
     add_compile_definitions(NOMINMAX _CRT_SECURE_NO_WARNINGS)
     if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
         add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
+        if(CMAKE_GENERATOR MATCHES "Visual Studio")
+            add_compile_options(/MP)
+        endif()
     endif()
 endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
@@ -95,9 +98,11 @@ else()
         target_compile_options(kasumi_hardening INTERFACE -fstack-protector-strong)
     endif()
 
-    check_cxx_compiler_flag("-fstack-clash-protection" KASUMI_HAS_STACK_CLASH_PROTECTION)
-    if(KASUMI_HAS_STACK_CLASH_PROTECTION)
-        target_compile_options(kasumi_hardening INTERFACE -fstack-clash-protection)
+    if(NOT (WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
+        check_cxx_compiler_flag("-fstack-clash-protection" KASUMI_HAS_STACK_CLASH_PROTECTION)
+        if(KASUMI_HAS_STACK_CLASH_PROTECTION)
+            target_compile_options(kasumi_hardening INTERFACE -fstack-clash-protection)
+        endif()
     endif()
 
     if(NOT WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i.86)$")
@@ -232,6 +237,20 @@ endif()
 set(CMAKE_WARN_DEPRECATED OFF)
 
 include(FetchContent)
+
+set(KASUMI_FETCHCONTENT_CACHE_DIR "" CACHE PATH
+    "Optional directory storing pre-fetched FetchContent *-src trees")
+if(KASUMI_FETCHCONTENT_CACHE_DIR)
+    foreach(_fc_dep IN ITEMS
+        reproc cpp_httplib nlohmann_json googletest utf8proc
+        blake3 zstd sqlite_amalgamation monocypher tomlplusplus)
+        set(_fc_src "${KASUMI_FETCHCONTENT_CACHE_DIR}/${_fc_dep}-src")
+        if(EXISTS "${_fc_src}")
+            string(TOUPPER "${_fc_dep}" _fc_upper)
+            set(FETCHCONTENT_SOURCE_DIR_${_fc_upper} "${_fc_src}" CACHE PATH "" FORCE)
+        endif()
+    endforeach()
+endif()
 
 set(REPROC++ ON CACHE BOOL "" FORCE)
 set(REPROC_TEST OFF CACHE BOOL "" FORCE)
@@ -528,6 +547,18 @@ fetchcontent_declare(
     SYSTEM
 )
 fetchcontent_makeavailable(tomlplusplus)
+if(KASUMI_FETCHCONTENT_CACHE_DIR)
+    file(MAKE_DIRECTORY "${KASUMI_FETCHCONTENT_CACHE_DIR}")
+    foreach(_fc_dep IN ITEMS
+        reproc cpp_httplib nlohmann_json googletest utf8proc
+        blake3 zstd sqlite_amalgamation monocypher tomlplusplus)
+        set(_fc_cached "${KASUMI_FETCHCONTENT_CACHE_DIR}/${_fc_dep}-src")
+        set(_fc_local "${CMAKE_BINARY_DIR}/_deps/${_fc_dep}-src")
+        if(NOT EXISTS "${_fc_cached}" AND EXISTS "${_fc_local}")
+            file(COPY "${_fc_local}" DESTINATION "${KASUMI_FETCHCONTENT_CACHE_DIR}")
+        endif()
+    endforeach()
+endif()
 set(CMAKE_WARN_DEPRECATED ON)
 
 add_library(kasumi_application STATIC
@@ -772,7 +803,7 @@ install(
 set(CPACK_PACKAGE_NAME "kasumi")
 set(CPACK_PACKAGE_VENDOR "auanK")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
-    "Multi-client encrypted bidirectional file synchronization without a dedicated server")
+    "Multi-device encrypted bidirectional file synchronization without a dedicated server")
 set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/auanK/kasumi")
 set(CPACK_PACKAGE_CONTACT "auanK <https://github.com/auanK/kasumi>")
 set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
@@ -788,7 +819,9 @@ set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
 set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
 set(CPACK_DEBIAN_PACKAGE_SUGGESTS "rclone, gnome-keyring, libsecret-1-0")
-set(CPACK_DEBIAN_KASUMI_FILE_NAME "kasumi-linux-x86_64.deb")
+set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
+    "${PROJECT_SOURCE_DIR}/packaging/linux/deb/postinst")
+set(CPACK_DEBIAN_KASUMI_FILE_NAME "kasumi-v${PROJECT_VERSION}-linux-x86_64.deb")
 
 set(CPACK_RPM_COMPONENT_INSTALL ON)
 set(CPACK_RPM_PACKAGE_NAME "kasumi")
@@ -804,7 +837,9 @@ set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
     "/usr/share"
     "/usr/share/doc"
 )
-set(CPACK_RPM_KASUMI_FILE_NAME "kasumi-linux-x86_64.rpm")
+set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE
+    "${PROJECT_SOURCE_DIR}/packaging/linux/rpm/post.sh")
+set(CPACK_RPM_KASUMI_FILE_NAME "kasumi-v${PROJECT_VERSION}-linux-x86_64.rpm")
 
 include(CPack)
 

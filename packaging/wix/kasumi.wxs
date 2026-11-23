@@ -7,7 +7,7 @@
            UpgradeCode="B9E7C4A2-8D13-4F6E-9A51-2C6D8E4F1B70"
            Scope="perMachine"
            InstallerVersion="500">
-    <SummaryInformation Description="Multi-client encrypted bidirectional file synchronization without a dedicated server" />
+    <SummaryInformation Description="Multi-device encrypted bidirectional file synchronization without a dedicated server" />
     <MajorUpgrade Schedule="afterInstallInitialize"
                   AllowSameVersionUpgrades="yes"
                   DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
@@ -23,6 +23,85 @@
                       Type="raw" />
     </Property>
 
+    <Property Id="PREVIOUS_VERSION">
+      <RegistrySearch Id="FindPreviousVersion"
+                      Root="HKLM"
+                      Key="Software\auanK\Kasumi"
+                      Name="InstalledVersion"
+                      Type="raw" />
+    </Property>
+
+    <Property Id="KASUMI_WELCOME_TITLE"
+              Value="Welcome to the Kasumi v$(var.ProductVersion) Setup Wizard" />
+    <Property Id="KASUMI_WELCOME_DESC"
+              Value="The Setup Wizard will install Kasumi v$(var.ProductVersion) on your computer and add it to the system PATH. Click Next to continue or Cancel to exit." />
+    <Property Id="KASUMI_READY_TITLE"
+              Value="Ready to install Kasumi v$(var.ProductVersion)" />
+    <Property Id="KASUMI_READY_TEXT"
+              Value="Click Install to begin the Kasumi v$(var.ProductVersion) installation." />
+    <Property Id="KASUMI_PROGRESS_TITLE"
+              Value="Installing Kasumi v$(var.ProductVersion)" />
+    <Property Id="KASUMI_EXIT_TITLE"
+              Value="Completed the Kasumi v$(var.ProductVersion) Setup Wizard" />
+
+    <CustomAction Id="SetFreshReadyText"
+                  Property="KASUMI_READY_TEXT"
+                  Value="Click Install to install Kasumi v$(var.ProductVersion) into [INSTALLFOLDER]." />
+    <CustomAction Id="SetUpgradeWelcomeTitle"
+                  Property="KASUMI_WELCOME_TITLE"
+                  Value="Update Kasumi to v$(var.ProductVersion)" />
+    <CustomAction Id="SetUpgradeWelcomeDescPrev"
+                  Property="KASUMI_WELCOME_DESC"
+                  Value="Detected Kasumi v[PREVIOUS_VERSION] in [INSTALLFOLDER]. Setup will update it in-place to v$(var.ProductVersion) while preserving your profiles and configuration." />
+    <CustomAction Id="SetUpgradeWelcomeDescNoPrev"
+                  Property="KASUMI_WELCOME_DESC"
+                  Value="An existing Kasumi installation was detected in [INSTALLFOLDER]. Setup will update it in-place to v$(var.ProductVersion) while preserving your profiles and configuration." />
+    <CustomAction Id="SetUpgradeReadyTitle"
+                  Property="KASUMI_READY_TITLE"
+                  Value="Ready to update Kasumi to v$(var.ProductVersion)" />
+    <CustomAction Id="SetUpgradeReadyTextPrev"
+                  Property="KASUMI_READY_TEXT"
+                  Value="Click Install to update Kasumi from v[PREVIOUS_VERSION] to v$(var.ProductVersion) in [INSTALLFOLDER]." />
+    <CustomAction Id="SetUpgradeReadyTextNoPrev"
+                  Property="KASUMI_READY_TEXT"
+                  Value="Click Install to update the existing Kasumi installation in [INSTALLFOLDER] to v$(var.ProductVersion)." />
+    <CustomAction Id="SetUpgradeProgressTitle"
+                  Property="KASUMI_PROGRESS_TITLE"
+                  Value="Updating Kasumi to v$(var.ProductVersion)" />
+    <CustomAction Id="SetUpgradeExitTitle"
+                  Property="KASUMI_EXIT_TITLE"
+                  Value="Kasumi v$(var.ProductVersion) Update Complete" />
+
+    <InstallUISequence>
+      <Custom Action="SetFreshReadyText"
+              After="CostFinalize"
+              Condition="NOT WIX_UPGRADE_DETECTED" />
+      <Custom Action="SetUpgradeWelcomeTitle"
+              After="CostFinalize"
+              Condition="WIX_UPGRADE_DETECTED" />
+      <Custom Action="SetUpgradeWelcomeDescPrev"
+              After="CostFinalize"
+              Condition="WIX_UPGRADE_DETECTED AND PREVIOUS_VERSION" />
+      <Custom Action="SetUpgradeWelcomeDescNoPrev"
+              After="CostFinalize"
+              Condition="WIX_UPGRADE_DETECTED AND NOT PREVIOUS_VERSION" />
+      <Custom Action="SetUpgradeReadyTitle"
+              After="CostFinalize"
+              Condition="WIX_UPGRADE_DETECTED" />
+      <Custom Action="SetUpgradeReadyTextPrev"
+              After="CostFinalize"
+              Condition="WIX_UPGRADE_DETECTED AND PREVIOUS_VERSION" />
+      <Custom Action="SetUpgradeReadyTextNoPrev"
+              After="CostFinalize"
+              Condition="WIX_UPGRADE_DETECTED AND NOT PREVIOUS_VERSION" />
+      <Custom Action="SetUpgradeProgressTitle"
+              After="CostFinalize"
+              Condition="WIX_UPGRADE_DETECTED" />
+      <Custom Action="SetUpgradeExitTitle"
+              After="CostFinalize"
+              Condition="WIX_UPGRADE_DETECTED" />
+    </InstallUISequence>
+
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Kasumi">
         <Component Id="KasumiExecutable">
@@ -32,6 +111,11 @@
                          Name="InstallFolder"
                          Type="string"
                          Value="[INSTALLFOLDER]" />
+          <RegistryValue Root="HKLM"
+                         Key="Software\auanK\Kasumi"
+                         Name="InstalledVersion"
+                         Type="string"
+                         Value="$(var.ProductVersion)" />
           <Environment Id="KasumiSystemPath"
                        Name="PATH"
                        Value="[INSTALLFOLDER]"
@@ -59,5 +143,19 @@
 
     <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
     <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <UI>
+      <Publish Dialog="WelcomeDlg"
+               Control="Next"
+               Event="NewDialog"
+               Value="VerifyReadyDlg"
+               Condition="WIX_UPGRADE_DETECTED"
+               Order="10" />
+      <Publish Dialog="VerifyReadyDlg"
+               Control="Back"
+               Event="NewDialog"
+               Value="WelcomeDlg"
+               Condition="WIX_UPGRADE_DETECTED"
+               Order="10" />
+    </UI>
   </Package>
 </Wix>

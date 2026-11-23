@@ -255,10 +255,10 @@ void parse_rule_line(std::string line,
         return;
     }
     if (line.size() > max_ignore_pattern_size) {
-        result.parse_error = IgnoreParseError{
-            line_number,
-            "pattern exceeds the maximum size of " +
-                std::to_string(max_ignore_pattern_size)};
+        result.parse_error =
+            IgnoreParseError{line_number,
+                             "pattern exceeds the maximum size of " +
+                                 std::to_string(max_ignore_pattern_size)};
         return;
     }
     rule.pattern = std::move(line);

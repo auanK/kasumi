@@ -11,12 +11,13 @@ namespace kasumi::reconciliation {
 // Computes the plan without mutating state.
 ReconcileResult reconcile(const Input& input);
 
-// Projects out directories that only contain ignored entries unless kept in desired_tree.
-std::expected<Snapshot, Error> project_local_tree(
-    Snapshot local_tree,
-    const LocalPhysicalEvidence& physical_evidence,
-    const Snapshot& desired_tree,
-    ErrorCode error_code = ErrorCode::InvalidLocalTree);
+// Projects out directories that only contain ignored entries unless kept in
+// desired_tree.
+std::expected<Snapshot, Error>
+project_local_tree(Snapshot local_tree,
+                   const LocalPhysicalEvidence& physical_evidence,
+                   const Snapshot& desired_tree,
+                   ErrorCode error_code = ErrorCode::InvalidLocalTree);
 
 // Reinserts pending references and completes their ancestors.
 std::expected<Snapshot, Error> build_publication_tree(

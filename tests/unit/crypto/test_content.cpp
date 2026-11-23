@@ -180,7 +180,8 @@ TEST(CryptoPhysicalHashTest, Sha256MatchesKnownVector) {
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
 }
 
-TEST(CryptoPhysicalHashTest, IncrementalSha256MatchesVectorsCopyMoveAndFileHash) {
+TEST(CryptoPhysicalHashTest,
+     IncrementalSha256MatchesVectorsCopyMoveAndFileHash) {
     {
         auto empty = kasumi::crypto::physical::sha256_init();
         EXPECT_EQ(
@@ -209,7 +210,8 @@ TEST(CryptoPhysicalHashTest, IncrementalSha256MatchesVectorsCopyMoveAndFileHash)
         }
         const auto file = kasumi::test::workspace_path(workspace, "large.bin");
         kasumi::test::write_binary(file, payload);
-        const auto expected = kasumi::crypto::physical::hash_file(file, "sha256");
+        const auto expected =
+            kasumi::crypto::physical::hash_file(file, "sha256");
         ASSERT_TRUE(expected.has_value());
 
         auto state = kasumi::crypto::physical::sha256_init();
@@ -239,7 +241,8 @@ TEST(CryptoPhysicalHashTest, IncrementalSha256MatchesVectorsCopyMoveAndFileHash)
 
         auto payload1 = payload;
         payload1.push_back(std::byte{'1'});
-        const auto file1 = kasumi::test::workspace_path(workspace, "large1.bin");
+        const auto file1 =
+            kasumi::test::workspace_path(workspace, "large1.bin");
         kasumi::test::write_binary(file1, payload1);
         const auto expected1 =
             kasumi::crypto::physical::hash_file(file1, "sha256");
@@ -247,7 +250,8 @@ TEST(CryptoPhysicalHashTest, IncrementalSha256MatchesVectorsCopyMoveAndFileHash)
 
         auto payload2 = payload;
         payload2.push_back(std::byte{'2'});
-        const auto file2 = kasumi::test::workspace_path(workspace, "large2.bin");
+        const auto file2 =
+            kasumi::test::workspace_path(workspace, "large2.bin");
         kasumi::test::write_binary(file2, payload2);
         const auto expected2 =
             kasumi::crypto::physical::hash_file(file2, "sha256");
@@ -395,9 +399,8 @@ TEST(CryptoFileTest, RejectsTamperingTruncationAppendingAndChunkReordering) {
     header_mac[kasumi::crypto::FILE_HEADER_SIZE - 1] ^= std::byte{1};
     corruptions.emplace_back("header-mac", std::move(header_mac));
     auto chunk = original;
-    chunk[kasumi::crypto::FILE_HEADER_SIZE +
-          kasumi::crypto::CHUNK_PREFIX_SIZE + kasumi::crypto::MAC_SIZE] ^=
-        std::byte{1};
+    chunk[kasumi::crypto::FILE_HEADER_SIZE + kasumi::crypto::CHUNK_PREFIX_SIZE +
+          kasumi::crypto::MAC_SIZE] ^= std::byte{1};
     corruptions.emplace_back("chunk", std::move(chunk));
     auto truncated = original;
     truncated.pop_back();
@@ -654,7 +657,8 @@ TEST(CryptoFileTest, RejectsLegacyV2CiphertextFixture) {
 
     EXPECT_FALSE(kasumi::crypto::decrypt_file(cipher, restored, key));
     EXPECT_FALSE(std::filesystem::exists(restored));
-    EXPECT_FALSE(kasumi::crypto::decrypt_bytes(legacy_ciphertext, key).has_value());
+    EXPECT_FALSE(
+        kasumi::crypto::decrypt_bytes(legacy_ciphertext, key).has_value());
     EXPECT_EQ(kasumi::test::read_binary(cipher), fixture);
 }
 
@@ -727,20 +731,16 @@ TEST(CryptoFileTest, PreventsPartialPlaintextPublicationOnMultiChunkFailure) {
               kasumi::crypto::FILE_HEADER_SIZE +
                   kasumi::crypto::CHUNK_PREFIX_SIZE);
     const std::size_t wire_len_0 =
-        static_cast<std::size_t>(
-            std::to_integer<std::uint8_t>(
-                cipher_bytes[kasumi::crypto::FILE_HEADER_SIZE + 1])) |
-        (static_cast<std::size_t>(
-             std::to_integer<std::uint8_t>(
-                 cipher_bytes[kasumi::crypto::FILE_HEADER_SIZE + 2]))
+        static_cast<std::size_t>(std::to_integer<std::uint8_t>(
+            cipher_bytes[kasumi::crypto::FILE_HEADER_SIZE + 1])) |
+        (static_cast<std::size_t>(std::to_integer<std::uint8_t>(
+             cipher_bytes[kasumi::crypto::FILE_HEADER_SIZE + 2]))
          << 8U) |
-        (static_cast<std::size_t>(
-             std::to_integer<std::uint8_t>(
-                 cipher_bytes[kasumi::crypto::FILE_HEADER_SIZE + 3]))
+        (static_cast<std::size_t>(std::to_integer<std::uint8_t>(
+             cipher_bytes[kasumi::crypto::FILE_HEADER_SIZE + 3]))
          << 16U) |
-        (static_cast<std::size_t>(
-             std::to_integer<std::uint8_t>(
-                 cipher_bytes[kasumi::crypto::FILE_HEADER_SIZE + 4]))
+        (static_cast<std::size_t>(std::to_integer<std::uint8_t>(
+             cipher_bytes[kasumi::crypto::FILE_HEADER_SIZE + 4]))
          << 24U);
     const std::size_t second_chunk_mac_offset =
         kasumi::crypto::FILE_HEADER_SIZE + kasumi::crypto::CHUNK_PREFIX_SIZE +
@@ -807,20 +807,16 @@ TEST(CryptoFileTest,
               kasumi::crypto::FILE_HEADER_SIZE +
                   kasumi::crypto::CHUNK_PREFIX_SIZE);
     const std::size_t wire_len_0 =
-        static_cast<std::size_t>(
-            std::to_integer<std::uint8_t>(
-                cipher_bytes[kasumi::crypto::FILE_HEADER_SIZE + 1])) |
-        (static_cast<std::size_t>(
-             std::to_integer<std::uint8_t>(
-                 cipher_bytes[kasumi::crypto::FILE_HEADER_SIZE + 2]))
+        static_cast<std::size_t>(std::to_integer<std::uint8_t>(
+            cipher_bytes[kasumi::crypto::FILE_HEADER_SIZE + 1])) |
+        (static_cast<std::size_t>(std::to_integer<std::uint8_t>(
+             cipher_bytes[kasumi::crypto::FILE_HEADER_SIZE + 2]))
          << 8U) |
-        (static_cast<std::size_t>(
-             std::to_integer<std::uint8_t>(
-                 cipher_bytes[kasumi::crypto::FILE_HEADER_SIZE + 3]))
+        (static_cast<std::size_t>(std::to_integer<std::uint8_t>(
+             cipher_bytes[kasumi::crypto::FILE_HEADER_SIZE + 3]))
          << 16U) |
-        (static_cast<std::size_t>(
-             std::to_integer<std::uint8_t>(
-                 cipher_bytes[kasumi::crypto::FILE_HEADER_SIZE + 4]))
+        (static_cast<std::size_t>(std::to_integer<std::uint8_t>(
+             cipher_bytes[kasumi::crypto::FILE_HEADER_SIZE + 4]))
          << 24U);
     const std::size_t second_chunk_mac_offset =
         kasumi::crypto::FILE_HEADER_SIZE + kasumi::crypto::CHUNK_PREFIX_SIZE +
@@ -1471,7 +1467,9 @@ TEST(CryptoFileTest, DecryptFileToSinkStreamsAndVerifiesHashAndSize) {
     EXPECT_FALSE(kasumi::crypto::decrypt_file_to_sink(
         cipher_path,
         key,
-        [](std::span<const std::uint8_t>) { return true; },
+        [](std::span<const std::uint8_t>) {
+            return true;
+        },
         kasumi::crypto::FilePurpose::Content,
         payload_size - 1U,
         &expected_hash));
@@ -1481,7 +1479,9 @@ TEST(CryptoFileTest, DecryptFileToSinkStreamsAndVerifiesHashAndSize) {
     EXPECT_FALSE(kasumi::crypto::decrypt_file_to_sink(
         cipher_path,
         key,
-        [](std::span<const std::uint8_t>) { return true; },
+        [](std::span<const std::uint8_t>) {
+            return true;
+        },
         kasumi::crypto::FilePurpose::Content,
         payload_size,
         &wrong_hash));
@@ -1489,7 +1489,9 @@ TEST(CryptoFileTest, DecryptFileToSinkStreamsAndVerifiesHashAndSize) {
     EXPECT_FALSE(kasumi::crypto::decrypt_file_to_sink(
         cipher_path,
         key,
-        [](std::span<const std::uint8_t>) { return true; },
+        [](std::span<const std::uint8_t>) {
+            return true;
+        },
         kasumi::crypto::FilePurpose::Pack,
         payload_size,
         &expected_hash));
@@ -1501,7 +1503,9 @@ TEST(CryptoFileTest, DecryptFileToSinkStreamsAndVerifiesHashAndSize) {
     EXPECT_FALSE(kasumi::crypto::decrypt_file_to_sink(
         cipher_path,
         key,
-        [](std::span<const std::uint8_t>) { return true; },
+        [](std::span<const std::uint8_t>) {
+            return true;
+        },
         kasumi::crypto::FilePurpose::Content,
         payload_size,
         &expected_hash));
@@ -1541,14 +1545,12 @@ TEST(CryptoPackTest, MicroPackRoundTripExtractsAndRejectsTamper) {
         pack_path, key, encrypted->pack_hash, &extract_dir);
     ASSERT_TRUE(verified.has_value()) << verified.error();
     EXPECT_EQ(verified->size(), 2U);
-    EXPECT_EQ(
-        kasumi::test::read_text(extract_dir /
-                                (kasumi::hash_hex(hash_a) + ".plain")),
-        content_a);
-    EXPECT_EQ(
-        kasumi::test::read_text(extract_dir /
-                                (kasumi::hash_hex(hash_b) + ".plain")),
-        content_b);
+    EXPECT_EQ(kasumi::test::read_text(extract_dir /
+                                      (kasumi::hash_hex(hash_a) + ".plain")),
+              content_a);
+    EXPECT_EQ(kasumi::test::read_text(extract_dir /
+                                      (kasumi::hash_hex(hash_b) + ".plain")),
+              content_b);
 
     auto wrong_hash = encrypted->pack_hash;
     wrong_hash[0] ^= std::byte{0x01};
@@ -1611,9 +1613,8 @@ TEST(CryptoPackTest, LoadVerifiedPackReturnsAuthenticatedMemberSlices) {
     ASSERT_TRUE(slice_b.has_value());
     EXPECT_EQ(to_string(*slice_b), content_b);
 
-    EXPECT_FALSE(
-        verified->member_bytes(kasumi::hasher::hash_string("missing"))
-            .has_value());
+    EXPECT_FALSE(verified->member_bytes(kasumi::hasher::hash_string("missing"))
+                     .has_value());
 
     auto wrong_hash = encrypted->pack_hash;
     wrong_hash[0] ^= std::byte{0x01};
@@ -1676,9 +1677,12 @@ TEST(CryptoPackTest, FastCdcReusesMajorityOfChunksAfterSmallMidFileEdit) {
     const auto slice_dec = kasumi::test::workspace_path(workspace, "slice.dec");
     const auto& first_chunk = cdc1->chunks.front();
     const auto slice_res =
-        kasumi::crypto::pack::encrypt_file_slice_with_hashes(
-            file_v1, first_chunk.offset, first_chunk.size, first_chunk.hash,
-            slice_enc, key);
+        kasumi::crypto::pack::encrypt_file_slice_with_hashes(file_v1,
+                                                             first_chunk.offset,
+                                                             first_chunk.size,
+                                                             first_chunk.hash,
+                                                             slice_enc,
+                                                             key);
     ASSERT_TRUE(slice_res.has_value());
     ASSERT_TRUE(kasumi::crypto::decrypt_file(slice_enc, slice_dec, key));
     const auto plain_slice_hash = kasumi::crypto::content::hash_file(slice_dec);
@@ -1703,7 +1707,8 @@ TEST(CryptoPackTest, ZstdCompressesRepetitiveAndBypassesIncompressibleStreams) {
         EXPECT_EQ(kasumi::test::read_binary(dec), zeros);
     }
 
-    // 2. High-entropy incompressible header (2 MiB) followed by 18 MiB of zeros:
+    // 2. High-entropy incompressible header (2 MiB) followed by 18 MiB of
+    // zeros:
     //    bypass triggers after 2 incompressible chunks, then the periodic
     //    chunk_index % 16 probe catches the compressible trailing region.
     {
@@ -1771,13 +1776,12 @@ TEST(CryptoPackTest, AdaptiveFastCdcSelectsTiersAndStreamsLargeSlices) {
     const auto& first_chunk = cdc->chunks.front();
     const auto slice_enc = kasumi::test::workspace_path(workspace, "slice.enc");
     const auto slice_dec = kasumi::test::workspace_path(workspace, "slice.dec");
-    const auto encrypted = encrypt_file_slice_with_hashes(
-        file_v1,
-        first_chunk.offset,
-        first_chunk.size,
-        first_chunk.hash,
-        slice_enc,
-        key);
+    const auto encrypted = encrypt_file_slice_with_hashes(file_v1,
+                                                          first_chunk.offset,
+                                                          first_chunk.size,
+                                                          first_chunk.hash,
+                                                          slice_enc,
+                                                          key);
     ASSERT_TRUE(encrypted.has_value());
     ASSERT_TRUE(kasumi::crypto::decrypt_file(slice_enc, slice_dec, key));
     EXPECT_EQ(kasumi::crypto::content::hash_file(slice_dec), first_chunk.hash);

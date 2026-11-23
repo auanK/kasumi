@@ -315,9 +315,9 @@ std::expected<void, Error> observe_content_availability(
             probed = true;
         } else if (repair_missing &&
                    listed.error().code != transport::ErrorCode::Unsupported) {
-            return std::unexpected(detail::make_error(
-                ErrorCode::ObservationFailure,
-                transport::describe(listed.error())));
+            return std::unexpected(
+                detail::make_error(ErrorCode::ObservationFailure,
+                                   transport::describe(listed.error())));
         }
     }
     if (!probed && storage.storage.control_read_batch != nullptr) {
@@ -365,9 +365,8 @@ std::expected<void, Error> observe_content_availability(
     std::unordered_map<std::string_view, bool> physical_present;
     physical_present.reserve(requested_physical.size());
     for (std::size_t i = 0; i < requested_physical.size(); ++i) {
-        physical_present.emplace(
-            requested_physical[i],
-            presences[i] == transport::Presence::Present);
+        physical_present.emplace(requested_physical[i],
+                                 presences[i] == transport::Presence::Present);
     }
 
     const bool inventory_available = input.audit_storage_objects;

@@ -11,8 +11,7 @@
 
 namespace {
 
-template <typename TimePoint>
-constexpr auto file_clock_to_sys(TimePoint tp) {
+template <typename TimePoint> constexpr auto file_clock_to_sys(TimePoint tp) {
 #if defined(_LIBCPP_VERSION)
     return std::chrono::file_clock::to_sys(tp);
 #else
@@ -20,8 +19,7 @@ constexpr auto file_clock_to_sys(TimePoint tp) {
 #endif
 }
 
-template <typename TimePoint>
-constexpr auto file_clock_from_sys(TimePoint tp) {
+template <typename TimePoint> constexpr auto file_clock_from_sys(TimePoint tp) {
 #if defined(_LIBCPP_VERSION)
     return std::chrono::file_clock::from_sys(tp);
 #else
@@ -41,13 +39,11 @@ std::filesystem::file_time_type subsecond_timestamp() {
     using filetime_tick =
         std::chrono::duration<long long, std::ratio<1, 10000000>>;
     const auto base = std::chrono::time_point_cast<filetime_tick>(
-        file_clock_to_sys(
-            std::filesystem::file_time_type::clock::now()));
+        file_clock_to_sys(std::filesystem::file_time_type::clock::now()));
     const auto value =
         base.time_since_epoch() + std::chrono::duration_cast<filetime_tick>(
-                                       std::chrono::nanoseconds{123456700});
-    return file_clock_from_sys(
-        std::chrono::sys_time<filetime_tick>{value});
+                                      std::chrono::nanoseconds{123456700});
+    return file_clock_from_sys(std::chrono::sys_time<filetime_tick>{value});
 }
 
 void expect_written(const std::filesystem::path& path,
@@ -169,13 +165,11 @@ TEST(PlatformMetadataTest, PreservesUnspecifiedNegativeAndChecksNativeRange) {
     ASSERT_TRUE(negative.has_value());
     EXPECT_EQ(kasumi::platform::metadata::unix_nanoseconds(*negative),
               std::chrono::duration_cast<std::chrono::nanoseconds>(
-                  std::chrono::floor<
-                      std::filesystem::file_time_type::duration>(
+                  std::chrono::floor<std::filesystem::file_time_type::duration>(
                       std::chrono::nanoseconds{-123456789}))
                   .count());
     EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(
-        -123456789,
-        *kasumi::platform::metadata::unix_nanoseconds(*negative)));
+        -123456789, *kasumi::platform::metadata::unix_nanoseconds(*negative)));
     for (const auto native :
          {std::filesystem::file_time_type{
               std::filesystem::file_time_type::duration::min()},
@@ -200,8 +194,10 @@ TEST(PlatformMetadataTest, FilesystemEquivalentSafeAcrossFullInt64Domain) {
     constexpr auto max_i64 = std::numeric_limits<std::int64_t>::max();
 
     // Reflexivity
-    EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(min_i64, min_i64));
-    EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(max_i64, max_i64));
+    EXPECT_TRUE(
+        kasumi::platform::metadata::filesystem_equivalent(min_i64, min_i64));
+    EXPECT_TRUE(
+        kasumi::platform::metadata::filesystem_equivalent(max_i64, max_i64));
     EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(0, 0));
     EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(-1, -1));
     EXPECT_TRUE(kasumi::platform::metadata::filesystem_equivalent(-100, -100));
@@ -225,7 +221,8 @@ TEST(PlatformMetadataTest, FilesystemEquivalentSafeAcrossFullInt64Domain) {
     }
 
     // Extremes
-    EXPECT_FALSE(kasumi::platform::metadata::filesystem_equivalent(min_i64, max_i64));
+    EXPECT_FALSE(
+        kasumi::platform::metadata::filesystem_equivalent(min_i64, max_i64));
     EXPECT_FALSE(kasumi::platform::metadata::filesystem_equivalent(min_i64, 0));
     EXPECT_FALSE(kasumi::platform::metadata::filesystem_equivalent(max_i64, 0));
 
@@ -249,9 +246,11 @@ TEST(PlatformMetadataTest, WindowsFiletimeTicksBoundariesAndOverflow) {
 
     // 1. Unix epoch (1970-01-01 00:00:00 UTC)
     const auto unix_epoch_ft =
-        kasumi::platform::metadata::detail::from_windows_ticks(unix_epoch_ticks);
+        kasumi::platform::metadata::detail::from_windows_ticks(
+            unix_epoch_ticks);
     ASSERT_TRUE(unix_epoch_ft.has_value()) << unix_epoch_ft.error();
-    const auto epoch_ns = kasumi::platform::metadata::unix_nanoseconds(*unix_epoch_ft);
+    const auto epoch_ns =
+        kasumi::platform::metadata::unix_nanoseconds(*unix_epoch_ft);
     ASSERT_TRUE(epoch_ns.has_value());
     EXPECT_EQ(*epoch_ns, 0);
     const auto roundtrip_epoch_ticks =
@@ -262,7 +261,8 @@ TEST(PlatformMetadataTest, WindowsFiletimeTicksBoundariesAndOverflow) {
     // 2. Timestamps before Unix epoch (e.g. 1969-12-31 23:59:59 UTC, 1s before)
     const auto before_epoch_ticks = unix_epoch_ticks - 10000000ULL;
     const auto before_epoch_ft =
-        kasumi::platform::metadata::detail::from_windows_ticks(before_epoch_ticks);
+        kasumi::platform::metadata::detail::from_windows_ticks(
+            before_epoch_ticks);
     ASSERT_TRUE(before_epoch_ft.has_value()) << before_epoch_ft.error();
     const auto before_epoch_ns =
         kasumi::platform::metadata::unix_nanoseconds(*before_epoch_ft);
@@ -296,9 +296,11 @@ TEST(PlatformMetadataTest, WindowsFiletimeTicksBoundariesAndOverflow) {
     EXPECT_FALSE(high_bit_ft.has_value());
 
     // 6. Zero ticks (Jan 1, 1601 - outside representable nanoseconds)
-    const auto zero_ft = kasumi::platform::metadata::detail::from_windows_ticks(0);
+    const auto zero_ft =
+        kasumi::platform::metadata::detail::from_windows_ticks(0);
 #if !defined(_MSC_VER)
-    // In libstdc++, file_time_type has 1ns resolution; 1601 exceeds int64 nanoseconds
+    // In libstdc++, file_time_type has 1ns resolution; 1601 exceeds int64
+    // nanoseconds
     EXPECT_FALSE(zero_ft.has_value());
 #endif
 }
@@ -329,8 +331,8 @@ TEST(PlatformMetadataTest, RejectsTimestampBeforeWindowsFiletimeEpoch) {
         kasumi::test::make_temp_workspace("platform-metadata-range");
     const auto file = kasumi::test::workspace_path(workspace, "file.txt");
     kasumi::test::write_text(file, "content");
-    const auto before_epoch = file_clock_from_sys(
-        std::chrono::sys_time<std::chrono::seconds>{
+    const auto before_epoch =
+        file_clock_from_sys(std::chrono::sys_time<std::chrono::seconds>{
             std::chrono::seconds{-11644473601}});
     if (before_epoch.time_since_epoch() <
         std::chrono::duration_cast<std::chrono::seconds>(
@@ -356,10 +358,9 @@ TEST(PlatformMetadataTest, RejectsWindowsDirectoryJunction) {
     ASSERT_EQ(std::system(command.c_str()), 0);
     EXPECT_FALSE(
         kasumi::platform::metadata::last_write_time(junction).has_value());
-    EXPECT_FALSE(
-        kasumi::platform::metadata::set_last_write_time(
-            junction, timestamp(std::chrono::hours{1}))
-            .has_value());
+    EXPECT_FALSE(kasumi::platform::metadata::set_last_write_time(
+                     junction, timestamp(std::chrono::hours{1}))
+                     .has_value());
 }
 #endif
 

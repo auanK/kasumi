@@ -66,8 +66,8 @@ struct ReachabilityInventory {
 using ReachabilityResult = std::expected<ReachabilityInventory, Error>;
 
 // Optional progress callback reporting commit variant authentication progress.
-using ReachabilityProgressCallback =
-    std::function<void(std::size_t commits_processed, std::size_t commits_total)>;
+using ReachabilityProgressCallback = std::function<void(
+    std::size_t commits_processed, std::size_t commits_total)>;
 
 // Inventories markers, commits, and reachability without removing objects.
 ReachabilityResult

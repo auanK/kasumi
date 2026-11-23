@@ -380,8 +380,7 @@ TEST(ApplicationMaintenanceContract, NoOpSyncDoesNotRewriteStateOrRemote) {
     EXPECT_EQ((*state_after)->commit_id, (*state_before)->commit_id);
     EXPECT_EQ((*state_after)->ciphertext_id, (*state_before)->ciphertext_id);
     EXPECT_EQ((*state_after)->epoch_id, (*state_before)->epoch_id);
-    EXPECT_EQ((*state_after)->epoch_sequence,
-              (*state_before)->epoch_sequence);
+    EXPECT_EQ((*state_after)->epoch_sequence, (*state_before)->epoch_sequence);
     EXPECT_EQ((*state_after)->pending_materializations,
               (*state_before)->pending_materializations);
     EXPECT_EQ((*state_after)->storage_manifest,
@@ -392,8 +391,8 @@ TEST(ApplicationMaintenanceContract, NoOpSyncDoesNotRewriteStateOrRemote) {
     EXPECT_EQ(*listing_after, *listing_before);
     EXPECT_FALSE(
         std::filesystem::exists(paths->profile_dir / "transaction.bin.enc"));
-    const auto activity = kasumi::application::inspect_profile_activity(
-        environment, "demo");
+    const auto activity =
+        kasumi::application::inspect_profile_activity(environment, "demo");
     ASSERT_TRUE(activity.last_attempt.has_value());
     EXPECT_EQ(activity.last_attempt->status,
               kasumi::application::ProfileExecutionStatus::SucceededNoChanges);
@@ -834,7 +833,8 @@ int run_resolve_missing_cli(std::string profile = "demo",
         (!confirm && !dry_run) ? std::cin.rdbuf(input.rdbuf()) : nullptr;
     int exit_code = -1;
     const auto output = kasumi::test::capture_stdout([&] {
-        exit_code = kasumi::cli::run(static_cast<int>(argv.size()), argv.data());
+        exit_code =
+            kasumi::cli::run(static_cast<int>(argv.size()), argv.data());
     });
     if (previous != nullptr) {
         std::cin.rdbuf(previous);
@@ -1035,9 +1035,9 @@ TEST(ApplicationRecoveryContract,
     EXPECT_NE(dry_out.find("Paths eligible for logical deletion (1):"),
               std::string::npos);
     EXPECT_NE(dry_out.find("lost.txt"), std::string::npos);
-    EXPECT_NE(
-        dry_out.find("Resolve-missing dry-run completed: no deletions published."),
-        std::string::npos);
+    EXPECT_NE(dry_out.find(
+                  "Resolve-missing dry-run completed: no deletions published."),
+              std::string::npos);
     auto state = kasumi::state_storage::load_state(paths_b->database_path);
     ASSERT_TRUE(state.has_value() && *state);
     ASSERT_EQ((*state)->pending_materializations.size(), 1U);
@@ -1055,8 +1055,7 @@ TEST(ApplicationRecoveryContract,
 
     // EOF on confirmation exits 130 and preserves pending paths.
     std::string eof_out;
-    EXPECT_EQ(run_resolve_missing_cli("demo", false, false, "", &eof_out),
-              130);
+    EXPECT_EQ(run_resolve_missing_cli("demo", false, false, "", &eof_out), 130);
     state = kasumi::state_storage::load_state(paths_b->database_path);
     ASSERT_TRUE(state.has_value() && *state &&
                 (*state)->pending_materializations.size() == 1U);
@@ -1683,7 +1682,8 @@ TEST(ApplicationRecoveryContract,
     ASSERT_TRUE(act_b_noop.has_value() && act_b_noop->accepted_commit);
     EXPECT_EQ(*act_b_noop->accepted_commit, *act_b_dl->accepted_commit);
 
-    // Machine B runs resolve-missing -> publishes KCOM v4 ResolveMissing under B.
+    // Machine B runs resolve-missing -> publishes KCOM v4 ResolveMissing under
+    // B.
     const auto id_b =
         kasumi::runtime::resolve_machine_identity(f.env_b.app_data_dir, false);
     ASSERT_TRUE(id_b.has_value());
@@ -1704,10 +1704,9 @@ TEST(ApplicationRecoveryContract,
     const auto observed = kasumi::application::observation::history::observe(
         storage, *decoded_key, obs_dir, false);
     ASSERT_TRUE(observed.has_value());
-    const auto head_it =
-        std::ranges::find(observed->reachable_commits,
-                          act_b_rm->accepted_commit->commit_id,
-                          &kasumi::history::LoadedCommit::id);
+    const auto head_it = std::ranges::find(observed->reachable_commits,
+                                           act_b_rm->accepted_commit->commit_id,
+                                           &kasumi::history::LoadedCommit::id);
     ASSERT_NE(head_it, observed->reachable_commits.end());
     EXPECT_TRUE(
         kasumi::history::has_commit_authorship(head_it->commit.authorship));
@@ -1757,8 +1756,7 @@ TEST(ApplicationRecoveryContract,
         kasumi::test::workspace_path(unauthored_ws, "plain_content.enc");
     ASSERT_TRUE(
         kasumi::transport::get(*seed_storage_res, plain_cid, plain_tmp));
-    ASSERT_TRUE(
-        kasumi::transport::put(target_storage, plain_tmp, plain_cid));
+    ASSERT_TRUE(kasumi::transport::put(target_storage, plain_tmp, plain_cid));
 
     const auto unauthored_prepared =
         kasumi::application::sync::publication::prepare_commit(
@@ -1789,11 +1787,11 @@ TEST(ApplicationRecoveryContract,
     ASSERT_TRUE(
         kasumi::application::execute(request(Operation::Sync, target_env)));
     EXPECT_TRUE(std::filesystem::exists(target_local / "plain.txt"));
-    const auto target_paths = kasumi::runtime::resolve_profile_paths(
-        target_env.app_data_dir, "demo");
+    const auto target_paths =
+        kasumi::runtime::resolve_profile_paths(target_env.app_data_dir, "demo");
     ASSERT_TRUE(target_paths.has_value());
-    const auto target_act = kasumi::state_storage::load_local_activity(
-        target_paths->database_path);
+    const auto target_act =
+        kasumi::state_storage::load_local_activity(target_paths->database_path);
     ASSERT_TRUE(target_act.has_value() && target_act->accepted_commit);
     EXPECT_EQ(target_act->accepted_commit->commit_id,
               unauthored_prepared->commit_id);
@@ -1808,13 +1806,14 @@ TEST(ApplicationRecoveryContract,
     const auto target_act_summary =
         kasumi::application::inspect_profile_activity(target_env, "demo");
     ASSERT_TRUE(target_act_summary.last_complete_sync.has_value());
-    EXPECT_EQ(target_act_summary.last_complete_sync->status,
-              kasumi::application::ProfileExecutionStatus::
-                  SucceededDownloadedOnly);
+    EXPECT_EQ(
+        target_act_summary.last_complete_sync->status,
+        kasumi::application::ProfileExecutionStatus::SucceededDownloadedOnly);
 }
 
-TEST(ApplicationMaintenanceContract,
-     MaintenancePublishesRemoteActivityGcRetentionWorksAndInvalidActivityFailsClosed) {
+TEST(
+    ApplicationMaintenanceContract,
+    MaintenancePublishesRemoteActivityGcRetentionWorksAndInvalidActivityFailsClosed) {
     auto [workspace, environment, profile, remote, credentials] =
         make_maintenance_env("activity-maintenance-gc-retention", '8');
     ASSERT_TRUE(std::filesystem::create_directories(profile.local_dir));
@@ -1905,7 +1904,8 @@ TEST(ApplicationMaintenanceContract,
     // modifying anything.
     const auto summary = kasumi::application::inspect(
         {kasumi::application::InspectionRequest{
-             .operation = kasumi::application::InspectionOperation::RemoteSummary,
+             .operation =
+                 kasumi::application::InspectionOperation::RemoteSummary,
              .profile_name = "demo"},
          credentials,
          environment});

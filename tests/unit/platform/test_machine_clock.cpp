@@ -26,13 +26,15 @@ TEST(PlatformClockTest, FormatsUtcTimestampsAndInvalidValues) {
 TEST(PlatformClockTest, LocalTimestampIncludesExplicitOffset) {
     const auto full = clock_util::format_local_timestamp(1700000000, true);
     EXPECT_TRUE(std::regex_match(
-        full, std::regex(R"(^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2}$)")))
+        full,
+        std::regex(R"(^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2}$)")))
         << full;
 
     const auto short_fmt =
         clock_util::format_local_timestamp(1700000000, false);
     EXPECT_TRUE(std::regex_match(
-        short_fmt, std::regex(R"(^\d{4}-\d{2}-\d{2} \d{2}:\d{2} [+-]\d{2}:\d{2}$)")))
+        short_fmt,
+        std::regex(R"(^\d{4}-\d{2}-\d{2} \d{2}:\d{2} [+-]\d{2}:\d{2}$)")))
         << short_fmt;
 }
 

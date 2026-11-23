@@ -225,17 +225,17 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
             history::CommitOriginOperation::ResolveMissing,
             *context.machine_identity);
     }
-    auto synchronized = sync::coordinator::execute(
-        context.runtime,
-        context.storage,
-        context.key,
-        stable->input,
-        stable->result,
-        &session,
-        stable->staged ? &*stable->staged : nullptr,
-        false,
-        std::move(authorship),
-        &context.accepted_commit_id);
+    auto synchronized =
+        sync::coordinator::execute(context.runtime,
+                                   context.storage,
+                                   context.key,
+                                   stable->input,
+                                   stable->result,
+                                   &session,
+                                   stable->staged ? &*stable->staged : nullptr,
+                                   false,
+                                   std::move(authorship),
+                                   &context.accepted_commit_id);
 
     if (history_storage::maintenance_protocol::registration_active(writer)) {
         auto released =

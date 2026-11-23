@@ -3,11 +3,13 @@
 #include "platform/random.hpp"
 
 #if defined(_WIN32)
+// clang-format off
 #include <winsock2.h>
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+// clang-format on
 #else
 #include <arpa/inet.h>
 #include <cerrno>
@@ -76,9 +78,11 @@ bool excluded_environment_name(std::string_view name,
         environment_name_equal(name, "RCLONE_CONFIG_PASS") ||
         environment_name_equal(name, "RCLONE_PASSWORD_COMMAND");
     return environment_name_starts_with(name, "KASUMI_") ||
-           std::ranges::any_of(controlled, [&](const auto& entry) {
-               return environment_name_equal(name, entry.first);
-           }) ||
+           std::ranges::any_of(controlled,
+                               [&](const auto& entry) {
+                                   return environment_name_equal(name,
+                                                                 entry.first);
+                               }) ||
            (environment_name_starts_with(name, "RCLONE_") &&
             !allowed_ambient_rclone);
 }
@@ -370,14 +374,16 @@ void attach_kill_on_close_job(State& state, int child_pid) noexcept {
         return;
     }
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    limits.BasicLimitInformation.LimitFlags =
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     if (!SetInformationJobObject(
             job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
         CloseHandle(job);
         return;
     }
-    HANDLE process = OpenProcess(
-        PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, static_cast<DWORD>(child_pid));
+    HANDLE process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE,
+                                 FALSE,
+                                 static_cast<DWORD>(child_pid));
     if (process == nullptr) {
         CloseHandle(job);
         return;
@@ -800,14 +806,12 @@ namespace kasumi::transport {
 std::optional<RcloneVersion>
 parse_rclone_version(std::string_view text) noexcept {
     const auto trim_ws = [](std::string_view sv) noexcept {
-        while (!sv.empty() &&
-               (sv.front() == ' ' || sv.front() == '\t' ||
-                sv.front() == '\r' || sv.front() == '\n')) {
+        while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t' ||
+                               sv.front() == '\r' || sv.front() == '\n')) {
             sv.remove_prefix(1);
         }
-        while (!sv.empty() &&
-               (sv.back() == ' ' || sv.back() == '\t' ||
-                sv.back() == '\r' || sv.back() == '\n')) {
+        while (!sv.empty() && (sv.back() == ' ' || sv.back() == '\t' ||
+                               sv.back() == '\r' || sv.back() == '\n')) {
             sv.remove_suffix(1);
         }
         return sv;
@@ -876,8 +880,8 @@ bool meets_minimum_rclone_version(const RcloneVersion& version) noexcept {
 
 RcloneProbeResult probe_rclone_installation(
     const std::filesystem::path& forbidden_executable_root) {
-    auto resolved = rclone_detail::resolve_rclone_executable(
-        detail::RcloneConfiguration{
+    auto resolved =
+        rclone_detail::resolve_rclone_executable(detail::RcloneConfiguration{
             .forbidden_executable_root = forbidden_executable_root});
     if (!resolved) {
         return RcloneProbeResult{
@@ -903,8 +907,8 @@ RcloneProbeResult probe_rclone_installation(
     options.redirect.in.type = reproc::redirect::discard;
     options.redirect.out.type = reproc::redirect::pipe;
     options.redirect.err.type = reproc::redirect::discard;
-    const std::vector<std::string> args{
-        platform::path::to_utf8(*resolved), "version"};
+    const std::vector<std::string> args{platform::path::to_utf8(*resolved),
+                                        "version"};
     if (const auto err = proc.start(args, options)) {
         result.detail = "could not execute rclone version: " + err.message();
         return result;
@@ -917,8 +921,7 @@ RcloneProbeResult probe_rclone_installation(
     while (std::chrono::steady_clock::now() < deadline &&
            output.size() < 4096U) {
         auto [events, poll_err] = proc.poll(
-            reproc::event::out | reproc::event::exit,
-            reproc::milliseconds(50));
+            reproc::event::out | reproc::event::exit, reproc::milliseconds(50));
         if (poll_err) {
             break;
         }
@@ -926,9 +929,9 @@ RcloneProbeResult probe_rclone_installation(
             auto [count, read_err] =
                 proc.read(reproc::stream::out, buffer, sizeof(buffer));
             if (count > 0) {
-                output.append(reinterpret_cast<const char*>(buffer),
-                              std::min<std::size_t>(
-                                  count, 4096U - output.size()));
+                output.append(
+                    reinterpret_cast<const char*>(buffer),
+                    std::min<std::size_t>(count, 4096U - output.size()));
             }
             if (read_err) {
                 break;
@@ -945,8 +948,8 @@ RcloneProbeResult probe_rclone_installation(
         {reproc::stop::kill, reproc::milliseconds(500)},
     });
     if (wait_err || status != 0) {
-        result.detail = "rclone version exited with status " +
-                        std::to_string(status);
+        result.detail =
+            "rclone version exited with status " + std::to_string(status);
         return result;
     }
 

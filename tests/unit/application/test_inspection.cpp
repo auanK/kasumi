@@ -2181,9 +2181,22 @@ TEST(ApplicationInspectionTest,
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(test_key());
 
-    const std::array<std::uint8_t, 16> machine_id{
-        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-        0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00};
+    const std::array<std::uint8_t, 16> machine_id{0x11,
+                                                  0x22,
+                                                  0x33,
+                                                  0x44,
+                                                  0x55,
+                                                  0x66,
+                                                  0x77,
+                                                  0x88,
+                                                  0x99,
+                                                  0xaa,
+                                                  0xbb,
+                                                  0xcc,
+                                                  0xdd,
+                                                  0xee,
+                                                  0xff,
+                                                  0x00};
     auto authored = make_commit(0, {}, "file.txt", "contents");
     ASSERT_TRUE(authored.has_value());
     authored->authorship = kasumi::history::CommitAuthorship{
@@ -2196,12 +2209,10 @@ TEST(ApplicationInspectionTest,
     // Publish an operational activity record (Fsck Succeeded).
     const kasumi::application::history_storage::activity::ActivityRecord act{
         .event_id = "0123456789abcdef0123456789abcdef",
-        .operation =
-            kasumi::application::history_storage::activity::ActivityOperation::
-                Fsck,
-        .outcome =
-            kasumi::application::history_storage::activity::ActivityOutcome::
-                Succeeded,
+        .operation = kasumi::application::history_storage::activity::
+            ActivityOperation::Fsck,
+        .outcome = kasumi::application::history_storage::activity::
+            ActivityOutcome::Succeeded,
         .machine_id = machine_id,
         .machine_name = "BuilderPC",
         .started_at = 1700000100,
@@ -2243,10 +2254,10 @@ TEST(ApplicationInspectionTest,
     const auto& objects_rep =
         std::get<kasumi::application::RemoteObjectsReport>(objects->payload);
     EXPECT_EQ(objects_rep.unknown_count, 0U);
-    const auto act_obj = std::ranges::find(
-        objects_rep.objects,
-        *act_id,
-        &kasumi::application::RemoteObjectInfo::identifier);
+    const auto act_obj =
+        std::ranges::find(objects_rep.objects,
+                          *act_id,
+                          &kasumi::application::RemoteObjectInfo::identifier);
     ASSERT_NE(act_obj, objects_rep.objects.end());
     EXPECT_EQ(act_obj->category,
               kasumi::application::RemoteObjectCategory::Activity);

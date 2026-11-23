@@ -1,0 +1,3 @@
+packaging/linux/** text eol=lf
+packaging/arch/** text eol=lf
+*.sh text eol=lf

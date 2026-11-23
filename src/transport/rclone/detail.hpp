@@ -98,7 +98,8 @@ post_rc_read_only(State& state,
 // Decodes an operations/list response.
 ListingResult parse_list_response(std::string_view response_body);
 // Decodes an operations/list response with timestamps and byte sizes.
-MetadataListingResult parse_list_metadata_response(std::string_view response_body);
+MetadataListingResult
+parse_list_metadata_response(std::string_view response_body);
 
 // Decodes an operations/check response against the sent request.
 PhysicalHashBatchResult

@@ -139,30 +139,28 @@ TEST(ManualBarrierRemovalTest, RejectsMalformedOrNonCanonicalBarrierTokens) {
     auto workspace =
         kasumi::test::make_temp_workspace("barrier-removal-malformed");
 
-    const std::vector<std::string>
-        invalid_payloads =
-            {
-                // Invalid prefixes
-                "corrupt",
-                "kasumi-gc-v1:barrier",
-                "kasumi-gc-v1:barrier;",
-                "kasumi-gc-v1:writer:0123456789abcdef0123456789abcdef",
-                "kasumi-gc-v2:barrier:0123456789abcdef0123456789abcdef",
-                // Non-canonical uppercase hex
-                "kasumi-gc-v1:barrier:0123456789ABCDEF0123456789abcdef",
-                "kasumi-gc-v1:barrier:0123456789abcdef0123456789ABCDEF",
-                // Non-hex characters
-                "kasumi-gc-v1:barrier:0123456789abcdef0123456789abcdeg",
-                "kasumi-gc-v1:barrier:0123456789abcdef 123456789abcdef",
-                "kasumi-gc-v1:barrier:0123456789abcdef-0123456789abcde",
-                // Invalid lengths (must be strictly 32 canonical hex chars)
-                "kasumi-gc-v1:barrier:0123456789abcdef0123456789abcde",   // 31
-                "kasumi-gc-v1:barrier:0123456789abcdef0123456789abcdef0", // 33
-                "kasumi-gc-v1:barrier:",                                  // 0
-                "kasumi-gc-v1:barrier:"
-                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd"
-                "ef", // 64
-            };
+    const std::vector<std::string> invalid_payloads = {
+        // Invalid prefixes
+        "corrupt",
+        "kasumi-gc-v1:barrier",
+        "kasumi-gc-v1:barrier;",
+        "kasumi-gc-v1:writer:0123456789abcdef0123456789abcdef",
+        "kasumi-gc-v2:barrier:0123456789abcdef0123456789abcdef",
+        // Non-canonical uppercase hex
+        "kasumi-gc-v1:barrier:0123456789ABCDEF0123456789abcdef",
+        "kasumi-gc-v1:barrier:0123456789abcdef0123456789ABCDEF",
+        // Non-hex characters
+        "kasumi-gc-v1:barrier:0123456789abcdef0123456789abcdeg",
+        "kasumi-gc-v1:barrier:0123456789abcdef 123456789abcdef",
+        "kasumi-gc-v1:barrier:0123456789abcdef-0123456789abcde",
+        // Invalid lengths (must be strictly 32 canonical hex chars)
+        "kasumi-gc-v1:barrier:0123456789abcdef0123456789abcde",   // 31
+        "kasumi-gc-v1:barrier:0123456789abcdef0123456789abcdef0", // 33
+        "kasumi-gc-v1:barrier:",                                  // 0
+        "kasumi-gc-v1:barrier:"
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd"
+        "ef", // 64
+    };
 
     for (const auto& invalid_str : invalid_payloads) {
         state->objects[layout.barrier_identifier] =

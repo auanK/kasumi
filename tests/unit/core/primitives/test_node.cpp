@@ -646,7 +646,8 @@ TEST(PortableCaseKeyTest, EquivalenceAndDistinct) {
               kasumi::portable_case_key("Ä_Ω.txt"));
 
     // NFC normalization and full Unicode casefold per segment
-    EXPECT_EQ(kasumi::portable_case_key("cafe\xCC\x81/Stra\xC3\x9F" "e.txt"),
+    EXPECT_EQ(kasumi::portable_case_key("cafe\xCC\x81/Stra\xC3\x9F"
+                                        "e.txt"),
               kasumi::portable_case_key("CAF\xC3\x89/STRASSE.TXT"));
 }
 

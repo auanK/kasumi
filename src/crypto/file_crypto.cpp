@@ -58,11 +58,11 @@ make_header_ad_v3(FilePurpose purpose,
     return result;
 }
 
-std::array<std::uint8_t, chunk_ad_size_v3>
-make_chunk_ad_v3(std::span<const std::uint8_t, header_ad_size_v3> header,
-                 std::uint64_t chunk_index,
-                 std::uint64_t plain_size,
-                 std::span<const std::uint8_t, CHUNK_PREFIX_SIZE> prefix) noexcept {
+std::array<std::uint8_t, chunk_ad_size_v3> make_chunk_ad_v3(
+    std::span<const std::uint8_t, header_ad_size_v3> header,
+    std::uint64_t chunk_index,
+    std::uint64_t plain_size,
+    std::span<const std::uint8_t, CHUNK_PREFIX_SIZE> prefix) noexcept {
     std::array<std::uint8_t, chunk_ad_size_v3> result{};
     std::copy(header.begin(), header.end(), result.begin());
     auto* ptr = result.data() + header.size();
@@ -350,8 +350,8 @@ bool encrypt_v3_chunk(CryptoSession& session,
 
     derive_chunk_nonce(
         session.base_nonce.data(), chunk_index, session.chunk_nonce.data());
-    const auto chunk_ad = make_chunk_ad_v3(
-        header, chunk_index, plain_chunk.size(), prefix);
+    const auto chunk_ad =
+        make_chunk_ad_v3(header, chunk_index, plain_chunk.size(), prefix);
     if (session.buffer_b.size() < wire_len) {
         session.buffer_b.resize(wire_len);
     }
@@ -407,9 +407,9 @@ bool decode_v3_stream(CryptoSession& session,
     std::uint64_t chunk_index = 0;
     std::uint64_t total_decrypted = 0;
     while (total_decrypted < expected_size) {
-        const auto expected_plain_len = static_cast<std::size_t>(
-            std::min<std::uint64_t>(CHUNK_SIZE,
-                                    expected_size - total_decrypted));
+        const auto expected_plain_len =
+            static_cast<std::size_t>(std::min<std::uint64_t>(
+                CHUNK_SIZE, expected_size - total_decrypted));
         if (remaining_wire < CHUNK_PREFIX_SIZE + MAC_SIZE) {
             return false;
         }
@@ -444,8 +444,8 @@ bool decode_v3_stream(CryptoSession& session,
 
         derive_chunk_nonce(
             session.base_nonce.data(), chunk_index, session.chunk_nonce.data());
-        const auto chunk_ad = make_chunk_ad_v3(
-            header, chunk_index, expected_plain_len, prefix);
+        const auto chunk_ad =
+            make_chunk_ad_v3(header, chunk_index, expected_plain_len, prefix);
 
         if (flags == 1U) {
             if (session.buffer_comp.size() < wire_len) {
@@ -529,8 +529,8 @@ encrypt_bytes(std::span<const std::uint8_t> plaintext,
             if (!platform::random::fill_bytes(session.base_nonce)) {
                 return std::nullopt;
             }
-            const auto header =
-                make_header_ad_v3(purpose, session.base_nonce.data(), plaintext.size());
+            const auto header = make_header_ad_v3(
+                purpose, session.base_nonce.data(), plaintext.size());
             header_mac_op(session.header_mac.data(),
                           session.base_nonce.data(),
                           header,
@@ -548,8 +548,8 @@ encrypt_bytes(std::span<const std::uint8_t> plaintext,
             std::size_t offset = 0;
             std::uint64_t chunk_index = 0;
             while (offset < plaintext.size()) {
-                const auto chunk_size =
-                    std::min<std::size_t>(CHUNK_SIZE, plaintext.size() - offset);
+                const auto chunk_size = std::min<std::size_t>(
+                    CHUNK_SIZE, plaintext.size() - offset);
                 std::array<std::uint8_t, CHUNK_PREFIX_SIZE> prefix{};
                 std::uint32_t wire_len = 0;
                 if (!encrypt_v3_chunk(session,
@@ -564,10 +564,9 @@ encrypt_bytes(std::span<const std::uint8_t> plaintext,
                 output.insert(output.end(), prefix.begin(), prefix.end());
                 output.insert(
                     output.end(), session.mac.begin(), session.mac.end());
-                output.insert(
-                    output.end(),
-                    session.buffer_b.data(),
-                    session.buffer_b.data() + wire_len);
+                output.insert(output.end(),
+                              session.buffer_b.data(),
+                              session.buffer_b.data() + wire_len);
                 offset += chunk_size;
                 ++chunk_index;
             }
@@ -606,16 +605,18 @@ decrypt_bytes(std::span<const std::uint8_t> ciphertext,
                 plaintext.insert(plaintext.end(), src, src + count);
                 return true;
             };
-            const auto at_eof = [&]() { return cursor == ciphertext.size(); };
+            const auto at_eof = [&]() {
+                return cursor == ciphertext.size();
+            };
 
-            const bool ok = magic == format_magic_v3 &&
-                            decode_v3_stream(session,
-                                             key,
-                                             purpose,
-                                             ciphertext.size(),
-                                             read_exact,
-                                             write_exact,
-                                             at_eof);
+            const bool ok =
+                magic == format_magic_v3 && decode_v3_stream(session,
+                                                             key,
+                                                             purpose,
+                                                             ciphertext.size(),
+                                                             read_exact,
+                                                             write_exact,
+                                                             at_eof);
             if (!ok) {
                 if (!plaintext.empty()) {
                     crypto_wipe(plaintext.data(), plaintext.size());
@@ -737,14 +738,13 @@ encrypt_file_range(const std::filesystem::path& input_path,
 
                     std::array<std::uint8_t, CHUNK_PREFIX_SIZE> prefix{};
                     std::uint32_t wire_len = 0;
-                    if (!encrypt_v3_chunk(
-                            session,
-                            key,
-                            header,
-                            chunk_index,
-                            {session.buffer_a.data(), chunk_size},
-                            prefix,
-                            wire_len)) {
+                    if (!encrypt_v3_chunk(session,
+                                          key,
+                                          header,
+                                          chunk_index,
+                                          {session.buffer_a.data(), chunk_size},
+                                          prefix,
+                                          wire_len)) {
                         return fail_crypto(error_detail,
                                            "encrypting chunk failed");
                     }

@@ -1696,31 +1696,29 @@ TEST(CliPresenterTest, PresentsGarbageCollectProgressAnalysisOnlyWarning) {
 
 TEST(CliPresenterTest, GcDryRunPresentsBreakdownAndNoDeletions) {
     const ScopedLanguage lang{Language::English};
-    const auto with_candidates = present_out(
-        Response{.operation = Operation::GarbageCollect,
-                 .data = GarbageCollectCompleted{
-                     .candidate_objects = 5,
-                     .dry_run = true,
-                     .candidate_content_objects = 2,
-                     .candidate_commit_variants = 2,
-                     .candidate_activities = 1,
-                 }});
-    EXPECT_NE(
-        with_candidates.find(
-            "GC plan: 5 candidate(s) (2 content object(s), 2 commit "
-            "variant(s), 1 activity record(s))."),
-        std::string::npos);
-    EXPECT_NE(
-        with_candidates.find(
-            "Garbage collection dry-run completed: no objects removed."),
-        std::string::npos);
+    const auto with_candidates =
+        present_out(Response{.operation = Operation::GarbageCollect,
+                             .data = GarbageCollectCompleted{
+                                 .candidate_objects = 5,
+                                 .dry_run = true,
+                                 .candidate_content_objects = 2,
+                                 .candidate_commit_variants = 2,
+                                 .candidate_activities = 1,
+                             }});
+    EXPECT_NE(with_candidates.find(
+                  "GC plan: 5 candidate(s) (2 content object(s), 2 commit "
+                  "variant(s), 1 activity record(s))."),
+              std::string::npos);
+    EXPECT_NE(with_candidates.find(
+                  "Garbage collection dry-run completed: no objects removed."),
+              std::string::npos);
 
-    const auto empty = present_out(
-        Response{.operation = Operation::GarbageCollect,
-                 .data = GarbageCollectCompleted{
-                     .candidate_objects = 0,
-                     .dry_run = true,
-                 }});
+    const auto empty =
+        present_out(Response{.operation = Operation::GarbageCollect,
+                             .data = GarbageCollectCompleted{
+                                 .candidate_objects = 0,
+                                 .dry_run = true,
+                             }});
     EXPECT_NE(empty.find("[OK] No garbage collection candidates found."),
               std::string::npos);
     EXPECT_NE(
@@ -2061,69 +2059,71 @@ TEST(CliPresenterTest, ManualBarrierRemovalErrorPresentationWithDiagnostics) {
 TEST(CliPresenterTest, RepackPresentationCoversNoOpDryRunAndPublish) {
     {
         const ScopedLanguage lang_en{Language::English};
-        const auto noop_with_dirty = present_out(
-            Response{
-                .operation = Operation::Repack,
-                .data = RepackCompleted{
-                    .actionable = false,
-                    .existing_packs = 3,
-                    .healthy_packs_kept = 2,
-                    .dirty_packs_detected = 1,
-                    .loose_small_blobs_detected = 1,
-                }},
-            true);
+        const auto noop_with_dirty =
+            present_out(Response{.operation = Operation::Repack,
+                                 .data =
+                                     RepackCompleted{
+                                         .actionable = false,
+                                         .existing_packs = 3,
+                                         .healthy_packs_kept = 2,
+                                         .dirty_packs_detected = 1,
+                                         .loose_small_blobs_detected = 1,
+                                     }},
+                        true);
         EXPECT_NE(noop_with_dirty.find("Nothing to repack"), std::string::npos);
         EXPECT_NE(noop_with_dirty.find("--reclaim-dirty"), std::string::npos);
         EXPECT_NE(noop_with_dirty.find("Inventory: 3 existing pack(s)"),
                   std::string::npos);
 
-        const auto dry_run = present_out(
-            Response{
-                .operation = Operation::Repack,
-                .data = RepackCompleted{
-                    .dry_run = true,
-                    .actionable = true,
-                    .existing_packs = 1,
-                    .healthy_packs_kept = 0,
-                    .dirty_packs_detected = 0,
-                    .loose_small_blobs_detected = 2,
-                    .source_loose_blobs = 2,
-                    .source_clean_packs = 1,
-                    .source_dirty_packs = 0,
-                    .new_packs = 1,
-                    .repacked_blobs = 4,
-                    .repacked_plaintext_bytes = 2048,
-                }},
-            false);
-        EXPECT_NE(dry_run.find("Repack plan: 4 blob(s) (2 KB) -> 1 new Micro-Pack(s)."),
+        const auto dry_run =
+            present_out(Response{.operation = Operation::Repack,
+                                 .data =
+                                     RepackCompleted{
+                                         .dry_run = true,
+                                         .actionable = true,
+                                         .existing_packs = 1,
+                                         .healthy_packs_kept = 0,
+                                         .dirty_packs_detected = 0,
+                                         .loose_small_blobs_detected = 2,
+                                         .source_loose_blobs = 2,
+                                         .source_clean_packs = 1,
+                                         .source_dirty_packs = 0,
+                                         .new_packs = 1,
+                                         .repacked_blobs = 4,
+                                         .repacked_plaintext_bytes = 2048,
+                                     }},
+                        false);
+        EXPECT_NE(dry_run.find(
+                      "Repack plan: 4 blob(s) (2 KB) -> 1 new Micro-Pack(s)."),
                   std::string::npos);
-        EXPECT_NE(dry_run.find("Sources: 2 loose blob(s), 1 underfilled pack(s), 0 dirty pack(s)."),
+        EXPECT_NE(dry_run.find("Sources: 2 loose blob(s), 1 underfilled "
+                               "pack(s), 0 dirty pack(s)."),
                   std::string::npos);
         EXPECT_NE(dry_run.find("Repack dry-run completed"), std::string::npos);
         EXPECT_EQ(dry_run.find("Inventory:"), std::string::npos);
 
         const auto published = present_out(
-            Response{
-                .operation = Operation::Repack,
-                .data = RepackCompleted{
-                    .dry_run = false,
-                    .actionable = true,
-                    .published = true,
-                    .existing_packs = 2,
-                    .healthy_packs_kept = 1,
-                    .dirty_packs_detected = 1,
-                    .loose_small_blobs_detected = 3,
-                    .source_loose_blobs = 3,
-                    .source_clean_packs = 0,
-                    .source_dirty_packs = 1,
-                    .new_packs = 1,
-                    .repacked_blobs = 5,
-                    .repacked_plaintext_bytes = 4096,
-                    .published_commit_id = std::string(64, 'a'),
-                    .published_height = 7,
-                    .wire_upload_bytes = 5120,
-                    .physical_objects_uploaded = 3,
-                }},
+            Response{.operation = Operation::Repack,
+                     .data =
+                         RepackCompleted{
+                             .dry_run = false,
+                             .actionable = true,
+                             .published = true,
+                             .existing_packs = 2,
+                             .healthy_packs_kept = 1,
+                             .dirty_packs_detected = 1,
+                             .loose_small_blobs_detected = 3,
+                             .source_loose_blobs = 3,
+                             .source_clean_packs = 0,
+                             .source_dirty_packs = 1,
+                             .new_packs = 1,
+                             .repacked_blobs = 5,
+                             .repacked_plaintext_bytes = 4096,
+                             .published_commit_id = std::string(64, 'a'),
+                             .published_height = 7,
+                             .wire_upload_bytes = 5120,
+                             .physical_objects_uploaded = 3,
+                         }},
             true);
         EXPECT_NE(published.find("[OK] Repack completed."), std::string::npos);
         EXPECT_NE(published.find("Wire upload 5 KB (3 objects)"),
@@ -2132,15 +2132,13 @@ TEST(CliPresenterTest, RepackPresentationCoversNoOpDryRunAndPublish) {
         EXPECT_NE(published.find("(height 7)"), std::string::npos);
         EXPECT_NE(published.find("kasumi gc"), std::string::npos);
 
-        EXPECT_EQ(kasumi::cli::present(
-                      Response{.operation = Operation::Sync,
-                               .data = RepackCompleted{}}),
+        EXPECT_EQ(kasumi::cli::present(Response{.operation = Operation::Sync,
+                                                .data = RepackCompleted{}}),
                   1);
-        const auto failed = present_out(
-            Error{.operation = Operation::Repack,
-                  .code = ErrorCode::RepackFailure,
-                  .detail = "workspace dirty"},
-            1);
+        const auto failed = present_out(Error{.operation = Operation::Repack,
+                                              .code = ErrorCode::RepackFailure,
+                                              .detail = "workspace dirty"},
+                                        1);
         EXPECT_NE(failed.find("Repack failed: workspace dirty"),
                   std::string::npos);
         const auto cancelled = kasumi::test::capture_stdout([&] {
@@ -2153,32 +2151,32 @@ TEST(CliPresenterTest, RepackPresentationCoversNoOpDryRunAndPublish) {
 
     const ScopedLanguage lang_pt{Language::Portuguese};
     const auto pt_published = present_out(
-        Response{
-            .operation = Operation::Repack,
-            .data = RepackCompleted{
-                .dry_run = false,
-                .actionable = true,
-                .published = true,
-                .source_loose_blobs = 2,
-                .source_clean_packs = 1,
-                .new_packs = 1,
-                .repacked_blobs = 3,
-                .repacked_plaintext_bytes = 1024,
-                .published_commit_id = std::string(64, 'b'),
-                .published_height = 2,
-                .wire_upload_bytes = 2048,
-                .physical_objects_uploaded = 1,
-            }},
+        Response{.operation = Operation::Repack,
+                 .data =
+                     RepackCompleted{
+                         .dry_run = false,
+                         .actionable = true,
+                         .published = true,
+                         .source_loose_blobs = 2,
+                         .source_clean_packs = 1,
+                         .new_packs = 1,
+                         .repacked_blobs = 3,
+                         .repacked_plaintext_bytes = 1024,
+                         .published_commit_id = std::string(64, 'b'),
+                         .published_height = 2,
+                         .wire_upload_bytes = 2048,
+                         .physical_objects_uploaded = 1,
+                     }},
         true);
     EXPECT_NE(pt_published.find("[OK] Repack concluído."), std::string::npos);
-    EXPECT_NE(pt_published.find("Envio real 2 KB (1 objeto)"), std::string::npos);
+    EXPECT_NE(pt_published.find("Envio real 2 KB (1 objeto)"),
+              std::string::npos);
     EXPECT_NE(pt_published.find("Commit publicado: "), std::string::npos);
     EXPECT_NE(pt_published.find("(altura 2)"), std::string::npos);
-    const auto pt_failed = present_out(
-        Error{.operation = Operation::Repack,
-              .code = ErrorCode::RepackFailure,
-              .detail = "conflito"},
-        1);
+    const auto pt_failed = present_out(Error{.operation = Operation::Repack,
+                                             .code = ErrorCode::RepackFailure,
+                                             .detail = "conflito"},
+                                       1);
     EXPECT_NE(pt_failed.find("Falha no repack: conflito"), std::string::npos);
 }
 } // namespace
@@ -2350,47 +2348,48 @@ TEST(CliPresenterTest,
             .observed_height = 4,
             .reachable_commit_count = 4,
             .logical_head_count = 1,
-            .recent_activities = {
-                RemoteActivityInfo{
-                    .event_id = "00000000000000000000000000000001",
-                    .operation = RemoteActivityOperation::Fsck,
-                    .outcome = RemoteActivityOutcome::IssuesFound,
-                    .machine_id_hex = id_a,
-                    .machine_name = "host-a",
-                    .started_at = 1700000000,
-                    .finished_at = 1700000010,
-                    .duration_ms = 2500,
-                    .metric_primary = 5,
-                    .metric_bytes = 2048,
-                    .stage = "audit",
-                    .detail = "missing blob",
+            .recent_activities =
+                {
+                    RemoteActivityInfo{
+                        .event_id = "00000000000000000000000000000001",
+                        .operation = RemoteActivityOperation::Fsck,
+                        .outcome = RemoteActivityOutcome::IssuesFound,
+                        .machine_id_hex = id_a,
+                        .machine_name = "host-a",
+                        .started_at = 1700000000,
+                        .finished_at = 1700000010,
+                        .duration_ms = 2500,
+                        .metric_primary = 5,
+                        .metric_bytes = 2048,
+                        .stage = "audit",
+                        .detail = "missing blob",
+                    },
+                    RemoteActivityInfo{
+                        .event_id = "00000000000000000000000000000002",
+                        .operation = RemoteActivityOperation::Fsck,
+                        .outcome = RemoteActivityOutcome::Succeeded,
+                        .machine_id_hex = id_b,
+                        .machine_name = "host-b",
+                        .started_at = 1700000100,
+                        .finished_at = 1700000110,
+                        .duration_ms = 1200,
+                        .metric_primary = 8,
+                        .metric_bytes = 4096,
+                    },
+                    RemoteActivityInfo{
+                        .event_id = "00000000000000000000000000000003",
+                        .operation = RemoteActivityOperation::GarbageCollect,
+                        .outcome = RemoteActivityOutcome::Succeeded,
+                        .machine_id_hex = id_a,
+                        .machine_name = "host-a",
+                        .started_at = 1700000200,
+                        .finished_at = 1700000210,
+                        .duration_ms = 500,
+                        .metric_primary = 0,
+                        .metric_secondary = 3,
+                        .flags = remote_activity_flag_analysis_only,
+                    },
                 },
-                RemoteActivityInfo{
-                    .event_id = "00000000000000000000000000000002",
-                    .operation = RemoteActivityOperation::Fsck,
-                    .outcome = RemoteActivityOutcome::Succeeded,
-                    .machine_id_hex = id_b,
-                    .machine_name = "host-b",
-                    .started_at = 1700000100,
-                    .finished_at = 1700000110,
-                    .duration_ms = 1200,
-                    .metric_primary = 8,
-                    .metric_bytes = 4096,
-                },
-                RemoteActivityInfo{
-                    .event_id = "00000000000000000000000000000003",
-                    .operation = RemoteActivityOperation::GarbageCollect,
-                    .outcome = RemoteActivityOutcome::Succeeded,
-                    .machine_id_hex = id_a,
-                    .machine_name = "host-a",
-                    .started_at = 1700000200,
-                    .finished_at = 1700000210,
-                    .duration_ms = 500,
-                    .metric_primary = 0,
-                    .metric_secondary = 3,
-                    .flags = remote_activity_flag_analysis_only,
-                },
-            },
             .invalid_activity_count = 2,
         }};
 
@@ -2603,9 +2602,8 @@ TEST(CliPresenterTest, CompactSummariesStayLanguageIndependentAndDescriptive) {
     changed.download_bytes = 512;
     changed.removed = 1;
     changed.repaired = 1;
-    EXPECT_EQ(
-        kasumi::cli::format_compact_summary(changed),
-        "3 changes | ↑ 2 (2 KB) | ↓ 1 (512 bytes) | - 1 | 1 repaired");
+    EXPECT_EQ(kasumi::cli::format_compact_summary(changed),
+              "3 changes | ↑ 2 (2 KB) | ↓ 1 (512 bytes) | - 1 | 1 repaired");
 
     PlanReport plan;
     plan.items.push_back(PlanItem{});
@@ -2628,28 +2626,25 @@ TEST(CliPresenterTest, CompactSummariesStayLanguageIndependentAndDescriptive) {
     gc_dry.candidate_content_objects = 3;
     gc_dry.candidate_commit_variants = 1;
     gc_dry.candidate_activities = 1;
-    EXPECT_EQ(
-        kasumi::cli::format_compact_summary(
-            response(gc_dry, Operation::GarbageCollect)),
-        "5 candidates (3 content, 1 commits, 1 activities)");
+    EXPECT_EQ(kasumi::cli::format_compact_summary(
+                  response(gc_dry, Operation::GarbageCollect)),
+              "5 candidates (3 content, 1 commits, 1 activities)");
 
     RepackCompleted repack;
     repack.actionable = true;
     repack.repacked_blobs = 2;
     repack.repacked_plaintext_bytes = 3072;
     repack.new_packs = 1;
-    EXPECT_EQ(
-        kasumi::cli::format_compact_summary(
-            response(repack, Operation::Repack)),
-        "repacked 2 blobs (3 KB) into 1 pack");
+    EXPECT_EQ(kasumi::cli::format_compact_summary(
+                  response(repack, Operation::Repack)),
+              "repacked 2 blobs (3 KB) into 1 pack");
 
     ResolveMissingCompleted rm;
     rm.resolved_paths = {"a.txt"};
     rm.resolved_count = 1;
-    EXPECT_EQ(
-        kasumi::cli::format_compact_summary(
-            response(rm, Operation::ResolveMissing)),
-        "1 missing path resolved");
+    EXPECT_EQ(kasumi::cli::format_compact_summary(
+                  response(rm, Operation::ResolveMissing)),
+              "1 missing path resolved");
 
     DiagnosticsReport diag;
     diag.rclone.found = true;

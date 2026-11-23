@@ -83,9 +83,10 @@ audit_content_object(transport::Transport& storage,
                      const std::filesystem::path* retain_plaintext_at) {
     const auto encrypted =
         workspace / ("content-" + std::to_string(sequence) + ".enc");
-    const auto plaintext = retain_plaintext_at != nullptr
-                               ? *retain_plaintext_at
-                               : workspace / ("content-" + std::to_string(sequence) + ".plain");
+    const auto plaintext =
+        retain_plaintext_at != nullptr
+            ? *retain_plaintext_at
+            : workspace / ("content-" + std::to_string(sequence) + ".plain");
     for (const auto& path : {encrypted, plaintext}) {
         if (auto ok =
                 check_temp_file(path, true, "temporary file has invalid type");
@@ -164,10 +165,11 @@ audit_content_object(transport::Transport& storage,
             }
         }
     }
-    const auto cleaned = retain_plaintext_at != nullptr && !expect_pack &&
-                                 result.state == ContentObjectState::Present
-                             ? check_temp_file(encrypted, true, "invalid temporary download")
-                             : remove_temp_pair(encrypted, plaintext);
+    const auto cleaned =
+        retain_plaintext_at != nullptr && !expect_pack &&
+                result.state == ContentObjectState::Present
+            ? check_temp_file(encrypted, true, "invalid temporary download")
+            : remove_temp_pair(encrypted, plaintext);
     if (!cleaned) {
         return std::unexpected(cleaned.error());
     }
@@ -235,8 +237,10 @@ inventory_impl(transport::Transport& storage,
                 }
                 auto& refs = content.references;
                 if (include_references &&
-                    (refs.empty() || refs.back().commit_id != commit.commit_id ||
-                     refs.back().path != logical_path || refs.back().size != ref_size)) {
+                    (refs.empty() ||
+                     refs.back().commit_id != commit.commit_id ||
+                     refs.back().path != logical_path ||
+                     refs.back().size != ref_size)) {
                     refs.push_back(ContentReference{
                         .commit_id = commit.commit_id,
                         .path = std::string{logical_path},
@@ -342,11 +346,11 @@ inventory_impl(transport::Transport& storage,
         result.contents.reserve(references.size() + physical.size());
 
         std::size_t sequence = 0;
-        auto audit = [&](std::string_view id,
-                         std::optional<std::string_view> plaintext_hash,
-                         std::optional<std::uint64_t> expected_size,
-                         bool expect_pack)
-            -> std::expected<ContentObjectState, Error> {
+        auto audit =
+            [&](std::string_view id,
+                std::optional<std::string_view> plaintext_hash,
+                std::optional<std::uint64_t> expected_size,
+                bool expect_pack) -> std::expected<ContentObjectState, Error> {
             if (!audit_payloads) {
                 return ContentObjectState::Present;
             }
@@ -370,13 +374,13 @@ inventory_impl(transport::Transport& storage,
             refs.erase(std::ranges::unique(refs).begin(), refs.end());
             auto state = ContentObjectState::Missing;
             if (std::ranges::binary_search(physical, content.remote_id)) {
-                auto audited = audit(
-                    content.remote_id,
-                    content.plaintext_hash,
-                    content.is_pack
-                        ? std::nullopt
-                        : std::optional<std::uint64_t>{content.size},
-                    content.is_pack);
+                auto audited =
+                    audit(content.remote_id,
+                          content.plaintext_hash,
+                          content.is_pack
+                              ? std::nullopt
+                              : std::optional<std::uint64_t>{content.size},
+                          content.is_pack);
                 if (!audited) {
                     return std::unexpected(audited.error());
                 }

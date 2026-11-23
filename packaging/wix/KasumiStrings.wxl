@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization Culture="en-us" xmlns="http://wixtoolset.org/schemas/v4/wxl">
+  <String Id="WelcomeDlgTitle" Value="{\WixUI_Font_Bigger}[KASUMI_WELCOME_TITLE]" />
+  <String Id="WelcomeDlgDescription" Value="[KASUMI_WELCOME_DESC]" />
+  <String Id="VerifyReadyDlgInstallTitle" Value="{\WixUI_Font_Title}[KASUMI_READY_TITLE]" />
+  <String Id="VerifyReadyDlgInstallText" Value="[KASUMI_READY_TEXT]" />
+  <String Id="ProgressDlgTitleInstalling" Value="{\WixUI_Font_Title}[KASUMI_PROGRESS_TITLE]" />
+  <String Id="ExitDialogTitle" Value="{\WixUI_Font_Bigger}[KASUMI_EXIT_TITLE]" />
+</WixLocalization>

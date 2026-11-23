@@ -65,16 +65,16 @@ struct ContentAuditResult {
 
 // Downloads and verifies a remote object. A caller may retain verified loose
 // plaintext at a private workspace path for ordered file reconstruction.
-std::expected<ContentAuditResult, Error>
-audit_content_object(transport::Transport& storage,
-                     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                     std::string_view content_id,
-                     std::optional<std::string_view> expected_plaintext_hash,
-                     std::optional<std::uint64_t> expected_size,
-                     const std::filesystem::path& workspace,
-                     std::size_t sequence,
-                     bool expect_pack = false,
-                     const std::filesystem::path* retain_plaintext_at = nullptr);
+std::expected<ContentAuditResult, Error> audit_content_object(
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    std::string_view content_id,
+    std::optional<std::string_view> expected_plaintext_hash,
+    std::optional<std::uint64_t> expected_size,
+    const std::filesystem::path& workspace,
+    std::size_t sequence,
+    bool expect_pack = false,
+    const std::filesystem::path* retain_plaintext_at = nullptr);
 
 // Audits referenced and orphan objects without removing them.
 ContentReachabilityResult inventory_content_reachability(

@@ -98,8 +98,7 @@ inline constexpr std::size_t maximum_chunked_file_entries = 65536;
 inline constexpr std::size_t maximum_chunks_per_file = 65536;
 inline constexpr std::uint64_t maximum_packed_blob_size =
     16ULL * 1024ULL * 1024ULL;
-inline constexpr std::uint32_t maximum_chunk_slice_size =
-    32U * 1024U * 1024U;
+inline constexpr std::uint32_t maximum_chunk_slice_size = 32U * 1024U * 1024U;
 
 inline constexpr std::uint8_t commit_format_version = 4;
 inline constexpr std::size_t machine_id_byte_count = 16;
@@ -219,8 +218,9 @@ deserialize_storage_manifest(std::span<const std::uint8_t> bytes,
                              const Snapshot& tree);
 
 // Merges candidate manifests deterministically and filters to tree files.
-StorageManifest filter_and_merge_storage_manifests(
-    const Snapshot& tree, std::span<const StorageManifest> manifests);
+StorageManifest
+filter_and_merge_storage_manifests(const Snapshot& tree,
+                                   std::span<const StorageManifest> manifests);
 
 // Creates an initial empty bootstrap commit at height zero.
 CommitResult make_empty_bootstrap(std::int64_t created_at = 0);

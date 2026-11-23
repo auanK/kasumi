@@ -407,7 +407,7 @@ TEST(PrivateStorageTest, SyncsReadOnlyFileAndPreservesItsAttributes) {
     const auto original = GetFileAttributesW(path.c_str());
     ASSERT_NE(original, INVALID_FILE_ATTRIBUTES);
     const auto attributes =
-        (original & ~FILE_ATTRIBUTE_NORMAL) | FILE_ATTRIBUTE_READONLY;
+        (original & ~DWORD{FILE_ATTRIBUTE_NORMAL}) | FILE_ATTRIBUTE_READONLY;
     ASSERT_TRUE(SetFileAttributesW(path.c_str(), attributes));
 
     const auto synced = kasumi::platform::durability::sync_file(path);
@@ -1050,7 +1050,8 @@ TEST(PrivateStorageTest, SecurityInspectionFailurePropagatesError) {
 }
 #endif
 
-TEST(ProfileLockTest, IsProfileLockHeldProbesNonBlockingWithoutCreatingLockFile) {
+TEST(ProfileLockTest,
+     IsProfileLockHeldProbesNonBlockingWithoutCreatingLockFile) {
     auto workspace =
         kasumi::test::make_temp_workspace("profile-lock-probe-nonblocking");
     const auto lock_path =

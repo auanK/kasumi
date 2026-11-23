@@ -336,11 +336,11 @@ bool valid_table(sqlite3* database,
 }
 
 bool has_unexpected_schema_objects(sqlite3* database) {
-    auto query = prepare_stmt(
-        database,
-        "SELECT 1 FROM sqlite_schema WHERE type = 'view' "
-        "OR (type = 'table' AND upper(coalesce(sql, '')) LIKE 'CREATE VIRTUAL TABLE%') "
-        "LIMIT 1");
+    auto query = prepare_stmt(database,
+                              "SELECT 1 FROM sqlite_schema WHERE type = 'view' "
+                              "OR (type = 'table' AND upper(coalesce(sql, '')) "
+                              "LIKE 'CREATE VIRTUAL TABLE%') "
+                              "LIMIT 1");
     return step_stmt(query);
 }
 
@@ -991,7 +991,7 @@ bool valid_accepted_commit_meta(const AcceptedCommitMeta& meta) {
 }
 
 void write_accepted_commit_meta_in_txn(sqlite3* database,
-                                        const AcceptedCommitMeta& meta) {
+                                       const AcceptedCommitMeta& meta) {
     require(sqlite::execute(database, "DELETE FROM accepted_commit_meta"));
     auto insert = prepare_stmt(
         database,
@@ -1151,7 +1151,8 @@ bool valid_local_execution_status(std::uint8_t raw) noexcept {
 }
 
 bool valid_remote_publish_state(std::uint8_t raw) noexcept {
-    return raw >= static_cast<std::uint8_t>(RemotePublishState::NotApplicable) &&
+    return raw >=
+               static_cast<std::uint8_t>(RemotePublishState::NotApplicable) &&
            raw <= static_cast<std::uint8_t>(RemotePublishState::Pending);
 }
 
@@ -1159,8 +1160,10 @@ bool upsert_execution_record(const std::filesystem::path& database_path,
                              const LocalExecutionRecord& record,
                              bool prune_old) {
     if (record.execution_id.empty() ||
-        !valid_local_operation_kind(static_cast<std::uint8_t>(record.operation)) ||
-        !valid_local_execution_status(static_cast<std::uint8_t>(record.status)) ||
+        !valid_local_operation_kind(
+            static_cast<std::uint8_t>(record.operation)) ||
+        !valid_local_execution_status(
+            static_cast<std::uint8_t>(record.status)) ||
         !valid_remote_publish_state(
             static_cast<std::uint8_t>(record.remote_publish_state))) {
         return false;
@@ -1184,8 +1187,10 @@ bool upsert_execution_record(const std::filesystem::path& database_path,
             "?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(execution_id) DO UPDATE SET "
             "operation=excluded.operation, machine_id=excluded.machine_id, "
-            "machine_name=excluded.machine_name, started_at=excluded.started_at, "
-            "finished_at=excluded.finished_at, duration_ms=excluded.duration_ms, "
+            "machine_name=excluded.machine_name, "
+            "started_at=excluded.started_at, "
+            "finished_at=excluded.finished_at, "
+            "duration_ms=excluded.duration_ms, "
             "status=excluded.status, recovered=excluded.recovered, "
             "stage=excluded.stage, detail=excluded.detail, "
             "commit_id=excluded.commit_id, summary_a=excluded.summary_a, "
@@ -1282,9 +1287,8 @@ bool save_accepted_commit_meta(const std::filesystem::path& database_path,
     }
 }
 
-bool save_remote_activity_cache(
-    const std::filesystem::path& database_path,
-    std::span<const CachedRemoteActivity> entries) {
+bool save_remote_activity_cache(const std::filesystem::path& database_path,
+                                std::span<const CachedRemoteActivity> entries) {
     try {
         auto opened = detail::open_state_database_readwrite(database_path);
         if (!opened) {
@@ -1301,13 +1305,14 @@ bool save_remote_activity_cache(
                 sorted.push_back(&entry);
             }
         }
-        std::ranges::sort(sorted, [](const CachedRemoteActivity* left,
-                                     const CachedRemoteActivity* right) {
-            if (left->finished_at != right->finished_at) {
-                return left->finished_at > right->finished_at;
-            }
-            return left->event_id < right->event_id;
-        });
+        std::ranges::sort(sorted,
+                          [](const CachedRemoteActivity* left,
+                             const CachedRemoteActivity* right) {
+                              if (left->finished_at != right->finished_at) {
+                                  return left->finished_at > right->finished_at;
+                              }
+                              return left->event_id < right->event_id;
+                          });
         if (sorted.size() > max_cached_remote_activity) {
             sorted.resize(max_cached_remote_activity);
         }
@@ -1454,7 +1459,8 @@ load_local_activity(const std::filesystem::path& database_path) {
         {
             auto query = prepare_stmt(
                 opened->get(),
-                "SELECT event_id, operation, outcome, machine_id, machine_name, "
+                "SELECT event_id, operation, outcome, machine_id, "
+                "machine_name, "
                 "started_at, finished_at, duration_ms, metric_primary, "
                 "metric_secondary, metric_bytes, flags, stage, detail, "
                 "cached_at FROM remote_activity_cache "

@@ -84,15 +84,15 @@ std::vector<std::uint8_t> make_kpak_plaintext_seed() {
         payload_total += item.payload.size();
     }
 
-    std::vector<std::uint8_t> buffer(
-        header_size + items.size() * entry_size + payload_total);
+    std::vector<std::uint8_t> buffer(header_size + items.size() * entry_size +
+                                     payload_total);
     buffer[0] = 'K';
     buffer[1] = 'P';
     buffer[2] = 'A';
     buffer[3] = 'K';
     buffer[4] = 1U;
-    wire::encode_le<std::uint32_t>(
-        static_cast<std::uint32_t>(items.size()), buffer.data() + 5U);
+    wire::encode_le<std::uint32_t>(static_cast<std::uint32_t>(items.size()),
+                                   buffer.data() + 5U);
 
     std::uint32_t payload_offset = 0;
     const std::size_t data_base = header_size + items.size() * entry_size;
@@ -101,9 +101,8 @@ std::vector<std::uint8_t> make_kpak_plaintext_seed() {
         std::uint8_t* entry = buffer.data() + header_size + i * entry_size;
         std::memcpy(entry, items[i].hash.data(), kasumi::HASH_SIZE);
         wire::encode_le<std::uint32_t>(payload_offset,
-                                               entry + kasumi::HASH_SIZE);
-        wire::encode_le<std::uint32_t>(size,
-                                               entry + kasumi::HASH_SIZE + 4U);
+                                       entry + kasumi::HASH_SIZE);
+        wire::encode_le<std::uint32_t>(size, entry + kasumi::HASH_SIZE + 4U);
         std::memcpy(buffer.data() + data_base + payload_offset,
                     items[i].payload.data(),
                     size);
@@ -119,7 +118,8 @@ std::vector<std::uint8_t> make_kcom_manifest_seed() {
         {.hash = small_hash,
          .size = static_cast<std::uint32_t>(small_payload.size())},
     };
-    const auto pack_hash = kasumi::crypto::pack::compute_pack_hash(desc).value();
+    const auto pack_hash =
+        kasumi::crypto::pack::compute_pack_hash(desc).value();
 
     const auto large_hash = kasumi::hasher::hash_string("large-chunked-file");
     const auto c1_hash = kasumi::hasher::hash_string("chunk-1");
@@ -265,7 +265,8 @@ struct SeedCorpus {
 SeedCorpus build_corpus() {
     const auto key = test_master_key();
     const auto bootstrap = kasumi::history::make_empty_bootstrap().value();
-    const auto encoded_bootstrap = kasumi::history::serialize(bootstrap).value();
+    const auto encoded_bootstrap =
+        kasumi::history::serialize(bootstrap).value();
     auto encoded_manifest = make_kcom_manifest_seed();
 
     const auto marker = kasumi::application::history_storage::encode_marker(
@@ -308,8 +309,8 @@ SeedCorpus build_corpus() {
         .metric_primary = 3ULL,
         .metric_secondary = 1ULL,
         .metric_bytes = 4'096ULL,
-        .flags = kasumi::application::history_storage::activity::
-            flag_analysis_only,
+        .flags =
+            kasumi::application::history_storage::activity::flag_analysis_only,
         .stage = "analyzing",
         .detail = "ok",
     };
@@ -332,9 +333,10 @@ SeedCorpus build_corpus() {
     const std::string payload = "protocol-v3-seed-payload";
     const std::span<const std::uint8_t> payload_span{
         reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size()};
-    auto aead_content = kasumi::crypto::encrypt_bytes(
-                            payload_span, key, kasumi::crypto::FilePurpose::Content)
-                            .value();
+    auto aead_content =
+        kasumi::crypto::encrypt_bytes(
+            payload_span, key, kasumi::crypto::FilePurpose::Content)
+            .value();
     auto aead_pack = kasumi::crypto::encrypt_bytes(
                          kpak_plain, key, kasumi::crypto::FilePurpose::Pack)
                          .value();
@@ -357,7 +359,8 @@ SeedCorpus build_corpus() {
 
 TEST(CodecFuzzTest, SeedCorpusDecodesCleanlyBeforeMutation) {
     const auto corpus = build_corpus();
-    EXPECT_TRUE(kasumi::history::deserialize(corpus.kcom_bootstrap).has_value());
+    EXPECT_TRUE(
+        kasumi::history::deserialize(corpus.kcom_bootstrap).has_value());
     EXPECT_TRUE(kasumi::history::deserialize(corpus.kcom_manifest).has_value());
     EXPECT_TRUE(
         kasumi::application::history_storage::decode_marker(corpus.marker)
@@ -379,22 +382,29 @@ TEST(CodecFuzzTest, SeedCorpusDecodesCleanlyBeforeMutation) {
     EXPECT_TRUE(kasumi::application::history_storage::epoch::open(
                     corpus.epoch_sealed, corpus.epoch_ref, corpus.key)
                     .has_value());
-    EXPECT_TRUE(kasumi::crypto::decrypt_bytes(
-                    corpus.aead_content, corpus.key,
-                    kasumi::crypto::FilePurpose::Content)
-                    .has_value());
-    EXPECT_TRUE(kasumi::crypto::decrypt_bytes(
-                    corpus.aead_pack, corpus.key,
-                    kasumi::crypto::FilePurpose::Pack)
+    EXPECT_TRUE(
+        kasumi::crypto::decrypt_bytes(corpus.aead_content,
+                                      corpus.key,
+                                      kasumi::crypto::FilePurpose::Content)
+            .has_value());
+    EXPECT_TRUE(kasumi::crypto::decrypt_bytes(corpus.aead_pack,
+                                              corpus.key,
+                                              kasumi::crypto::FilePurpose::Pack)
                     .has_value());
 }
 
 TEST(CodecFuzzTest, MutatedBinaryCodecsAndEnvelopesDoNotCrash) {
     const auto corpus = build_corpus();
     const std::array<const std::vector<std::uint8_t>*, 10> seeds{
-        &corpus.kcom_bootstrap, &corpus.kcom_manifest, &corpus.marker,
-        &corpus.transaction,    &corpus.kpak_plaintext, &corpus.kact_plaintext,
-        &corpus.epoch_plaintext, &corpus.epoch_sealed, &corpus.aead_content,
+        &corpus.kcom_bootstrap,
+        &corpus.kcom_manifest,
+        &corpus.marker,
+        &corpus.transaction,
+        &corpus.kpak_plaintext,
+        &corpus.kact_plaintext,
+        &corpus.epoch_plaintext,
+        &corpus.epoch_sealed,
+        &corpus.aead_content,
         &corpus.aead_pack,
     };
     std::uint64_t state = 0x4b6173756d695232ULL;

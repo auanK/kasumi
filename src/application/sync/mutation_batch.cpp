@@ -160,8 +160,7 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
 
     if (meter)
         meter->phase(Activity::Staging, plans.size());
-    const auto execute_plan =
-        [&](const UniqueUploadPlan& plan)
+    const auto execute_plan = [&](const UniqueUploadPlan& plan)
         -> std::expected<StagedUploadObject, MutationError> {
         const auto& primary_op = record.plan.operations[plan.primary_index];
         const auto destination = batch.root / plan.identifier;
@@ -192,8 +191,8 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
                 !ok) {
                 return std::unexpected(ok.error());
             }
-            auto verified = crypto::content::verify_file(
-                *source, dup_op.hash, dup_op.size);
+            auto verified =
+                crypto::content::verify_file(*source, dup_op.hash, dup_op.size);
             if (!verified) {
                 return std::unexpected(
                     make_error(MutationErrorCode::IntegrityMismatch,
@@ -219,8 +218,7 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
             outcomes.emplace_back(std::unexpected(MutationError{}));
         }
         const auto hw = std::thread::hardware_concurrency();
-        const auto workers =
-            std::clamp<std::size_t>(hw == 0 ? 4 : hw, 2, 8);
+        const auto workers = std::clamp<std::size_t>(hw == 0 ? 4 : hw, 2, 8);
         application::parallel_for_indexed(
             plans.size(), workers, [&](std::size_t slot) {
                 outcomes[slot] = execute_plan(plans[slot]);
@@ -228,10 +226,9 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
 
         std::optional<MutationError> deterministic_error;
         for (const auto& outcome : outcomes) {
-            if (!outcome &&
-                (!deterministic_error ||
-                 outcome.error().operation_index <
-                     deterministic_error->operation_index)) {
+            if (!outcome && (!deterministic_error ||
+                             outcome.error().operation_index <
+                                 deterministic_error->operation_index)) {
                 deterministic_error = outcome.error();
             }
         }

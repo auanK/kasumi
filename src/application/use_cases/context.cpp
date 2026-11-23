@@ -154,9 +154,9 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         const bool is_lock_busy =
             lock_detail == "profile is already in use by another execution";
         if (is_lock_busy) {
-            if (const auto active_op = active_profile_operation(
-                    inspect_profile_activity(input.environment,
-                                             input.request.profile_name))) {
+            if (const auto active_op =
+                    active_profile_operation(inspect_profile_activity(
+                        input.environment, input.request.profile_name))) {
                 lock_detail =
                     std::format("{} (running {})", lock_detail, *active_op);
             }

@@ -1,7 +1,6 @@
-#include "application/sync/coordinator.hpp"
-
 #include "application/concurrency.hpp"
 #include "application/progress.hpp"
+#include "application/sync/coordinator.hpp"
 #include "application/sync/mutation.hpp"
 #include "application/sync/mutation_detail.hpp"
 #include "application/sync/mutation_fault_test.hpp"
@@ -129,9 +128,8 @@ bool stream_verified_seed_slice(const detail::ChunkSource& seed,
         return false;
     }
     Hash digest{};
-    blake3_hasher_finalize(&hasher,
-                           reinterpret_cast<std::uint8_t*>(digest.data()),
-                           digest.size());
+    blake3_hasher_finalize(
+        &hasher, reinterpret_cast<std::uint8_t*>(digest.data()), digest.size());
     return digest == chunk.hash;
 }
 
@@ -285,13 +283,12 @@ mutation::MutationResult detail::apply_chunked_download(
 
                 if (!fetch.empty()) {
                     if (meter)
-                        meter->phase(
-                            Activity::Downloading,
-                            fetch.size(),
-                            0,
-                            window.size() == entry.chunks.size()
-                                ? &operation.path
-                                : nullptr);
+                        meter->phase(Activity::Downloading,
+                                     fetch.size(),
+                                     0,
+                                     window.size() == entry.chunks.size()
+                                         ? &operation.path
+                                         : nullptr);
                     batch_fetch_objects(
                         storage, session.chunk_dl_dir, ids, parallelism);
                     if (platform::cancellation::requested()) {
@@ -395,9 +392,9 @@ mutation::MutationResult detail::apply_chunked_download(
                                 "previously staged FastCDC chunk changed");
                         }
                     } else {
-                        const auto enc = session.chunk_dl_dir /
-                                         crypto::content_identifier(
-                                             key, chunk.hash);
+                        const auto enc =
+                            session.chunk_dl_dir /
+                            crypto::content_identifier(key, chunk.hash);
                         write_failed = false;
                         const bool decrypted = crypto::decrypt_file_to_sink(
                             enc,
@@ -651,9 +648,9 @@ detail::apply_packed_downloads(
                 for (const auto op_idx : job.op_indices) {
                     const auto& op = record.plan.operations[op_idx];
                     const auto blob_hash = hash_from_hex(op.hash);
-                    const auto member =
-                        blob_hash ? verified->member_bytes(*blob_hash)
-                                  : std::nullopt;
+                    const auto member = blob_hash
+                                            ? verified->member_bytes(*blob_hash)
+                                            : std::nullopt;
                     if (!member) {
                         errors[i] = mutation::detail::make_error(
                             mutation::MutationErrorCode::IntegrityMismatch,

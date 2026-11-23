@@ -159,11 +159,12 @@ Read [Upgrading Kasumi](best-practices.md#upgrading-kasumi) for compatibility an
 backup precautions before upgrading:
 
 - **Native installers (in-place upgrade):** Stop running Kasumi operations and
-  run the verified package (`kasumi-windows-x86_64.msi` on Windows,
-  `sudo pacman -U kasumi-linux-x86_64.pkg.tar.zst` on Arch Linux,
-  `sudo apt install ./kasumi-linux-x86_64.deb` on Debian/Ubuntu, or
-  `sudo dnf install --nogpgcheck ./kasumi-linux-x86_64.rpm` on Fedora/RHEL). Existing
-  profiles, local databases, and configuration are preserved.
+  run the verified package (`kasumi-v<version>-windows-x86_64.msi` on Windows,
+  `sudo pacman -U kasumi-v<version>-linux-x86_64.pkg.tar.zst` on Arch Linux,
+  `sudo apt install ./kasumi-v<version>-linux-x86_64.deb` on Debian/Ubuntu, or
+  `sudo dnf install --nogpgcheck ./kasumi-v<version>-linux-x86_64.rpm` on
+  Fedora/RHEL). Installers detect existing installations, report the version
+  transition, and preserve existing profiles, local databases, and configuration.
 - **Portable archives (`.zip` / `.tar.gz`):** Stop Kasumi and replace the
   executable manually from the verified archive.
 

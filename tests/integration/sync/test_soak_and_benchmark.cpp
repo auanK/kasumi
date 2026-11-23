@@ -133,35 +133,32 @@ kasumi::transport::Result fi_put(void* context,
         const auto n = ++state->put_calls;
         if (state->active && state->fail_put_on_call &&
             *state->fail_put_on_call == n) {
-            return std::unexpected(
-                injected_error("injected put fault at call " +
-                               std::to_string(n)));
+            return std::unexpected(injected_error(
+                "injected put fault at call " + std::to_string(n)));
         }
         if (state->active && state->fail_put_prefix &&
             identifier.starts_with(*state->fail_put_prefix)) {
             const auto pn = ++state->prefix_put_calls;
             if (!state->fail_put_prefix_on_call ||
                 *state->fail_put_prefix_on_call == pn) {
-                return std::unexpected(
-                    injected_error("injected prefix put fault at call " +
-                                   std::to_string(pn)));
+                return std::unexpected(injected_error(
+                    "injected prefix put fault at call " + std::to_string(pn)));
             }
         }
     }
     return kasumi::transport::put(*state->base, source, identifier);
 }
 
-kasumi::transport::Result fi_put_batch(void* context,
-                                       const kasumi::transport::PutBatch& batch) {
+kasumi::transport::Result
+fi_put_batch(void* context, const kasumi::transport::PutBatch& batch) {
     auto* state = static_cast<FaultInjectorState*>(context);
     {
         std::lock_guard lock(state->mutex);
         const auto n = ++state->put_batch_calls;
         if (state->active && state->fail_put_batch_on_call &&
             *state->fail_put_batch_on_call == n) {
-            return std::unexpected(
-                injected_error("injected put_batch fault at call " +
-                               std::to_string(n)));
+            return std::unexpected(injected_error(
+                "injected put_batch fault at call " + std::to_string(n)));
         }
     }
     return kasumi::transport::put_batch(*state->base, batch);
@@ -181,34 +178,31 @@ kasumi::transport::Result fi_get(void* context,
         }
         if (state->active && state->fail_get_on_call &&
             *state->fail_get_on_call == n) {
-            return std::unexpected(
-                injected_error("injected get fault at call " +
-                               std::to_string(n)));
+            return std::unexpected(injected_error(
+                "injected get fault at call " + std::to_string(n)));
         }
     }
     return kasumi::transport::get(*state->base, identifier, destination);
 }
 
-kasumi::transport::Result fi_get_batch(void* context,
-                                       const kasumi::transport::GetBatch& batch) {
+kasumi::transport::Result
+fi_get_batch(void* context, const kasumi::transport::GetBatch& batch) {
     auto* state = static_cast<FaultInjectorState*>(context);
     {
         std::lock_guard lock(state->mutex);
         const auto n = ++state->get_batch_calls;
-        if (state->active &&
-            (state->fail_all_get_batches ||
-             (state->fail_get_batch_on_call &&
-              *state->fail_get_batch_on_call == n))) {
-            return std::unexpected(
-                injected_error("injected get_batch fault at call " +
-                               std::to_string(n)));
+        if (state->active && (state->fail_all_get_batches ||
+                              (state->fail_get_batch_on_call &&
+                               *state->fail_get_batch_on_call == n))) {
+            return std::unexpected(injected_error(
+                "injected get_batch fault at call " + std::to_string(n)));
         }
     }
     return kasumi::transport::get_batch(*state->base, batch);
 }
 
-kasumi::transport::PresenceResult
-fi_presence(void* context, std::string_view identifier) {
+kasumi::transport::PresenceResult fi_presence(void* context,
+                                              std::string_view identifier) {
     return kasumi::transport::presence(
         *static_cast<FaultInjectorState*>(context)->base, identifier);
 }
@@ -220,9 +214,8 @@ kasumi::transport::ListingResult fi_list(void* context) {
         const auto n = ++state->list_calls;
         if (state->active && state->fail_list_on_call &&
             *state->fail_list_on_call == n) {
-            return std::unexpected(
-                injected_error("injected list fault at call " +
-                               std::to_string(n)));
+            return std::unexpected(injected_error(
+                "injected list fault at call " + std::to_string(n)));
         }
     }
     return kasumi::transport::list(*state->base);
@@ -233,8 +226,8 @@ kasumi::transport::MetadataListingResult fi_list_metadata(void* context) {
         *static_cast<FaultInjectorState*>(context)->base);
 }
 
-kasumi::transport::ListingResult
-fi_list_prefix(void* context, std::string_view prefix) {
+kasumi::transport::ListingResult fi_list_prefix(void* context,
+                                                std::string_view prefix) {
     return kasumi::transport::list(
         *static_cast<FaultInjectorState*>(context)->base, prefix);
 }
@@ -261,23 +254,24 @@ fi_remove_batch(void* context, const kasumi::transport::RemoveBatch& batch) {
 kasumi::transport::Transport make_fault_transport(FaultInjectorState& state) {
     const auto& ops = state.base->storage;
     return kasumi::transport::Transport{
-        .state = kasumi::transport::TransportStateHandle{
-            &state, destroy_fault_state},
-        .storage = kasumi::transport::StorageOperations{
-            .initialize = fi_initialize,
-            .put = fi_put,
-            .put_batch = ops.put_batch ? fi_put_batch : nullptr,
-            .get = fi_get,
-            .get_batch = ops.get_batch ? fi_get_batch : nullptr,
-            .presence = fi_presence,
-            .list = fi_list,
-            .list_metadata = ops.list_metadata ? fi_list_metadata : nullptr,
-            .list_prefix = ops.list_prefix ? fi_list_prefix : nullptr,
-            .control_read_batch =
-                ops.control_read_batch ? fi_control_read_batch : nullptr,
-            .remove = fi_remove,
-            .remove_batch = ops.remove_batch ? fi_remove_batch : nullptr,
-        },
+        .state = kasumi::transport::TransportStateHandle{&state,
+                                                         destroy_fault_state},
+        .storage =
+            kasumi::transport::StorageOperations{
+                .initialize = fi_initialize,
+                .put = fi_put,
+                .put_batch = ops.put_batch ? fi_put_batch : nullptr,
+                .get = fi_get,
+                .get_batch = ops.get_batch ? fi_get_batch : nullptr,
+                .presence = fi_presence,
+                .list = fi_list,
+                .list_metadata = ops.list_metadata ? fi_list_metadata : nullptr,
+                .list_prefix = ops.list_prefix ? fi_list_prefix : nullptr,
+                .control_read_batch =
+                    ops.control_read_batch ? fi_control_read_batch : nullptr,
+                .remove = fi_remove,
+                .remove_batch = ops.remove_batch ? fi_remove_batch : nullptr,
+            },
     };
 }
 
@@ -289,9 +283,7 @@ public:
                std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key)
         : profile_dir_(root / (std::string{name} + "_profile")),
           local_dir_(root / (std::string{name} + "_local")),
-          database_(profile_dir_ / "state.db"),
-          key_(key),
-          machine_name_(name) {
+          database_(profile_dir_ / "state.db"), key_(key), machine_name_(name) {
         std::filesystem::create_directories(profile_dir_);
         std::filesystem::create_directories(local_dir_);
         EXPECT_TRUE(kasumi::state_storage::initialize(database_));
@@ -356,8 +348,8 @@ public:
             runtime_,
             storage_,
             key_,
-            integrity::GarbageCollectOptions{
-                .min_orphan_age = std::chrono::seconds{0}});
+            integrity::GarbageCollectOptions{.min_orphan_age =
+                                                 std::chrono::seconds{0}});
     }
 
     std::expected<integrity::FsckResult, integrity::Error> run_fsck() {
@@ -365,8 +357,7 @@ public:
     }
 
     void write_text_file(std::string_view rel, std::string_view text) {
-        const auto target =
-            local_dir_ / kasumi::platform::path::from_utf8(rel);
+        const auto target = local_dir_ / kasumi::platform::path::from_utf8(rel);
         std::filesystem::create_directories(target.parent_path());
         kasumi::test::write_text(target, text);
     }
@@ -377,14 +368,14 @@ public:
                                 std::size_t patch_offset = 0,
                                 std::size_t patch_len = 0,
                                 std::uint8_t patch_byte = 0) {
-        const auto target =
-            local_dir_ / kasumi::platform::path::from_utf8(rel);
+        const auto target = local_dir_ / kasumi::platform::path::from_utf8(rel);
         std::filesystem::create_directories(target.parent_path());
         std::vector<std::byte> buf(bytes);
         for (std::size_t i = 0; i < bytes; ++i) {
             buf[i] = static_cast<std::byte>(
-                (seed + static_cast<std::uint8_t>(i * 131U) +
-                 static_cast<std::uint8_t>(i >> 11U)) &
+                (static_cast<unsigned>(seed) +
+                 static_cast<unsigned>(static_cast<std::uint8_t>(i * 131U)) +
+                 static_cast<unsigned>(static_cast<std::uint8_t>(i >> 11U))) &
                 0xFFU);
         }
         const std::size_t limit = std::min(patch_offset + patch_len, bytes);
@@ -404,13 +395,14 @@ public:
     }
 
     void remove_file(std::string_view rel) {
-        std::filesystem::remove(
-            local_dir_ / kasumi::platform::path::from_utf8(rel));
+        std::filesystem::remove(local_dir_ /
+                                kasumi::platform::path::from_utf8(rel));
     }
 
 private:
     kasumi::transport::Transport open_fresh_storage() const {
-        auto opened = kasumi::transport::open_transport(runtime_.storage_location);
+        auto opened =
+            kasumi::transport::open_transport(runtime_.storage_location);
         EXPECT_TRUE(opened.has_value());
         return std::move(*opened);
     }
@@ -435,8 +427,7 @@ void sync_all(std::array<ClientNode*, 3> clients, std::size_t leader) {
     }
 }
 
-TEST(SyncMaintenanceSoakTest,
-     RandomizedMultiClientSyncGcRepackAndFsckCycles) {
+TEST(SyncMaintenanceSoakTest, RandomizedMultiClientSyncGcRepackAndFsckCycles) {
     auto ws = kasumi::test::make_temp_workspace("sync-maintenance-soak");
     const auto remote = kasumi::test::workspace_path(ws, "remote");
     std::filesystem::create_directories(remote);
@@ -519,21 +510,23 @@ TEST(SyncMaintenanceSoakTest,
             const auto idx =
                 static_cast<std::size_t>(next_rng(rng) % live_small.size());
             active.remove_file(live_small[idx]);
-            live_small.erase(
-                live_small.begin() + static_cast<std::ptrdiff_t>(idx));
+            live_small.erase(live_small.begin() +
+                             static_cast<std::ptrdiff_t>(idx));
         }
 
         // 5. Exercise a > 256 KiB loose file periodically.
         if ((cycle % 4U) == 0U) {
             active.write_patterned_binary(
-                "loose/blob.bin", 300U * 1024U + cycle * 1024U,
+                "loose/blob.bin",
+                300U * 1024U + cycle * 1024U,
                 static_cast<std::uint8_t>(0x10U + cycle));
         }
 
         // 6. Exercise > 8 MiB FastCDC creation and incremental delta edit.
         constexpr std::size_t fastcdc_bytes = 9U * 1024U * 1024U;
         if (!created_large && (cycle == 1U || cycle + 1U == cycles)) {
-            active.write_patterned_binary("large/dataset.bin", fastcdc_bytes, 0x22U);
+            active.write_patterned_binary(
+                "large/dataset.bin", fastcdc_bytes, 0x22U);
             created_large = true;
         } else if (created_large && !edited_large &&
                    (cycle == 5U || cycle + 1U == cycles)) {
@@ -580,7 +573,8 @@ TEST(SyncMaintenanceSoakTest,
     }
 }
 
-TEST(SyncMaintenanceSoakTest, InjectedTransportFaultsRecoverCleanlyAcrossCycles) {
+TEST(SyncMaintenanceSoakTest,
+     InjectedTransportFaultsRecoverCleanlyAcrossCycles) {
     auto ws = kasumi::test::make_temp_workspace("sync-fault-injection");
     const auto remote = kasumi::test::workspace_path(ws, "remote");
     std::filesystem::create_directories(remote);
@@ -618,8 +612,10 @@ TEST(SyncMaintenanceSoakTest, InjectedTransportFaultsRecoverCleanlyAcrossCycles)
     // Fault B: transient failure while publishing commit object.
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(key);
-    a.write_text_file("fault_publish/p1.txt", "commit-publication-test-payload");
-    a.write_text_file("fault_publish/p2.txt", "commit-publication-test-payload-2");
+    a.write_text_file("fault_publish/p1.txt",
+                      "commit-publication-test-payload");
+    a.write_text_file("fault_publish/p2.txt",
+                      "commit-publication-test-payload-2");
     {
         FaultInjectorState fi_state{.base = &a.storage()};
         fi_state.fail_put_prefix = layout.commits_prefix;
@@ -677,10 +673,11 @@ TEST(SyncEngineBenchmarkTest, MultiFilePackAndChunkedRoundTripBenchmark) {
     };
 
     for (int i = 0; i < 120; ++i) {
-        a.write_text_file("pack/" + std::to_string(i / 20) + "/f_" +
-                              std::to_string(i) + ".txt",
-                          "bench-small-" + std::to_string(i) + "-" +
-                              std::string(1024U, static_cast<char>('a' + (i % 26))));
+        a.write_text_file(
+            "pack/" + std::to_string(i / 20) + "/f_" + std::to_string(i) +
+                ".txt",
+            "bench-small-" + std::to_string(i) + "-" +
+                std::string(1024U, static_cast<char>('a' + (i % 26))));
     }
     measure("120_small_files_initial_upload", [&]() {
         auto res = a.sync();

@@ -192,9 +192,8 @@ std::string sanitize_machine_name(std::string_view raw) {
             ++offset;
             continue;
         }
-        const bool is_control =
-            codepoint < 0x20U || codepoint == 0x7FU ||
-            (codepoint >= 0x80U && codepoint <= 0x9FU);
+        const bool is_control = codepoint < 0x20U || codepoint == 0x7FU ||
+                                (codepoint >= 0x80U && codepoint <= 0x9FU);
         if (is_control) {
             if (!sanitized.empty() && sanitized.back() != ' ' &&
                 sanitized.size() < maximum_machine_name_bytes) {

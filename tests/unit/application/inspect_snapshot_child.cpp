@@ -23,8 +23,8 @@ std::filesystem::path path_from_utf8(const char* value) {
 }
 
 bool wait_for(const std::filesystem::path& path) {
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::seconds{20};
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{20};
     while (std::chrono::steady_clock::now() < deadline) {
         std::error_code error;
         if (std::filesystem::exists(path, error)) {
@@ -114,7 +114,8 @@ int main(int argc, char** argv) {
                             &raw_writer,
                             SQLITE_OPEN_READWRITE,
                             nullptr) != SQLITE_OK) {
-            if (raw_writer != nullptr) sqlite3_close(raw_writer);
+            if (raw_writer != nullptr)
+                sqlite3_close(raw_writer);
             return 3;
         }
         std::unique_ptr<sqlite3, int (*)(sqlite3*)> writer{raw_writer,
@@ -147,7 +148,8 @@ int main(int argc, char** argv) {
                         &raw_reader,
                         SQLITE_OPEN_READONLY,
                         nullptr) != SQLITE_OK) {
-        if (raw_reader != nullptr) sqlite3_close(raw_reader);
+        if (raw_reader != nullptr)
+            sqlite3_close(raw_reader);
         return 3;
     }
     std::unique_ptr<sqlite3, int (*)(sqlite3*)> reader{raw_reader,
@@ -167,9 +169,8 @@ int main(int argc, char** argv) {
         return 5;
     }
     sqlite3_finalize(statement);
-    if (!save_height(database,
-                     write_after_trigger ? 3 : 2,
-                     mode == "late-pending") ||
+    if (!save_height(
+            database, write_after_trigger ? 3 : 2, mode == "late-pending") ||
         (!write_after_trigger && !signal(ready))) {
         return 6;
     }

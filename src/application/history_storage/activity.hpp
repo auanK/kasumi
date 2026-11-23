@@ -95,9 +95,9 @@ std::string sanitize_text(std::string_view raw, std::size_t max_bytes);
 
 bool valid_record(const ActivityRecord& record) noexcept;
 
-std::expected<std::string, Error>
-object_identifier(const RemoteLayout& layout, std::int64_t finished_at,
-                  std::string_view event_id);
+std::expected<std::string, Error> object_identifier(const RemoteLayout& layout,
+                                                    std::int64_t finished_at,
+                                                    std::string_view event_id);
 
 std::optional<Reference> parse_object_identifier(const RemoteLayout& layout,
                                                  std::string_view identifier);
@@ -128,10 +128,9 @@ load_all(transport::Transport& storage,
 // Selects old activity identifiers eligible for GC removal under retention
 // policy aligned with sync/epoch history retention, keeping recent depth, age
 // window, and the latest Succeeded event per (machine_id, operation).
-std::vector<std::string>
-plan_pruning(std::span<const LoadedActivity> valid,
-             const epoch::RetentionPolicy& policy,
-             std::int64_t reference_now);
+std::vector<std::string> plan_pruning(std::span<const LoadedActivity> valid,
+                                      const epoch::RetentionPolicy& policy,
+                                      std::int64_t reference_now);
 
 } // namespace kasumi::application::history_storage::activity
 

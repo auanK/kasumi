@@ -44,12 +44,10 @@ TEST(FileFingerprintTest,
     ASSERT_TRUE(*second_fingerprint);
     EXPECT_EQ((*first_fingerprint)->kind, (*second_fingerprint)->kind);
     // ChangeTime is not a native identity guarantee.
-    EXPECT_TRUE((*first_fingerprint)->value[0] !=
-                    (*second_fingerprint)->value[0] ||
-                (*first_fingerprint)->value[1] !=
-                    (*second_fingerprint)->value[1] ||
-                (*first_fingerprint)->value[2] !=
-                    (*second_fingerprint)->value[2]);
+    EXPECT_TRUE(
+        (*first_fingerprint)->value[0] != (*second_fingerprint)->value[0] ||
+        (*first_fingerprint)->value[1] != (*second_fingerprint)->value[1] ||
+        (*first_fingerprint)->value[2] != (*second_fingerprint)->value[2]);
 }
 
 TEST(FileFingerprintTest, DirectoriesAndMissingPathsDoNotBecomeCacheRows) {

@@ -27,9 +27,8 @@ bool to_local_tm(std::time_t value, std::tm& output) noexcept {
 }
 
 // Howard Hinnant's civil-to-days algorithm avoids mktime DST/overflow quirks.
-constexpr std::int64_t days_from_civil(std::int64_t year,
-                                       unsigned month,
-                                       unsigned day) noexcept {
+constexpr std::int64_t
+days_from_civil(std::int64_t year, unsigned month, unsigned day) noexcept {
     year -= month <= 2 ? 1 : 0;
     const std::int64_t era = (year >= 0 ? year : year - 399) / 400;
     const auto yoe = static_cast<unsigned>(year - era * 400);
@@ -67,16 +66,17 @@ std::string format_tm_with_offset(const std::tm& value,
     const int off_mins = abs_minutes % 60;
 
     if (include_seconds) {
-        return std::format("{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d} {}{:02d}:{:02d}",
-                           year,
-                           month,
-                           day,
-                           hour,
-                           minute,
-                           second,
-                           sign,
-                           off_hours,
-                           off_mins);
+        return std::format(
+            "{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d} {}{:02d}:{:02d}",
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            sign,
+            off_hours,
+            off_mins);
     }
     return std::format("{:04d}-{:02d}-{:02d} {:02d}:{:02d} {}{:02d}:{:02d}",
                        year,
@@ -105,8 +105,7 @@ std::expected<std::int64_t, std::string> unix_seconds() {
     return static_cast<std::int64_t>(value);
 }
 
-std::string format_utc_timestamp(std::int64_t timestamp,
-                                 bool include_seconds) {
+std::string format_utc_timestamp(std::int64_t timestamp, bool include_seconds) {
     if (timestamp <= 0 || !std::in_range<std::time_t>(timestamp)) {
         return "-";
     }

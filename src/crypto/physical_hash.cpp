@@ -16,8 +16,10 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+// clang-format off
 #include <windows.h>
 #include <bcrypt.h>
+// clang-format on
 #endif
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -309,8 +311,7 @@ hash_file_bcrypt(const std::filesystem::path& path) {
     }
 
     BcryptHashGuard hash;
-    if (BCryptCreateHash(
-            alg, &hash.handle, nullptr, 0, nullptr, 0, 0) != 0) {
+    if (BCryptCreateHash(alg, &hash.handle, nullptr, 0, nullptr, 0, 0) != 0) {
         return std::nullopt;
     }
 

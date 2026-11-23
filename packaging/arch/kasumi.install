@@ -1,0 +1,8 @@
+post_install() {
+  echo "==> Kasumi v${1%-*} installed (/usr/bin/kasumi)"
+  echo "==> Run 'kasumi --version' or 'kasumi config' to get started."
+}
+
+post_upgrade() {
+  echo "==> Kasumi upgraded: v${2%-*} -> v${1%-*} (profiles and config preserved)"
+}

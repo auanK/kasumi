@@ -116,7 +116,8 @@ void present_duration(std::chrono::nanoseconds duration);
 // Formats a concise, language-independent operational summary string.
 std::string format_compact_summary(const application::SyncCompleted& sync);
 std::string format_compact_summary(const application::Response& response);
-std::string format_compact_summary(const application::DiagnosticsReport& report);
+std::string
+format_compact_summary(const application::DiagnosticsReport& report);
 std::string
 format_compact_summary(const application::InspectionResponse& response);
 

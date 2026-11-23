@@ -26,9 +26,7 @@ hash_file(const std::filesystem::path& path,
         secure_memory::WipeGuard wipe_guard{buffer};
 
         auto streamed = platform::private_storage::stream_regular_file(
-            path,
-            buffer,
-            [&](std::span<const std::uint8_t> chunk) {
+            path, buffer, [&](std::span<const std::uint8_t> chunk) {
                 if (!chunk.empty()) {
                     blake3_hasher_update(&state, chunk.data(), chunk.size());
                     if (bytes_read) {
@@ -44,10 +42,10 @@ hash_file(const std::filesystem::path& path,
                 streamed.error().kind ==
                     platform::private_storage::StreamErrorKind::NotFound;
             return std::unexpected(
-                std::string{open_failure ? "could not open file for hashing: "
-                                         : "failed to read file for hashing: "} +
-                platform::path::to_utf8(path) + ": " +
-                streamed.error().detail);
+                std::string{open_failure
+                                ? "could not open file for hashing: "
+                                : "failed to read file for hashing: "} +
+                platform::path::to_utf8(path) + ": " + streamed.error().detail);
         }
 
         Hash result{};

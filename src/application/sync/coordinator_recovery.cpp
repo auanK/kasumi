@@ -149,15 +149,15 @@ ensure_state(const runtime::RuntimeData& runtime_data,
     }
     return detail::save_state_checked(
         runtime_data.database_path,
-        state_storage::StoredState{
-            .tree = commit.commit.tree,
-            .height = commit.commit.height,
-            .commit_id = commit.id,
-            .ciphertext_id = ciphertext_id,
-            .epoch_id = epoch_id,
-            .epoch_sequence = epoch_sequence,
-            .pending_materializations = std::move(*target_pending),
-            .storage_manifest = commit.commit.storage},
+        state_storage::StoredState{.tree = commit.commit.tree,
+                                   .height = commit.commit.height,
+                                   .commit_id = commit.id,
+                                   .ciphertext_id = ciphertext_id,
+                                   .epoch_id = epoch_id,
+                                   .epoch_sequence = epoch_sequence,
+                                   .pending_materializations =
+                                       std::move(*target_pending),
+                                   .storage_manifest = commit.commit.storage},
         publication::make_accepted_commit_meta(commit.id, commit.commit));
 }
 
@@ -526,9 +526,8 @@ std::expected<void, Error> resume_pending_local_mutations(
                     hash_from_hex(record.plan.operations[op_idx].hash);
                 if (h && history::find_packed_blob(manifest, *h) != nullptr) {
                     packed_indices.push_back(op_idx);
-                } else if (h &&
-                           history::find_chunked_file(manifest, *h) !=
-                               nullptr) {
+                } else if (h && history::find_chunked_file(manifest, *h) !=
+                                    nullptr) {
                     chunked_indices.push_back(op_idx);
                 } else {
                     loose_indices.push_back(op_idx);
@@ -552,9 +551,8 @@ std::expected<void, Error> resume_pending_local_mutations(
                     return std::unexpected(packed_result.error());
                 }
                 if (*packed_result) {
-                    return std::unexpected(
-                        replay_failure((*packed_result)->operation_index,
-                                       **packed_result));
+                    return std::unexpected(replay_failure(
+                        (*packed_result)->operation_index, **packed_result));
                 }
             }
             for (const auto op_idx : chunked_indices) {

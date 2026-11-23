@@ -272,7 +272,8 @@ public:
                                       std::string_view contents) const {
         const auto target = local_ / kasumi::platform::path::from_utf8(path);
 #if defined(_WIN32)
-        // Preserve the exact 100 ns FILETIME; MinGW's filesystem setter rounds it.
+        // Preserve the exact 100 ns FILETIME; MinGW's filesystem setter rounds
+        // it.
         FILETIME modified{};
         auto file = ::CreateFileW(target.c_str(),
                                   FILE_READ_ATTRIBUTES,
@@ -283,18 +284,18 @@ public:
                                   FILE_ATTRIBUTE_NORMAL,
                                   nullptr);
         if (file == INVALID_HANDLE_VALUE) {
-            throw std::system_error(
-                static_cast<int>(::GetLastError()),
-                std::system_category(),
-                "failed to open fingerprint fixture");
+            throw std::system_error(static_cast<int>(::GetLastError()),
+                                    std::system_category(),
+                                    "failed to open fingerprint fixture");
         }
         const BOOL read_time = ::GetFileTime(file, nullptr, nullptr, &modified);
         const DWORD read_error = read_time ? ERROR_SUCCESS : ::GetLastError();
         ::CloseHandle(file);
         if (!read_time) {
-            throw std::system_error(static_cast<int>(read_error),
-                                    std::system_category(),
-                                    "failed to read fingerprint fixture timestamp");
+            throw std::system_error(
+                static_cast<int>(read_error),
+                std::system_category(),
+                "failed to read fingerprint fixture timestamp");
         }
 
         kasumi::test::write_text(target, contents);
@@ -308,18 +309,18 @@ public:
                              FILE_ATTRIBUTE_NORMAL,
                              nullptr);
         if (file == INVALID_HANDLE_VALUE) {
-            throw std::system_error(
-                static_cast<int>(::GetLastError()),
-                std::system_category(),
-                "failed to reopen fingerprint fixture");
+            throw std::system_error(static_cast<int>(::GetLastError()),
+                                    std::system_category(),
+                                    "failed to reopen fingerprint fixture");
         }
         const BOOL restored = ::SetFileTime(file, nullptr, nullptr, &modified);
         const DWORD restore_error = restored ? ERROR_SUCCESS : ::GetLastError();
         ::CloseHandle(file);
         if (!restored) {
-            throw std::system_error(static_cast<int>(restore_error),
-                                    std::system_category(),
-                                    "failed to restore fingerprint fixture timestamp");
+            throw std::system_error(
+                static_cast<int>(restore_error),
+                std::system_category(),
+                "failed to restore fingerprint fixture timestamp");
         }
 #else
         const auto modified = std::filesystem::last_write_time(target);
@@ -382,8 +383,8 @@ public:
         const auto source = profile_ / "orphan.source";
         const auto encrypted = profile_ / "orphan.enc";
         kasumi::test::write_text(source, contents);
-        const auto result = kasumi::crypto::encrypt_file_with_hashes(
-            source, encrypted, key_);
+        const auto result =
+            kasumi::crypto::encrypt_file_with_hashes(source, encrypted, key_);
         if (!result) {
             return std::nullopt;
         }
@@ -395,9 +396,9 @@ public:
         return identifier;
     }
 
-    [[nodiscard]] std::expected<kasumi::application::integrity::
-                                   GarbageCollectResult,
-                               kasumi::application::integrity::Error>
+    [[nodiscard]] std::expected<
+        kasumi::application::integrity::GarbageCollectResult,
+        kasumi::application::integrity::Error>
     collect_garbage() {
         return kasumi::application::integrity::garbage_collect(
             runtime_,
@@ -430,8 +431,8 @@ public:
         const auto identifier =
             kasumi::application::history_storage::derive_remote_layout(key_)
                 .barrier_identifier;
-        counting_state_.after_put = [this, identifier](
-                                       std::string_view current) {
+        counting_state_.after_put = [this,
+                                     identifier](std::string_view current) {
             if (current == identifier) {
                 counting_state_.barrier_sync_attempted = true;
                 const auto result = sync();
@@ -527,16 +528,17 @@ public:
         const auto identifier =
             kasumi::application::history_storage::derive_remote_layout(key_)
                 .barrier_identifier;
-        counting_state_.after_presence = [this, identifier](
-                                              std::string_view current,
-                                              const kasumi::transport::PresenceResult& result) {
-            if (current == identifier && result &&
-                *result == kasumi::transport::Presence::Absent &&
-                !counting_state_.barrier_injected) {
-                counting_state_.barrier_injected = true;
-                write_remote(identifier, "injected active GC barrier");
-            }
-        };
+        counting_state_.after_presence =
+            [this,
+             identifier](std::string_view current,
+                         const kasumi::transport::PresenceResult& result) {
+                if (current == identifier && result &&
+                    *result == kasumi::transport::Presence::Absent &&
+                    !counting_state_.barrier_injected) {
+                    counting_state_.barrier_injected = true;
+                    write_remote(identifier, "injected active GC barrier");
+                }
+            };
     }
 
     void place_barrier_after_final_admission_observation() {
@@ -544,16 +546,17 @@ public:
             kasumi::application::history_storage::derive_remote_layout(key_)
                 .barrier_identifier;
         counting_state_.barrier_absent_observations = 0;
-        counting_state_.after_presence = [this, identifier](
-                                              std::string_view current,
-                                              const kasumi::transport::PresenceResult& result) {
-            if (current == identifier && result &&
-                *result == kasumi::transport::Presence::Absent &&
-                ++counting_state_.barrier_absent_observations == 2U) {
-                counting_state_.barrier_injected = true;
-                write_remote(identifier, "injected active GC barrier");
-            }
-        };
+        counting_state_.after_presence =
+            [this,
+             identifier](std::string_view current,
+                         const kasumi::transport::PresenceResult& result) {
+                if (current == identifier && result &&
+                    *result == kasumi::transport::Presence::Absent &&
+                    ++counting_state_.barrier_absent_observations == 2U) {
+                    counting_state_.barrier_injected = true;
+                    write_remote(identifier, "injected active GC barrier");
+                }
+            };
     }
 
     [[nodiscard]] bool barrier_injected() const noexcept {
@@ -936,8 +939,8 @@ TEST(SyncRemoteAvailabilityTest, NoOpFastPathRecoversPendingJournalFirst) {
     const auto workspace = transaction_root / record->operation_id;
     ASSERT_TRUE(kasumi::application::sync::journal::save(
         *paths, *record, harness.key()));
-    auto transaction_workspace =
-        kasumi::application::sync::coordinator::detail::create_transaction_workspace(
+    auto transaction_workspace = kasumi::application::sync::coordinator::
+        detail::create_transaction_workspace(
             profile, record->operation_id, harness.key());
     ASSERT_TRUE(transaction_workspace.has_value())
         << transaction_workspace.error().detail;
@@ -953,8 +956,7 @@ TEST(SyncRemoteAvailabilityTest, NoOpFastPathRecoversPendingJournalFirst) {
     EXPECT_EQ(summary->total, 0U);
 }
 
-TEST(SyncRemoteAvailabilityTest,
-     NoOpAndActiveSyncCheckOnlyRequiredContent) {
+TEST(SyncRemoteAvailabilityTest, NoOpAndActiveSyncCheckOnlyRequiredContent) {
     std::size_t small_presence_checks = 0;
     {
         SyncHarness few("sync-no-op-small-content-set");
@@ -1082,7 +1084,8 @@ TEST(SyncRemoteAvailabilityTest, CorruptLocalRepairSourceIsRejected) {
     const auto source_path = harness.local() / "alpha.txt";
     ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(
         source_path,
-        std::filesystem::file_time_type::clock::now() - std::chrono::seconds{1}));
+        std::filesystem::file_time_type::clock::now() -
+            std::chrono::seconds{1}));
     const auto first = harness.sync();
     ASSERT_TRUE(first.has_value()) << first.error().detail;
     const auto metadata_before =
@@ -1096,10 +1099,10 @@ TEST(SyncRemoteAvailabilityTest, CorruptLocalRepairSourceIsRejected) {
     const auto cached =
         kasumi::state_storage::load_file_cache(harness.database());
     ASSERT_TRUE(cached.has_value());
-    const auto cached_source = std::ranges::find(
-        *cached,
-        std::string{"alpha.txt"},
-        &kasumi::state_storage::FileCacheRow::path);
+    const auto cached_source =
+        std::ranges::find(*cached,
+                          std::string{"alpha.txt"},
+                          &kasumi::state_storage::FileCacheRow::path);
     ASSERT_NE(cached_source, cached->end());
     EXPECT_EQ(cached_source->hash, hash);
     const auto path = harness.content_path(hash);
@@ -1170,7 +1173,8 @@ TEST(SyncRemoteAvailabilityTest, CancelledRepairIsNotAcceptedAndRecovers) {
     EXPECT_EQ(harness.read("duplicate.txt"), "alpha contents");
 }
 
-TEST(SyncRemoteAvailabilityTest, LocalCopyRepairsMissingContentWithoutPublication) {
+TEST(SyncRemoteAvailabilityTest,
+     LocalCopyRepairsMissingContentWithoutPublication) {
     for (const bool cancel_repair : {false, true}) {
         SCOPED_TRACE(cancel_repair);
         SyncHarness publisher("copy-repair-publisher");
@@ -1182,11 +1186,12 @@ TEST(SyncRemoteAvailabilityTest, LocalCopyRepairsMissingContentWithoutPublicatio
             kasumi::state_storage::load_state(publisher.database());
         ASSERT_TRUE(before.has_value() && *before);
         const auto layout =
-            kasumi::application::history_storage::derive_remote_layout(publisher.key());
-        const auto heads_before =
-            kasumi::test::snapshot_tree(publisher.remote_path(layout.heads_prefix));
-        const auto commits_before =
-            kasumi::test::snapshot_tree(publisher.remote_path(layout.commits_prefix));
+            kasumi::application::history_storage::derive_remote_layout(
+                publisher.key());
+        const auto heads_before = kasumi::test::snapshot_tree(
+            publisher.remote_path(layout.heads_prefix));
+        const auto commits_before = kasumi::test::snapshot_tree(
+            publisher.remote_path(layout.commits_prefix));
 
         SyncHarness receiver("copy-repair-receiver", publisher.storage_root());
         ASSERT_TRUE(receiver.valid());
@@ -1219,9 +1224,11 @@ TEST(SyncRemoteAvailabilityTest, LocalCopyRepairsMissingContentWithoutPublicatio
         ASSERT_TRUE(after.has_value() && *after);
         EXPECT_EQ((*after)->commit_id, (*before)->commit_id);
         EXPECT_EQ((*after)->ciphertext_id, (*before)->ciphertext_id);
-        EXPECT_EQ(kasumi::test::snapshot_tree(receiver.remote_path(layout.heads_prefix)),
+        EXPECT_EQ(kasumi::test::snapshot_tree(
+                      receiver.remote_path(layout.heads_prefix)),
                   heads_before);
-        EXPECT_EQ(kasumi::test::snapshot_tree(receiver.remote_path(layout.commits_prefix)),
+        EXPECT_EQ(kasumi::test::snapshot_tree(
+                      receiver.remote_path(layout.commits_prefix)),
                   commits_before);
         const auto healthy = receiver.fsck();
         ASSERT_TRUE(healthy.has_value()) << healthy.error().detail;
@@ -1246,7 +1253,8 @@ TEST(SyncRemoteAvailabilityTest, MissingMicroPackIsRepairedAndPassesFsck) {
     const auto& members = (*before)->storage_manifest.packed_blobs;
     ASSERT_EQ(members.size(), 17U);
     const auto pack_hash = members.front().pack_hash;
-    const auto pack_id = kasumi::crypto::pack_identifier(publisher.key(), pack_hash);
+    const auto pack_id =
+        kasumi::crypto::pack_identifier(publisher.key(), pack_hash);
     const auto* initial_summary =
         std::get_if<kasumi::application::SyncCompleted>(&initial->data);
     ASSERT_NE(initial_summary, nullptr);
@@ -1267,9 +1275,11 @@ TEST(SyncRemoteAvailabilityTest, MissingMicroPackIsRepairedAndPassesFsck) {
     EXPECT_EQ(completed->physical_objects_uploaded, 1U);
     EXPECT_EQ(completed->wire_upload_bytes, encoded_size);
     EXPECT_EQ(receiver.read("copy.txt"), "packed member 0");
-    EXPECT_TRUE(std::filesystem::is_regular_file(publisher.remote_path(pack_id)));
+    EXPECT_TRUE(
+        std::filesystem::is_regular_file(publisher.remote_path(pack_id)));
     for (const auto& member : members) {
-        EXPECT_FALSE(std::filesystem::exists(publisher.content_path(member.blob_hash)));
+        EXPECT_FALSE(
+            std::filesystem::exists(publisher.content_path(member.blob_hash)));
     }
     const auto after = kasumi::state_storage::load_state(receiver.database());
     ASSERT_TRUE(after && *after);
@@ -1304,7 +1314,8 @@ TEST(SyncRemoteAvailabilityTest, IncompleteMicroPackRepairRequiresPublication) {
 
     const auto rejected = receiver.sync();
     ASSERT_FALSE(rejected);
-    EXPECT_NE(rejected.error().detail.find("cannot reconstruct the original absent pack"),
+    EXPECT_NE(rejected.error().detail.find(
+                  "cannot reconstruct the original absent pack"),
               std::string::npos);
     EXPECT_EQ(receiver.content_puts(), 0U);
 
@@ -1322,8 +1333,7 @@ TEST(SyncRemoteAvailabilityTest, IncompleteMicroPackRepairRequiresPublication) {
     ASSERT_TRUE(audited) << audited.error().detail;
 }
 
-TEST(SyncRemoteAvailabilityTest,
-     ActiveSyncIgnoresUnrelatedMissingContents) {
+TEST(SyncRemoteAvailabilityTest, ActiveSyncIgnoresUnrelatedMissingContents) {
     SyncHarness harness("gc-r3-multiple-missing");
     ASSERT_TRUE(harness.valid());
     harness.write("a.txt", "content a");
@@ -1364,8 +1374,7 @@ TEST(SyncRemoteAvailabilityTest,
     EXPECT_NE(after->commit_id, before->commit_id);
     const auto* updated = kasumi::find_row(after->tree, "b.txt");
     ASSERT_NE(updated, nullptr);
-    EXPECT_EQ(updated->hash,
-              kasumi::hasher::hash_string("updated content b"));
+    EXPECT_EQ(updated->hash, kasumi::hasher::hash_string("updated content b"));
     EXPECT_TRUE(after->pending_materializations.empty());
     const auto audited = harness.fsck();
     ASSERT_FALSE(audited.has_value());
@@ -1632,8 +1641,8 @@ TEST(SyncGcCertificationTest, SyncWriterRegisteredFirstBlocksGc) {
     EXPECT_NE(harness.nested_gc_error().find("active writers block"),
               std::string::npos);
     EXPECT_EQ(harness.content_puts(), 1U);
-    EXPECT_TRUE(std::filesystem::is_regular_file(
-        harness.content_path(kasumi::hasher::hash_string("sync writer first"))));
+    EXPECT_TRUE(std::filesystem::is_regular_file(harness.content_path(
+        kasumi::hasher::hash_string("sync writer first"))));
 }
 
 TEST(SyncGcCertificationTest, GcBarrierFirstBlocksSyncAndThenConverges) {
@@ -1654,8 +1663,8 @@ TEST(SyncGcCertificationTest, GcBarrierFirstBlocksSyncAndThenConverges) {
     EXPECT_FALSE(harness.barrier_sync_succeeded());
     EXPECT_EQ(harness.barrier_sync_content_puts(), 0U);
     EXPECT_FALSE(std::filesystem::exists(harness.remote_path(*orphan)));
-    EXPECT_TRUE(std::filesystem::is_regular_file(
-        harness.content_path(kasumi::hasher::hash_string("protected content"))));
+    EXPECT_TRUE(std::filesystem::is_regular_file(harness.content_path(
+        kasumi::hasher::hash_string("protected content"))));
 
     const auto summary = sync_completed(harness);
     ASSERT_TRUE(summary.has_value());
@@ -1718,8 +1727,7 @@ TEST(SyncGcCertificationTest,
     ASSERT_TRUE(audited.has_value()) << audited.error().detail;
 }
 
-TEST(SyncGcCertificationTest,
-     LogicalDeletionStaysDeletedAcrossGcAndNoOpSync) {
+TEST(SyncGcCertificationTest, LogicalDeletionStaysDeletedAcrossGcAndNoOpSync) {
     SyncHarness harness("gc-r4-delete-gc-noop");
     ASSERT_TRUE(harness.valid());
     harness.write("deleted.txt", "logically deleted");
@@ -1750,8 +1758,7 @@ TEST(SyncGcCertificationTest,
     EXPECT_EQ(final_state->commit_id, deleted_state->commit_id);
 }
 
-TEST(SyncGcCertificationTest,
-     LocalDeletionDoesNotAuditMissingRemoteContent) {
+TEST(SyncGcCertificationTest, LocalDeletionDoesNotAuditMissingRemoteContent) {
     SyncHarness harness("gc-r4-missing-unrecoverable-content");
     ASSERT_TRUE(harness.valid());
     harness.write("lost.txt", "unrecoverable content");
@@ -1822,7 +1829,8 @@ TEST(SyncGcCertificationTest,
     EXPECT_TRUE(std::filesystem::exists(consumer.remote_path(content_id)));
 }
 
-TEST(SyncGcCertificationTest, BarrierAppearingAfterWriterAdmissionBlocksRepair) {
+TEST(SyncGcCertificationTest,
+     BarrierAppearingAfterWriterAdmissionBlocksRepair) {
     SyncHarness harness("gc-r4-barrier-during-repair");
     ASSERT_TRUE(harness.valid());
     harness.write("file.txt", "barrier protected repair");
@@ -2015,11 +2023,11 @@ TEST(SyncRemoteAvailabilityTest,
             const auto payload = "bulk-probe-content-" + std::to_string(i);
             const auto hash = kasumi::hasher::hash_string(payload);
             const auto size = static_cast<std::uint64_t>(payload.size());
-            local.rows.push_back(kasumi::NodeRow{
-                .path = "file-" + std::to_string(i) + ".txt",
-                .hash = hash,
-                .size = size,
-                .is_directory = false});
+            local.rows.push_back(
+                kasumi::NodeRow{.path = "file-" + std::to_string(i) + ".txt",
+                                .hash = hash,
+                                .size = size,
+                                .is_directory = false});
             items.emplace_back(hash, size);
             if (i % 2U == 0U) {
                 const auto id = kasumi::crypto::content_identifier(key, hash);
@@ -2034,9 +2042,9 @@ TEST(SyncRemoteAvailabilityTest,
             input.storage.object_identifiers = std::move(remote_ids);
         }
         const auto planned = downloads_for(local);
-        const auto refreshed = kasumi::application::sync::coordinator::
-            reobservation::refresh_content_availability(
-                input, planned, storage, key);
+        const auto refreshed =
+            kasumi::application::sync::coordinator::reobservation::
+                refresh_content_availability(input, planned, storage, key);
         ASSERT_TRUE(refreshed.has_value()) << refreshed.error().detail;
 
         const bool expect_bulk_list = !audit && count >= 256U;
@@ -2071,17 +2079,19 @@ TEST(SyncRemoteAvailabilityTest, LocalCopyStillProbesRequiredContent) {
     input.local_tree = local;
     const auto planned = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(planned.has_value()) << planned.error().detail;
-    ASSERT_EQ(kasumi::sync_plan_phase(planned->plan, kasumi::Action::CopyLocal).size(),
+    ASSERT_EQ(kasumi::sync_plan_phase(planned->plan, kasumi::Action::CopyLocal)
+                  .size(),
               1U);
-    ASSERT_TRUE(
-        kasumi::sync_plan_phase(planned->plan, kasumi::Action::Download).empty());
+    ASSERT_TRUE(kasumi::sync_plan_phase(planned->plan, kasumi::Action::Download)
+                    .empty());
     ASSERT_TRUE(
         kasumi::sync_plan_phase(planned->plan, kasumi::Action::Upload).empty());
 
     FakeState* state = nullptr;
     auto storage = make_fake_transport(state);
-    const auto refreshed = kasumi::application::sync::coordinator::
-        reobservation::refresh_content_availability(input, *planned, storage, key);
+    const auto refreshed =
+        kasumi::application::sync::coordinator::reobservation::
+            refresh_content_availability(input, *planned, storage, key);
     ASSERT_TRUE(refreshed.has_value()) << refreshed.error().detail;
     EXPECT_TRUE(input.known_missing_content_objects.contains(hash));
     EXPECT_TRUE(refreshed->requires_storage_repair);
@@ -2090,8 +2100,10 @@ TEST(SyncRemoteAvailabilityTest, LocalCopyStillProbesRequiredContent) {
     ASSERT_EQ(uploads.size(), 1U);
     EXPECT_EQ(uploads.front().hash, kasumi::hash_hex(hash));
     EXPECT_EQ(uploads.front().size, 12U);
-    EXPECT_EQ(kasumi::sync_plan_phase(refreshed->plan, kasumi::Action::CopyLocal).size(),
-              1U);
+    EXPECT_EQ(
+        kasumi::sync_plan_phase(refreshed->plan, kasumi::Action::CopyLocal)
+            .size(),
+        1U);
 }
 
 TEST(SyncRemoteAvailabilityTest, ListPresentPresenceAbsentFailsClosed) {
@@ -2105,9 +2117,9 @@ TEST(SyncRemoteAvailabilityTest, ListPresentPresenceAbsentFailsClosed) {
 
     FakeState* state = nullptr;
     auto storage = make_fake_transport(state);
-    const auto refreshed = kasumi::application::sync::coordinator::
-        reobservation::refresh_content_availability(
-            input, result, storage, key);
+    const auto refreshed =
+        kasumi::application::sync::coordinator::reobservation::
+            refresh_content_availability(input, result, storage, key);
     ASSERT_FALSE(refreshed.has_value());
     EXPECT_EQ(
         refreshed.error().code,
@@ -2127,9 +2139,9 @@ TEST(SyncRemoteAvailabilityTest, ListAbsentPresencePresentFailsClosed) {
     FakeState* state = nullptr;
     auto storage = make_fake_transport(state);
     state->objects[identifier] = {1U, 2U, 3U, 4U, 5U, 6U, 7U};
-    const auto refreshed = kasumi::application::sync::coordinator::
-        reobservation::refresh_content_availability(
-            input, result, storage, key);
+    const auto refreshed =
+        kasumi::application::sync::coordinator::reobservation::
+            refresh_content_availability(input, result, storage, key);
     ASSERT_FALSE(refreshed.has_value());
     EXPECT_EQ(
         refreshed.error().code,
@@ -2166,9 +2178,9 @@ TEST(SyncRemoteAvailabilityTest,
     FakeState* state = nullptr;
     auto storage = make_fake_transport(state);
     state->objects[present_identifier] = {1U, 2U, 3U, 4U, 5U, 6U, 7U};
-    const auto refreshed = kasumi::application::sync::coordinator::
-        reobservation::refresh_content_availability(
-            input, result, storage, key);
+    const auto refreshed =
+        kasumi::application::sync::coordinator::reobservation::
+            refresh_content_availability(input, result, storage, key);
     ASSERT_TRUE(refreshed.has_value()) << refreshed.error().detail;
     EXPECT_FALSE(input.known_missing_content_objects.contains(present_hash));
     EXPECT_TRUE(input.known_missing_content_objects.contains(absent_hash));
@@ -2237,18 +2249,20 @@ TEST(SyncRemoteAvailabilityTest, InitialSyncPerformsGetVerification) {
     state->objects[identifier] = {1U, 2U, 3U};
 
     // allow_unreferenced_content_reuse = true
-    const auto refreshed = kasumi::application::sync::coordinator::
-        reobservation::refresh_content_availability(
-            input, result, storage, key, {}, true);
+    const auto refreshed =
+        kasumi::application::sync::coordinator::reobservation::
+            refresh_content_availability(input, result, storage, key, {}, true);
     ASSERT_TRUE(refreshed.has_value()) << refreshed.error().detail;
     // Verification GET was performed!
     EXPECT_EQ(state->get_count, 1U);
-    // Since bytes {1, 2, 3} are not valid ciphertext for "verify-me", it failed verification and was marked missing
+    // Since bytes {1, 2, 3} are not valid ciphertext for "verify-me", it failed
+    // verification and was marked missing
     EXPECT_TRUE(input.known_missing_content_objects.contains(hash));
     EXPECT_TRUE(input.verified_remote_content_objects.empty());
 }
 
-TEST(SyncRemoteAvailabilityTest, EnrollmentDoesNotAllowUnreferencedContentReuse) {
+TEST(SyncRemoteAvailabilityTest,
+     EnrollmentDoesNotAllowUnreferencedContentReuse) {
     const auto key = test_key();
     const auto hash = kasumi::hasher::hash_string("orphan-in-enrollment");
     const auto identifier = kasumi::crypto::content_identifier(key, hash);
@@ -2290,7 +2304,8 @@ TEST(SyncRemoteAvailabilityTest, InitialSyncCorruptedOrphanIsOverwritten) {
     const auto result = harness.sync();
     ASSERT_TRUE(result.has_value()) << result.error().detail;
 
-    // It must download to verify, detect corruption, and overwrite it with valid ciphertext!
+    // It must download to verify, detect corruption, and overwrite it with
+    // valid ciphertext!
     EXPECT_GE(harness.content_gets(), 1U);
     EXPECT_EQ(harness.content_puts(), 1U);
 }

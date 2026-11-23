@@ -137,8 +137,8 @@ parse_hex_16(std::string_view hex) noexcept {
         return std::nullopt;
     }
     auto nibble = [](char ch) noexcept -> std::uint8_t {
-        return static_cast<std::uint8_t>(
-            ch >= 'a' ? (ch - 'a' + 10) : (ch - '0'));
+        return static_cast<std::uint8_t>(ch >= 'a' ? (ch - 'a' + 10)
+                                                   : (ch - '0'));
     };
     std::array<std::uint8_t, event_id_byte_count> bytes{};
     for (std::size_t i = 0; i < event_id_byte_count; ++i) {
@@ -148,7 +148,8 @@ parse_hex_16(std::string_view hex) noexcept {
     return bytes;
 }
 
-std::string encode_hex_16(const std::array<std::uint8_t, event_id_byte_count>& bytes) {
+std::string
+encode_hex_16(const std::array<std::uint8_t, event_id_byte_count>& bytes) {
     static constexpr char digits[] = "0123456789abcdef";
     std::string out;
     out.reserve(event_id_hex_size);
@@ -160,9 +161,10 @@ std::string encode_hex_16(const std::array<std::uint8_t, event_id_byte_count>& b
 }
 
 std::expected<std::optional<ActivityRecord>, Error>
-read_and_decode_activity_file(const std::filesystem::path& encrypted_path,
-                              std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                              const Reference& expected_ref) {
+read_and_decode_activity_file(
+    const std::filesystem::path& encrypted_path,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const Reference& expected_ref) {
     std::error_code fs_err;
     const auto file_size = std::filesystem::file_size(encrypted_path, fs_err);
     if (fs_err || file_size > maximum_ciphertext_size) {
@@ -175,8 +177,8 @@ read_and_decode_activity_file(const std::filesystem::path& encrypted_path,
         }
         return std::unexpected(encrypted.error());
     }
-    auto plain = crypto::decrypt_bytes(
-        *encrypted, key, crypto::FilePurpose::Activity);
+    auto plain =
+        crypto::decrypt_bytes(*encrypted, key, crypto::FilePurpose::Activity);
     if (!plain) {
         return std::nullopt;
     }
@@ -194,14 +196,12 @@ read_and_decode_activity_file(const std::filesystem::path& encrypted_path,
 } // namespace
 
 std::string sanitize_text(std::string_view raw, std::size_t max_bytes) {
-    while (!raw.empty() &&
-           (raw.front() == ' ' || raw.front() == '\t' || raw.front() == '\r' ||
-            raw.front() == '\n')) {
+    while (!raw.empty() && (raw.front() == ' ' || raw.front() == '\t' ||
+                            raw.front() == '\r' || raw.front() == '\n')) {
         raw.remove_prefix(1);
     }
-    while (!raw.empty() &&
-           (raw.back() == ' ' || raw.back() == '\t' || raw.back() == '\r' ||
-            raw.back() == '\n')) {
+    while (!raw.empty() && (raw.back() == ' ' || raw.back() == '\t' ||
+                            raw.back() == '\r' || raw.back() == '\n')) {
         raw.remove_suffix(1);
     }
 
@@ -243,10 +243,14 @@ bool valid_record(const ActivityRecord& record) noexcept {
         !valid_outcome(static_cast<std::uint8_t>(record.outcome))) {
         return false;
     }
-    const bool non_zero_event = std::ranges::any_of(
-        *parse_hex_16(record.event_id), [](std::uint8_t b) { return b != 0; });
-    const bool non_zero_machine = std::ranges::any_of(
-        record.machine_id, [](std::uint8_t b) { return b != 0; });
+    const bool non_zero_event =
+        std::ranges::any_of(*parse_hex_16(record.event_id), [](std::uint8_t b) {
+            return b != 0;
+        });
+    const bool non_zero_machine =
+        std::ranges::any_of(record.machine_id, [](std::uint8_t b) {
+            return b != 0;
+        });
     if (!non_zero_event || !non_zero_machine) {
         return false;
     }
@@ -263,13 +267,12 @@ bool valid_record(const ActivityRecord& record) noexcept {
            valid_utf8_no_controls(record.detail, maximum_detail_bytes, true);
 }
 
-std::expected<std::string, Error>
-object_identifier(const RemoteLayout& layout,
-                  std::int64_t finished_at,
-                  std::string_view event_id) {
+std::expected<std::string, Error> object_identifier(const RemoteLayout& layout,
+                                                    std::int64_t finished_at,
+                                                    std::string_view event_id) {
     if (finished_at <= 0 || !valid_hex_32(event_id)) {
-        return std::unexpected(
-            detail::error(ErrorCode::InvalidInput, "invalid activity object reference"));
+        return std::unexpected(detail::error(
+            ErrorCode::InvalidInput, "invalid activity object reference"));
     }
     auto ts_text = std::to_string(finished_at);
     if (ts_text.size() < timestamp_width) {
@@ -315,42 +318,43 @@ encode(const ActivityRecord& record) {
         return std::unexpected(
             detail::error(ErrorCode::InvalidInput, "invalid activity record"));
     }
-    return detail::guard_alloc([&]() -> std::expected<std::vector<std::uint8_t>, Error> {
-        wire::Writer writer;
-        wire::write_array(writer, kact_magic);
-        wire::write(writer, kact_version);
-        const auto event_bytes = parse_hex_16(record.event_id).value();
-        wire::write_bytes(writer, std::as_bytes(std::span{event_bytes}));
-        wire::write(writer, static_cast<std::uint8_t>(record.operation));
-        wire::write(writer, static_cast<std::uint8_t>(record.outcome));
-        wire::write_bytes(writer, std::as_bytes(std::span{record.machine_id}));
-        wire::write_string(writer, record.machine_name);
-        wire::write<std::int64_t>(writer, record.started_at);
-        wire::write<std::int64_t>(writer, record.finished_at);
-        wire::write<std::uint64_t>(writer, record.duration_ms);
-        wire::write<std::uint64_t>(writer, record.metric_primary);
-        wire::write<std::uint64_t>(writer, record.metric_secondary);
-        wire::write<std::uint64_t>(writer, record.metric_bytes);
-        wire::write<std::uint32_t>(writer, record.flags);
-        wire::write_string(writer, record.stage);
-        wire::write_string(writer, record.detail);
-        if (writer.buffer.size() > maximum_encoded_size) {
-            return std::unexpected(
-                detail::error(ErrorCode::LimitExceeded,
-                              "activity record exceeds maximum size"));
-        }
-        std::vector<std::uint8_t> out(writer.buffer.size());
-        std::memcpy(out.data(), writer.buffer.data(), writer.buffer.size());
-        return out;
-    });
+    return detail::guard_alloc(
+        [&]() -> std::expected<std::vector<std::uint8_t>, Error> {
+            wire::Writer writer;
+            wire::write_array(writer, kact_magic);
+            wire::write(writer, kact_version);
+            const auto event_bytes = parse_hex_16(record.event_id).value();
+            wire::write_bytes(writer, std::as_bytes(std::span{event_bytes}));
+            wire::write(writer, static_cast<std::uint8_t>(record.operation));
+            wire::write(writer, static_cast<std::uint8_t>(record.outcome));
+            wire::write_bytes(writer,
+                              std::as_bytes(std::span{record.machine_id}));
+            wire::write_string(writer, record.machine_name);
+            wire::write<std::int64_t>(writer, record.started_at);
+            wire::write<std::int64_t>(writer, record.finished_at);
+            wire::write<std::uint64_t>(writer, record.duration_ms);
+            wire::write<std::uint64_t>(writer, record.metric_primary);
+            wire::write<std::uint64_t>(writer, record.metric_secondary);
+            wire::write<std::uint64_t>(writer, record.metric_bytes);
+            wire::write<std::uint32_t>(writer, record.flags);
+            wire::write_string(writer, record.stage);
+            wire::write_string(writer, record.detail);
+            if (writer.buffer.size() > maximum_encoded_size) {
+                return std::unexpected(
+                    detail::error(ErrorCode::LimitExceeded,
+                                  "activity record exceeds maximum size"));
+            }
+            std::vector<std::uint8_t> out(writer.buffer.size());
+            std::memcpy(out.data(), writer.buffer.data(), writer.buffer.size());
+            return out;
+        });
 }
 
 std::expected<ActivityRecord, Error>
 decode(std::span<const std::uint8_t> bytes) {
     if (bytes.size() > maximum_encoded_size) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded,
-                          "activity record exceeds maximum size"));
+        return std::unexpected(detail::error(
+            ErrorCode::LimitExceeded, "activity record exceeds maximum size"));
     }
     return detail::guard_alloc([&]() -> std::expected<ActivityRecord, Error> {
         wire::Reader reader{std::as_bytes(bytes)};
@@ -361,9 +365,8 @@ decode(std::span<const std::uint8_t> bytes) {
         }
         auto version = wire::read<std::uint8_t>(reader);
         if (!version || *version != kact_version) {
-            return std::unexpected(
-                detail::error(ErrorCode::InvalidCommit,
-                              "unsupported KACT version"));
+            return std::unexpected(detail::error(ErrorCode::InvalidCommit,
+                                                 "unsupported KACT version"));
         }
         auto event_bytes = wire::read_array<event_id_byte_count>(reader);
         auto raw_op = wire::read<std::uint8_t>(reader);
@@ -384,14 +387,12 @@ decode(std::span<const std::uint8_t> bytes) {
             !machine_name || !started_at || !finished_at || !duration_ms ||
             !metric_primary || !metric_secondary || !metric_bytes || !flags ||
             !stage || !detail_text || !reader.data.empty()) {
-            return std::unexpected(
-                detail::error(ErrorCode::InvalidCommit,
-                              "malformed KACT payload"));
+            return std::unexpected(detail::error(ErrorCode::InvalidCommit,
+                                                 "malformed KACT payload"));
         }
         if (!valid_operation(*raw_op) || !valid_outcome(*raw_outcome)) {
-            return std::unexpected(
-                detail::error(ErrorCode::InvalidCommit,
-                              "invalid KACT operation or outcome"));
+            return std::unexpected(detail::error(
+                ErrorCode::InvalidCommit, "invalid KACT operation or outcome"));
         }
         ActivityRecord record;
         std::array<std::uint8_t, event_id_byte_count> ev_raw{};
@@ -414,8 +415,7 @@ decode(std::span<const std::uint8_t> bytes) {
         record.detail = std::move(*detail_text);
         if (!valid_record(record)) {
             return std::unexpected(
-                detail::error(ErrorCode::InvalidCommit,
-                              "invalid KACT fields"));
+                detail::error(ErrorCode::InvalidCommit, "invalid KACT fields"));
         }
         return record;
     });
@@ -443,9 +443,8 @@ publish(transport::Transport& storage,
     auto encrypted =
         crypto::encrypt_bytes(*encoded, key, crypto::FilePurpose::Activity);
     if (!encrypted) {
-        return std::unexpected(
-            detail::error(ErrorCode::CryptoFailure,
-                          "failed to encrypt activity record"));
+        return std::unexpected(detail::error(
+            ErrorCode::CryptoFailure, "failed to encrypt activity record"));
     }
     auto temporary = detail::make_workspace(workspace_root);
     if (!temporary) {
@@ -494,9 +493,8 @@ load_all(transport::Transport& storage,
     }
     detail::sort_unique(identifiers);
     if (identifiers.size() > maximum_activity_object_count) {
-        return std::unexpected(
-            detail::error(ErrorCode::LimitExceeded,
-                          "too many remote activity objects"));
+        return std::unexpected(detail::error(
+            ErrorCode::LimitExceeded, "too many remote activity objects"));
     }
 
     ActivityInventory result;
@@ -534,8 +532,8 @@ load_all(transport::Transport& storage,
 
     if (storage.storage.get_batch != nullptr && candidates.size() >= 2) {
         transport::GetBatch batch{
-            .source_prefix =
-                std::string{detail::trim_trailing_slash(layout.activity_prefix)},
+            .source_prefix = std::string{detail::trim_trailing_slash(
+                layout.activity_prefix)},
             .destination_root = (*temporary)->workspace.root,
             .identifiers = {},
         };
@@ -584,23 +582,22 @@ load_all(transport::Transport& storage,
         });
     }
 
-    std::ranges::sort(result.valid, [](const LoadedActivity& left,
-                                       const LoadedActivity& right) {
-        if (left.record.finished_at != right.record.finished_at) {
-            return left.record.finished_at > right.record.finished_at;
-        }
-        return left.record.event_id < right.record.event_id;
-    });
+    std::ranges::sort(
+        result.valid,
+        [](const LoadedActivity& left, const LoadedActivity& right) {
+            if (left.record.finished_at != right.record.finished_at) {
+                return left.record.finished_at > right.record.finished_at;
+            }
+            return left.record.event_id < right.record.event_id;
+        });
     return result;
 }
 
-std::vector<std::string>
-plan_pruning(std::span<const LoadedActivity> valid,
-             const epoch::RetentionPolicy& policy,
-             std::int64_t reference_now) {
-    using GroupKey =
-        std::pair<std::array<std::uint8_t, machine_id_byte_count>,
-                  ActivityOperation>;
+std::vector<std::string> plan_pruning(std::span<const LoadedActivity> valid,
+                                      const epoch::RetentionPolicy& policy,
+                                      std::int64_t reference_now) {
+    using GroupKey = std::pair<std::array<std::uint8_t, machine_id_byte_count>,
+                               ActivityOperation>;
     std::map<GroupKey, std::vector<const LoadedActivity*>> groups;
     for (const auto& item : valid) {
         groups[GroupKey{item.record.machine_id, item.record.operation}]
@@ -615,21 +612,20 @@ plan_pruning(std::span<const LoadedActivity> valid,
     std::vector<std::string> prunable;
     for (auto& [unused, items] : groups) {
         static_cast<void>(unused);
-        std::ranges::sort(items, [](const LoadedActivity* left,
-                                    const LoadedActivity* right) {
-            if (left->record.finished_at != right->record.finished_at) {
-                return left->record.finished_at > right->record.finished_at;
-            }
-            return left->record.event_id < right->record.event_id;
-        });
+        std::ranges::sort(
+            items, [](const LoadedActivity* left, const LoadedActivity* right) {
+                if (left->record.finished_at != right->record.finished_at) {
+                    return left->record.finished_at > right->record.finished_at;
+                }
+                return left->record.event_id < right->record.event_id;
+            });
 
         bool kept_latest_success = false;
         for (std::size_t index = 0; index < items.size(); ++index) {
             const auto& item = *items[index];
             const bool keep_depth = index < min_depth;
             bool keep_age = false;
-            if (reference_now <= 0 ||
-                item.record.finished_at > reference_now) {
+            if (reference_now <= 0 || item.record.finished_at > reference_now) {
                 keep_age = true;
             } else {
                 const auto age = static_cast<std::uint64_t>(

@@ -118,8 +118,8 @@ to_activity_op(Operation operation) noexcept {
     }
 }
 
-state_storage::LocalExecutionStatus
-outcome_to_local_status(history_storage::activity::ActivityOutcome outcome) noexcept {
+state_storage::LocalExecutionStatus outcome_to_local_status(
+    history_storage::activity::ActivityOutcome outcome) noexcept {
     using AO = history_storage::activity::ActivityOutcome;
     using LS = state_storage::LocalExecutionStatus;
     switch (outcome) {
@@ -158,7 +158,8 @@ std::string sync_stage_label(std::optional<SyncStage> stage) {
     return {};
 }
 
-bool db_ready_for_tracking(const std::filesystem::path& database_path) noexcept {
+bool db_ready_for_tracking(
+    const std::filesystem::path& database_path) noexcept {
     if (database_path.empty()) {
         return false;
     }
@@ -222,13 +223,11 @@ std::expected<Response, Error> execute(ExecutionInput input) {
             result = detail::dispatch(context);
         } else {
             const auto steady_started = std::chrono::steady_clock::now();
-            const auto started_at =
-                platform::clock::unix_seconds().value_or(0);
+            const auto started_at = platform::clock::unix_seconds().value_or(0);
             auto eid = platform::random::hex_id(16);
             const std::string execution_id =
-                (eid && !eid->empty())
-                    ? std::move(*eid)
-                    : ("exec-" + std::to_string(started_at));
+                (eid && !eid->empty()) ? std::move(*eid)
+                                       : ("exec-" + std::to_string(started_at));
             state_storage::LocalExecutionRecord record{
                 .execution_id = execution_id,
                 .operation = to_local_op(context.operation),
@@ -299,8 +298,8 @@ std::expected<Response, Error> execute(ExecutionInput input) {
                         act.metric_primary = gcc->candidate_objects;
                         act.metric_secondary = gcc->removed_objects;
                         if (gcc->analysis_only) {
-                            act.flags |= history_storage::activity::
-                                flag_analysis_only;
+                            act.flags |=
+                                history_storage::activity::flag_analysis_only;
                         }
                     } else if (const auto* rwc =
                                    std::get_if<ManualWriterRemovalCompleted>(
@@ -319,9 +318,8 @@ std::expected<Response, Error> execute(ExecutionInput input) {
                         }
                     }
                 } else {
-                    act.outcome =
-                        context.maintenance_failure_outcome.value_or(
-                            history_storage::activity::ActivityOutcome::Failed);
+                    act.outcome = context.maintenance_failure_outcome.value_or(
+                        history_storage::activity::ActivityOutcome::Failed);
                     act.metric_primary = context.maintenance_metric_primary;
                     act.metric_secondary = context.maintenance_metric_secondary;
                     act.flags = context.maintenance_flags;
@@ -350,8 +348,12 @@ std::expected<Response, Error> execute(ExecutionInput input) {
                     std::string pub_error;
                     if (auto ws = platform::create_workspace("kasumi-activity");
                         ws) {
-                        auto pub = history_storage::activity::publish(
-                            context.storage, layout, context.key, act, ws->root);
+                        auto pub =
+                            history_storage::activity::publish(context.storage,
+                                                               layout,
+                                                               context.key,
+                                                               act,
+                                                               ws->root);
                         platform::cleanup_workspace(*ws);
                         if (pub) {
                             published = true;
@@ -430,11 +432,10 @@ std::expected<Response, Error> execute(ExecutionInput input) {
                             sc->upload_bytes + sc->download_bytes;
                         record.flags = sc->published ? 1U : 0U;
                         record.commit_id = context.accepted_commit_id;
-                    } else if (const auto* rc =
-                                   std::get_if<RepackCompleted>(&result->data)) {
-                        record.status = rc->published
-                                            ? LS::Succeeded
-                                            : LS::SucceededNoChanges;
+                    } else if (const auto* rc = std::get_if<RepackCompleted>(
+                                   &result->data)) {
+                        record.status = rc->published ? LS::Succeeded
+                                                      : LS::SucceededNoChanges;
                         record.summary_a = rc->repacked_blobs;
                         record.summary_b = rc->new_packs;
                         record.summary_bytes = rc->repacked_plaintext_bytes;
@@ -443,9 +444,8 @@ std::expected<Response, Error> execute(ExecutionInput input) {
                     } else if (const auto* rmc =
                                    std::get_if<ResolveMissingCompleted>(
                                        &result->data)) {
-                        record.status = rmc->published
-                                            ? LS::Succeeded
-                                            : LS::SucceededNoChanges;
+                        record.status = rmc->published ? LS::Succeeded
+                                                       : LS::SucceededNoChanges;
                         record.summary_a = rmc->resolved_count;
                         record.flags = rmc->published ? 1U : 0U;
                         record.commit_id = context.accepted_commit_id;
@@ -457,7 +457,8 @@ std::expected<Response, Error> execute(ExecutionInput input) {
                         const auto& sc = *err.sync_completed;
                         record.status = LS::Failed;
                         record.stage = "audit";
-                        record.detail = history_storage::activity::sanitize_text(
+                        record
+                            .detail = history_storage::activity::sanitize_text(
                             err.detail,
                             history_storage::activity::maximum_detail_bytes);
                         record.summary_a = sc.uploaded;
@@ -474,7 +475,8 @@ std::expected<Response, Error> execute(ExecutionInput input) {
                                             ? LS::Cancelled
                                             : LS::Failed;
                         record.stage = sync_stage_label(err.stage);
-                        record.detail = history_storage::activity::sanitize_text(
+                        record
+                            .detail = history_storage::activity::sanitize_text(
                             err.detail,
                             history_storage::activity::maximum_detail_bytes);
                     }

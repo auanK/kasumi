@@ -1,5 +1,4 @@
 #include "application/sync/coordinator.hpp"
-
 #include "application/sync/journal.hpp"
 #include "application/sync/mutation.hpp"
 #include "application/sync/mutation_detail.hpp"
@@ -53,12 +52,12 @@ Error indeterminate_publication(const publication::Error& error,
 }
 
 Error mutation_error(const mutation::MutationError& error) {
-    return make_error(
-        error.code == mutation::MutationErrorCode::RemoteContentMissing
-            ? ErrorCode::RemoteContentMissing
-            : ErrorCode::MutationFailure,
-        mutation::describe(error),
-        error.operation_index);
+    return make_error(error.code ==
+                              mutation::MutationErrorCode::RemoteContentMissing
+                          ? ErrorCode::RemoteContentMissing
+                          : ErrorCode::MutationFailure,
+                      mutation::describe(error),
+                      error.operation_index);
 }
 
 Error publication_error(const publication::Error& error) {
@@ -1107,10 +1106,10 @@ std::expected<void, Error> save_state_checked(
         return std::unexpected(
             make_error(ErrorCode::DatabaseFailure, "failed to save state.db"));
     }
-    const bool saved = accepted_meta.has_value()
-                           ? state_storage::save_state(
-                                 database_path, state, *accepted_meta)
-                           : state_storage::save_state(database_path, state);
+    const bool saved =
+        accepted_meta.has_value()
+            ? state_storage::save_state(database_path, state, *accepted_meta)
+            : state_storage::save_state(database_path, state);
     if (!saved) {
         return std::unexpected(
             make_error(ErrorCode::DatabaseFailure, "failed to save state.db"));

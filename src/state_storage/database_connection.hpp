@@ -89,11 +89,10 @@ open_state_database_readwrite(const std::filesystem::path& database_path) {
     if (auto wal = require_wal_mode(opened->get()); !wal) {
         return std::unexpected(wal.error());
     }
-    auto configured =
-        sqlite::execute(opened->get(),
-                        "PRAGMA synchronous=NORMAL; "
-                        "PRAGMA temp_store=MEMORY; "
-                        "PRAGMA cache_size=-16384;");
+    auto configured = sqlite::execute(opened->get(),
+                                      "PRAGMA synchronous=NORMAL; "
+                                      "PRAGMA temp_store=MEMORY; "
+                                      "PRAGMA cache_size=-16384;");
     if (!configured) {
         return std::unexpected(
             std::string{"failed to configure database synchronous PRAGMA: "} +

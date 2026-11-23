@@ -347,13 +347,13 @@ flush_pending_files(std::vector<PendingFile>& pending_files,
     const auto hw = std::thread::hardware_concurrency();
     const std::size_t workers = std::clamp<std::size_t>(hw == 0 ? 4 : hw, 2, 8);
     std::vector<std::expected<ProcessedFile, ScanError>> outcomes(
-        pending_files.size(),
-        std::unexpected(ScanError{}));
+        pending_files.size(), std::unexpected(ScanError{}));
     application::parallel_for_indexed(
         pending_files.size(), workers, [&](std::size_t index) {
-            outcomes[index] = process_file_entry(pending_files[index].physical_path,
-                                                 pending_files[index].relative,
-                                                 context);
+            outcomes[index] =
+                process_file_entry(pending_files[index].physical_path,
+                                   pending_files[index].relative,
+                                   context);
         });
     for (auto& outcome : outcomes) {
         if (!outcome) {
@@ -458,13 +458,12 @@ handle_ignored_entry(const std::filesystem::path& physical_path,
                      MetadataQuery metadata_query,
                      reconciliation::LocalDirectoryEvidence& parent_evidence,
                      reconciliation::LocalPhysicalEvidence& physical_evidence) {
-    const auto kind = entry_type.linklike
-                          ? reconciliation::PhysicalEntryKind::LinkLike
-                      : entry_type.directory
-                          ? reconciliation::PhysicalEntryKind::Directory
-                      : entry_type.regular_file
-                          ? reconciliation::PhysicalEntryKind::RegularFile
-                          : reconciliation::PhysicalEntryKind::Unsupported;
+    const auto kind =
+        entry_type.linklike    ? reconciliation::PhysicalEntryKind::LinkLike
+        : entry_type.directory ? reconciliation::PhysicalEntryKind::Directory
+        : entry_type.regular_file
+            ? reconciliation::PhysicalEntryKind::RegularFile
+            : reconciliation::PhysicalEntryKind::Unsupported;
     auto effective_disposition =
         entry_type.linklike || !entry_type.regular_file ||
                 !valid_logical_path_component(entry_name)
@@ -547,7 +546,8 @@ struct UniqueWin32Handle {
         }
     }
     UniqueWin32Handle() = default;
-    explicit UniqueWin32Handle(HANDLE h) noexcept : handle(h) {}
+    explicit UniqueWin32Handle(HANDLE h) noexcept : handle(h) {
+    }
     UniqueWin32Handle(const UniqueWin32Handle&) = delete;
     UniqueWin32Handle& operator=(const UniqueWin32Handle&) = delete;
 };
@@ -608,8 +608,10 @@ read_win32_directory_bulk(const std::filesystem::path& dir_path,
     }
 
     FILE_BASIC_INFO basic_info{};
-    if (!GetFileInformationByHandleEx(
-            dir_handle.handle, FileBasicInfo, &basic_info, sizeof(basic_info))) {
+    if (!GetFileInformationByHandleEx(dir_handle.handle,
+                                      FileBasicInfo,
+                                      &basic_info,
+                                      sizeof(basic_info))) {
         const DWORD err = GetLastError();
         if (is_win32_bulk_unsupported(err)) {
             return Win32BulkStatus::Unsupported;
@@ -657,7 +659,8 @@ read_win32_directory_bulk(const std::filesystem::path& dir_path,
     if (id_info.VolumeSerialNumber == 0) {
         return Win32BulkStatus::Unsupported;
     }
-    const auto volume_serial = static_cast<std::uint64_t>(id_info.VolumeSerialNumber);
+    const auto volume_serial =
+        static_cast<std::uint64_t>(id_info.VolumeSerialNumber);
 
     alignas(FILE_ID_EXTD_DIR_INFO) std::array<std::byte, 65536> buffer{};
     bool first_batch = true;
@@ -717,9 +720,8 @@ read_win32_directory_bulk(const std::filesystem::path& dir_path,
                 }
                 std::uint64_t file_low = 0;
                 std::uint64_t file_high = 0;
-                std::memcpy(&file_low,
-                            info->FileId.Identifier,
-                            sizeof(file_low));
+                std::memcpy(
+                    &file_low, info->FileId.Identifier, sizeof(file_low));
                 std::memcpy(&file_high,
                             info->FileId.Identifier + sizeof(file_low),
                             sizeof(file_high));
@@ -728,9 +730,10 @@ read_win32_directory_bulk(const std::filesystem::path& dir_path,
                     !(file_low == std::numeric_limits<std::uint64_t>::max() &&
                       file_high == std::numeric_limits<std::uint64_t>::max());
                 if (valid_id) {
-                    entry.identity = cache::FileIdentity{.volume = volume_serial,
-                                                         .file_low = file_low,
-                                                         .file_high = file_high};
+                    entry.identity =
+                        cache::FileIdentity{.volume = volume_serial,
+                                            .file_low = file_low,
+                                            .file_high = file_high};
                 }
                 out_entries.push_back(std::move(entry));
             }
@@ -862,9 +865,10 @@ scan_result(const std::filesystem::path& local_root,
                     const auto completed_index = frame.evidence_index;
                     win32_stack.pop_back();
                     if (!win32_stack.empty()) {
-                        propagate_directory_evidence(physical_evidence,
-                                                     win32_stack.back().evidence_index,
-                                                     completed_index);
+                        propagate_directory_evidence(
+                            physical_evidence,
+                            win32_stack.back().evidence_index,
+                            completed_index);
                     }
                     continue;
                 }
@@ -893,10 +897,10 @@ scan_result(const std::filesystem::path& local_root,
                     entry_type = *classified;
                 }
 
-                const auto relative = frame.relative.empty()
-                                          ? entry.name_utf8
-                                          : frame.relative + '/' +
-                                                entry.name_utf8;
+                const auto relative =
+                    frame.relative.empty()
+                        ? entry.name_utf8
+                        : frame.relative + '/' + entry.name_utf8;
                 const auto disposition = classify_ignore(
                     relative, entry_type.directory, ignore_list);
                 const bool ignored = disposition != IgnoreDisposition::Managed;
@@ -963,9 +967,8 @@ scan_result(const std::filesystem::path& local_root,
                             continue;
                         }
                     }
-                    pending_files.push_back(
-                        PendingFile{.physical_path = entry_path,
-                                    .relative = relative});
+                    pending_files.push_back(PendingFile{
+                        .physical_path = entry_path, .relative = relative});
                     continue;
                 }
 
@@ -980,8 +983,9 @@ scan_result(const std::filesystem::path& local_root,
                     fallback_to_portable = true;
                     break;
                 }
-                snapshot.rows.push_back(
-                    {.path = relative, .mtime = sub_mtime, .is_directory = true});
+                snapshot.rows.push_back({.path = relative,
+                                         .mtime = sub_mtime,
+                                         .is_directory = true});
                 const auto evidence_index =
                     physical_evidence.directories.size();
                 physical_evidence.directories.push_back(
@@ -1101,9 +1105,8 @@ scan_result(const std::filesystem::path& local_root,
             }
             if (entry_type->regular_file) {
                 if (metadata_query == &cache::read_file_metadata) {
-                    pending_files.push_back(
-                        PendingFile{.physical_path = entry.path(),
-                                    .relative = relative});
+                    pending_files.push_back(PendingFile{
+                        .physical_path = entry.path(), .relative = relative});
                 } else {
                     auto row = process_file(entry.path(), relative, context);
                     if (!row)

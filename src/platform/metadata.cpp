@@ -54,8 +54,8 @@ add_nanoseconds_to_unix_epoch(std::int64_t unix_ns) noexcept {
         file_clock_from_sys(std::chrono::system_clock::time_point{})
             .time_since_epoch();
     const auto quotient = unix_ns / Factor::num;
-    const auto delta = static_cast<Count>(
-        unix_ns % Factor::num < 0 ? quotient - 1 : quotient);
+    const auto delta =
+        static_cast<Count>(unix_ns % Factor::num < 0 ? quotient - 1 : quotient);
     if (delta > std::numeric_limits<Rep>::max() ||
         delta < std::numeric_limits<Rep>::lowest()) {
         return std::nullopt;
@@ -111,8 +111,9 @@ from_windows_ticks(std::uint64_t ticks) noexcept {
 
 std::expected<std::uint64_t, std::string>
 to_windows_ticks(std::filesystem::file_time_type value) noexcept {
-    using file_ticks = std::chrono::duration<
-        std::filesystem::file_time_type::rep, std::ratio<1, 10000000>>;
+    using file_ticks =
+        std::chrono::duration<std::filesystem::file_time_type::rep,
+                              std::ratio<1, 10000000>>;
 #if defined(_MSC_VER)
     const auto ticks =
         std::chrono::duration_cast<file_ticks>(value.time_since_epoch())
@@ -161,8 +162,7 @@ bool matches_written_time(Duration requested, Duration actual) noexcept {
     });
 }
 
-std::optional<std::int64_t>
-duration_to_nanoseconds(
+std::optional<std::int64_t> duration_to_nanoseconds(
     std::filesystem::file_time_type::duration duration) noexcept {
     using Duration = std::filesystem::file_time_type::duration;
     using Factor = std::ratio_divide<typename Duration::period, std::nano>;

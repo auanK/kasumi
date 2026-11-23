@@ -1,6 +1,6 @@
 # Kasumi
 
-Kasumi is multi-client bidirectional file synchronization with client-side encryption
+Kasumi is multi-device (multi-master) bidirectional file synchronization with client-side encryption
 over local or rclone-compatible shared storage, without a dedicated server.
 
 Written in C++23 for **Linux and Windows**, it works with local filesystems,
@@ -19,7 +19,7 @@ Interactive runs show live progress on one terminal line. Sync reports physical 
 
 ## Features
 
-- **Bidirectional, multi-client sync** across independently operated machines.
+- **Bidirectional, multi-device (multi-master) sync** across independently operated machines without a central server or global sync lock.
 - **Client-side encryption, authentication, and in-memory Zstandard compression** for file contents, Micro-Packs, chunks, and history.
 - **Adaptive storage layout** combining loose objects, `KPAK\x01` Micro-Packs for small files (`<= 256 KiB`), and FastCDC content-defined chunking (`> 8 MiB`) with block-level delta uploads and downloads.
 - **Configurable key storage (`vault`, `file`, `memory`)** supporting OS credential vaults (Windows Credential Manager, Linux Secret Service / KWallet), local `key.bin`, or stateless in-memory key derivation.
@@ -28,7 +28,7 @@ Interactive runs show live progress on one terminal line. Sync reports physical 
 - **Offline and shared operational traceability** recording local execution outcomes and accepted commit provenance in `db.sqlite`, plus immutable `KACT` v1 maintenance records (`fsck`, `gc`, writer/barrier removal) inspectable via `show [--full]`, `config`, `remote heads`/`commits`, and `remote summary [--full]` with zero extra remote requests during `sync`.
 - **Interrupted-operation recovery** through an authenticated transaction journal.
 - **Persistent BLAKE3 hash cache** shared by sync and read-only plan observation.
-- **Integrity, diagnostics, and maintenance tools** to inspect local environment, disk space, `rclone >= v1.60.0` availability, and profile health (`diagnostics [<profile>]`), run fast single-listing missing-object repair from verified local files (`sync --repair`), audit referenced content, packs, and chunks (`fsck`), consolidate fragmented Micro-Packs locally without remote downloads or deletions (`repack`), preview or run scheduled-safe garbage collection on authenticated orphan objects, expired commits behind Epochs, redundant CommitVariants, and pruned activities (`gc [--dry-run] [--min-age <hours>]`, with a fail-safe 6-hour default grace period and read-only `remote_busy` backoff), and guard missing-content resolution with preview/confirmation (`resolve-missing [--dry-run | --confirm]`).
+- **Integrity, diagnostics, and maintenance tools** to inspect local environment, disk space, `rclone >= v1.60.0` availability, and profile health (`diagnostics [<profile>]`), run fast single-listing missing-object repair from verified local files (`sync --repair`), audit referenced content, packs, and chunks (`fsck`), consolidate fragmented Micro-Packs locally without remote downloads or deletions (`repack`), preview or run exclusive garbage collection behind a remote maintenance barrier on authenticated orphan objects, expired commits behind Epochs, redundant CommitVariants, and pruned activities (`gc [--dry-run] [--min-age <hours>]`, with a fail-safe 6-hour default grace period and read-only `remote_busy` backoff when another device is actively syncing or running maintenance), and guard missing-content resolution with preview/confirmation (`resolve-missing [--dry-run | --confirm]`).
 - **Automation-friendly CLI** supporting `--json` (`schema_version: 1` with language-independent `error.code`, including preflight `insufficient_disk_space` and `io_error`), `--quiet`, and `--log-file <path>` (clean ANSI-free UTF-8 logs or NDJSON with `--json`) alongside `--full`.
 
 ## Quick Start
@@ -51,13 +51,13 @@ See [Security](docs/security.md) for the protection limits and key-loss risks.
 
 ## Download and Documentation
 
-Official x86_64 installers and portable binaries are published on [GitHub Releases](https://github.com/auanK/kasumi/releases):
+Official versioned x86_64 installers and portable binaries (`kasumi-v<version>-...`, keeping simple `kasumi` / `kasumi.exe` executable names inside) are published on [GitHub Releases](https://github.com/auanK/kasumi/releases):
 
-- **Windows:** `kasumi-windows-x86_64.msi` (installs to `C:\Program Files\Kasumi`, adds to System `PATH`, upgrades in-place) or portable `kasumi-windows-x86_64.zip`.
-- **Arch Linux:** `kasumi-linux-x86_64.pkg.tar.zst` (`sudo pacman -U kasumi-linux-x86_64.pkg.tar.zst`), plus [PKGBUILD](packaging/arch/PKGBUILD) for `makepkg -si`.
-- **Debian / Ubuntu:** `kasumi-linux-x86_64.deb` (`sudo apt install ./kasumi-linux-x86_64.deb`).
-- **Fedora / RHEL:** `kasumi-linux-x86_64.rpm` (`sudo dnf install --nogpgcheck ./kasumi-linux-x86_64.rpm`).
-- **Portable Linux:** `kasumi-linux-x86_64.tar.gz`.
+- **Windows:** `kasumi-v<version>-windows-x86_64.msi` (installs to `C:\Program Files\Kasumi`, adds to System `PATH`, detects existing installs and displays the version while upgrading in-place) or portable `kasumi-v<version>-windows-x86_64.zip`.
+- **Arch Linux:** `kasumi-v<version>-linux-x86_64.pkg.tar.zst` (`sudo pacman -U kasumi-v<version>-linux-x86_64.pkg.tar.zst`), plus [PKGBUILD](packaging/arch/PKGBUILD) for `makepkg -si`.
+- **Debian / Ubuntu:** `kasumi-v<version>-linux-x86_64.deb` (`sudo apt install ./kasumi-v<version>-linux-x86_64.deb`).
+- **Fedora / RHEL:** `kasumi-v<version>-linux-x86_64.rpm` (`sudo dnf install --nogpgcheck ./kasumi-v<version>-linux-x86_64.rpm`).
+- **Portable Linux:** `kasumi-v<version>-linux-x86_64.tar.gz`.
 
 For source builds, see [Build and Test](docs/build-and-test.md).
 
@@ -69,7 +69,7 @@ For source builds, see [Build and Test](docs/build-and-test.md).
 - [Architecture](docs/architecture.md) — components and their responsibilities.
 - [Changelog](CHANGELOG.md) and [Release Notes](RELEASE_NOTES.md) — changes and upgrade requirements.
 
-Use the same release on all clients; read the
+Use the same release on all devices; read the
 [upgrade precautions](docs/best-practices.md#upgrading-kasumi) before replacing binaries.
 Synchronization propagates deletions; keep independent backups. A sync that exits
 with code `2` is only partially complete; see

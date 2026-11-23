@@ -38,9 +38,8 @@ DWORD rename_windows_handle(HANDLE file,
     std::error_code path_error;
     const auto resolved = std::filesystem::absolute(target, path_error);
     if (path_error) {
-        return path_error.value() != 0
-                   ? static_cast<DWORD>(path_error.value())
-                   : ERROR_INVALID_NAME;
+        return path_error.value() != 0 ? static_cast<DWORD>(path_error.value())
+                                       : ERROR_INVALID_NAME;
     }
     const auto& name = resolved.native();
     if (name.size() >
@@ -186,7 +185,8 @@ sync_read_only_file(const std::filesystem::path& path) {
             native_error("sync_file: CreateFileW failed", ERROR_ACCESS_DENIED));
     }
     FILE_BASIC_INFO attributes{};
-    attributes.FileAttributes = info.FileAttributes & ~FILE_ATTRIBUTE_READONLY;
+    attributes.FileAttributes =
+        info.FileAttributes & ~DWORD{FILE_ATTRIBUTE_READONLY};
     if (attributes.FileAttributes == 0) {
         attributes.FileAttributes = FILE_ATTRIBUTE_NORMAL;
     }

@@ -204,10 +204,9 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         }
         bool dry_run = false;
         std::optional<std::uint32_t> min_age_hours;
-        const auto parse_hours = [](std::string_view value)
-            -> std::optional<std::uint32_t> {
-            if (value.empty() ||
-                !std::ranges::all_of(value, [](char ch) {
+        const auto parse_hours =
+            [](std::string_view value) -> std::optional<std::uint32_t> {
+            if (value.empty() || !std::ranges::all_of(value, [](char ch) {
                     return ch >= '0' && ch <= '9';
                 })) {
                 return std::nullopt;
@@ -239,8 +238,7 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                     }
                     value = argv[++i];
                 } else {
-                    value =
-                        flag.substr(std::string_view{"--min-age="}.size());
+                    value = flag.substr(std::string_view{"--min-age="}.size());
                 }
                 const auto parsed = parse_hours(value);
                 if (!parsed.has_value()) {
@@ -251,11 +249,11 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 return std::unexpected(ParseError{});
             }
         }
-        return application::Request{
-            .operation = application::Operation::GarbageCollect,
-            .profile_name = argv[2],
-            .dry_run = dry_run,
-            .gc_min_age_hours = min_age_hours};
+        return application::Request{.operation =
+                                        application::Operation::GarbageCollect,
+                                    .profile_name = argv[2],
+                                    .dry_run = dry_run,
+                                    .gc_min_age_hours = min_age_hours};
     }
     if (command == "repack") {
         if (argc < 3 || argc > 5 || !operand(argv[2])) {
@@ -276,11 +274,10 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
             }
             *found->second = true;
         }
-        return application::Request{
-            .operation = application::Operation::Repack,
-            .profile_name = argv[2],
-            .dry_run = dry_run,
-            .reclaim_dirty = reclaim_dirty};
+        return application::Request{.operation = application::Operation::Repack,
+                                    .profile_name = argv[2],
+                                    .dry_run = dry_run,
+                                    .reclaim_dirty = reclaim_dirty};
     }
     if (command == "resolve-missing") {
         if (argc == 3 && operand(argv[2])) {

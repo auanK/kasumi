@@ -16,7 +16,8 @@ std::string format_utc_timestamp(std::int64_t unix_seconds,
                                  bool include_seconds = true);
 
 // Formats a Unix timestamp in local time with explicit "±HH:MM" UTC offset.
-// Falls back to UTC ("+00:00") if local conversion fails. Returns "-" when <= 0.
+// Falls back to UTC ("+00:00") if local conversion fails. Returns "-" when <=
+// 0.
 std::string format_local_timestamp(std::int64_t unix_seconds,
                                    bool include_seconds = true);
 

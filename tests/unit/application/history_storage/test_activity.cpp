@@ -1,5 +1,4 @@
 #include "application/history_storage/activity.hpp"
-
 #include "application/history_storage/remote_layout.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/path.hpp"
@@ -83,12 +82,9 @@ TEST(HistoryStorageActivityTest, CodecRoundTripsAndRejectsMalformedRecords) {
 
 TEST(HistoryStorageActivityTest,
      PublishLoadAndRejectsCorruptOrMismatchedObjects) {
-    auto workspace =
-        kasumi::test::make_temp_workspace("activity-publish-load");
-    const auto remote_dir =
-        kasumi::test::workspace_path(workspace, "remote");
-    const auto scratch =
-        kasumi::test::workspace_path(workspace, "scratch");
+    auto workspace = kasumi::test::make_temp_workspace("activity-publish-load");
+    const auto remote_dir = kasumi::test::workspace_path(workspace, "remote");
+    const auto scratch = kasumi::test::workspace_path(workspace, "scratch");
     std::filesystem::create_directories(remote_dir);
     std::filesystem::create_directories(scratch);
 
@@ -136,7 +132,8 @@ TEST(HistoryStorageActivityTest,
                   static_cast<std::streamsize>(wrong_purpose->size()));
     }
     const auto mismatched_id =
-        object_identifier(layout, 1700000300, "cccccccccccccccccccccccccccccccc")
+        object_identifier(
+            layout, 1700000300, "cccccccccccccccccccccccccccccccc")
             .value();
     ASSERT_TRUE(transport::put(storage, temp, bad_name));
     ASSERT_TRUE(transport::put(storage, temp, mismatched_id));
@@ -165,30 +162,39 @@ TEST(HistoryStorageActivityTest,
         auto id = object_identifier(layout, ts, hex).value();
         return LoadedActivity{
             .identifier = id,
-            .record = make_sample(
-                hex, ActivityOperation::Fsck, outcome, ts, machine),
+            .record =
+                make_sample(hex, ActivityOperation::Fsck, outcome, ts, machine),
         };
     };
 
     // Machine A: 4 old runs (oldest is Succeeded, newer 3 are Failed).
-    // Keep newest 2 by depth (hex3, hex2), prune hex1, KEEP hex0 (latest Succeeded).
-    const auto a3 = make_loaded("00000000000000000000000000000003",
-                                ActivityOutcome::Failed, old + 30);
-    const auto a2 = make_loaded("00000000000000000000000000000002",
-                                ActivityOutcome::Failed, old + 20);
-    const auto a1 = make_loaded("00000000000000000000000000000001",
-                                ActivityOutcome::Failed, old + 10);
-    const auto a0 = make_loaded("00000000000000000000000000000000",
-                                ActivityOutcome::Succeeded, old);
+    // Keep newest 2 by depth (hex3, hex2), prune hex1, KEEP hex0 (latest
+    // Succeeded).
+    const auto a3 = make_loaded(
+        "00000000000000000000000000000003", ActivityOutcome::Failed, old + 30);
+    const auto a2 = make_loaded(
+        "00000000000000000000000000000002", ActivityOutcome::Failed, old + 20);
+    const auto a1 = make_loaded(
+        "00000000000000000000000000000001", ActivityOutcome::Failed, old + 10);
+    const auto a0 = make_loaded(
+        "00000000000000000000000000000000", ActivityOutcome::Succeeded, old);
     // Machine B: all 4 within age window or future clock skew -> none pruned.
     const auto b0 = make_loaded("10000000000000000000000000000000",
-                                ActivityOutcome::Succeeded, recent, 0x43);
+                                ActivityOutcome::Succeeded,
+                                recent,
+                                0x43);
     const auto b1 = make_loaded("10000000000000000000000000000001",
-                                ActivityOutcome::Succeeded, recent + 10, 0x43);
+                                ActivityOutcome::Succeeded,
+                                recent + 10,
+                                0x43);
     const auto b2 = make_loaded("10000000000000000000000000000002",
-                                ActivityOutcome::Succeeded, recent + 20, 0x43);
+                                ActivityOutcome::Succeeded,
+                                recent + 20,
+                                0x43);
     const auto b3 = make_loaded("10000000000000000000000000000003",
-                                ActivityOutcome::Succeeded, now + 600, 0x43);
+                                ActivityOutcome::Succeeded,
+                                now + 600,
+                                0x43);
 
     const std::vector<LoadedActivity> items{a3, a2, a1, a0, b3, b2, b1, b0};
     const auto pruned = plan_pruning(items, policy, now);

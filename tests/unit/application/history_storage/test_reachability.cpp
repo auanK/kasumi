@@ -785,15 +785,13 @@ fake_reachability_get_batch(void* context,
                     test_key())
                     .commits_prefix)) {
             --fake_state(context)->commit_get_count;
-        } else if (source.starts_with(
-                       kasumi::application::history_storage::derive_remote_layout(
-                           test_key())
-                           .heads_prefix)) {
+        } else if (source.starts_with(kasumi::application::history_storage::
+                                          derive_remote_layout(test_key())
+                                              .heads_prefix)) {
             --fake_state(context)->marker_get_count;
-        } else if (source.starts_with(
-                       kasumi::application::history_storage::derive_remote_layout(
-                           test_key())
-                           .epochs_prefix)) {
+        } else if (source.starts_with(kasumi::application::history_storage::
+                                          derive_remote_layout(test_key())
+                                              .epochs_prefix)) {
             --fake_state(context)->epoch_get_count;
         }
         fake_state(context)->remote_events.pop_back();
@@ -1207,10 +1205,10 @@ TEST(ReachabilityTest,
     const auto r0 = publish(storage, c0);
     const auto r1 = publish(storage, c1);
     const auto r2 = publish(storage, c2);
-    ASSERT_TRUE(kasumi::transport::remove(storage.transport,
-                                          marker_path(r0.head)));
-    ASSERT_TRUE(kasumi::transport::remove(storage.transport,
-                                          marker_path(r1.head)));
+    ASSERT_TRUE(
+        kasumi::transport::remove(storage.transport, marker_path(r0.head)));
+    ASSERT_TRUE(
+        kasumi::transport::remove(storage.transport, marker_path(r1.head)));
 
     const epoch::Epoch ep{
         .vault_id = std::string(64, 'c'),
@@ -1220,15 +1218,15 @@ TEST(ReachabilityTest,
         .anchors = {epoch::Anchor{.commit_id = commit_id(c1), .height = 1}},
     };
     const auto sealed = epoch::seal(ep, test_key()).value();
-    ASSERT_TRUE(epoch::publish(
-        storage.transport,
-        test_key(),
-        sealed,
-        kasumi::test::workspace_root(storage.workspace)));
+    ASSERT_TRUE(
+        epoch::publish(storage.transport,
+                       test_key(),
+                       sealed,
+                       kasumi::test::workspace_root(storage.workspace)));
 
     // Simulate expired commit GC removing c0 strictly behind the Epoch anchor.
-    ASSERT_TRUE(kasumi::transport::remove(storage.transport,
-                                          object_path(r0.head)));
+    ASSERT_TRUE(
+        kasumi::transport::remove(storage.transport, object_path(r0.head)));
 
     const auto inv =
         kasumi::application::history_storage::inventory_reachability(
@@ -1240,19 +1238,18 @@ TEST(ReachabilityTest,
     EXPECT_TRUE(inv->missing_parent_ids.empty());
     EXPECT_TRUE(inv->orphan_commits.empty());
 
-    const auto loaded =
-        kasumi::application::history_storage::load_history(
-            storage.transport,
-            test_key(),
-            kasumi::test::workspace_root(storage.workspace));
+    const auto loaded = kasumi::application::history_storage::load_history(
+        storage.transport,
+        test_key(),
+        kasumi::test::workspace_root(storage.workspace));
     ASSERT_TRUE(loaded.has_value()) << loaded.error().detail;
     EXPECT_EQ(loaded->marked_heads,
               std::vector<std::string>{r2.head.commit_id});
 
-    const auto chain = epoch::load_chain(
-        storage.transport,
-        test_key(),
-        kasumi::test::workspace_root(storage.workspace));
+    const auto chain =
+        epoch::load_chain(storage.transport,
+                          test_key(),
+                          kasumi::test::workspace_root(storage.workspace));
     ASSERT_TRUE(chain.has_value()) << chain.error().detail;
     ASSERT_EQ(chain->size(), 1U);
 }

@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  configure)
+    ver=""
+    if [ -x /usr/bin/kasumi ]; then
+      ver="$(/usr/bin/kasumi --version 2>/dev/null | awk '{print $NF}')"
+    fi
+    if [ -n "${2:-}" ]; then
+      echo "kasumi: upgraded v${2} -> v${ver:-unknown} (profiles preserved)"
+    else
+      echo "kasumi: installed v${ver:-unknown} (/usr/bin/kasumi)"
+    fi
+    ;;
+esac
+
+exit 0

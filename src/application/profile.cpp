@@ -902,12 +902,13 @@ create_profile(const ExecutionEnvironment& environment,
 struct ScopedProfileLock {
     std::intptr_t handle = -1;
     ScopedProfileLock() = default;
-    explicit ScopedProfileLock(std::intptr_t value) noexcept
-        : handle(value) {}
+    explicit ScopedProfileLock(std::intptr_t value) noexcept : handle(value) {
+    }
     ScopedProfileLock(const ScopedProfileLock&) = delete;
     ScopedProfileLock& operator=(const ScopedProfileLock&) = delete;
     ScopedProfileLock(ScopedProfileLock&& other) noexcept
-        : handle(std::exchange(other.handle, -1)) {}
+        : handle(std::exchange(other.handle, -1)) {
+    }
     ScopedProfileLock& operator=(ScopedProfileLock&& other) noexcept {
         if (this != &other) {
             if (handle >= 0) {
@@ -943,10 +944,10 @@ acquire_target_profile_lock(const ExecutionEnvironment& environment,
                            ("profile-" + std::string(profile_name) + ".lock");
     auto profile_lock = platform::acquire_profile_lock(lock_path);
     if (!profile_lock) {
-        return fail_profile(
-            ProfileErrorCode::LockFailure,
-            format_profile_lock_error(
-                environment, profile_name, profile_lock.error()));
+        return fail_profile(ProfileErrorCode::LockFailure,
+                            format_profile_lock_error(environment,
+                                                      profile_name,
+                                                      profile_lock.error()));
     }
     return ScopedProfileLock{*profile_lock};
 }
@@ -973,8 +974,7 @@ update_profile(const ExecutionEnvironment& environment, Profile profile) {
 
     const auto old_storage = it->key_storage;
     const auto new_storage = to_runtime_key_storage(profile.key_storage);
-    auto profile_lock =
-        acquire_target_profile_lock(environment, profile.name);
+    auto profile_lock = acquire_target_profile_lock(environment, profile.name);
     if (!profile_lock) {
         return std::unexpected(profile_lock.error());
     }
@@ -1129,8 +1129,7 @@ delete_profile(const ExecutionEnvironment& environment,
         return fail_profile(ProfileErrorCode::NotFound, "profile not found");
     }
 
-    auto profile_lock =
-        acquire_target_profile_lock(environment, profile_name);
+    auto profile_lock = acquire_target_profile_lock(environment, profile_name);
     if (!profile_lock) {
         return std::unexpected(profile_lock.error());
     }
@@ -1196,8 +1195,7 @@ rename_profile(const ExecutionEnvironment& environment,
         current_name <= new_name ? current_name : new_name;
     const auto second_lock_name =
         current_name <= new_name ? new_name : current_name;
-    auto first_lock =
-        acquire_target_profile_lock(environment, first_lock_name);
+    auto first_lock = acquire_target_profile_lock(environment, first_lock_name);
     if (!first_lock) {
         return std::unexpected(first_lock.error());
     }
@@ -2208,7 +2206,8 @@ inspect_profile_activity(const ExecutionEnvironment& environment,
             .commit_id = meta.commit_id,
             .height = meta.height,
             .created_at = meta.created_at,
-            .origin_operation = static_cast<std::uint8_t>(meta.origin_operation),
+            .origin_operation =
+                static_cast<std::uint8_t>(meta.origin_operation),
             .machine_id_hex = meta.machine_id_hex,
             .machine_name = meta.machine_name,
             .accepted_at = meta.accepted_at,

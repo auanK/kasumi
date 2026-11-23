@@ -2,10 +2,10 @@
 #include "application/integrity/maintenance.hpp"
 #include "application/use_cases/context.hpp"
 #include "platform/path.hpp"
+#include "process_crash_test_hook.hpp"
 #include "runtime/vault.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
-#include "process_crash_test_hook.hpp"
 #ifdef KASUMI_MUTATION_FAULT_TESTS
 #include "application/sync/mutation_fault_test.hpp"
 #endif
@@ -54,43 +54,57 @@ std::filesystem::path environment_path(const char* name) {
 kasumi::transport::Transport crash_storage(kasumi::transport::Transport& base) {
     using namespace kasumi::transport;
     return Transport{
-        .state = TransportStateHandle{&base, [](void*) noexcept {}},
+        .state = TransportStateHandle{&base,
+                                      [](void*) noexcept {
+                                      }},
         .storage = StorageOperations{
-            .initialize = [](void* state) {
-                return initialize(*static_cast<Transport*>(state));
-            },
-            .put = [](void* state, const std::filesystem::path& source,
-                      std::string_view identifier) {
-                auto result = put(*static_cast<Transport*>(state), source,
-                                  identifier);
-                if (result) {
-                    kasumi::platform::process_crash_test_hook::pause_at(
-                        "transport.put", identifier);
-                }
-                return result;
-            },
-            .get = [](void* state, std::string_view identifier,
-                      const std::filesystem::path& destination) {
-                return get(*static_cast<Transport*>(state), identifier,
-                           destination);
-            },
-            .presence = [](void* state, std::string_view identifier) {
-                return presence(*static_cast<Transport*>(state), identifier);
-            },
-            .list = [](void* state) {
-                return list(*static_cast<Transport*>(state));
-            },
-            .list_prefix = [](void* state, std::string_view prefix) {
-                return list(*static_cast<Transport*>(state), prefix);
-            },
-            .remove = [](void* state, std::string_view identifier) {
-                auto result = remove(*static_cast<Transport*>(state), identifier);
-                if (result && *result == Removal::Removed) {
-                    kasumi::platform::process_crash_test_hook::pause_at(
-                        "transport.remove", identifier);
-                }
-                return result;
-            },
+            .initialize =
+                [](void* state) {
+                    return initialize(*static_cast<Transport*>(state));
+                },
+            .put =
+                [](void* state,
+                   const std::filesystem::path& source,
+                   std::string_view identifier) {
+                    auto result = put(
+                        *static_cast<Transport*>(state), source, identifier);
+                    if (result) {
+                        kasumi::platform::process_crash_test_hook::pause_at(
+                            "transport.put", identifier);
+                    }
+                    return result;
+                },
+            .get =
+                [](void* state,
+                   std::string_view identifier,
+                   const std::filesystem::path& destination) {
+                    return get(*static_cast<Transport*>(state),
+                               identifier,
+                               destination);
+                },
+            .presence =
+                [](void* state, std::string_view identifier) {
+                    return presence(*static_cast<Transport*>(state),
+                                    identifier);
+                },
+            .list =
+                [](void* state) {
+                    return list(*static_cast<Transport*>(state));
+                },
+            .list_prefix =
+                [](void* state, std::string_view prefix) {
+                    return list(*static_cast<Transport*>(state), prefix);
+                },
+            .remove =
+                [](void* state, std::string_view identifier) {
+                    auto result =
+                        remove(*static_cast<Transport*>(state), identifier);
+                    if (result && *result == Removal::Removed) {
+                        kasumi::platform::process_crash_test_hook::pause_at(
+                            "transport.remove", identifier);
+                    }
+                    return result;
+                },
         },
     };
 }
@@ -167,7 +181,8 @@ int main() {
         kasumi::application::integrity::GarbageCollectOptions{
             .min_orphan_age = std::chrono::seconds{0}},
         [&](const kasumi::application::GarbageCollectProgress& progress) {
-            if (progress.stage == kasumi::application::GarbageCollectStage::Analyzing) {
+            if (progress.stage ==
+                kasumi::application::GarbageCollectStage::Analyzing) {
                 kasumi::platform::process_crash_test_hook::pause_at(
                     "gc.barrier.acquired", layout.barrier_identifier);
             }

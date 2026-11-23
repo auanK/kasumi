@@ -1,6 +1,5 @@
-#include "application/profile.hpp"
-
 #include "application/detail.hpp"
+#include "application/profile.hpp"
 #include "platform/path.hpp"
 #include "platform/profile_lock.hpp"
 #include "runtime/paths.hpp"
@@ -57,14 +56,14 @@ bool is_rclone_location(std::string_view location) noexcept {
 
 bool check_directory_writable(const std::filesystem::path& dir) noexcept {
 #if defined(_WIN32)
-    const HANDLE handle = CreateFileW(
-        dir.c_str(),
-        FILE_ADD_FILE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-        nullptr);
+    const HANDLE handle =
+        CreateFileW(dir.c_str(),
+                    FILE_ADD_FILE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                    nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         return false;
     }
@@ -114,7 +113,8 @@ void append_reason(std::string& detail, std::string_view reason) {
 std::expected<DiagnosticsReport, ProfileError>
 collect_diagnostics(const ExecutionEnvironment& environment,
                     std::string_view profile_name) {
-    if (!profile_name.empty() && !runtime::is_valid_profile_name(profile_name)) {
+    if (!profile_name.empty() &&
+        !runtime::is_valid_profile_name(profile_name)) {
         return std::unexpected(ProfileError{
             .code = ProfileErrorCode::InvalidName,
             .detail = "invalid profile name",
@@ -128,7 +128,8 @@ collect_diagnostics(const ExecutionEnvironment& environment,
 
     std::vector<Profile> selected;
     if (!profile_name.empty()) {
-        const auto it = std::ranges::find(*profiles, profile_name, &Profile::name);
+        const auto it =
+            std::ranges::find(*profiles, profile_name, &Profile::name);
         if (it == profiles->end()) {
             return std::unexpected(ProfileError{
                 .code = ProfileErrorCode::NotFound,
@@ -187,21 +188,21 @@ collect_diagnostics(const ExecutionEnvironment& environment,
                                 !std::filesystem::is_symlink(local_status) &&
                                 std::filesystem::is_directory(local_status);
         if (diag.local_dir_exists) {
-            diag.local_dir_writable = check_directory_writable(profile.local_dir);
+            diag.local_dir_writable =
+                check_directory_writable(profile.local_dir);
             if (const auto space = safe_space_info(profile.local_dir)) {
                 diag.local_free_bytes = to_space_u64(space->available);
                 diag.local_capacity_bytes = to_space_u64(space->capacity);
             }
         }
 
-        const auto lock_path = environment.app_data_dir /
-                               ("profile-" + profile.name + ".lock");
-        diag.lock_active =
-            (diag.local_state == ProfileLocalState::Running) ||
-            platform::is_profile_lock_held(lock_path);
+        const auto lock_path =
+            environment.app_data_dir / ("profile-" + profile.name + ".lock");
+        diag.lock_active = (diag.local_state == ProfileLocalState::Running) ||
+                           platform::is_profile_lock_held(lock_path);
 
-        const auto profile_paths =
-            runtime::resolve_profile_paths(environment.app_data_dir, profile.name);
+        const auto profile_paths = runtime::resolve_profile_paths(
+            environment.app_data_dir, profile.name);
         if (profile_paths) {
             std::error_code journal_error;
             const auto journal_status = std::filesystem::symlink_status(
@@ -209,8 +210,8 @@ collect_diagnostics(const ExecutionEnvironment& environment,
                 journal_error);
             diag.journal_present =
                 diag.local_problem == ProfileLocalProblem::Journal ||
-                (!journal_error &&
-                 journal_status.type() != std::filesystem::file_type::not_found);
+                (!journal_error && journal_status.type() !=
+                                       std::filesystem::file_type::not_found);
         } else {
             diag.journal_present =
                 diag.local_problem == ProfileLocalProblem::Journal;
@@ -245,7 +246,8 @@ collect_diagnostics(const ExecutionEnvironment& environment,
                    issues.empty()) {
             append_reason(issues, "local profile state problem");
         }
-        if (diag.uses_rclone && (!report.rclone.found || !report.rclone.meets_minimum)) {
+        if (diag.uses_rclone &&
+            (!report.rclone.found || !report.rclone.meets_minimum)) {
             append_reason(issues,
                           report.rclone.detail.empty()
                               ? "rclone toolchain unavailable"
