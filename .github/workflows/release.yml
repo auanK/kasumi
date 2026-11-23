@@ -33,7 +33,7 @@ jobs:
           fi
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cmake ninja-build gcc-14 g++-14 git \
-            gnome-keyring libsecret-1-0 dbus-x11
+            gnome-keyring libsecret-1-0 dbus-x11 dpkg-dev rpm file zstd
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 --slave /usr/bin/g++ g++ /usr/bin/g++-14
           sudo update-alternatives --set gcc /usr/bin/gcc-14
 
@@ -75,12 +75,30 @@ jobs:
 
       - name: Package
         run: |
+          VERSION="$(python3 -c 'import re; print(re.search(r"project\(kasumi\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)", open("CMakeLists.txt").read()).group(1))')"
           mkdir -p package
           cp build/kasumi LICENSE THIRD_PARTY_NOTICES.md package/
           cd package
           tar -czf ../kasumi-linux-x86_64.tar.gz kasumi LICENSE THIRD_PARTY_NOTICES.md
           cd ..
           sha256sum kasumi-linux-x86_64.tar.gz > kasumi-linux-x86_64.tar.gz.sha256
+
+          mkdir -p cpack-out
+          cpack --config build/CPackConfig.cmake -G DEB -B cpack-out
+          cpack --config build/CPackConfig.cmake -G RPM -B cpack-out
+          mv cpack-out/kasumi-linux-x86_64.deb cpack-out/kasumi-linux-x86_64.rpm .
+          rm -rf cpack-out
+
+          python3 scripts/build_arch_package.py \
+            --binary build/kasumi \
+            --version "$VERSION" \
+            --output kasumi-linux-x86_64.pkg.tar.zst
+
+          for pkg in kasumi-linux-x86_64.deb kasumi-linux-x86_64.rpm kasumi-linux-x86_64.pkg.tar.zst; do
+            test -s "$pkg"
+            sha256sum "$pkg" > "$pkg.sha256"
+          done
+          ls -la kasumi-linux-x86_64.*
 
       - name: Release Gate - Verify Package
         env:
@@ -95,6 +113,47 @@ jobs:
             --ref-type "$KASUMI_RELEASE_REF_TYPE" \
             --ref-name "$KASUMI_RELEASE_REF_NAME"
 
+      - name: Release Gate - Verify Native Linux Installers
+        run: |
+          VERSION="$(python3 -c 'import re; print(re.search(r"project\(kasumi\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)", open("CMakeLists.txt").read()).group(1))')"
+          sha256sum -c kasumi-linux-x86_64.deb.sha256 kasumi-linux-x86_64.rpm.sha256 kasumi-linux-x86_64.pkg.tar.zst.sha256
+
+          dpkg-deb --info kasumi-linux-x86_64.deb
+          sudo dpkg -i kasumi-linux-x86_64.deb
+          test "$(/usr/bin/kasumi --version)" = "kasumi version $VERSION"
+          test -f /usr/share/doc/kasumi/LICENSE
+          test -f /usr/share/doc/kasumi/THIRD_PARTY_NOTICES.md
+          sudo dpkg -i kasumi-linux-x86_64.deb
+          test "$(/usr/bin/kasumi --version)" = "kasumi version $VERSION"
+          sudo dpkg -r kasumi
+          test ! -e /usr/bin/kasumi
+
+          docker run --rm -v "$PWD:/work:ro" archlinux:latest bash -euo pipefail -c "
+            pacman -U --noconfirm /work/kasumi-linux-x86_64.pkg.tar.zst
+            test \"\$(/usr/bin/kasumi --version)\" = \"kasumi version $VERSION\"
+            test -f /usr/share/licenses/kasumi/LICENSE
+            test -f /usr/share/licenses/kasumi/THIRD_PARTY_NOTICES.md
+            pacman -Qk kasumi
+            pacman -U --noconfirm /work/kasumi-linux-x86_64.pkg.tar.zst
+            test \"\$(/usr/bin/kasumi --version)\" = \"kasumi version $VERSION\"
+            pacman -R --noconfirm kasumi
+            test ! -e /usr/bin/kasumi
+          "
+
+          docker run --rm -v "$PWD:/work:ro" fedora:latest bash -euo pipefail -c "
+            rpm --version
+            rpm -qpi --nosignature /work/kasumi-linux-x86_64.rpm
+            rpm -Uvh --nosignature /work/kasumi-linux-x86_64.rpm
+            test \"\$(/usr/bin/kasumi --version)\" = \"kasumi version $VERSION\"
+            test -f /usr/share/doc/kasumi/LICENSE
+            test -f /usr/share/doc/kasumi/THIRD_PARTY_NOTICES.md
+            rpm -V --nosignature kasumi
+            rpm -Uvh --nosignature --replacepkgs /work/kasumi-linux-x86_64.rpm
+            test \"\$(/usr/bin/kasumi --version)\" = \"kasumi version $VERSION\"
+            rpm -e kasumi
+            test ! -e /usr/bin/kasumi
+          "
+
       - name: Upload Artifact
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
@@ -102,6 +161,12 @@ jobs:
           path: |
             kasumi-linux-x86_64.tar.gz
             kasumi-linux-x86_64.tar.gz.sha256
+            kasumi-linux-x86_64.deb
+            kasumi-linux-x86_64.deb.sha256
+            kasumi-linux-x86_64.rpm
+            kasumi-linux-x86_64.rpm.sha256
+            kasumi-linux-x86_64.pkg.tar.zst
+            kasumi-linux-x86_64.pkg.tar.zst.sha256
 
   build-windows:
     name: Windows (x86_64)
@@ -178,15 +243,44 @@ jobs:
               }
           }
 
+      - name: Install WiX Toolset
+        shell: powershell
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
+          wix --version
+          wix extension add -g WixToolset.UI.wixext/5.0.2
+          if ($LASTEXITCODE -ne 0) { throw "Failed to add WixToolset.UI.wixext" }
+
       - name: Package
         shell: powershell
         run: |
+          $cmakeText = Get-Content -LiteralPath CMakeLists.txt -Raw
+          if ($cmakeText -notmatch '(?im)^\s*project\(kasumi\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)') {
+              throw "Failed to parse version from CMakeLists.txt"
+          }
+          $version = $Matches[1]
+
           New-Item -ItemType Directory -Path package
           Copy-Item build-release/Release/kasumi.exe package/
           Copy-Item LICENSE, THIRD_PARTY_NOTICES.md package/
           Compress-Archive -Path package/* -DestinationPath kasumi-windows-x86_64.zip
           $hash = (Get-FileHash kasumi-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
           "$hash *kasumi-windows-x86_64.zip" | Out-File -FilePath kasumi-windows-x86_64.zip.sha256 -Encoding ascii
+
+          $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
+          wix build packaging/wix/kasumi.wxs `
+            -arch x64 `
+            -ext WixToolset.UI.wixext/5.0.2 `
+            -d "ProductVersion=$version" `
+            -d "BinPath=build-release/Release/kasumi.exe" `
+            -d "LicensePath=LICENSE" `
+            -d "NoticesPath=THIRD_PARTY_NOTICES.md" `
+            -d "LicenseRtf=packaging/wix/LICENSE.rtf" `
+            -o kasumi-windows-x86_64.msi
+          if ($LASTEXITCODE -ne 0) { throw "wix build failed with code $LASTEXITCODE" }
+          $msiHash = (Get-FileHash kasumi-windows-x86_64.msi -Algorithm SHA256).Hash.ToLower()
+          "$msiHash *kasumi-windows-x86_64.msi" | Out-File -FilePath kasumi-windows-x86_64.msi.sha256 -Encoding ascii
 
       - name: Release Gate - Verify Package
         shell: powershell
@@ -203,6 +297,79 @@ jobs:
             --ref-name $env:KASUMI_RELEASE_REF_NAME
           if ($LASTEXITCODE -ne 0) { throw "Release package verification failed with code $LASTEXITCODE" }
 
+      - name: Release Gate - Verify Windows MSI Installer
+        shell: powershell
+        run: |
+          $cmakeText = Get-Content -LiteralPath CMakeLists.txt -Raw
+          if ($cmakeText -notmatch '(?im)^\s*project\(kasumi\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)') {
+              throw "Failed to parse version from CMakeLists.txt"
+          }
+          $version = $Matches[1]
+
+          $expectedMsiHash = ((Get-Content -LiteralPath kasumi-windows-x86_64.msi.sha256 -Raw).Trim() -split '\s+')[0].ToLower()
+          $actualMsiHash = (Get-FileHash -LiteralPath kasumi-windows-x86_64.msi -Algorithm SHA256).Hash.ToLower()
+          if ($actualMsiHash -ne $expectedMsiHash) {
+              throw "MSI SHA-256 mismatch: expected $expectedMsiHash, got $actualMsiHash"
+          }
+
+          $installDir = "C:\Program Files\Kasumi"
+          $msiPath = (Resolve-Path -LiteralPath kasumi-windows-x86_64.msi).Path
+
+          function Get-MachinePathEntries {
+              $raw = [Environment]::GetEnvironmentVariable("Path", "Machine")
+              if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
+              return @($raw.Split(';', [System.StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { $_.Trim().TrimEnd('\') })
+          }
+
+          function Invoke-MsiExec([string[]]$MsiArgs, [string]$LogPath) {
+              $proc = Start-Process -FilePath msiexec.exe -ArgumentList ($MsiArgs + @("/l*v", $LogPath)) -Wait -PassThru
+              if ($proc.ExitCode -ne 0) {
+                  if (Test-Path -LiteralPath $LogPath) {
+                      Get-Content -LiteralPath $LogPath -Tail 80 | Write-Host
+                  }
+                  throw "msiexec failed with exit code $($proc.ExitCode)"
+              }
+          }
+
+          Invoke-MsiExec @("/i", $msiPath, "/qn") "$PWD\msi-install.log"
+          foreach ($f in @("kasumi.exe", "LICENSE", "THIRD_PARTY_NOTICES.md")) {
+              if (-not (Test-Path -LiteralPath (Join-Path $installDir $f) -PathType Leaf)) {
+                  throw "Missing installed file: $f"
+              }
+          }
+          $pathHits = @(Get-MachinePathEntries | Where-Object { $_ -ieq $installDir })
+          if ($pathHits.Count -ne 1) {
+              throw "Expected $installDir once in Machine PATH after install, found $($pathHits.Count)"
+          }
+          $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+          $resolvedExe = (Get-Command kasumi.exe -ErrorAction Stop).Source
+          if ($resolvedExe -notlike "$installDir\*") {
+              throw "kasumi.exe resolved to unexpected path: $resolvedExe"
+          }
+          $outVersion = (& kasumi.exe --version).Trim()
+          if ($outVersion -ne "kasumi version $version") {
+              throw "Installed kasumi --version returned '$outVersion', expected 'kasumi version $version'"
+          }
+
+          Invoke-MsiExec @("/i", $msiPath, "/qn") "$PWD\msi-upgrade.log"
+          $pathHitsAfterUpgrade = @(Get-MachinePathEntries | Where-Object { $_ -ieq $installDir })
+          if ($pathHitsAfterUpgrade.Count -ne 1) {
+              throw "Expected $installDir once in Machine PATH after upgrade, found $($pathHitsAfterUpgrade.Count)"
+          }
+          $outVersionUpgrade = (& (Join-Path $installDir "kasumi.exe") --version).Trim()
+          if ($outVersionUpgrade -ne "kasumi version $version") {
+              throw "Upgraded kasumi --version returned '$outVersionUpgrade'"
+          }
+
+          Invoke-MsiExec @("/x", $msiPath, "/qn") "$PWD\msi-uninstall.log"
+          if (Test-Path -LiteralPath (Join-Path $installDir "kasumi.exe")) {
+              throw "kasumi.exe still present after MSI uninstall"
+          }
+          $pathHitsAfterUninstall = @(Get-MachinePathEntries | Where-Object { $_ -ieq $installDir })
+          if ($pathHitsAfterUninstall.Count -ne 0) {
+              throw "Expected $installDir removed from Machine PATH after uninstall, found $($pathHitsAfterUninstall.Count)"
+          }
+
       - name: Upload Artifact
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
@@ -210,6 +377,8 @@ jobs:
           path: |
             kasumi-windows-x86_64.zip
             kasumi-windows-x86_64.zip.sha256
+            kasumi-windows-x86_64.msi
+            kasumi-windows-x86_64.msi.sha256
 
   publish:
     name: Publish Release
@@ -241,8 +410,18 @@ jobs:
         run: |
           cd dist
           sha256sum -c kasumi-linux-x86_64.tar.gz.sha256
+          sha256sum -c kasumi-linux-x86_64.deb.sha256
+          sha256sum -c kasumi-linux-x86_64.rpm.sha256
+          sha256sum -c kasumi-linux-x86_64.pkg.tar.zst.sha256
           sha256sum -c kasumi-windows-x86_64.zip.sha256
-          cat kasumi-linux-x86_64.tar.gz.sha256 kasumi-windows-x86_64.zip.sha256 > SHA256SUMS.txt
+          sha256sum -c kasumi-windows-x86_64.msi.sha256
+          cat \
+            kasumi-linux-x86_64.tar.gz.sha256 \
+            kasumi-linux-x86_64.deb.sha256 \
+            kasumi-linux-x86_64.rpm.sha256 \
+            kasumi-linux-x86_64.pkg.tar.zst.sha256 \
+            kasumi-windows-x86_64.zip.sha256 \
+            kasumi-windows-x86_64.msi.sha256 > SHA256SUMS.txt
           sha256sum -c SHA256SUMS.txt
           ls -la
 
@@ -251,7 +430,11 @@ jobs:
         with:
           subject-path: |
             dist/kasumi-linux-x86_64.tar.gz
+            dist/kasumi-linux-x86_64.deb
+            dist/kasumi-linux-x86_64.rpm
+            dist/kasumi-linux-x86_64.pkg.tar.zst
             dist/kasumi-windows-x86_64.zip
+            dist/kasumi-windows-x86_64.msi
             dist/SHA256SUMS.txt
 
       - name: Create GitHub Release
@@ -261,8 +444,16 @@ jobs:
           files: |
             dist/kasumi-linux-x86_64.tar.gz
             dist/kasumi-linux-x86_64.tar.gz.sha256
+            dist/kasumi-linux-x86_64.deb
+            dist/kasumi-linux-x86_64.deb.sha256
+            dist/kasumi-linux-x86_64.rpm
+            dist/kasumi-linux-x86_64.rpm.sha256
+            dist/kasumi-linux-x86_64.pkg.tar.zst
+            dist/kasumi-linux-x86_64.pkg.tar.zst.sha256
             dist/kasumi-windows-x86_64.zip
             dist/kasumi-windows-x86_64.zip.sha256
+            dist/kasumi-windows-x86_64.msi
+            dist/kasumi-windows-x86_64.msi.sha256
             dist/SHA256SUMS.txt
           body_path: RELEASE_NOTES.md
           prerelease: ${{ contains(github.ref_name, '-') }}

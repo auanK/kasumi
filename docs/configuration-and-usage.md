@@ -145,12 +145,20 @@ its current work; a no-op is not a full integrity audit. See
 
 ### Updating Kasumi
 
-Download the new archive and its SHA-256 checksum from
+Download the new installer or portable archive and its SHA-256 checksum from
 [GitHub Releases](https://github.com/auanK/kasumi/releases), then
-[verify the archive checksum and provenance attestation](getting-started.md#verify-downloads).
-Stop Kasumi and replace the executable manually with the one from the verified
-archive. Read [Upgrading Kasumi](best-practices.md#upgrading-kasumi) for
-compatibility and backup precautions before replacing binaries.
+[verify the checksum and provenance attestation](getting-started.md#verify-downloads).
+Read [Upgrading Kasumi](best-practices.md#upgrading-kasumi) for compatibility and
+backup precautions before upgrading:
+
+- **Native installers (in-place upgrade):** Stop running Kasumi operations and
+  run the verified package (`kasumi-windows-x86_64.msi` on Windows,
+  `sudo pacman -U kasumi-linux-x86_64.pkg.tar.zst` on Arch Linux,
+  `sudo apt install ./kasumi-linux-x86_64.deb` on Debian/Ubuntu, or
+  `sudo dnf install --nogpgcheck ./kasumi-linux-x86_64.rpm` on Fedora/RHEL). Existing
+  profiles, local databases, and configuration are preserved.
+- **Portable archives (`.zip` / `.tar.gz`):** Stop Kasumi and replace the
+  executable manually from the verified archive.
 
 ### Partial Synchronization and Explicit Data-Loss Operations
 

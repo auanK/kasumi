@@ -4,6 +4,10 @@ add_test(NAME kasumi_documentation_hygiene
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/architecture/test_documentation.py)
 set_tests_properties(kasumi_documentation_hygiene PROPERTIES LABELS "architecture")
 
+add_test(NAME kasumi_packaging_contract
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/architecture/test_packaging.py)
+set_tests_properties(kasumi_packaging_contract PROPERTIES LABELS "architecture;release-critical")
+
 if(CMAKE_NM AND NOT MSVC)
     add_test(NAME kasumi_fault_hook_isolation
         COMMAND ${CMAKE_COMMAND}

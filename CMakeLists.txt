@@ -752,6 +752,52 @@ install(
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     COMPONENT kasumi
 )
+install(
+    FILES
+        ${PROJECT_SOURCE_DIR}/LICENSE
+        ${PROJECT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md
+    DESTINATION ${CMAKE_INSTALL_DOCDIR}
+    COMPONENT kasumi
+)
+
+set(CPACK_PACKAGE_NAME "kasumi")
+set(CPACK_PACKAGE_VENDOR "auanK")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+    "Multi-client encrypted bidirectional file synchronization without a dedicated server")
+set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/auanK/kasumi")
+set(CPACK_PACKAGE_CONTACT "auanK <https://github.com/auanK/kasumi>")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_RESOURCE_FILE_LICENSE "${PROJECT_SOURCE_DIR}/LICENSE")
+set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+set(CPACK_COMPONENTS_ALL kasumi)
+set(CPACK_STRIP_FILES FALSE)
+
+set(CPACK_DEB_COMPONENT_INSTALL ON)
+set(CPACK_DEBIAN_PACKAGE_NAME "kasumi")
+set(CPACK_DEBIAN_KASUMI_PACKAGE_NAME "kasumi")
+set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
+set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+set(CPACK_DEBIAN_PACKAGE_SUGGESTS "rclone, gnome-keyring, libsecret-1-0")
+set(CPACK_DEBIAN_KASUMI_FILE_NAME "kasumi-linux-x86_64.deb")
+
+set(CPACK_RPM_COMPONENT_INSTALL ON)
+set(CPACK_RPM_PACKAGE_NAME "kasumi")
+set(CPACK_RPM_KASUMI_PACKAGE_NAME "kasumi")
+set(CPACK_RPM_PACKAGE_ARCHITECTURE "x86_64")
+set(CPACK_RPM_PACKAGE_LICENSE "MIT")
+set(CPACK_RPM_PACKAGE_GROUP "Applications/Archiving")
+set(CPACK_RPM_PACKAGE_URL "https://github.com/auanK/kasumi")
+set(CPACK_RPM_PACKAGE_AUTOREQPROV "yes")
+set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
+    "/usr"
+    "/usr/bin"
+    "/usr/share"
+    "/usr/share/doc"
+)
+set(CPACK_RPM_KASUMI_FILE_NAME "kasumi-linux-x86_64.rpm")
+
+include(CPack)
 
 if(BUILD_TESTING)
     if(KASUMI_BUILD_SYSTEM_TESTS)
