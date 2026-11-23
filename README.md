@@ -51,7 +51,14 @@ See [Security](docs/security.md) for the protection limits and key-loss risks.
 
 ## Download and Documentation
 
-Official x86_64 binaries: [GitHub Releases](https://github.com/auanK/kasumi/releases).
+Official x86_64 installers and portable binaries are published on [GitHub Releases](https://github.com/auanK/kasumi/releases):
+
+- **Windows:** `kasumi-windows-x86_64.msi` (installs to `C:\Program Files\Kasumi`, adds to System `PATH`, upgrades in-place) or portable `kasumi-windows-x86_64.zip`.
+- **Arch Linux:** `kasumi-linux-x86_64.pkg.tar.zst` (`sudo pacman -U kasumi-linux-x86_64.pkg.tar.zst`), plus [PKGBUILD](packaging/arch/PKGBUILD) for `makepkg -si`.
+- **Debian / Ubuntu:** `kasumi-linux-x86_64.deb` (`sudo apt install ./kasumi-linux-x86_64.deb`).
+- **Fedora / RHEL:** `kasumi-linux-x86_64.rpm` (`sudo dnf install --nogpgcheck ./kasumi-linux-x86_64.rpm`).
+- **Portable Linux:** `kasumi-linux-x86_64.tar.gz`.
+
 For source builds, see [Build and Test](docs/build-and-test.md).
 
 - [Getting Started](docs/getting-started.md) — first profile and two-machine setup.

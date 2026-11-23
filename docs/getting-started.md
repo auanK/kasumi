@@ -11,59 +11,79 @@ compatibility across releases or automatically migrate existing data; see the
 
 ## 1. Obtain Kasumi
 
-Official [GitHub Releases](https://github.com/auanK/kasumi/releases) provide:
+Official [GitHub Releases](https://github.com/auanK/kasumi/releases) provide native installers and portable x86_64 archives:
 
-- **Windows x86_64:** `kasumi-windows-x86_64.zip` (built on `windows-2022` with the MSVC static C/C++ runtime `/MT`). Extract it into a directory you can run programs from; use PowerShell or CMD to invoke `kasumi.exe`.
-- **Linux x86_64:** `kasumi-linux-x86_64.tar.gz` (built on GitHub `ubuntu-latest` with GCC 14 and dynamically linked against the host `glibc`; distributions with an older `glibc` should build from source). Extract it and run `kasumi`.
+- **Windows x86_64 installer (`.msi`):** `kasumi-windows-x86_64.msi` installs to `C:\Program Files\Kasumi`, adds that directory to the system `PATH`, and upgrades older `.msi` installations in-place.
+- **Windows x86_64 portable (`.zip`):** `kasumi-windows-x86_64.zip` (built on `windows-2022` with the MSVC static C/C++ runtime `/MT`). Extract into a directory on `PATH` and invoke `kasumi.exe`.
+- **Arch Linux (`.pkg.tar.zst` / `PKGBUILD`):** install or upgrade directly with `pacman`, or build locally using [PKGBUILD](../packaging/arch/PKGBUILD):
 
-Add the executable's directory to `PATH`, or use its full path in the commands
-below. Local storage requires no rclone installation. For a rclone remote,
+  ```sh
+  sudo pacman -U kasumi-linux-x86_64.pkg.tar.zst
+  ```
+
+- **Debian / Ubuntu (`.deb`):**
+
+  ```sh
+  sudo apt install ./kasumi-linux-x86_64.deb
+  ```
+
+- **Fedora / RHEL (`.rpm`):** (after verifying the `.sha256` checksum / `gh attestation verify`, since packages are not GPG-signed; pass `--nogpgcheck` on Fedora 43+ / RPM 6.0):
+
+  ```sh
+  sudo dnf install --nogpgcheck ./kasumi-linux-x86_64.rpm
+  ```
+
+- **Portable Linux x86_64 (`.tar.gz`):** `kasumi-linux-x86_64.tar.gz` (built on GitHub `ubuntu-latest` with GCC 14 and dynamically linked against the host `glibc`; distributions with an older `glibc` should build from source). Extract and place `kasumi` on `PATH`.
+
+Local storage requires no `rclone` installation. For a `rclone` remote,
 install `rclone` in a directory on `PATH` outside the synchronized folder and
 configure the provider's credentials with `rclone config` on each machine.
-See [Updating Kasumi](configuration-and-usage.md#updating-kasumi) when replacing
-binaries on an existing installation.
+See [Updating Kasumi](configuration-and-usage.md#updating-kasumi) when upgrading
+or replacing binaries on an existing installation.
 
 ### Verify Downloads
 
-Download the archive and its matching `.sha256` file from the same official
-release. Verify before extracting or executing the archive.
+Download the package/archive and its matching `.sha256` sidecar from the same
+official release. Verify before installing, extracting, or executing.
 
-Linux:
+Linux (replace the filename with `.pkg.tar.zst`, `.deb`, `.rpm`, or `.tar.gz`):
 
 ```sh
+sha256sum -c kasumi-linux-x86_64.pkg.tar.zst.sha256
+# Or for the portable archive:
 sha256sum -c kasumi-linux-x86_64.tar.gz.sha256
 tar -xzf kasumi-linux-x86_64.tar.gz
 ./kasumi --version
 ```
 
-Windows PowerShell:
+Windows PowerShell (works for both `.msi` and `.zip`):
 
 ```powershell
-$expected = ((Get-Content .\kasumi-windows-x86_64.zip.sha256 -Raw) -split '\s+')[0].ToLowerInvariant()
-$actual = (Get-FileHash .\kasumi-windows-x86_64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw 'SHA-256 mismatch; do not extract or run this archive.' }
-Expand-Archive .\kasumi-windows-x86_64.zip -DestinationPath .\kasumi
-.\kasumi\kasumi.exe --version
+$pkg = 'kasumi-windows-x86_64.msi' # or 'kasumi-windows-x86_64.zip'
+$expected = ((Get-Content ".\$pkg.sha256" -Raw) -split '\s+')[0].ToLowerInvariant()
+$actual = (Get-FileHash ".\$pkg" -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw 'SHA-256 mismatch; do not install or extract.' }
 ```
 
-The release also provides `SHA256SUMS.txt`; with both archives downloaded, Linux
-users can verify it with `sha256sum -c SHA256SUMS.txt`. A mismatch means you
-should download again and report a repeat failure. A matching checksum detects
-changed bytes but does not independently authenticate the publisher. The
+The release also provides `SHA256SUMS.txt` covering all installers and portable
+archives (`sha256sum -c --ignore-missing SHA256SUMS.txt` on Linux). A mismatch
+means you should download again and report a repeat failure. A matching checksum
+detects changed bytes but does not independently authenticate the publisher. The
 [release workflow](../.github/workflows/release.yml) generates GitHub build
-provenance attestations for both archives and the consolidated checksum list.
+provenance attestations for every package/archive and the consolidated checksum
+list.
 
 Verify build provenance with the [GitHub CLI](https://cli.github.com/) (`gh`)
-before extracting or running an archive:
+before installing or extracting:
 
 ```sh
-gh attestation verify kasumi-linux-x86_64.tar.gz --repo auanK/kasumi
-gh attestation verify kasumi-windows-x86_64.zip --repo auanK/kasumi
+gh attestation verify kasumi-linux-x86_64.pkg.tar.zst --repo auanK/kasumi
+gh attestation verify kasumi-windows-x86_64.msi --repo auanK/kasumi
 ```
 
-`gh attestation verify` cryptographically verifies that the archive was built
-by the official `auanK/kasumi` GitHub Actions release workflow. Release binaries
-are not currently OS-code-signed (Authenticode or GPG).
+`gh attestation verify` cryptographically verifies that the package or archive
+was built by the official `auanK/kasumi` GitHub Actions release workflow. Release
+artifacts are not currently OS-code-signed (Authenticode or GPG).
 
 ### Build from Source
 
