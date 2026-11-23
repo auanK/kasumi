@@ -191,6 +191,7 @@ struct ManualBarrierRemovalCompleted {
     std::string identifier;
     BarrierRemovalOutcome outcome = BarrierRemovalOutcome::Removed;
     std::size_t active_writers_count = 0;
+    std::size_t remaining_barriers_count = 0;
 };
 
 // Stage of the manual barrier removal operation.

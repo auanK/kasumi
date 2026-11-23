@@ -80,7 +80,7 @@ protected:
     }
 
     void replace_barrier_bytes() {
-        state->objects[test_layout().barrier_identifier] = {
+        state->objects[barrier.identifier] = {
             'f', 'o', 'r', 'e', 'i', 'g', 'n'};
     }
 };
@@ -90,7 +90,7 @@ TEST_F(BarrierOwnershipTest, PhysicalHashMatchAndMismatchAvoidGet) {
     EXPECT_EQ(state->physical_hash_count, 1U);
     EXPECT_EQ(state->get_count, 0U);
 
-    state->physical_hash_mismatch_identifier = test_layout().barrier_identifier;
+    state->physical_hash_mismatch_identifier = barrier.identifier;
     const auto mismatch = protocol::verify_registration(barrier);
     ASSERT_FALSE(mismatch.has_value());
     EXPECT_EQ(mismatch.error().code, protocol::ErrorCode::Blocked);
@@ -99,8 +99,8 @@ TEST_F(BarrierOwnershipTest, PhysicalHashMatchAndMismatchAvoidGet) {
 }
 
 TEST_F(BarrierOwnershipTest, MissingBarrierFailsClosedWithoutGet) {
-    state->objects.erase(test_layout().barrier_identifier);
-    state->physical_hashes.erase(test_layout().barrier_identifier);
+    state->objects.erase(barrier.identifier);
+    state->physical_hashes.erase(barrier.identifier);
 
     const auto result = protocol::verify_registration(barrier);
     ASSERT_FALSE(result.has_value());
@@ -111,8 +111,7 @@ TEST_F(BarrierOwnershipTest, MissingBarrierFailsClosedWithoutGet) {
 
 TEST_F(BarrierOwnershipTest,
        UnsupportedHashUsesReadbackForMatchMismatchAndMissing) {
-    state->physical_hash_unsupported_identifier =
-        test_layout().barrier_identifier;
+    state->physical_hash_unsupported_identifier = barrier.identifier;
     EXPECT_TRUE(protocol::verify_registration(barrier));
 
     replace_barrier_bytes();
@@ -120,7 +119,7 @@ TEST_F(BarrierOwnershipTest,
     ASSERT_FALSE(mismatch.has_value());
     EXPECT_EQ(mismatch.error().code, protocol::ErrorCode::Blocked);
 
-    state->objects.erase(test_layout().barrier_identifier);
+    state->objects.erase(barrier.identifier);
     const auto missing = protocol::verify_registration(barrier);
     ASSERT_FALSE(missing.has_value());
     EXPECT_EQ(missing.error().code, protocol::ErrorCode::Blocked);
@@ -165,17 +164,17 @@ TEST_F(BarrierOwnershipTest, ReleaseVerifiesHashBeforeRemovingOwnedBarrier) {
     EXPECT_EQ(state->physical_hash_count, 1U);
     EXPECT_EQ(state->get_count, 0U);
     EXPECT_EQ(state->remove_count, 1U);
-    EXPECT_FALSE(state->objects.contains(test_layout().barrier_identifier));
+    EXPECT_FALSE(state->objects.contains(barrier.identifier));
 }
 
 TEST_F(BarrierOwnershipTest, ReleaseDoesNotRemoveForeignBarrier) {
-    state->physical_hash_mismatch_identifier = test_layout().barrier_identifier;
+    state->physical_hash_mismatch_identifier = barrier.identifier;
 
     ASSERT_TRUE(protocol::release_registration(barrier));
     EXPECT_EQ(state->physical_hash_count, 1U);
     EXPECT_EQ(state->get_count, 0U);
     EXPECT_EQ(state->remove_count, 0U);
-    EXPECT_TRUE(state->objects.contains(test_layout().barrier_identifier));
+    EXPECT_TRUE(state->objects.contains(barrier.identifier));
 }
 
 TEST(BarrierOwnershipControl, AmbiguousAppliedPutDoesNotAdmitWriter) {
@@ -190,17 +189,18 @@ TEST(BarrierOwnershipControl, AmbiguousAppliedPutDoesNotAdmitWriter) {
     const auto barrier = protocol::establish_barrier(
         storage, test_layout(), kasumi::test::workspace_root(workspace));
     ASSERT_FALSE(barrier.has_value());
-    EXPECT_TRUE(state->objects.contains(test_layout().barrier_identifier));
+    const auto active_barrier = find_active_barrier(*state, test_layout());
+    ASSERT_TRUE(active_barrier.has_value());
 
     const auto writer = protocol::register_writer(
         storage, test_layout(), kasumi::test::workspace_root(workspace));
     EXPECT_FALSE(writer.has_value());
-    ASSERT_TRUE(state->objects.contains(test_layout().barrier_identifier));
+    EXPECT_TRUE(state->objects.contains(*active_barrier));
 }
 
 TEST_F(BarrierOwnershipTest, ReleaseMissingBarrierSucceedsWithoutRemove) {
-    state->objects.erase(test_layout().barrier_identifier);
-    state->physical_hashes.erase(test_layout().barrier_identifier);
+    state->objects.erase(barrier.identifier);
+    state->physical_hashes.erase(barrier.identifier);
 
     ASSERT_TRUE(protocol::release_registration(barrier));
     EXPECT_EQ(state->physical_hash_count, 1U);
@@ -217,29 +217,27 @@ TEST_F(BarrierOwnershipTest, ReleaseTransportErrorDoesNotRemoveBarrier) {
     EXPECT_EQ(state->physical_hash_count, 1U);
     EXPECT_EQ(state->get_count, 0U);
     EXPECT_EQ(state->remove_count, 0U);
-    EXPECT_TRUE(state->objects.contains(test_layout().barrier_identifier));
+    EXPECT_TRUE(state->objects.contains(barrier.identifier));
 }
 
 TEST_F(BarrierOwnershipTest, ReleaseUnsupportedHashFallsBackToReadback) {
-    state->physical_hash_unsupported_identifier =
-        test_layout().barrier_identifier;
+    state->physical_hash_unsupported_identifier = barrier.identifier;
     ASSERT_TRUE(protocol::release_registration(barrier));
     EXPECT_EQ(state->physical_hash_count, 1U);
     EXPECT_EQ(state->get_count, 1U);
     EXPECT_EQ(state->remove_count, 1U);
-    EXPECT_FALSE(state->objects.contains(test_layout().barrier_identifier));
+    EXPECT_FALSE(state->objects.contains(barrier.identifier));
 }
 
 TEST_F(BarrierOwnershipTest, ReleaseUnsupportedHashPreservesForeignBarrier) {
-    state->physical_hash_unsupported_identifier =
-        test_layout().barrier_identifier;
+    state->physical_hash_unsupported_identifier = barrier.identifier;
     replace_barrier_bytes();
 
     ASSERT_TRUE(protocol::release_registration(barrier));
     EXPECT_EQ(state->physical_hash_count, 1U);
     EXPECT_EQ(state->get_count, 1U);
     EXPECT_EQ(state->remove_count, 0U);
-    EXPECT_TRUE(state->objects.contains(test_layout().barrier_identifier));
+    EXPECT_TRUE(state->objects.contains(barrier.identifier));
 }
 
 TEST(IntegrityMaintenanceTest, WriterPhysicalHashSuccessAvoidsReadback) {
@@ -320,7 +318,7 @@ TEST(IntegrityMaintenanceTest,
     ASSERT_FALSE(writer.has_value());
     EXPECT_EQ(writer.error().code, protocol::ErrorCode::Blocked);
     EXPECT_EQ(state->control_read_batch_count, 1U);
-    EXPECT_EQ(state->list_count, 1U);
+    EXPECT_EQ(state->list_count, 2U);
     EXPECT_EQ(state->presence_count, 1U);
 }
 
@@ -337,7 +335,7 @@ TEST(IntegrityMaintenanceTest, WriterAdmissionAllowsSecondWriter) {
         transport, test_layout(), kasumi::test::workspace_root(workspace));
     ASSERT_TRUE(writer.has_value()) << writer.error().detail;
     EXPECT_EQ(state->control_read_batch_count, 1U);
-    EXPECT_EQ(state->list_count, 1U);
+    EXPECT_EQ(state->list_count, 2U);
     EXPECT_EQ(state->presence_count, 1U);
     ASSERT_TRUE(protocol::release_registration(*writer));
 }
@@ -356,7 +354,7 @@ TEST(IntegrityMaintenanceTest, WriterAdmissionBatchRejectsMissingWriter) {
     ASSERT_FALSE(writer.has_value());
     EXPECT_EQ(writer.error().code, protocol::ErrorCode::BackendUnsafe);
     EXPECT_EQ(state->control_read_batch_count, 1U);
-    EXPECT_EQ(state->list_count, 1U);
+    EXPECT_EQ(state->list_count, 2U);
     EXPECT_EQ(state->presence_count, 1U);
 }
 
@@ -374,7 +372,7 @@ TEST(IntegrityMaintenanceTest, WriterAdmissionBlocksPresentBarrier) {
     ASSERT_FALSE(writer.has_value());
     EXPECT_EQ(writer.error().code, protocol::ErrorCode::Blocked);
     EXPECT_EQ(state->control_read_batch_count, 1U);
-    EXPECT_EQ(state->list_count, 1U);
+    EXPECT_EQ(state->list_count, 2U);
     EXPECT_EQ(state->presence_count, 1U);
 }
 
@@ -412,7 +410,7 @@ TEST(IntegrityMaintenanceTest,
     ASSERT_FALSE(writer.has_value());
     EXPECT_EQ(writer.error().code, protocol::ErrorCode::Blocked);
     EXPECT_EQ(state->control_read_batch_count, 1U);
-    EXPECT_EQ(state->list_count, 1U);
+    EXPECT_EQ(state->list_count, 2U);
     EXPECT_EQ(state->presence_count, 1U);
 }
 
@@ -449,7 +447,7 @@ TEST(IntegrityMaintenanceTest, WriterAdmissionBarrierFailureFailsClosed) {
     ASSERT_FALSE(writer.has_value());
     EXPECT_EQ(writer.error().code, protocol::ErrorCode::TransportFailure);
     EXPECT_EQ(state->control_read_batch_count, 1U);
-    EXPECT_EQ(state->list_count, 1U);
+    EXPECT_EQ(state->list_count, 2U);
     EXPECT_EQ(state->presence_count, 1U);
 }
 

@@ -9,6 +9,7 @@
 #include "application/integrity/maintenance.hpp"
 #include "platform/cancellation.hpp"
 #include "platform/clock.hpp"
+#include "platform/machine.hpp"
 
 #include <algorithm>
 #include <array>
@@ -362,6 +363,7 @@ observe(transport::Transport& storage,
         const history_storage::epoch::RetentionPolicy& retention,
         std::chrono::seconds effective_grace,
         std::uint32_t effective_min_age_hours,
+        std::optional<std::string_view> barrier_identifier,
         const std::filesystem::path& workspace_root,
         ProgressState& progress) {
     progress.emit(GarbageCollectStage::Analyzing,
@@ -470,25 +472,46 @@ observe(transport::Transport& storage,
                            now_unix.error()));
     }
 
+    // Fail-closed remote clock clamping: when running a mutating GC with
+    // positive grace period, clamp effective_now to min(local_now, remote_now)
+    // observed from the backend-assigned timestamp on our published barrier.
+    std::optional<std::int64_t> effective_now_unix = *now_unix;
+    if (effective_grace > std::chrono::seconds{0} &&
+        barrier_identifier.has_value()) {
+        const auto* barrier_meta = find_metadata(*barrier_identifier);
+        if (barrier_meta == nullptr ||
+            !barrier_meta->modified_at_unix.has_value() ||
+            *barrier_meta->modified_at_unix <= 0) {
+            effective_now_unix.reset();
+        } else {
+            effective_now_unix =
+                std::min(*now_unix, *barrier_meta->modified_at_unix);
+        }
+    }
+
     const auto is_old_enough =
         [&](std::string_view identifier,
             std::optional<std::int64_t> commit_created_at) -> bool {
         if (effective_grace == std::chrono::seconds{0}) {
             return true;
         }
+        if (!effective_now_unix.has_value()) {
+            return false;
+        }
+        const auto effective_now = *effective_now_unix;
         const auto* meta = find_metadata(identifier);
         if (meta == nullptr || !meta->modified_at_unix.has_value()) {
             return false;
         }
         const auto mtime = *meta->modified_at_unix;
-        if (mtime <= 0 || mtime > *now_unix ||
-            (*now_unix - mtime) < effective_grace.count()) {
+        if (mtime <= 0 || mtime > effective_now ||
+            (effective_now - mtime) < effective_grace.count()) {
             return false;
         }
         if (commit_created_at.has_value()) {
             const auto created = *commit_created_at;
-            if (created <= 0 || created > *now_unix ||
-                (*now_unix - created) < effective_grace.count()) {
+            if (created <= 0 || created > effective_now ||
+                (effective_now - created) < effective_grace.count()) {
                 return false;
             }
         }
@@ -500,9 +523,12 @@ observe(transport::Transport& storage,
         activity_retention.min_history_age_hours = std::max(
             activity_retention.min_history_age_hours, effective_min_age_hours);
     }
-    auto planned_activities = history_storage::activity::plan_pruning(
-        activities->valid, activity_retention, *now_unix);
-    history_storage::detail::sort_unique(planned_activities);
+    std::vector<std::string> planned_activities;
+    if (effective_now_unix.has_value()) {
+        planned_activities = history_storage::activity::plan_pruning(
+            activities->valid, activity_retention, *effective_now_unix);
+        history_storage::detail::sort_unique(planned_activities);
+    }
 
     std::size_t deferred_recent_objects = 0;
     std::vector<std::string> prunable_activities;
@@ -673,16 +699,20 @@ std::expected<void, Error>
 check_pre_barrier_controls(transport::Transport& storage,
                            const history_storage::RemoteLayout& layout) {
     bool use_fallback = (storage.storage.control_read_batch == nullptr);
-    std::vector<std::string> listed_names;
-    transport::Presence barrier_state = transport::Presence::Absent;
+    std::vector<std::string> listed_writers;
+    std::vector<std::string> listed_barriers;
+    transport::Presence legacy_barrier = transport::Presence::Absent;
 
     if (!use_fallback) {
         const auto writers_dir =
             history_storage::detail::trim_trailing_slash(layout.writers_prefix);
+        const auto barriers_dir = history_storage::detail::trim_trailing_slash(
+            layout.barriers_prefix);
         auto batch = transport::control_read_batch(
             storage,
             transport::ControlReadBatchRequest{
-                .list_prefixes = {std::string{writers_dir}},
+                .list_prefixes = {std::string{writers_dir},
+                                  std::string{barriers_dir}},
                 .presence_identifiers = {layout.barrier_identifier},
             });
         if (!batch) {
@@ -693,25 +723,23 @@ check_pre_barrier_controls(transport::Transport& storage,
                     batch.error(), "could not inspect maintenance controls"));
             }
         } else {
-            if (batch->listings.size() != 1 || batch->presences.size() != 1) {
+            if (batch->listings.size() != 2 || batch->presences.size() != 1) {
                 return std::unexpected(make_error(
                     ErrorCode::TransportFailure,
                     "invalid control read batch response cardinality"));
             }
-            listed_names = std::move(batch->listings.front());
-            barrier_state = batch->presences.front();
+            listed_writers = std::move(batch->listings[0]);
+            listed_barriers = std::move(batch->listings[1]);
+            legacy_barrier = batch->presences.front();
         }
     }
 
     if (use_fallback) {
-        auto barrier_presence =
-            transport::presence(storage, layout.barrier_identifier);
-        if (!barrier_presence) {
-            return std::unexpected(
-                transport_error(barrier_presence.error(),
-                                "could not inspect maintenance barrier"));
+        auto barriers = protocol::active_barriers(storage, layout);
+        if (!barriers) {
+            return std::unexpected(protocol_error(barriers.error()));
         }
-        if (*barrier_presence == transport::Presence::Present) {
+        if (!barriers->empty()) {
             return std::unexpected(
                 make_error(ErrorCode::ConcurrentChange,
                            "another maintenance barrier is already present"));
@@ -719,15 +747,16 @@ check_pre_barrier_controls(transport::Transport& storage,
         return require_no_writers(storage, layout);
     }
 
-    if (barrier_state == transport::Presence::Present) {
+    if (legacy_barrier == transport::Presence::Present ||
+        !listed_barriers.empty()) {
         return std::unexpected(
             make_error(ErrorCode::ConcurrentChange,
                        "another maintenance barrier is already present"));
     }
 
     std::vector<std::string> writers;
-    writers.reserve(listed_names.size());
-    for (const auto& name : listed_names) {
+    writers.reserve(listed_writers.size());
+    for (const auto& name : listed_writers) {
         const bool valid_hex32 =
             name.size() == 32 && std::ranges::all_of(name, [](char c) {
                 return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
@@ -742,12 +771,13 @@ check_pre_barrier_controls(transport::Transport& storage,
 }
 
 std::expected<void, Error>
-require_barrier_ownership(const protocol::RegistrationState& barrier) {
+require_barrier_exclusivity(const protocol::RegistrationState& barrier,
+                            const history_storage::RemoteLayout& layout) {
     if (!protocol::registration_active(barrier)) {
         return std::unexpected(make_error(ErrorCode::ConcurrentChange,
                                           "maintenance barrier lost"));
     }
-    auto verified = protocol::verify_registration(barrier);
+    auto verified = protocol::verify_barrier_exclusivity(barrier, layout);
     if (!verified) {
         return std::unexpected(protocol_error(verified.error()));
     }
@@ -821,6 +851,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                                      retention,
                                      effective_grace,
                                      effective_min_age_hours,
+                                     std::nullopt,
                                      workspace_root,
                                      progress);
         if (!observed_plan) {
@@ -874,7 +905,22 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
 
     progress.emit(GarbageCollectStage::Preparing,
                   GarbageCollectSubStage::EstablishingBarrier);
-    auto barrier = protocol::establish_barrier(storage, layout, workspace_root);
+    protocol::BarrierOptions barrier_options{
+        .settle_delay = options.barrier_settle_delay,
+    };
+    if (options.machine_name.has_value()) {
+        const auto now_sec =
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        barrier_options.metadata = protocol::MarkerMetadata{
+            .machine_name = *options.machine_name,
+            .pid = platform::machine::current_process_id(),
+            .started_at_unix = static_cast<std::int64_t>(now_sec),
+        };
+    }
+    auto barrier = protocol::establish_barrier(
+        storage, layout, workspace_root, barrier_options);
     if (!barrier) {
         return std::unexpected(protocol_error(barrier.error()));
     }
@@ -945,12 +991,10 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
     };
 
     try {
-        if (auto verified = require_barrier_ownership(cleanup.registration);
+        if (auto verified =
+                require_barrier_exclusivity(cleanup.registration, layout);
             !verified) {
             return finish(std::unexpected(verified.error()));
-        }
-        if (auto writers = require_no_writers(storage, layout); !writers) {
-            return finish(std::unexpected(writers.error()));
         }
 
         failure_diagnostic.stage = GarbageCollectStage::Analyzing;
@@ -959,6 +1003,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                                      retention,
                                      effective_grace,
                                      effective_min_age_hours,
+                                     cleanup.registration.identifier,
                                      workspace_root,
                                      progress);
         if (!observed_plan) {
@@ -1050,7 +1095,8 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
         progress.emit(GarbageCollectStage::Applying,
                       GarbageCollectSubStage::RemovingObjects);
         auto apply = [&]() -> std::expected<std::size_t, Error> {
-            auto verified = require_barrier_ownership(cleanup.registration);
+            auto verified =
+                require_barrier_exclusivity(cleanup.registration, layout);
             if (!verified) {
                 return std::unexpected(verified.error());
             }
@@ -1060,6 +1106,13 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
 
             std::size_t chunk_start = 0;
             const std::size_t total_candidates = candidates.size();
+            const std::size_t revalidation_object_interval =
+                options.apply_revalidation_batch_interval > 0
+                    ? options.apply_revalidation_batch_interval *
+                          gc_delete_batch_size
+                    : 0;
+            std::size_t objects_since_revalidation = 0;
+            auto last_revalidation = std::chrono::steady_clock::now();
 
             const auto fail_uncertain = [&](std::optional<std::string> id,
                                             transport::Error error,
@@ -1093,6 +1146,25 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                 if (auto cancelled = cancellation_error();
                     cancelled.has_value()) {
                     return std::unexpected(std::move(*cancelled));
+                }
+
+                const auto now_steady = std::chrono::steady_clock::now();
+                const bool batch_due =
+                    revalidation_object_interval > 0 &&
+                    objects_since_revalidation >= revalidation_object_interval;
+                const bool time_due =
+                    options.apply_revalidation_time_interval >
+                        std::chrono::seconds{0} &&
+                    (now_steady - last_revalidation) >=
+                        options.apply_revalidation_time_interval;
+                if (chunk_start > 0 && (batch_due || time_due)) {
+                    auto revalidated = require_barrier_exclusivity(
+                        cleanup.registration, layout);
+                    if (!revalidated) {
+                        return std::unexpected(revalidated.error());
+                    }
+                    objects_since_revalidation = 0;
+                    last_revalidation = now_steady;
                 }
 
                 if (!fallback_sequential) {
@@ -1176,6 +1248,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                                               "object removal failed");
                     }
                     chunk_start += chunk_size;
+                    objects_since_revalidation += chunk_size;
                 } else {
                     const auto& candidate = candidates[chunk_start];
                     failure_diagnostic.failed_identifier = candidate;
@@ -1189,6 +1262,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                     }
                     record_acknowledged(1, candidate_sizes[chunk_start]);
                     ++chunk_start;
+                    ++objects_since_revalidation;
                 }
             }
             return acknowledged_removals;

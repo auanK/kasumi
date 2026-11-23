@@ -9,12 +9,12 @@ releases the maintenance barrier.
 The collector preserves this order:
 
 1. `application::execute` resolves the profile/key, validates retention and `--min-age` (`0..8760` hours), takes the **local** profile lock, and opens the transport. Pending [Sync transaction recovery](transactions-and-recovery.md) runs before live GC (dry-run inspects the journal read-only).
-2. **Pre-barrier read-only busy check (`CheckingControls`)**: Before acquiring or mutating the remote barrier, GC performs a read-only check of writer markers and barrier presence (using a single `control_read_batch` when supported, or sequential fallback). If active/abandoned writers or an existing barrier are present, GC bails out read-only with zero barrier writes (`remote_busy = true` when no uncertain mutation occurred).
-3. GC publishes a verified, token-owned remote **barrier** (`EstablishingBarrier`), re-verifies ownership, and re-checks active writers before observation. Cooperative Sync writers register a visible writer marker and are denied admission while the barrier is present.
+2. **Pre-barrier read-only busy check (`CheckingControls`)**: Before acquiring or mutating any remote barrier, GC performs a read-only check of writer markers, multi-barrier entries (`<barriers-ns>/<token>`), and the legacy single barrier (`<barrier-id>`) using a single `control_read_batch` when supported, or sequential fallback. If active/abandoned writers or an existing barrier are present, GC bails out read-only with zero barrier writes (`remote_busy = true` when no uncertain mutation occurred).
+3. **Unique multi-barrier with settle delay (`EstablishingBarrier`)**: GC publishes a unique token-owned barrier under `<barriers-ns>/<32-hex-token>` (carrying diagnostic `started_at`, `pid`, and `machine` metadata — never auto-expired by time), waits a cooperative settle window (`2000 ms` in CLI runs; `0 ms` default in library/unit calls), and verifies exclusivity (no legacy `<barrier-id>`, only our barrier token present under `<barriers-ns>/`, zero active writers, and our payload SHA-256/bytes intact). If contention appears during the settle window, GC deletes **only its own** `<barriers-ns>/<token>` and aborts read-only without disturbing peer barriers or writers. Cooperative Sync writers register a visible writer marker and check both legacy `<barrier-id>` and `<barriers-ns>/`, denying admission while any barrier is present.
 4. GC performs **one complete authenticated observation** using `transport::list_metadata` (`ListingRemote`, falling back to `list` when `Unsupported`), HEAD/Commit/Epoch reachability with batched Epoch/Marker prefetch (`AuthenticatingHistory`), content reachability (`AnalyzingReachability`), and `KACT` v1 activity loading (`LoadingActivities`) with zero orphan payload downloads. Malformed history, unknown objects, missing required content, invalid control state, or transport errors stop collection before candidate deletion.
-5. GC builds and validates the global deletion plan and filters candidates against the fail-safe grace period (`min_orphan_age`, defaulting to `runtime_data.min_history_age_hours` = 6h). When `candidates.empty()`, GC skips the online consistency probe and pre-Apply re-check and releases the barrier immediately (`Finalizing`).
+5. GC builds and validates the global deletion plan and filters candidates against the remote-clock fail-closed grace period (`min_orphan_age`, defaulting to `runtime_data.min_history_age_hours` = 6h, alongside `min_history_depth` = 5 commits). During live mutating GC with positive grace, `effective_now` is clamped to `min(local_now, remote_now)` where `remote_now` is the backend-assigned `ModTime` of the freshly published barrier (failing closed and deferring all candidates if the barrier timestamp is unavailable or non-positive), so a fast local clock cannot prune recent objects early. When `candidates.empty()`, GC skips the online consistency probe and pre-Apply re-check and releases its barrier immediately (`Finalizing`).
 6. When `!candidates.empty()`, GC publishes and verifies a temporary provider-visibility probe (`ProbingConsistency`), requires listings to confirm creation and removal, and returns `analysis_only` if online visibility cannot be established. Probe errors fail closed.
-7. Immediately before Apply, GC revalidates barrier ownership using remote SHA-256 or the control-payload GET fallback (`RemovingObjects`). Replacement, absence, or verification failure stops all candidate deletion (`NotAttempted`).
+7. Immediately before Apply, GC revalidates full barrier exclusivity (`verify_barrier_exclusivity`: owns `<barriers-ns>/<token>`, no competing barriers, no legacy barrier, and no writers). Replacement, absence, contention, or verification failure stops all candidate deletion (`NotAttempted`).
 
 ## Global deletion plan
 
@@ -73,10 +73,13 @@ During candidate selection, the collector constructs a deterministically ordered
 deduplicated deletion list (passing fail-safe age checks and excluding every
 identifier in `PROTECTED_SET`), failing closed if any candidate is empty, is a
 control object, or intersects `PROTECTED_SET`. When `min_orphan_age > 0s`
-(default 6h), any candidate with a missing, non-positive (`<= 0`), future
-(`> now`), or `< min_orphan_age` remote `ModTime` (or missing `list_metadata`
-support) — and any unreachable commit whose `Commit.created_at` fails the same
-dual-clock check — is kept untouched and counted in `deferred_recent_objects`.
+(default 6h), live GC computes `effective_now = min(local_now, remote_now)` from
+the freshly written barrier's backend `ModTime` (failing closed when missing or
+non-positive), and any candidate with a missing, non-positive (`<= 0`), future
+(`> effective_now`), or `< min_orphan_age` remote `ModTime` (or missing
+`list_metadata` support) — and any unreachable commit whose `Commit.created_at`
+fails the same dual-clock check — is kept untouched and counted in
+`deferred_recent_objects`.
 Unknown, invalid, or ambiguously classified objects are not inferred safe to
 delete. Epoch objects are never candidates.
 
@@ -84,9 +87,15 @@ delete. Epoch objects are never candidates.
 
 Apply consumes the frozen, deterministically ordered plan in batches of at most
 8 candidates. The transport may execute these DELETEs concurrently. Cancellation
-is checked before the first batch and between batches; an in-flight batch drains
-before the next decision. When batching is unsupported, GC falls back to individual
-removals only if no item was submitted.
+and periodic barrier-exclusivity revalidation are checked before continuing later
+batches (`apply_revalidation_batch_interval = 16` batches / `128` candidates, or
+`apply_revalidation_time_interval = 30s`); an in-flight batch drains before the
+next decision. If a new writer, competing barrier, legacy barrier, or lost
+barrier ownership is detected between batches, Apply aborts further batches with
+`ConcurrentChange` (`NotAttempted` for the unstarted batch while preserving
+earlier `confirmed_removed` counts) and releases only its own barrier. When
+batching is unsupported, GC falls back to individual removals only if no item
+was submitted.
 
 A complete batch report must identify every submitted candidate exactly once.
 Acknowledgements from all items in the batch are retained, including successful
@@ -94,9 +103,11 @@ peers of a failed item. A failed batch, malformed report, exception or cancellat
 stops admission of later batches, without retry or compensation. A whole-batch
 failure can leave the failed identifier unavailable and effects uncertain.
 
-After the fixed pre-Apply ownership check, Apply performs no candidate `GET`,
-`LIST` or `PRESENCE`, no history reobservation and no periodic ownership
-checkpoints. Additional checks would add latency without providing fencing.
+Except for bounded periodic exclusivity checkpoints between batches (which
+verify `<writers-ns>/`, `<barriers-ns>/`, legacy `<barrier-id>`, and own barrier
+integrity), Apply performs no candidate `GET` or `PRESENCE` and no history
+reobservation, limiting remote DELETE overhead while tightening late-join
+contention detection.
 
 A `Removed` or `AlreadyAbsent` result increments `removed_objects` /
 `confirmed_removed`: these count **REMOVE operations acknowledged by the API**,
@@ -135,25 +146,38 @@ between verification and DELETE without conditional deletion/CAS.
 
 ### Scheduled Automation and Grace Period
 
-Cooperative exclusivity uses the local profile lock, remote token-owned barrier,
-writer registration, and pre-/post-barrier writer checks. Because object storage
-lacks distributed CAS or fencing tokens, two safeguards make scheduled unattended
-`kasumi gc <profile>` safe alongside asynchronous Sync schedules:
+Cooperative exclusivity uses the local profile lock, unique token-owned remote
+barriers (`<barriers-ns>/<token>`) with a `2s` post-write settle check and
+periodic Apply revalidation, writer registration, pre-/post-barrier checks, and
+backward read-compatibility with legacy `v0.23.x` single barriers (`<barrier-id>`).
+Because object storage lacks distributed CAS or fencing tokens, three safeguards
+make scheduled unattended `kasumi gc <profile>` safe alongside asynchronous
+Sync schedules:
 
-1. **Pre-barrier read-only busy backoff**: Active Sync writers or an existing
-   barrier fail fast read-only (`remote_busy`) without creating or colliding on
-   control barriers.
-2. **Defense-in-depth grace period (`min_orphan_age` / `--min-age`, default 6h)**:
-   Even if a writer uploaded an in-flight payload or Commit variant without
-   coordination or immediately before timing out, any remote object newer than
-   `min_orphan_age` (or with missing/clock-skewed timestamps) is deferred intact
-   in `deferred_recent_objects`. For manual offline cleanups where all clients
+1. **Pre-barrier read-only busy backoff & unique-barrier settle verification**:
+   Active Sync writers or any existing barrier (legacy or multi-barrier) fail
+   fast read-only (`remote_busy`) without creating markers. Because every new
+   barrier uses its own `<barriers-ns>/<token>`, racing GCs cannot silently
+   overwrite each other and abort cleanly during the `2s` settle check while
+   deleting only their own marker.
+2. **Remote-clock fail-closed grace period (`min_orphan_age` / `--min-age`, default 6h)**:
+   Live mutating GC clamps `effective_now = min(local_now, remote_now)` using
+   the backend timestamp on its newly published barrier (keeping defaults of `6`
+   hours and `5` commits unchanged). Even if a writer uploaded an in-flight
+   payload or Commit variant without coordination or a client has an ahead local
+   clock, any remote object newer than `min_orphan_age` (or with missing,
+   non-positive, or clock-skewed timestamps) is deferred intact in
+   `deferred_recent_objects`. For manual offline cleanups where all clients
    are stopped, pass `--min-age 0` to collect fresh candidates immediately.
+3. **Diagnostic-only marker metadata without auto-expiration**:
+   Writer and barrier markers record `started_at`, `pid`, and `machine` for
+   operator triage in `kasumi remote writers <profile>`, but Kasumi never
+   auto-expires writers or barriers based on elapsed time.
 
 Exclusivity remains cooperative rather than distributed locking: do not bypass
 coordination with `--min-age 0` while Sync is uploading recent unlinked objects,
-and do not run `gc remove-barrier --confirm-abandoned` while another GC process
-is actively deleting objects.
+and do not run `gc remove-barrier [<barrier-id>] --confirm-abandoned` while
+another GC process is actively deleting objects.
 
 The backend must expose completed control and namespace changes to protocol
 `LIST` and `PRESENCE` checks. The visibility probe tests its own temporary object;
@@ -203,43 +227,51 @@ nor runs Sync or GC.
 
 ## Manual barrier removal
 
-`kasumi gc remove-barrier <profile> --confirm-abandoned` is a controlled, diagnostic
-manual recovery operation for an abandoned remote maintenance barrier left behind
-when a Garbage Collection process was terminated abruptly (e.g., killed process,
-power loss, or ungraceful shutdown).
+`kasumi gc remove-barrier <profile> [<barrier-id>] --confirm-abandoned` is a controlled,
+diagnostic manual recovery operation for abandoned remote maintenance barriers
+left behind when a Garbage Collection process was terminated abruptly (e.g., killed
+process, power loss, or ungraceful shutdown).
 
-When an abandoned barrier remains on remote storage, subsequent GC runs fail
-immediately with:
-
-```text
-another maintenance barrier is already present
-```
+When one or more maintenance barriers remain on remote storage, subsequent GC runs
+fail during pre-barrier or exclusivity checks (for example, returning `remote_busy`
+or reporting that a competing maintenance barrier is already present).
 
 ### Protocol and Operational Principles
 
-1. **Inspection**: Use `kasumi remote writers <profile>` to inspect whether a
-   barrier is present. When present, Kasumi displays its full remote identifier
-   (derived deterministically from the vault's key layout):
+1. **Inspection**: Use `kasumi remote writers <profile>` (or with `--json`) to
+   inspect active barriers and writer markers, including optional diagnostic
+   metadata (`started_at`, `pid`, `machine`) when present:
    ```text
-   Maintenance barrier:
-     Present: Yes
-     Identifier: <barrier-identifier>
+   Maintenance barriers: 1
+     - Identifier: <barriers-ns>/<32-hex-token> (v0.24+) or <barrier-id> (legacy)
+       Machine: <machine>
+       PID: <pid>
+       Started at: <utc-timestamp>
 
    Writers: 0
    Maintenance blocked: Yes
    ```
-2. **Mandatory Confirmation (`--confirm-abandoned`)**: Because Kasumi operates
+2. **Target Selection**:
+   - When exactly one barrier is present (either a multi-barrier object under
+     `<barriers-ns>/<32-hex-token>` or a legacy `<barrier-id>`), `<barrier-id>` may
+     be omitted.
+   - When multiple barriers are present, `<barrier-id>` (full remote identifier or
+     its 32-hex token) is required so only the explicitly selected barrier is removed;
+     remaining barriers stay intact and are reported in the output warning.
+3. **Mandatory Confirmation (`--confirm-abandoned`)**: Because Kasumi operates
    over passive storage backends that lack distributed process liveness detection, it
    cannot determine whether an active GC process is still executing on another
-   device or machine. Never assume a barrier is abandoned merely because of its
-   age or timestamp. The operator must verify externally that no maintenance or sync
-   operation is active before passing `--confirm-abandoned`.
-3. **Control Token Verification**: The barrier object contains a control payload
-   token (`kasumi-gc-v1:barrier:<32-hex-token>`). Kasumi downloads and performs
-   structural validation of this token (checking prefix and canonical 32-character
-   hexadecimal format) before attempting removal, rejecting corrupted or foreign
-   objects. This token is an internal control token; it is not a cryptographic
-   signature or MAC.
+   device or machine. Diagnostic metadata (`started_at`, `pid`, `machine`) never
+   triggers automatic expiration; never assume a barrier is abandoned merely because
+   of its age or timestamp. The operator must verify externally that no maintenance
+   or sync operation is active before passing `--confirm-abandoned`.
+4. **Control Token Verification**: Each barrier object contains a control payload
+   whose first line is a token (`kasumi-gc-v1:barrier:<32-hex-token>`) optionally
+   followed by diagnostic metadata lines (`started_at`, `pid`, `machine`). Kasumi
+   downloads and performs structural validation of the header token (checking prefix
+   and canonical 32-character hexadecimal format) before attempting removal,
+   rejecting corrupted or foreign objects. This token is an internal control token;
+   it is not a cryptographic signature or MAC.
 4. **Physical Identity Verification vs. Absence of Distributed CAS**: Prior to
    deletion, Kasumi verifies the object's physical identity (via remote SHA-256
    hash or verified GET readback fallback) against the downloaded copy to ensure

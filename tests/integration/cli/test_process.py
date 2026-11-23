@@ -1034,6 +1034,91 @@ class CliProcessTest(unittest.TestCase):
         finally:
             marker.unlink()
 
+    def test_multi_barrier_diagnostics_and_targeted_removal_cli(self):
+        local, remote = self.root / "local", self.root / "remote"
+        local.mkdir()
+        self.invoke("config", input=f"n\ndemo\n{local}\n{remote}\n\nq\n".encode())
+        (local / "live.txt").write_text("multi-barrier-cli", encoding="utf-8")
+        self.invoke("sync", "demo")
+
+        writer_dirs = [
+            Path(root_dir)
+            for root_dir, _dirs, _files in os.walk(remote)
+            if len(Path(root_dir).relative_to(remote).parts) == 4
+        ]
+        self.assertEqual(len(writer_dirs), 1)
+        writer_dir = writer_dirs[0]
+        # Run an empty live gc so the barriers directory is created under <gc>/<v1>
+        self.invoke("gc", "demo")
+        four_part_dirs = [
+            Path(root_dir)
+            for root_dir, _dirs, _files in os.walk(remote)
+            if len(Path(root_dir).relative_to(remote).parts) == 4
+        ]
+        barrier_dirs = [d for d in four_part_dirs if d != writer_dir]
+        self.assertEqual(len(barrier_dirs), 1)
+        barriers_dir = barrier_dirs[0]
+        t1 = "1" * 32
+        t2 = "2" * 32
+        (barriers_dir / t1).write_bytes(
+            f"kasumi-gc-v1:barrier:{t1}\nstarted_at=1700000100\npid=1111\nmachine=node-one".encode(
+                "utf-8"
+            )
+        )
+        (barriers_dir / t2).write_bytes(
+            f"kasumi-gc-v1:barrier:{t2}\nstarted_at=1700000200\npid=2222\nmachine=node-two".encode(
+                "utf-8"
+            )
+        )
+
+        writers_proc = self.invoke_raw("remote", "writers", "demo", "--json")
+        self.assertEqual(
+            writers_proc.returncode, 0, writers_proc.stdout + writers_proc.stderr
+        )
+        writers_json = json.loads(writers_proc.stdout.decode("utf-8"))
+        self.assertTrue(writers_json["ok"])
+        self.assertTrue(writers_json["data"]["barrier_present"])
+        self.assertEqual(len(writers_json["data"]["barriers"]), 2)
+        self.assertEqual(
+            {b["machine_name"] for b in writers_json["data"]["barriers"]},
+            {"node-one", "node-two"},
+        )
+
+        # Ambiguous remove-barrier rejects without deleting either barrier.
+        ambig = self.invoke_raw(
+            "gc", "remove-barrier", "demo", "--confirm-abandoned", "--json"
+        )
+        self.assertNotEqual(ambig.returncode, 0)
+        self.assertTrue((barriers_dir / t1).exists())
+        self.assertTrue((barriers_dir / t2).exists())
+
+        # Targeted remove-barrier by token removes only t1.
+        rm1_proc = self.invoke_raw(
+            "gc", "remove-barrier", "demo", t1, "--confirm-abandoned", "--json"
+        )
+        self.assertEqual(
+            rm1_proc.returncode, 0, rm1_proc.stdout + rm1_proc.stderr
+        )
+        rm1 = json.loads(rm1_proc.stdout.decode("utf-8"))
+        self.assertTrue(rm1["ok"])
+        self.assertEqual(rm1["data"]["outcome"], "removed")
+        self.assertEqual(rm1["data"]["remaining_barriers_count"], 1)
+        self.assertFalse((barriers_dir / t1).exists())
+        self.assertTrue((barriers_dir / t2).exists())
+
+        # Single remaining barrier is auto-removed without specifying its ID.
+        rm2_proc = self.invoke_raw(
+            "gc", "remove-barrier", "demo", "--confirm-abandoned", "--json"
+        )
+        self.assertEqual(
+            rm2_proc.returncode, 0, rm2_proc.stdout + rm2_proc.stderr
+        )
+        rm2 = json.loads(rm2_proc.stdout.decode("utf-8"))
+        self.assertTrue(rm2["ok"])
+        self.assertEqual(rm2["data"]["outcome"], "removed")
+        self.assertEqual(rm2["data"]["remaining_barriers_count"], 0)
+        self.assertFalse((barriers_dir / t2).exists())
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)

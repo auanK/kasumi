@@ -1,4 +1,5 @@
 #include "application/history_storage/epoch.hpp"
+#include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/publication.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/scanner.hpp"
@@ -663,6 +664,11 @@ kasumi::transport::ControlReadBatchResponse reobserve_control_read_batch(
     for (const auto& prefix : request.list_prefixes) {
         auto listing = reobserve_list_prefix(context, prefix);
         if (!listing) {
+            if (listing.error().code ==
+                kasumi::transport::ErrorCode::StorageNotFound) {
+                result.listings.emplace_back();
+                continue;
+            }
             return std::unexpected(listing.error());
         }
         result.listings.push_back(std::move(*listing));
@@ -8185,10 +8191,18 @@ void run_sync_mutation_interruption(
             ASSERT_TRUE(state->objects.contains(writer_identifier));
             const auto& writer_bytes = state->objects.at(writer_identifier);
             writer_payload.assign(writer_bytes.begin(), writer_bytes.end());
-            ASSERT_EQ(
-                writer_payload,
+            const auto expected_prefix =
                 "kasumi-gc-v1:writer:" +
+                writer_identifier.substr(layout.writers_prefix.size());
+            ASSERT_TRUE(writer_payload.starts_with(expected_prefix));
+            const auto parsed_meta = kasumi::application::history_storage::
+                maintenance_protocol::parse_marker_metadata(
+                    writer_bytes,
+                    "writer",
                     writer_identifier.substr(layout.writers_prefix.size()));
+            ASSERT_TRUE(parsed_meta.has_value());
+            EXPECT_GT(parsed_meta->pid, 0U);
+            EXPECT_FALSE(parsed_meta->machine_name.empty());
             ASSERT_FALSE(state->objects.contains(layout.barrier_identifier));
             ASSERT_NE(
                 std::find(state->presence_identifiers.begin() +
@@ -12554,7 +12568,7 @@ TEST(SyncCoordinatorTest, PruningFailurePreservesDatabaseCommittedPhase) {
     const auto paths = sync_journal::make_paths(profile);
     ASSERT_TRUE(paths.has_value());
     for (int attempt = 0; attempt < 2; ++attempt) {
-        state->fail_list_at = state->list_count + 2;
+        state->fail_list_at = state->list_count + 4;
         const auto failed =
             coord::recover_if_needed(runtime_data, storage, key);
         ASSERT_FALSE(failed.has_value());

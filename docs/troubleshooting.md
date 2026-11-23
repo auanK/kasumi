@@ -339,28 +339,32 @@ The operating system user account running Kasumi lacks sufficient filesystem per
 
 ### Likely Meaning
 
-GC checks barrier ownership after acquisition and immediately before Apply. Loss detected before Apply prevents every candidate DELETE. Apply stops on observed cancellation or failure; ownership lost after the pre-Apply check may only be detected during cleanup. No periodic ownership checkpoints or history reobservations run during Apply: they would add latency without fencing and could suggest false concurrency safety.
+GC establishes a unique per-run barrier (`<barriers-ns>/<token>`), waits the post-publish settle window, verifies exclusivity (no competing barriers, no legacy barrier, no writers, own barrier intact) after acquisition and immediately before `Apply`, and periodically revalidates exclusivity during `Apply` (every 16 batches / 128 objects or 30 seconds). Loss or contention detected before `Apply` or before starting a subsequent batch prevents unstarted candidate `DELETE`s with `NotAttempted`; contention between revalidation ticks or during an in-flight batch stops further batches on the next check or failure.
 
-The error carries the candidate total, transport-acknowledged removals, failed identifier when one exists, stage, transport category/message/native code when available, mutation state, and barrier-cleanup status. `NotAttempted` means no DELETE was started for this failure, including cancellation before the next batch. `Confirmed` counts acknowledged `Removed` and `AlreadyAbsent` results, not independently audited absence. `Uncertain` means an attempted DELETE has an unproven effect, including exceptions and removal errors whose category cannot guarantee no mutation. The transport provides no no-effect guarantee for these errors, so `NotApplied` is not emitted. A failed DELETE is never labelled `NotAttempted`.
+The error carries the candidate total, transport-acknowledged removals, failed identifier when one exists, stage, transport category/message/native code when available, mutation state, and barrier-cleanup status. `NotAttempted` means no DELETE was started for this failure, including cancellation or failed exclusivity revalidation before the next batch. `Confirmed` counts acknowledged `Removed` and `AlreadyAbsent` results, not independently audited absence. `Uncertain` means an attempted DELETE has an unproven effect, including exceptions and removal errors whose category cannot guarantee no mutation. The transport provides no no-effect guarantee for these errors, so `NotApplied` is not emitted. A failed DELETE is never labelled `NotAttempted`.
 
 Partial failures preserve acknowledgements from completed batches, including successful peers of a failed item, and stop further batches without retry, rollback, or compensation. The primary error and any cleanup error remain separate; failed or throwing cleanup leaves barrier release unconfirmed and is not retried by the destructor. Successful candidate REMOVE calls are not read back with PRESENCE. Manual barrier removal still verifies absence after either acknowledged REMOVE result.
 
-For scheduled unattended GC, the default 6-hour grace period (`--min-age`, falling back to `min_history_age_hours`) and the pre-barrier read-only busy check isolate in-flight Sync clients without creating or colliding on remote barriers (`error.code = "remote_busy"` / `[BUSY]` in `--log-file`). When contention clears on the next scheduled run, GC proceeds normally. For manual `--min-age 0` cleanups, stop all Syncs and other GC processes before starting, and resume Sync only after healthy completion or resolution of maintenance uncertainty. The barrier is cooperative; pre-Apply and cleanup checks provide neither distributed exclusivity nor fencing and cannot close the TOCTOU window between verification and DELETE. Running `gc remove-barrier --confirm-abandoned` while a GC is active can break exclusivity and cause data loss.
+For scheduled unattended GC, the default 6-hour grace period (`--min-age`, falling back to `min_history_age_hours`, clamped against remote `ModTime` and failing closed if remote time is unavailable), the pre-barrier read-only busy check (`error.code = "remote_busy"` / `[BUSY]` in `--log-file`), and the multi-barrier settle window isolate concurrent Sync and GC runs without overwriting another process's barrier. When contention clears on the next scheduled run, GC proceeds normally. For manual `--min-age 0` cleanups, stop all Syncs and other GC processes before starting, and resume Sync only after healthy completion or resolution of maintenance uncertainty. Barriers and revalidation remain cooperative on passive storage without distributed CAS/fencing and cannot close the micro-window between a revalidation tick and an already-started batch `DELETE`. Running `gc remove-barrier --confirm-abandoned` while a GC is active can break exclusivity and cause data loss.
 
 ### Safe Next Steps
 
 1. **Preserve Protocol Objects**: Do not delete legacy quarantine objects or other protocol objects directly through the provider.
-2. **Inspect Writer Markers and Barrier**:
+2. **Inspect Writer Markers and Barriers**:
    ```bash
    kasumi remote writers <profile>
    ```
    If you know another client is synchronizing, wait for it to finish.
-   - If a maintenance barrier is present from an interrupted GC run (`Barrier: present`), inspect its identifier. Ensure that no GC process is active on any device (never assume a barrier is abandoned merely because of its age or timestamp), then recover it:
+   - If one or more maintenance barriers remain from interrupted GC runs, inspect each barrier identifier and its diagnostic metadata (`machine`, `pid`, `started_at`). Ensure that no GC process is active on any device (never assume a barrier is abandoned merely because of its age or timestamp), then recover it:
      ```bash
      kasumi gc remove-barrier <profile> --confirm-abandoned
      ```
+     When multiple barriers are present, pass the specific identifier (or 32-hex token) to remove only the verified abandoned one:
+     ```bash
+     kasumi gc remove-barrier <profile> <barrier-id> --confirm-abandoned
+     ```
      If removal exits with an `Uncertain` mutation state (e.g. after a network timeout or connection reset during DELETE or post-removal verification), do not perform manual provider mutations. Re-run `kasumi remote writers <profile>` to inspect actual remote state. If the barrier is already absent, a subsequent `remove-barrier` will report `Already absent` with zero deletes. If it remains present and maintenance is verified inactive, retry the command.
-   - If writer markers remain, verify that no Sync or maintenance operation is running, copy that writer's exact identifier, and run:
+   - If writer markers remain, inspect their diagnostic metadata, verify that no Sync or maintenance operation is running, copy that writer's exact identifier, and run:
      ```bash
      kasumi gc remove-writer <profile> <writer-id>
      ```
@@ -373,8 +377,9 @@ For scheduled unattended GC, the default 6-hour grace period (`--min-age`, falli
 5. **Investigate Before Retrying**: Treat `Uncertain` mutation state and barrier-cleanup errors as reasons to inspect the remote namespace and retry only after the state is understood. Do not substitute ad-hoc provider deletion for GC. See [Garbage Collection Architecture](architecture/garbage-collection.md).
 
 Slow cloud DELETEs do not justify increasing the fixed concurrency limit or
-running concurrent Sync. There are deliberately no periodic
-ownership checkpoints or distributed CAS.
+running concurrent Sync. Passive storage provides no distributed CAS;
+multi-barrier isolation, settle delays, and periodic `Apply` revalidation reduce
+concurrent overlap rather than replacing external exclusivity guarantees.
 
 ### Related Documentation
 * [Garbage Collection Architecture](architecture/garbage-collection.md)
@@ -445,7 +450,7 @@ The table below clarifies the purpose and operational behavior of Kasumi's diagn
 | `kasumi repack <profile>` | Local-first Micro-Pack consolidation (`--dry-run` previews) | No remote downloads; verifies local hashes/sizes | Yes (`--dry-run` inspects read-only) | Exclusive | Cooperative writer marker blocks GC barrier; stop Sync on other clients |
 | `kasumi gc <profile>` | Storage reclamation | Reachability-only (zero orphan payload GETs) | Yes | Exclusive | Barrier plus writer/ownership checks; not distributed exclusion |
 | `kasumi gc remove-writer <profile> <writer-id>` | Remove one explicitly selected writer marker | No | No | Exclusive | Operator verifies liveness; other markers still block GC |
-| `kasumi gc remove-barrier <profile> --confirm-abandoned` | Remove an abandoned maintenance barrier | No | No | Exclusive | Operator verifies liveness; breaks deadlock with coexisting writers |
+| `kasumi gc remove-barrier <profile> [<barrier-id>] --confirm-abandoned` | Remove an abandoned maintenance barrier | No | No | Exclusive | Operator verifies liveness; supports specific barrier ID when multiple exist |
 | `kasumi remote health <profile>` | Operational diagnostic | No | No | None | Point-in-time observation |
 | `kasumi remote contents <profile> --audit` | Audit all physical payloads | Yes (all present) | No | None | Point-in-time observation |
 | `kasumi remote summary <profile> [--full]` | Overview of vault state and shared operational activity | No | No | None | Point-in-time observation |

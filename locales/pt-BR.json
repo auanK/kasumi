@@ -330,6 +330,7 @@
     "classification": "  Classificação: {}",
     "structural_candidate": "  Candidato estrutural: {}",
     "barrier": "  Barrier: {}",
+    "barriers": "  Barriers ({}):",
     "present": "presente",
     "absent": "ausente",
     "maintenance_blocked": "  Manutenção bloqueada: {}",
@@ -342,6 +343,8 @@
     "reasons": "  Razões ({}):",
     "origin": "  Origem: {}",
     "machine": "  Máquina: {}",
+    "pid": "  PID: {}",
+    "started_at": "  Iniciado em: {}",
     "invalid_activities": "  Registros de atividade inválidos: {}"
   },
   "variants": {
@@ -485,6 +488,7 @@
     "completed": "Barreira de manutenção removida: {}",
     "absent": "A barreira de manutenção já está ausente.",
     "writers_remain": "Marcadores de writer ativos permanecem ({}). Eles agora podem ser removidos com 'kasumi gc remove-writer <profile> <writer-id>'.",
+    "barriers_remain": "Outras barreiras de manutenção permanecem ({}). Inspecione 'kasumi remote writers <profile>' e remova cada barreira abandonada com 'kasumi gc remove-barrier <profile> <barrier-id> --confirm-abandoned'.",
     "stage_checking_presence": "Verificando presença da barreira",
     "stage_downloading_payload": "Baixando conteúdo da barreira",
     "stage_validating_payload": "Validando token de controle da barreira",
@@ -502,7 +506,7 @@
     "fsck": "Uso: kasumi fsck <perfil>\n\nAudita integridade remota e conteúdo autenticado.\nExemplo: kasumi fsck Programming\n",
     "gc": "Uso: kasumi gc <perfil> [--dry-run] [--min-age <horas>]\n\nAnalisa candidatos à coleta de lixo e remove conteúdo órfão seguro, commits expirados, variantes redundantes e atividades antigas.\n--dry-run analisa os candidatos sem criar barreira nem remover objetos.\n--min-age <horas> define a idade mínima para remoção (0-8760, padrão de retenção de 6h); protege envios de sync em andamento e torna o GC automático seguro.\nSeguro para agendamento automático: verifica escritores e barreiras em modo somente leitura antes de mutar (retorna remote_busy / BUSY se ocupado).\nSubcomandos: remove-writer, remove-barrier (use --help em cada subcomando).\nExemplo: kasumi gc Programming --dry-run\n",
     "gc_remove-writer": "Uso: kasumi gc remove-writer <perfil> <writer-id>\n\nRemove um marker exato listado por remote writers.\nVerifique se o processo está inativo e se nenhum Sync ou manutenção está em execução.\nNão executa Sync nem GC.\nExemplo: kasumi remote writers Programming\n",
-    "gc_remove-barrier": "Uso: kasumi gc remove-barrier <perfil> --confirm-abandoned\n\nRemove uma barrier de manutenção abandonada após verificação manual.\n--confirm-abandoned é obrigatório; confirme que não há GC ou Sync ativo em dispositivo algum.\nVerifica identidade física e confirma ausência; não executa Sync nem GC.\nExemplo: kasumi gc remove-barrier Programming --confirm-abandoned\n",
+    "gc_remove-barrier": "Uso: kasumi gc remove-barrier <perfil> [<barrier-id>] --confirm-abandoned\n\nRemove uma barrier de manutenção abandonada após verificação manual.\n--confirm-abandoned é obrigatório; confirme que não há GC ou Sync ativo em dispositivo algum.\nOmita <barrier-id> quando houver apenas uma barrier ativa; informe <barrier-id> ou seu token hex de 32 caracteres quando houver múltiplas.\nVerifica identidade física e confirma ausência; não executa Sync nem GC.\nExemplo: kasumi gc remove-barrier Programming --confirm-abandoned\n",
     "repack": "Uso: kasumi repack <perfil> [--dry-run] [--reclaim-dirty] [--full]\n\nConsolida Micro-Packs fragmentados e arquivos pequenos soltos a partir dos arquivos locais.\nGaranta que o workspace está limpo e pare o Sync em outros clientes antes de executar.\n--dry-run simula a consolidação sem criar packs nem alterar o estado remoto.\n--reclaim-dirty inclui packs grandes com espaço morto; packs antigos são removidos pelo 'kasumi gc'.\n--full exibe o inventário completo de packs e os detalhes do commit publicado.\nExemplo: kasumi repack Programming --dry-run\n",
     "resolve-missing": "Uso: kasumi resolve-missing <perfil> [--dry-run | --confirm]\n\nResolve conteúdo indisponível como exclusões lógicas. Revise as pendências antes.\nLista os caminhos elegíveis e pede confirmação antes de publicar; use --dry-run para simular\nsem excluir, ou --confirm para automação não interativa.\nExemplo: kasumi resolve-missing Programming --dry-run\n",
     "remote": "Uso: kasumi remote <subcomando> <perfil> [argumentos] [opções]\n\nInspeção remota. Subcomandos:\n  heads, tree, commits, summary, stat, commit, get, epochs, epoch,\n  contents, content, markers, objects, orphans, writers, health\nUse kasumi remote <subcomando> --help para argumentos e restrições.\nExemplo: kasumi remote summary Programming\n",

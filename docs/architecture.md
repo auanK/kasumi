@@ -37,12 +37,13 @@ CLI/profile → local observation + authenticated remote history + StoredState
 | Request | Local effects | Remote effects |
 |---|---|---|
 | `config` list/create/edit/rename/delete, `key` | Reads or changes `config.toml`, private profile paths, and persisted keys in the OS vault or `key.bin`; delete preserves the synchronized directory | None |
-| `list`, `show` | Reads `config.toml` and local/SQLite inspection diagnostics without contacting remote storage or displaying credentials | None |
+| `list`, `show`, `diagnostics` | Reads `config.toml`, environment/toolchain info, and local/SQLite inspection diagnostics without contacting remote storage or displaying credentials | None |
 | Preview (`sync --dry-run`), Status | Reads local/SQLite state; profile lock and permission normalization are possible | Observation only; no recovery or publication |
 | Sync | May change synchronized files, file-hash cache, transaction journal, and accepted `StoredState` | May upload content and publish/prune history; registers a writer for active work |
-| Fsck | Workspace; preceding recovery can change local state | Audit reads only, **except** effects of preceding transaction recovery |
+| Resolve Missing | `--dry-run`: read-only preview of pending paths. `--confirm` (or confirmed prompt): preceding recovery, logical deletion updates in `StoredState` | `--dry-run`: observation only. Confirmed run: registers writer and publishes a `KCOM` Commit/HEAD marking unresolved paths deleted |
+| Fsck | Workspace; preceding recovery can change local state | Audit reads plus best-effort `KACT` v1 activity record publication; preceding transaction recovery may publish Sync changes |
 | Repack | `--dry-run`: read-only observation (refuses pending journal). Real run: preceding recovery if applicable, file-hash cache delta, and updated `StoredState` + `StorageManifest`; zero synchronized-file mutations | `--dry-run`: observation only. Real run: registers writer, uploads consolidated `KPAK\x01` packs, publishes tree-preserving Commit/HEAD, prunes superseded HEAD markers; zero remote deletions |
-| GC | Workspace; preceding recovery can change local state | Direct deletion of eligible orphan Content and redundant CommitVariants under cooperative maintenance controls and a globally validated plan; preceding recovery may publish |
+| GC | `--dry-run`: read-only observation (refuses pending journal). Real run: workspace; preceding recovery can change local state | `--dry-run`: observation only. Real run: direct deletion of eligible orphan Content, redundant CommitVariants, expired unreachable Commits behind Epochs, and pruned `KACT` activities under cooperative multi-barrier controls and a globally validated plan, plus `KACT` v1 activity publication; preceding recovery may publish |
 | `remote ...` | Temporary workspace; `remote get` writes its chosen destination | Inspection reads only; no normal transaction recovery |
 
 Read the linked owners for exact invariants. The [README](../README.md) is a short entry point.

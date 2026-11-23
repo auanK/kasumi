@@ -194,17 +194,26 @@ int run(int argc, char* argv[]) {
             ? 2U
             : ((is_gc_subcommand || is_remote_sub) ? 4U : 3U);
 
+    const bool supports_remote_writers =
+        is_remote_sub && sanitized[2] == "writers";
+    const bool supports_gc_remove_barrier =
+        is_gc_subcommand && sanitized[2] == "remove-barrier";
+
     const bool supports_json =
         cmd == "list" || cmd == "diagnostics" ||
         (has_profile_arg &&
          (cmd == "show" || cmd == "sync" || cmd == "status" || cmd == "fsck" ||
           cmd == "repack" || cmd == "resolve-missing" ||
           (cmd == "gc" && !is_gc_sub_kw))) ||
-        supports_remote_summary_full;
+        supports_remote_summary_full || supports_remote_writers ||
+        supports_gc_remove_barrier;
     const std::size_t json_start_index =
         (cmd == "list" || (cmd == "diagnostics" && !has_profile_arg))
             ? 2U
-            : (supports_remote_summary_full ? 4U : 3U);
+            : ((supports_remote_summary_full || supports_remote_writers ||
+                supports_gc_remove_barrier)
+                   ? 4U
+                   : 3U);
 
     std::size_t delimiter_index = sanitized.size();
     for (std::size_t index = 1; index < sanitized.size(); ++index) {

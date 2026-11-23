@@ -1131,25 +1131,58 @@ int present_remote_report(const application::RemoteOrphansReport& report) {
 }
 
 int present_remote_report(const application::RemoteWritersReport& report) {
+    const auto print_marker_metadata =
+        [](const std::optional<std::string>& machine_name,
+           const std::optional<std::uint64_t>& pid,
+           const std::optional<std::int64_t>& started_at_unix) {
+            if (machine_name.has_value()) {
+                i18n::println(i18n::Key::FieldMachine,
+                              remote_text(*machine_name));
+            }
+            if (pid.has_value()) {
+                i18n::println(i18n::Key::FieldPid, *pid);
+            }
+            if (started_at_unix.has_value()) {
+                i18n::println(
+                    i18n::Key::FieldStartedAt,
+                    platform::clock::format_local_timestamp(*started_at_unix));
+            }
+        };
     i18n::println(i18n::Key::RemoteWritersHeader, report.writers.size());
     i18n::println(i18n::Key::FieldBarrier,
                   report.barrier_present ? i18n::tr(i18n::Key::FieldPresent)
                                          : i18n::tr(i18n::Key::FieldAbsent));
-    if (report.barrier_identifier.has_value()) {
+    if (report.barriers.empty() && report.barrier_identifier.has_value()) {
         i18n::println(i18n::Key::FieldIdentifier,
                       remote_text(*report.barrier_identifier));
+    } else if (report.barriers.size() == 1) {
+        const auto& barrier = report.barriers.front();
+        i18n::println(i18n::Key::FieldIdentifier,
+                      remote_text(barrier.identifier));
+        print_marker_metadata(
+            barrier.machine_name, barrier.pid, barrier.started_at_unix);
+    } else if (report.barriers.size() > 1) {
+        i18n::println(i18n::Key::FieldBarriers, report.barriers.size());
+        render_indexed(report.barriers, [&](const auto& barrier) {
+            i18n::println(i18n::Key::FieldIdentifier,
+                          remote_text(barrier.identifier));
+            print_marker_metadata(
+                barrier.machine_name, barrier.pid, barrier.started_at_unix);
+        });
     }
     i18n::println(i18n::Key::FieldMaintenanceBlocked,
                   yes_no(report.maintenance_blocked));
     i18n::println(i18n::Key::FieldProtocolConsistent,
                   yes_no(report.protocol_consistent));
-    render_indexed(report.writers, [](const auto& writer) {
+    render_indexed(report.writers, [&](const auto& writer) {
         i18n::println(i18n::Key::FieldIdentifier,
                       remote_text(writer.identifier));
         i18n::println(i18n::Key::FieldState,
                       writer.state == application::RemoteWriterState::Invalid
                           ? i18n::tr(i18n::Key::WriterStateInvalid)
                           : i18n::tr(i18n::Key::WriterStateIndeterminate));
+        print_marker_metadata(
+            writer.machine_name, writer.pid, writer.started_at_unix);
     });
     return 0;
 }
@@ -2511,6 +2544,14 @@ int present(const application::Response& response, bool full, bool quiet) {
                                        data.identifier)
                         : std::string{
                               i18n::tr(i18n::Key::ManualBarrierRemovalAbsent)});
+                if (data.remaining_barriers_count > 0) {
+                    std::println(
+                        "{} {}",
+                        i18n::tr(i18n::Key::LabelWarning),
+                        i18n::format(
+                            i18n::Key::ManualBarrierRemovalBarriersRemain,
+                            data.remaining_barriers_count));
+                }
                 if (data.active_writers_count > 0) {
                     std::println(
                         "{} {}",

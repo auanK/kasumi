@@ -59,14 +59,22 @@ state or transaction evidence merely to make a failing synchronization proceed.
 ## Garbage Collection
 
 `kasumi gc <profile>` reclaims storage by directly deleting eligible orphan
-Content (loose objects, `KPAK\x01` Micro-Packs with no reachable members, and unreferenced FastCDC chunks) and redundant CommitVariants while preserving required history and
-Epochs. Deletions are permanent; keep independent backups.
+Content (loose objects, `KPAK\x01` Micro-Packs with no reachable members, and
+unreferenced FastCDC chunks), redundant CommitVariants, expired unreachable
+Commits behind Epochs, and pruned `KACT` activity records while preserving
+required history and Epochs. Deletions are permanent; keep independent backups.
 
-* **Reserve a Maintenance Window**: Stop Sync on every client and run only one
-  destructive maintenance or writer-removal operation at a time. Size the window
-  using observed GC duration; running GC after every Sync is unnecessary.
-* **Inspect Results**: Check acknowledged removals and investigate partial or
-  uncertain results before retrying. A later run builds a new plan.
+* **Scheduled vs. Manual Maintenance**: Routine unattended `kasumi gc <profile>`
+  uses the default 6-hour remote-clock-clamped grace period (`min_history_age_hours`),
+  read-only `remote_busy` backoff, multi-barrier settle checks, and periodic
+  mid-`Apply` revalidation (see [Automation](#automation)). For immediate
+  `--min-age 0` cleanups, reserve a maintenance window with Sync stopped on every
+  client and serialize destructive maintenance across the vault; running GC after
+  every Sync is unnecessary.
+* **Preview and Inspect Results**: Use `kasumi gc <profile> --dry-run` to preview
+  reclaimable counts and bytes read-only, check acknowledged removals after a real
+  run, and investigate partial or uncertain results before retrying. A later run
+  builds a new plan.
 * **Respect Protocol Objects**: Use Kasumi's maintenance commands rather than
   treating a provider listing as a deletion list.
 
@@ -111,7 +119,7 @@ Kasumi provides distinct tools for auditing vault integrity and remote storage h
 | `kasumi remote health` | No payload audit | No | No | No |
 | `kasumi remote contents <profile> --audit` | Yes (full download & verify) | Yes | No | No |
 | `kasumi repack` | No payload audit; verifies local sources before staging | No | Yes (`--dry-run` inspects read-only) | `--dry-run`: No. Real run: uploads consolidated packs and publishes Commit/HEAD; zero deletions |
-| `kasumi gc` | No Fsck-style payload audit | No | Yes | Yes: authorized direct deletions and control cleanup; preceding recovery may publish |
+| `kasumi gc` | No Fsck-style payload audit | No | Yes (`--dry-run` inspects read-only) | `--dry-run`: No. Real run: authorized direct deletions, control cleanup, and `KACT` v1 activity publication; preceding recovery may publish |
 
 Fsck and GC run pending Sync transaction recovery first. Recovery may change local files or complete remote publication; Fsck's audit does not publish or delete file contents or commits, though maintenance operations (`fsck`, `gc`, `gc remove-writer`, and `gc remove-barrier`) publish best-effort encrypted `KACT` v1 activity records inspectable from any client via `kasumi remote summary [--full]`.
 
@@ -162,7 +170,7 @@ replace the binary manually.
 When running Kasumi in automated scripts, cron jobs, or task schedulers:
 
 * **Structured Automation (`--json` and `--quiet`)**: Prefer `kasumi <command> <profile> --json` in unattended scripts to inspect `ok`, `exit_code`, and stable `error.code` (`lock_busy`, `remote_busy`, `partial_pending`, `confirmation_required`, etc.) without parsing localized text; use `--quiet` for cron/Task Scheduler jobs that want silent success and errors only.
-* **Scheduled Automatic Garbage Collection**: Unattended `kasumi gc <profile>` is safe to schedule periodically (such as daily or weekly cron / Task Scheduler runs). GC checks for active remote writers or barriers read-only before mutating the barrier (`error.code = "remote_busy"` and `[BUSY]` in `--log-file` when contention occurs) and enforces a fail-safe default 6-hour grace period (`min_history_age_hours`, overridable with `--min-age <hours>`) using remote `ModTime` and `Commit.created_at` so in-flight objects and recent unreachable commits are deferred intact. Reserve `--min-age 0` for manual offline maintenance when all clients are stopped.
+* **Scheduled Automatic Garbage Collection**: Unattended `kasumi gc <profile>` is safe to schedule periodically (such as daily or weekly cron / Task Scheduler runs). GC checks for active remote writers or barriers read-only before mutating any control object (`error.code = "remote_busy"` and `[BUSY]` in `--log-file` when contention occurs), coordinates concurrent runs via unique barriers and a post-publish settle window, revalidates exclusivity periodically during `Apply`, and enforces a fail-safe default 6-hour grace period (`min_history_age_hours`, overridable with `--min-age <hours>`) clamped to remote `ModTime` (failing closed if remote clock time is unavailable) plus `Commit.created_at` so in-flight objects and recent unreachable commits are deferred intact even under local clock skew. Reserve `--min-age 0` for manual offline maintenance when all clients are stopped.
 * **Process Exit Codes**: Handle every [documented exit code](configuration-and-usage.md#exit-codes). Code `2` means partial synchronization with pending materializations, not full success; retry once the missing content is restored. Never automatically run `resolve-missing --confirm` on pending paths without human review.
 * **Single-Process Profile Lock**: `status`, `sync --dry-run`, `sync`, `fsck`, `repack`, and `gc` use an OS file lock (`profile-<name>.lock`). If an automated script attempts one of these operations while another holds that profile lock, it exits with code `1`. Remote inspection uses a separate path without this lock. Ensure scheduled jobs do not overlap.
 * **External Scheduling**: Kasumi does not contain an internal background daemon. Use system scheduling tools:
@@ -188,5 +196,5 @@ Avoid these operational anti-patterns:
 * **Do NOT manually delete raw remote objects**: Never delete files directly in the remote storage directory using cloud consoles, SFTP clients, or `rclone delete`. Kasumi manages object reachability, Epoch anchors, and retention internally; deleting files manually can cause missing-content errors and break history continuity.
 * **Do NOT replace binaries during an unfinished transaction**: Complete recovery before replacing the application binary. Never delete the journal to bypass recovery.
 * **Do NOT rely on `key.bin` for offline protection without Full-Disk Encryption**: `key.bin` uses a reversible XOR mask and OS file permissions; always enable BitLocker or LUKS on devices containing sensitive profile keys.
-* **Do NOT run concurrent normal application operations on the same profile**: `status`, `sync --dry-run`, `sync`, `fsck`, and `gc` use the local exclusive `profile-<name>.lock`. `remote ...` inspection does not acquire it and reports a point-in-time view.
+* **Do NOT run concurrent normal application operations on the same profile**: `status`, `sync --dry-run`, `sync`, `fsck`, `repack`, `resolve-missing`, and `gc` use the local exclusive `profile-<name>.lock`. `remote ...` inspection does not acquire it and reports a point-in-time view.
 

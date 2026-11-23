@@ -121,18 +121,25 @@ exposing secrets.
 
 **GC permanently deletes eligible objects.** Scheduled unattended `kasumi gc <profile>`
 checks active writers and barriers read-only before barrier acquisition (backing off
-with `error.code = "remote_busy"` / `[BUSY]` when busy) and applies a default 6-hour
-grace period (`min_history_age_hours`, override with `--min-age <hours>` `0..8760`)
-using remote `ModTime` (and `Commit.created_at` for expired unreachable commits). Any
-object newer than `--min-age` or with missing, invalid, or future timestamps is
-deferred safely. Reserve `--min-age 0` for manual maintenance with Sync stopped on
-every client. Use `kasumi gc <profile> --dry-run` to preview candidate counts
-(content objects, redundant commit variants, expired commits, and expired activity
-records), reclaimable bytes, and deferred recent objects read-only without
-establishing a barrier, deleting objects, or publishing a `KACT` activity record.
-Manual `gc remove-writer` requires an exact marker whose process is verified inactive.
-`gc remove-barrier` requires `--confirm-abandoned` after verifying no Sync or
-maintenance is active; barrier age alone is insufficient. See the
+with `error.code = "remote_busy"` / `[BUSY]` when busy), publishes a unique
+per-run barrier under `<barriers-ns>/<token>` with a post-publish settle window and
+exclusivity check, periodically revalidates exclusivity during `Apply`, and enforces a
+default 6-hour grace period (`min_history_age_hours`, override with `--min-age <hours>`
+`0..8760`) clamped to `min(local_now, remote_now)` derived from the barrier's remote
+`ModTime` (plus `Commit.created_at` for expired unreachable commits). Any object newer
+than `--min-age` or with missing, invalid, or future timestamps is deferred safely, and
+if remote barrier `ModTime` cannot be determined while `--min-age > 0`, GC fails closed
+to protect recent uploads under local clock skew. Reserve `--min-age 0` for manual
+maintenance with Sync stopped on every client. Use `kasumi gc <profile> --dry-run` to
+preview candidate counts (content objects, redundant commit variants, expired commits,
+and expired activity records), reclaimable bytes, and deferred recent objects read-only
+without establishing a barrier, deleting objects, or publishing a `KACT` activity
+record. `kasumi remote writers <profile>` displays active barriers, writers, and
+diagnostic metadata (`started_at`, `pid`, `machine`). Manual `gc remove-writer`
+requires an exact marker whose process is verified inactive.
+`gc remove-barrier [<barrier-id>] --confirm-abandoned` requires `--confirm-abandoned`
+after verifying no Sync or maintenance is active (and `<barrier-id>` when multiple
+barriers are present); marker age alone is insufficient. See the
 [GC operational contract](architecture/garbage-collection.md#operational-contract).
 
 `kasumi repack <profile>` consolidates loose small files and fragmented
@@ -297,7 +304,7 @@ Pass `--quiet` after the profile (or after `kasumi list`, `kasumi diagnostics [<
 
 ### Machine-Readable Output (`--json`)
 
-Pass `--json` on supported commands (`list`, `show`, `diagnostics`, `status`, `sync`, `fsck`, `gc <profile>`, `repack`, `resolve-missing`, and `remote summary`) to emit a single language-independent JSON object (`"schema_version": 1`) to `stdout` with empty `stderr`, suppressing banners, progress output, and localized text differences regardless of `--lang`:
+Pass `--json` on supported commands (`list`, `show`, `diagnostics`, `status`, `sync`, `fsck`, `gc <profile>`, `gc remove-barrier`, `repack`, `resolve-missing`, `remote summary`, and `remote writers`) to emit a single language-independent JSON object (`"schema_version": 1`) to `stdout` with empty `stderr`, suppressing banners, progress output, and localized text differences regardless of `--lang`:
 
 - Every response includes `schema_version`, `command`, `ok`, `exit_code`, and `timestamp` (UTC ISO-8601 ending in `Z`), plus `profile`, `duration_ms`, `data`, `warning`, or `error` as applicable.
 - Command `data` objects retain all raw numeric/boolean/array fields alongside a concise language-independent `summary` string (such as `"Everything in sync"` or `"3 changes | ↑ 2 (2 KB) | ↓ 1 (512 bytes)"`). On `gc`, `data` also exposes `candidate_expired_commits`, `deferred_recent_objects`, `candidate_bytes`, `removed_bytes`, and `min_age_hours`.

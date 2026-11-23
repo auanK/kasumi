@@ -36,6 +36,7 @@ struct Request {
     Operation operation = Operation::Sync;
     std::string profile_name;
     std::string writer_identifier;
+    std::optional<std::string> barrier_identifier = std::nullopt;
     bool initial = false;
     bool audit_inventory = false;
     bool repair = false;

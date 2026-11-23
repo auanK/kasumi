@@ -428,19 +428,19 @@ public:
     }
 
     void sync_after_barrier_is_published() {
-        const auto identifier =
+        const auto barriers_prefix =
             kasumi::application::history_storage::derive_remote_layout(key_)
-                .barrier_identifier;
-        counting_state_.after_put = [this,
-                                     identifier](std::string_view current) {
-            if (current == identifier) {
-                counting_state_.barrier_sync_attempted = true;
-                const auto result = sync();
-                counting_state_.barrier_sync_succeeded = result.has_value();
-                counting_state_.barrier_sync_content_puts =
-                    counting_state_.content_puts;
-            }
-        };
+                .barriers_prefix;
+        counting_state_.after_put =
+            [this, barriers_prefix](std::string_view current) {
+                if (current.starts_with(barriers_prefix)) {
+                    counting_state_.barrier_sync_attempted = true;
+                    const auto result = sync();
+                    counting_state_.barrier_sync_succeeded = result.has_value();
+                    counting_state_.barrier_sync_content_puts =
+                        counting_state_.content_puts;
+                }
+            };
     }
 
     [[nodiscard]] std::filesystem::path

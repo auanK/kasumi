@@ -220,4 +220,12 @@ std::string host_name() {
     return sanitize_machine_name(query_os_host_name());
 }
 
+std::uint64_t current_process_id() noexcept {
+#if defined(_WIN32)
+    return static_cast<std::uint64_t>(GetCurrentProcessId());
+#else
+    return static_cast<std::uint64_t>(getpid());
+#endif
+}
+
 } // namespace kasumi::platform::machine

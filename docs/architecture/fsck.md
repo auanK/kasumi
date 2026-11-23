@@ -30,7 +30,7 @@ detail only as text. Incomplete audits remain failures.
 | Fsck | Authenticated history/namespace plus full AEAD, logical-hash, size, and keyed-ID binding for **referenced** content; possible preceding recovery effects plus best-effort `KACT` v1 activity publication. No file/commit repair or deletion. |
 | [`remote contents <profile> --audit`](remote-content-inspection.md) | Inspection inventory plus byte validation of **all physically present** content, including orphans; reports per-object states, without prior transaction recovery. |
 | [`remote health`](remote-maintenance-inspection.md) | Diagnostic composition of history, availability, reachability, controls, and unknowns; no content-payload AEAD audit by default. |
-| [Garbage Collection](garbage-collection.md) | Direct removal of eligible orphan Content and redundant CommitVariants under cooperative maintenance controls. |
+| [Garbage Collection](garbage-collection.md) | `--dry-run` preview or direct removal of eligible orphan Content, redundant CommitVariants, expired unreachable Commits behind Epochs, and pruned `KACT` activities under cooperative multi-barrier maintenance controls. |
 
 ## Live audit progress
 

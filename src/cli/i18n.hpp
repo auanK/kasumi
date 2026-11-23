@@ -250,6 +250,7 @@ enum class Key {
     ManualBarrierRemovalCompleted,
     ManualBarrierRemovalAbsent,
     ManualBarrierRemovalWritersRemain,
+    ManualBarrierRemovalBarriersRemain,
     BarrierRemovalStageCheckingPresence,
     BarrierRemovalStageDownloadingPayload,
     BarrierRemovalStageValidatingPayload,
@@ -418,6 +419,7 @@ enum class Key {
     FieldClassification,
     FieldStructuralCandidate,
     FieldBarrier,
+    FieldBarriers,
     FieldPresent,
     FieldAbsent,
     FieldMaintenanceBlocked,
@@ -430,6 +432,8 @@ enum class Key {
     FieldReasons,
     FieldOrigin,
     FieldMachine,
+    FieldPid,
+    FieldStartedAt,
     FieldInvalidActivities,
 
     // Variant states

@@ -60,6 +60,14 @@ struct GarbageCollectOptions {
     // std::nullopt uses runtime_data.min_history_age_hours (default 6h).
     // Explicit 0s disables the safety grace period (offline maintenance).
     std::optional<std::chrono::seconds> min_orphan_age = std::nullopt;
+    // Wait window after publishing a unique barrier marker before confirming
+    // exclusivity (0ms default for library/unit callers; CLI uses 2000ms).
+    std::chrono::milliseconds barrier_settle_delay{0};
+    // Optional override for diagnostic barrier metadata machine name.
+    std::optional<std::string> machine_name = std::nullopt;
+    // Periodic barrier exclusivity revalidation cadence during Applying.
+    std::size_t apply_revalidation_batch_interval = 16;
+    std::chrono::seconds apply_revalidation_time_interval{30};
 };
 
 // Counts produced by global-plan garbage collection.

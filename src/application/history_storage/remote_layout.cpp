@@ -51,6 +51,7 @@ RemoteLayout derive_remote_layout(
         layout.history_prefix + ns("epochs") + "/" + v1_hash + "/";
     layout.gc_prefix = layout.history_prefix + ns("gc") + "/" + v1_hash + "/";
     layout.barrier_identifier = layout.gc_prefix + ns("barrier");
+    layout.barriers_prefix = layout.gc_prefix + ns("barriers") + "/";
     layout.writers_prefix = layout.gc_prefix + ns("writers") + "/";
     layout.probes_prefix = layout.gc_prefix + ns("probes") + "/";
     layout.activity_prefix = ns("activity") + "/" + v1_hash + "/";
@@ -133,6 +134,7 @@ parse_epoch_object(const RemoteLayout& layout, std::string_view identifier) {
 bool is_control_object(const RemoteLayout& layout,
                        std::string_view identifier) noexcept {
     return identifier == layout.barrier_identifier ||
+           identifier.starts_with(layout.barriers_prefix) ||
            identifier.starts_with(layout.writers_prefix) ||
            identifier.starts_with(layout.probes_prefix);
 }
@@ -172,13 +174,36 @@ bool valid_writer_identifier(std::string_view identifier) noexcept {
     return offset == identifier.size();
 }
 
-bool valid_writer_identifier(const RemoteLayout& layout,
-                             std::string_view identifier) noexcept {
-    if (!identifier.starts_with(layout.writers_prefix)) {
+namespace {
+
+bool valid_prefixed_token(std::string_view prefix,
+                          std::string_view identifier) noexcept {
+    if (!identifier.starts_with(prefix)) {
         return false;
     }
-    const auto token = identifier.substr(layout.writers_prefix.size());
+    const auto token = identifier.substr(prefix.size());
     return token.size() == 32 && valid_lower_hex(token);
+}
+
+} // namespace
+
+bool valid_writer_identifier(const RemoteLayout& layout,
+                             std::string_view identifier) noexcept {
+    return valid_prefixed_token(layout.writers_prefix, identifier);
+}
+
+bool valid_barrier_identifier(std::string_view identifier) noexcept {
+    const auto pos = identifier.rfind('/');
+    if (pos == std::string_view::npos) {
+        return false;
+    }
+    const auto token = identifier.substr(pos + 1);
+    return token.size() == 32 && valid_lower_hex(token);
+}
+
+bool valid_barrier_identifier(const RemoteLayout& layout,
+                              std::string_view identifier) noexcept {
+    return valid_prefixed_token(layout.barriers_prefix, identifier);
 }
 
 } // namespace kasumi::application::history_storage

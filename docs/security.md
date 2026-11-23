@@ -9,7 +9,7 @@ The threat model distinguishes three threat scenarios:
 ### Threat A: Untrusted Remote Storage & Network Eavesdropping
 * **Threat Profile**: The remote storage provider (cloud bucket, SFTP host, NAS share), an untrusted third party, or a network eavesdropper inspects or tampers with stored objects.
 * **Mitigations & Observable Data**:
-  * File content payloads (loose objects, FastCDC chunks, and `KPAK\x01` Micro-Packs), commit payloads, and Epoch records are compressed in memory (where applicable) and encrypted and authenticated client-side using **XChaCha20-Poly1305** before remote storage.
+  * File content payloads (loose objects, FastCDC chunks, and `KPAK\x01` Micro-Packs), commit payloads, Epoch records, and `KACT` v1 maintenance activity records are compressed in memory (where applicable) and encrypted and authenticated client-side using **XChaCha20-Poly1305** before remote storage.
   * The local transaction journal is also encrypted and authenticated, but resides exclusively on local client storage and is not uploaded to remote storage.
   * Domain-separated keyed BLAKE2b derivations generate Content, Pack, Commit, Epoch, and namespace identifiers. Canonical file paths, directory structure, file modification timestamps, and `StorageManifest` pack/chunk mappings are contained within encrypted Commit payloads when represented in remote history and are not used directly as remote object identifiers. The local transaction journal may also contain synchronization paths and logical hashes inside its encrypted record.
   * Protected payloads that fail AEAD authentication, purpose-binding checks, or identifier/structural validation are rejected.
@@ -138,7 +138,7 @@ Encrypted Commit → AEAD Auth → Topological Validation → HEAD Marker Valida
 
 The commit object is published and verified using the transport's physical-hash capability or readback fallback before its HEAD marker is published. HEAD markers are structurally validated and bind a commit ID to a ciphertext ID. The referenced commit variant is cryptographically authenticated before the marked commit participates in validated history.
 
-Epochs define authenticated retention horizons and boundary anchors. The cooperative writer/barrier protocol checks for active synchronization work during garbage collection; it does not provide distributed exclusion between maintenance commands.
+Epochs define authenticated retention horizons and boundary anchors. The cooperative writer and multi-barrier protocol checks for active synchronization writers and competing barriers (with a post-publish settle delay and periodic `Apply` revalidation) during garbage collection; it remains cooperative on passive storage and does not provide atomic distributed CAS or fencing.
 
 ## Local Filesystem Isolation
 
