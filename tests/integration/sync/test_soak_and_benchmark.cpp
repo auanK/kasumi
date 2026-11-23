@@ -373,8 +373,9 @@ public:
         std::vector<std::byte> buf(bytes);
         for (std::size_t i = 0; i < bytes; ++i) {
             buf[i] = static_cast<std::byte>(
-                (seed + static_cast<std::uint8_t>(i * 131U) +
-                 static_cast<std::uint8_t>(i >> 11U)) &
+                (static_cast<unsigned>(seed) +
+                 static_cast<unsigned>(static_cast<std::uint8_t>(i * 131U)) +
+                 static_cast<unsigned>(static_cast<std::uint8_t>(i >> 11U))) &
                 0xFFU);
         }
         const std::size_t limit = std::min(patch_offset + patch_len, bytes);

@@ -7,6 +7,10 @@ on:
     branches: [ "**" ]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -18,35 +22,119 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
+
+      - name: Cache FetchContent sources
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}\kasumi-fc-cache
+          key: fetchcontent-windows-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Cache ccache (MSVC 2022)
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}\ccache-windows-msvc
+          key: ccache-windows-msvc-${{ github.sha }}
+          restore-keys: |
+            ccache-windows-msvc-
+
+      - name: Install ccache
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command ccache -CommandType Application -ErrorAction SilentlyContinue)) {
+            $zip = Join-Path $env:RUNNER_TEMP 'ccache-4.14.3-windows-x86_64.zip'
+            $url = 'https://github.com/ccache/ccache/releases/download/v4.14.3/ccache-4.14.3-windows-x86_64.zip'
+            $expected = 'c845c3d65be81954c75659145a522a793a27586bf940c5dcfe18af33fa1a67dd'
+            Invoke-WebRequest -Uri $url -OutFile $zip
+            $actual = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) {
+              throw "ccache SHA-256 mismatch: expected $expected, got $actual"
+            }
+            $extractDir = Join-Path $env:RUNNER_TEMP 'ccache-dist'
+            Expand-Archive -Path $zip -DestinationPath $extractDir -Force
+            $ccacheDir = (Get-ChildItem -Path $extractDir -Filter 'ccache.exe' -Recurse | Select-Object -First 1).Directory.FullName
+            $ccacheDir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
 
       - name: Display tool versions
         shell: powershell
         run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          & (Join-Path $vsPath "Common7\Tools\Launch-VsDevShell.ps1") -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $vsCmakeDir = Join-Path $vsPath "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin"
+          $vsNinjaDir = Join-Path $vsPath "Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja"
+          if (Test-Path $vsCmakeDir) { $env:PATH = "$vsCmakeDir;$vsNinjaDir;$env:PATH" }
+          cl
           cmake --version
           ninja --version
+          ccache --version
 
       - name: Build (Debug)
         shell: powershell
         run: |
-          cmake -S . -B build-ci-debug -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
-          cmake --build build-ci-debug --config Debug --parallel
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          & (Join-Path $vsPath "Common7\Tools\Launch-VsDevShell.ps1") -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $vsCmakeDir = Join-Path $vsPath "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin"
+          $vsNinjaDir = Join-Path $vsPath "Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja"
+          if (Test-Path $vsCmakeDir) { $env:PATH = "$vsCmakeDir;$vsNinjaDir;$env:PATH" }
+          $fcCache = ($env:RUNNER_TEMP -replace '\\', '/') + '/kasumi-fc-cache'
+          $env:CCACHE_DIR = ($env:RUNNER_TEMP -replace '\\', '/') + '/ccache-windows-msvc'
+          $env:CCACHE_MAXSIZE = '1G'
+          cmake -S . -B build-ci-debug -G Ninja `
+            -DCMAKE_BUILD_TYPE=Debug `
+            -DCMAKE_C_COMPILER=cl `
+            -DCMAKE_CXX_COMPILER=cl `
+            -DCMAKE_POLICY_DEFAULT_CMP0141=NEW `
+            -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded `
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
+            "-DKASUMI_FETCHCONTENT_CACHE_DIR=$fcCache" `
+            -DBUILD_TESTING=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build-ci-debug --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run Tests (Debug)
         shell: powershell
         run: |
-          ctest --test-dir build-ci-debug -C Debug --output-on-failure
+          ctest --test-dir build-ci-debug --output-on-failure --parallel $env:NUMBER_OF_PROCESSORS
 
       - name: Build (Release)
         shell: powershell
         run: |
-          cmake -S . -B build-ci-release -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
-          cmake --build build-ci-release --config Release --parallel
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          & (Join-Path $vsPath "Common7\Tools\Launch-VsDevShell.ps1") -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $vsCmakeDir = Join-Path $vsPath "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin"
+          $vsNinjaDir = Join-Path $vsPath "Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja"
+          if (Test-Path $vsCmakeDir) { $env:PATH = "$vsCmakeDir;$vsNinjaDir;$env:PATH" }
+          $fcCache = ($env:RUNNER_TEMP -replace '\\', '/') + '/kasumi-fc-cache'
+          $env:CCACHE_DIR = ($env:RUNNER_TEMP -replace '\\', '/') + '/ccache-windows-msvc'
+          $env:CCACHE_MAXSIZE = '1G'
+          cmake -S . -B build-ci-release -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=cl `
+            -DCMAKE_CXX_COMPILER=cl `
+            -DCMAKE_POLICY_DEFAULT_CMP0141=NEW `
+            -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded `
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
+            "-DKASUMI_FETCHCONTENT_CACHE_DIR=$fcCache" `
+            -DBUILD_TESTING=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build-ci-release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ccache -s
 
       - name: Run Tests (Release)
         shell: powershell
         run: |
-          ctest --test-dir build-ci-release -C Release --output-on-failure
+          ctest --test-dir build-ci-release --output-on-failure --parallel $env:NUMBER_OF_PROCESSORS
 
   gcc:
     name: GCC (MSYS2 UCRT64)
@@ -61,7 +149,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Configure MSYS2 (UCRT64)
         uses: msys2/setup-msys2@v2
@@ -72,7 +160,22 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ccache
             git
+
+      - name: Cache FetchContent sources
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}\kasumi-fc-cache
+          key: fetchcontent-windows-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Cache ccache (MSYS2 UCRT64)
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}\ccache-msys2-gcc
+          key: ccache-windows-msys2-gcc-${{ github.sha }}
+          restore-keys: |
+            ccache-windows-msys2-gcc-
 
       - name: Verify MSYS2 toolchain
         run: |
@@ -82,13 +185,15 @@ jobs:
           command -v g++
           command -v cmake
           command -v ninja
+          command -v ccache
 
           gcc --version
           g++ --version
           cmake --version
           ninja --version
+          ccache --version
 
-          for tool in gcc g++ cmake ninja; do
+          for tool in gcc g++ cmake ninja ccache; do
             tool_path=$(command -v "$tool")
             echo "$tool path: $tool_path"
             case "$tool_path" in
@@ -102,21 +207,34 @@ jobs:
 
       - name: Build (Debug)
         run: |
-          cmake --preset debug
+          FC_CACHE="$(cygpath -m "$RUNNER_TEMP")/kasumi-fc-cache"
+          export CCACHE_DIR="$(cygpath -m "$RUNNER_TEMP")/ccache-msys2-gcc"
+          export CCACHE_MAXSIZE=1G
+          cmake --preset debug \
+            -DKASUMI_FETCHCONTENT_CACHE_DIR="$FC_CACHE" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build --preset debug
 
       - name: Run Tests (Debug)
         run: |
-          ctest --preset debug --output-on-failure --parallel 2
+          ctest --preset debug --output-on-failure --parallel $(nproc)
 
       - name: Build (Release)
         run: |
-          cmake --preset default -DBUILD_TESTING=ON
+          FC_CACHE="$(cygpath -m "$RUNNER_TEMP")/kasumi-fc-cache"
+          export CCACHE_DIR="$(cygpath -m "$RUNNER_TEMP")/ccache-msys2-gcc"
+          export CCACHE_MAXSIZE=1G
+          cmake --preset default -DBUILD_TESTING=ON \
+            -DKASUMI_FETCHCONTENT_CACHE_DIR="$FC_CACHE" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build --preset default
+          ccache -s
 
       - name: Run Tests (Release)
         run: |
-          ctest --test-dir build --output-on-failure --parallel 2
+          ctest --test-dir build --output-on-failure --parallel $(nproc)
 
   clang64:
     name: Clang (MSYS2 CLANG64)
@@ -131,7 +249,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Configure MSYS2 (CLANG64)
         uses: msys2/setup-msys2@v2
@@ -140,10 +258,26 @@ jobs:
           update: false
           install: >-
             mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-lld
             mingw-w64-clang-x86_64-ninja
             mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ccache
             mingw-w64-clang-x86_64-python
             git
+
+      - name: Cache FetchContent sources
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}\kasumi-fc-cache
+          key: fetchcontent-windows-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Cache ccache (MSYS2 CLANG64)
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}\ccache-msys2-clang
+          key: ccache-windows-msys2-clang-${{ github.sha }}
+          restore-keys: |
+            ccache-windows-msys2-clang-
 
       - name: Verify MSYS2 toolchain
         run: |
@@ -153,13 +287,15 @@ jobs:
           command -v clang++
           command -v cmake
           command -v ninja
+          command -v ccache
 
           clang --version
           clang++ --version
           cmake --version
           ninja --version
+          ccache --version
 
-          for tool in clang clang++ cmake ninja; do
+          for tool in clang clang++ cmake ninja ccache; do
             tool_path=$(command -v "$tool")
             echo "$tool path: $tool_path"
             case "$tool_path" in
@@ -173,19 +309,34 @@ jobs:
 
       - name: Build (Debug)
         run: |
-          cmake -S . -B build-clang64-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+          FC_CACHE="$(cygpath -m "$RUNNER_TEMP")/kasumi-fc-cache"
+          export CCACHE_DIR="$(cygpath -m "$RUNNER_TEMP")/ccache-msys2-clang"
+          export CCACHE_MAXSIZE=1G
+          cmake -S . -B build-clang64-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
+            -DKASUMI_FETCHCONTENT_CACHE_DIR="$FC_CACHE" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld"
           cmake --build build-clang64-debug
 
       - name: Run Tests (Debug)
         run: |
-          ctest --test-dir build-clang64-debug --output-on-failure --parallel 2
+          ctest --test-dir build-clang64-debug --output-on-failure --parallel $(nproc)
 
       - name: Build (Release)
         run: |
-          cmake -S . -B build-clang64-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          FC_CACHE="$(cygpath -m "$RUNNER_TEMP")/kasumi-fc-cache"
+          export CCACHE_DIR="$(cygpath -m "$RUNNER_TEMP")/ccache-msys2-clang"
+          export CCACHE_MAXSIZE=1G
+          cmake -S . -B build-clang64-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+            -DKASUMI_FETCHCONTENT_CACHE_DIR="$FC_CACHE" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld"
           cmake --build build-clang64-release
+          ccache -s
 
       - name: Run Tests (Release)
         run: |
-          ctest --test-dir build-clang64-release --output-on-failure --parallel 2
+          ctest --test-dir build-clang64-release --output-on-failure --parallel $(nproc)
 

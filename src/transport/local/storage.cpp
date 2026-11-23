@@ -243,13 +243,12 @@ Result copy_file_overwrite(const std::filesystem::path& source,
                 static_cast<int>(win_err), std::system_category())));
         }
         const auto attributes = GetFileAttributesW(staging.c_str());
+        const DWORD cleared = attributes & ~DWORD{FILE_ATTRIBUTE_READONLY};
         if (attributes == INVALID_FILE_ATTRIBUTES ||
             ((attributes & FILE_ATTRIBUTE_READONLY) != 0 &&
              !SetFileAttributesW(staging.c_str(),
-                                 (attributes & ~FILE_ATTRIBUTE_READONLY) == 0
-                                     ? FILE_ATTRIBUTE_NORMAL
-                                     : attributes &
-                                           ~FILE_ATTRIBUTE_READONLY))) {
+                                 cleared == 0 ? FILE_ATTRIBUTE_NORMAL
+                                              : cleared))) {
             return std::unexpected(make_error(std::error_code(
                 static_cast<int>(GetLastError()), std::system_category())));
         }

@@ -185,7 +185,8 @@ sync_read_only_file(const std::filesystem::path& path) {
             native_error("sync_file: CreateFileW failed", ERROR_ACCESS_DENIED));
     }
     FILE_BASIC_INFO attributes{};
-    attributes.FileAttributes = info.FileAttributes & ~FILE_ATTRIBUTE_READONLY;
+    attributes.FileAttributes =
+        info.FileAttributes & ~DWORD{FILE_ATTRIBUTE_READONLY};
     if (attributes.FileAttributes == 0) {
         attributes.FileAttributes = FILE_ATTRIBUTE_NORMAL;
     }

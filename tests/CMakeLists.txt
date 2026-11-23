@@ -36,6 +36,8 @@ function(kasumi_add_test_suite target label)
         ${ARG_SOURCES}
     )
 
+    set_target_properties(${target} PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+
     target_link_libraries(
         ${target}
         PRIVATE
