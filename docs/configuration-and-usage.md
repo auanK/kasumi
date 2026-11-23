@@ -25,7 +25,7 @@ mutation.
 With an empty profile list, the wizard offers New and Quit. Type `:back` at a
 profile, path, or key storage prompt to return to the menu.
 
-The wizard lists profiles and allows creating, cloning, editing paths, changing key storage (`[s] Storage`), re-entering keys (`[k] Key`), renaming, and deleting them. It displays each profile's local state (`Initialized`, `Ready`, `Pending`, `Running`, or `Problem`) alongside a compact summary of the last local sync timestamp and outcome. During an active operation on a profile, `config`, `show`, and `diagnostics` report `Running` (alongside the active operation such as `Running (gc)` when recorded) instead of `Problem`. During creation, it prompts for the profile name, local synchronized path, remote destination, and key storage mode before asking for Password and Password Salt. Press Enter at the key storage prompt to use `key_storage = "vault"` (Windows Credential Manager on Windows; GNOME Keyring / Freedesktop Secret Service or KDE KWallet on Linux). You can switch any profile between `vault`, `file` (stored locally in `profiles/<name>/key.bin`), and `memory` (prompted on every command without persisting the key) via `[s] Storage` in `kasumi config` or by editing `config.toml`; switching away from `vault` or `file` removes the previously saved key and requires `kasumi key <profile>` (or `[k] Key`) when entering `vault` or `file`. Profile names contain only letters, digits, `_`, or `-`; the local path must be absolute. Cloning reuses configuration and the master key but creates fresh SQLite state without copying accepted history or remote data. Editing changes the configured local and remote paths, not the key. Renaming moves private profile state and OS vault entries. Deleting removes local configuration, key, and state, while leaving the synchronized folder and remote objects intact. See [Profile Management](architecture/profile-management.md) for state meanings, the lifecycle, and rollback boundaries. For operational guidance, see [Best Practices](best-practices.md); for troubleshooting operational issues, see [Troubleshooting](troubleshooting.md).
+The wizard lists profiles and allows creating, cloning, editing paths, changing key storage (`[s] Storage`), re-entering keys (`[k] Key`), renaming, and deleting them. When `rclone >= v1.60.0` is installed and has configured remotes, the wizard also displays configured remote names from `rclone listremotes` before asking for the destination and warns if an rclone remote prefix is missing. For non-interactive automation and scripting, use `kasumi profile <create|edit|clone|storage|rename|delete>` with `KASUMI_PASSWORD` + `KASUMI_PASSWORD2` or `KASUMI_MASTER_KEY`. It displays each profile's local state (`Initialized`, `Ready`, `Pending`, `Running`, or `Problem`) alongside a compact summary of the last local sync timestamp and outcome. During an active operation on a profile, `config`, `show`, and `diagnostics` report `Running` (alongside the active operation such as `Running (gc)` when recorded) instead of `Problem`. During creation, it prompts for the profile name, local synchronized path, remote destination, and key storage mode before asking for Password and Password Salt. Press Enter at the key storage prompt to use `key_storage = "vault"` (Windows Credential Manager on Windows; GNOME Keyring / Freedesktop Secret Service or KDE KWallet on Linux). You can switch any profile between `vault`, `file` (stored locally in `profiles/<name>/key.bin`), and `memory` (prompted on every command without persisting the key) via `[s] Storage` in `kasumi config` or by editing `config.toml`; switching away from `vault` or `file` removes the previously saved key and requires `kasumi key <profile>` (or `[k] Key`) when entering `vault` or `file`. Profile names contain only letters, digits, `_`, or `-`; the local path must be absolute. Cloning reuses configuration and the master key but creates fresh SQLite state without copying accepted history or remote data. Editing changes the configured local and remote paths, not the key. Renaming moves private profile state and OS vault entries. Deleting removes local configuration, key, and state, while leaving the synchronized folder and remote objects intact. See [Profile Management](architecture/profile-management.md) for state meanings, the lifecycle, and rollback boundaries. For operational guidance, see [Best Practices](best-practices.md); for troubleshooting operational issues, see [Troubleshooting](troubleshooting.md).
 
 * **Password**: Minimum 12 characters.
 * **Password Salt**: Minimum 16 characters. A reproducible, user-provided passphrase used as the cryptographic salt for Argon2id key derivation (not an automatically generated or stored random salt). When configuring another machine for the same vault through the interactive wizard, use the same Password and Password Salt so that it derives the same vault master key.
@@ -78,17 +78,20 @@ Use `kasumi <command> --help` for the complete arguments, options and examples.
 
 | Purpose | Command |
 |---|---|
-| Manage local profiles | `kasumi config` |
+| Manage local profiles interactively | `kasumi config` |
+| Manage local profiles non-interactively | `kasumi profile <create\|edit\|clone\|storage\|rename\|delete> ...` |
 | Re-enter or save profile key | `kasumi key <profile>` |
 | List profile names | `kasumi list` |
 | Show profile settings and local traceability | `kasumi show <profile> [--full]` |
 | Inspect local environment, `rclone`, and profile health | `kasumi diagnostics [<profile>]` |
 | Inspect the current plan | `kasumi status <profile>` or `kasumi sync <profile> --dry-run` |
+| List preserved local conflict artifacts | `kasumi conflicts <profile>` |
 | Synchronize (or fast-repair missing remote objects) | `kasumi sync <profile> [--repair]` |
 | Audit referenced payloads | `kasumi fsck <profile>` |
 | Consolidate fragmented Micro-Packs | `kasumi repack <profile> [--dry-run] [--reclaim-dirty] [--full]` |
 | Reclaim eligible remote storage | `kasumi gc <profile> [--dry-run] [--min-age <hours>]` |
 | Resolve permanently missing content as logical deletion | `kasumi resolve-missing <profile> [--dry-run \| --confirm]` |
+| Output shell completion script | `kasumi completion <bash\|zsh\|fish\|powershell>` |
 
 `--full` applies to `sync`, `status`, `repack`, `show`, and `remote summary`, after the profile. In `sync` and `status` it displays every plan and pending-path item (otherwise lists longer than ten items show the first and last five) and keeps detailed progress lines for each activity; in `repack` it displays the full pack inventory summary and published Commit/height details; in `show` it displays full Commit/machine IDs plus recorded local execution and cached remote maintenance histories (noting offline cache limits for other machines); in `remote summary` it expands full machine IDs and the complete operational activity timeline. Preview and Status do not execute the plan, recover transactions, or persist file-hash cache changes. See
 [Preview and Status](architecture/planning-and-status.md).
@@ -223,7 +226,8 @@ See [Content Inspection](architecture/remote-content-inspection.md).
 
 Commit and Content selectors require 64 lowercase hex characters. `tree --head`
 selects a current logical head and is required for multiple heads. `stat` and
-`get` use the resolved effective tree; `get` authenticates the requested file and
+`get` use the resolved effective tree by default, or an earlier retained snapshot
+when `--commit <id>` is specified; `get` authenticates the requested file and
 writes its explicit destination, whose parent must exist. Health diagnostics
 are observations rather than a substitute for a payload audit.
 
@@ -300,11 +304,11 @@ content, and retry; do not turn it automatically into deletions. See
 
 ### Quiet Mode (`--quiet`)
 
-Pass `--quiet` after the profile (or after `kasumi list`, `kasumi diagnostics [<profile>]`, or `kasumi remote <subcommand> <profile>`) to suppress banners, live progress, `Duration:` lines, and non-error operational stdout on `sync`, `status`, `fsck`, `gc`, `repack`, `resolve-missing`, and healthy `diagnostics` runs. Query commands (`list`, `show`, `remote ...`) retain their query output without progress or duration lines, and errors, partial-pending lists (exit `2`), unhealthy `diagnostics` summaries, and `stderr` warnings remain visible.
+Pass `--quiet` after the profile (or after `kasumi list`, `kasumi diagnostics [<profile>]`, `kasumi profile <subcommand> <profile>`, or `kasumi remote <subcommand> <profile>`) to suppress banners, live progress, `Duration:` lines, and non-error operational stdout on `sync`, `status`, `conflicts`, `profile ...`, `fsck`, `gc`, `repack`, `resolve-missing`, and healthy `diagnostics` runs. Query commands (`list`, `show`, `remote ...`) retain their query output without progress or duration lines, and errors, partial-pending lists (exit `2`), unhealthy `diagnostics` summaries, and `stderr` warnings remain visible.
 
 ### Machine-Readable Output (`--json`)
 
-Pass `--json` on supported commands (`list`, `show`, `diagnostics`, `status`, `sync`, `fsck`, `gc <profile>`, `gc remove-barrier`, `repack`, `resolve-missing`, `remote summary`, and `remote writers`) to emit a single language-independent JSON object (`"schema_version": 1`) to `stdout` with empty `stderr`, suppressing banners, progress output, and localized text differences regardless of `--lang`:
+Pass `--json` on supported commands (`list`, `show`, `diagnostics`, `profile ...`, `conflicts`, `status`, `sync`, `fsck`, `gc <profile>`, `gc remove-barrier`, `repack`, `resolve-missing`, `remote summary`, and `remote writers`) to emit a single language-independent JSON object (`"schema_version": 1`) to `stdout` with empty `stderr`, suppressing banners, progress output, and localized text differences regardless of `--lang`:
 
 - Every response includes `schema_version`, `command`, `ok`, `exit_code`, and `timestamp` (UTC ISO-8601 ending in `Z`), plus `profile`, `duration_ms`, `data`, `warning`, or `error` as applicable.
 - Command `data` objects retain all raw numeric/boolean/array fields alongside a concise language-independent `summary` string (such as `"Everything in sync"` or `"3 changes | ↑ 2 (2 KB) | ↓ 1 (512 bytes)"`). On `gc`, `data` also exposes `candidate_expired_commits`, `deferred_recent_objects`, `candidate_bytes`, `removed_bytes`, and `min_age_hours`.
@@ -313,7 +317,7 @@ Pass `--json` on supported commands (`list`, `show`, `diagnostics`, `status`, `s
 
 ### Persistent Log File (`--log-file <path>`)
 
-Pass `--log-file <path>` (or `--log-file=<path>`) on supported non-interactive commands (`list`, `show`, `diagnostics`, `sync`, `status`, `fsck`, `gc`, `repack`, `resolve-missing`, and `remote ...`) to append durable logs without interrupting terminal output:
+Pass `--log-file <path>` (or `--log-file=<path>`) on supported non-interactive commands (`list`, `show`, `diagnostics`, `profile ...`, `conflicts`, `sync`, `status`, `fsck`, `gc`, `repack`, `resolve-missing`, and `remote ...`) to append durable logs without interrupting terminal output:
 
 - **With `--json`**: Appends the exact serialized JSON envelope (`timestamp`, `data.summary`, raw counts, and error codes) as one NDJSON line per invocation.
 - **Without `--json`**: Appends UTF-8 plain-text entries in one atomic write per command using local timestamps with UTC offset, status tags (`[OK]`, `[WARN]`, `[PARTIAL]`, `[LOCKED]`, `[BUSY]`, `[CANCELLED]`, `[ERROR]`), command/profile target, ANSI-free compact summary (with human-readable sizes), duration (`(<seconds> s)`), and indented detail lines for pending paths, warnings, or unhealthy diagnostic items.

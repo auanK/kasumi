@@ -13,7 +13,7 @@ CLI/profile → local observation + authenticated remote history + StoredState
 
 | Question | Owner |
 |---|---|
-| What does `config` do to profiles, keys, and private paths? | [Profile Management](architecture/profile-management.md), [Configuration and Usage](configuration-and-usage.md) |
+| What do `config` and `profile ...` do to profiles, keys, and private paths? | [Profile Management](architecture/profile-management.md), [Configuration and Usage](configuration-and-usage.md) |
 | How does an operation resolve runtime, lock, credentials, and transport? | [Application and Runtime](architecture/application-and-runtime.md) |
 | What is a Snapshot, NodeRow, or Merkle hash? | [Data Model](architecture/data-model.md) |
 | What do SQLite, StoredState, caches, checkpoints, keys, and locks own? | [Local Persistent State](architecture/local-state.md) |
@@ -36,8 +36,8 @@ CLI/profile → local observation + authenticated remote history + StoredState
 
 | Request | Local effects | Remote effects |
 |---|---|---|
-| `config` list/create/edit/rename/delete, `key` | Reads or changes `config.toml`, private profile paths, and persisted keys in the OS vault or `key.bin`; delete preserves the synchronized directory | None |
-| `list`, `show`, `diagnostics` | Reads `config.toml`, environment/toolchain info, and local/SQLite inspection diagnostics without contacting remote storage or displaying credentials | None |
+| `config` list/create/edit/rename/delete, `profile ...`, `key` | Reads or changes `config.toml`, private profile paths, and persisted keys in the OS vault or `key.bin`; delete preserves the synchronized directory | None |
+| `list`, `show`, `diagnostics`, `conflicts`, `completion` | `list`/`show`/`diagnostics`/`conflicts` inspect `config.toml`, local/SQLite traceability, or `.kasumiconflict_*` artifacts read-only without contacting remote storage or exposing secrets; `completion` prints shell completion scripts | None |
 | Preview (`sync --dry-run`), Status | Reads local/SQLite state; profile lock and permission normalization are possible | Observation only; no recovery or publication |
 | Sync | May change synchronized files, file-hash cache, transaction journal, and accepted `StoredState` | May upload content and publish/prune history; registers a writer for active work |
 | Resolve Missing | `--dry-run`: read-only preview of pending paths. `--confirm` (or confirmed prompt): preceding recovery, logical deletion updates in `StoredState` | `--dry-run`: observation only. Confirmed run: registers writer and publishes a `KCOM` Commit/HEAD marking unresolved paths deleted |

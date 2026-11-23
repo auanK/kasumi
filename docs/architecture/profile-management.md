@@ -1,6 +1,6 @@
 # Profile Management
 
-`kasumi config` is the interactive CLI for listing, creating, cloning, editing, changing key storage modes (`[s] Storage`), re-entering keys (`[k] Key`), renaming, and deleting profiles, and `kasumi key <profile>` prompts directly to re-enter or replace a profile's stored key (without re-encrypting the vault). These commands change local configuration, OS vault entries, and private profile storage, **not** the synchronized directory or remote vault. The wizard's prompts and accepted locations are in [Configuration and Usage](../configuration-and-usage.md); [Application and Runtime](application-and-runtime.md) owns runtime resolution and private-state layout.
+`kasumi config` is the interactive CLI (with optional `rclone listremotes` destination hints) and `kasumi profile <create|edit|clone|storage|rename|delete>` is the non-interactive CLI for managing profiles and key storage modes, and `kasumi key <profile>` prompts directly to re-enter or replace a profile's stored key (without re-encrypting the vault). These commands change local configuration, OS vault entries, and private profile storage, **not** the synchronized directory or remote vault. The command options and wizard prompts are in [Configuration and Usage](../configuration-and-usage.md); [Application and Runtime](application-and-runtime.md) owns runtime resolution and private-state layout.
 
 ## Ownership and credentials
 

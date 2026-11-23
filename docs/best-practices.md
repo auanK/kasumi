@@ -131,8 +131,12 @@ For details, see [Fsck Architecture](architecture/fsck.md) and [Remote Maintenan
 
 Each machine publishes independently through the shared vault. Sync reconciles
 concurrent branches and preserves incompatible file changes as conflict files.
-Review those files, merge the desired content into the canonical file, remove
-the resolved artifacts, and run `kasumi sync <profile>` to publish the result.
+Run `kasumi conflicts <profile>` (or `--json`) to list preserved conflict files
+grouped by canonical path, review those files, merge the desired content into the
+canonical file, remove the resolved artifacts, and run `kasumi sync <profile>` to
+publish the result. To inspect or restore an older retained version of a file
+from an earlier commit, use `kasumi remote commits <profile>` followed by
+`kasumi remote get <profile> <path> <dst> --commit <id>`.
 
 For merge rules and conflict naming, see [History and Concurrency](architecture/history-and-concurrency.md#conflict-handling).
 
