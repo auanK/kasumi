@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.23.1]
+
+### Added
+
+- Use versioned release package filenames (`kasumi-v0.23.1-windows-x86_64.{msi,zip}` and `kasumi-v0.23.1-linux-x86_64.{pkg.tar.zst,deb,rpm,tar.gz}`) while keeping internal executable names simple (`kasumi` / `kasumi.exe`).
+- Make all native installers upgrade-aware with visible version reporting:
+  - **Windows `.msi`**: display target version (`v0.23.1`) on setup dialogs, detect existing installations across patch/minor/major updates (`WIX_UPGRADE_DETECTED` + `InstalledVersion` registry tracking), preserve profiles/configuration, and skip re-prompting for license/directory on updates.
+  - **Arch Linux `.pkg.tar.zst` / `PKGBUILD`**, **Debian/Ubuntu `.deb`**, and **Fedora/RHEL `.rpm`**: include `.INSTALL` / `postinst` / `post.sh` lifecycle hooks reporting clean installs vs in-place version upgrades with preserved profiles.
+- Add `KASUMI_FETCHCONTENT_CACHE_DIR` in [CMakeLists.txt](CMakeLists.txt) to reuse downloaded third-party dependency sources across Debug/Release builds without sharing build directories.
+
+### Fixed
+
+- Guard `-fstack-clash-protection` in [CMakeLists.txt](CMakeLists.txt) so Clang builds on Windows no longer emit unused compiler argument warnings, and fix remaining `-Wsign-conversion` warnings in `durability.cpp`, `local/storage.cpp`, `test_private_storage.cpp`, and `test_soak_and_benchmark.cpp`.
+- Upgrade GitHub Actions workflows ([ci-ubuntu.yml](.github/workflows/ci-ubuntu.yml), [ci-windows.yml](.github/workflows/ci-windows.yml), [release.yml](.github/workflows/release.yml)) to Node 24-compatible action versions (`actions/checkout@v7`, `actions/cache@v6`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`).
+- Accelerate and harden CI builds and tests with a prebuilt non-root GHCR Ubuntu image ([ci-ubuntu.Dockerfile](.github/docker/ci-ubuntu.Dockerfile), [ci-image.yml](.github/workflows/ci-image.yml)), `MSVC` `Ninja`+`ccache` (`/Z7`), `/MP` for Visual Studio generators, non-LTO test binaries, `lld`, `FetchContent` source caching, workflow `concurrency`, resilient Ubuntu APT mirror retries, and parallel `ctest`.
+
+### Documentation
+
+- Update [README.md](README.md), [getting-started.md](docs/getting-started.md), [configuration-and-usage.md](docs/configuration-and-usage.md), and package metadata to document versioned package names, upgrade-aware installers, `multi-device` (`multi-master`) sync terminology, and exclusive `gc` barrier behavior.
+
+### Upgrade Notes
+
+- Protocol and local storage formats remain unchanged (`KCOM` v4, `KACT` v1, `KPAK\x01`, `state.db` schema v2, `transaction.bin.enc`, and `config.toml`), staying 100% compatible with `v0.19.x`–`v0.23.0`.
+
 ## [0.23.0]
 
 ### Added
