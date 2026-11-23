@@ -1,6 +1,8 @@
 #ifndef KASUMI_APPLICATION_REQUEST_HPP
 #define KASUMI_APPLICATION_REQUEST_HPP
 
+#include <cstdint>
+#include <optional>
 #include <string>
 
 namespace kasumi::application {
@@ -41,6 +43,7 @@ struct Request {
     bool confirm = false;
     bool dry_run = false;
     bool reclaim_dirty = false;
+    std::optional<std::uint32_t> gc_min_age_hours = std::nullopt;
 };
 
 } // namespace kasumi::application

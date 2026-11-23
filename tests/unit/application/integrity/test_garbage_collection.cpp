@@ -1,3 +1,4 @@
+#include "application/history_storage/activity.hpp"
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/reachability.hpp"
@@ -8,6 +9,7 @@
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/history_storage.hpp"
 #include "platform/cancellation.hpp"
+#include "platform/clock.hpp"
 
 #include <algorithm>
 #include <array>
@@ -34,6 +36,7 @@ using kasumi::NodeRow;
 using kasumi::Snapshot;
 using kasumi::application::GarbageCollectProgress;
 using kasumi::application::GarbageCollectStage;
+using kasumi::application::GarbageCollectSubStage;
 using kasumi::application::history_storage::HeadReference;
 using kasumi::application::history_storage::RemoteLayout;
 using kasumi::application::history_storage::epoch::Anchor;
@@ -138,8 +141,20 @@ struct LocalFixture {
                   kasumi::application::integrity::Error>
     collect(kasumi::application::integrity::GarbageCollectProgressCallback
                 progress = {}) {
+        return collect_with_options(
+            gc_int::GarbageCollectOptions{
+                .min_orphan_age = std::chrono::seconds{0}},
+            std::move(progress));
+    }
+
+    std::expected<kasumi::application::integrity::GarbageCollectResult,
+                  kasumi::application::integrity::Error>
+    collect_with_options(
+        gc_int::GarbageCollectOptions options,
+        kasumi::application::integrity::GarbageCollectProgressCallback progress =
+            {}) {
         return gc_int::garbage_collect(
-            runtime, storage.transport, test_key(), std::move(progress));
+            runtime, storage.transport, test_key(), options, std::move(progress));
     }
 
     HeadReference publish(const kasumi::history::Commit& commit,
@@ -177,8 +192,20 @@ struct FakeFixture {
                   kasumi::application::integrity::Error>
     collect(kasumi::application::integrity::GarbageCollectProgressCallback
                 progress = {}) {
+        return collect_with_options(
+            gc_int::GarbageCollectOptions{
+                .min_orphan_age = std::chrono::seconds{0}},
+            std::move(progress));
+    }
+
+    std::expected<kasumi::application::integrity::GarbageCollectResult,
+                  kasumi::application::integrity::Error>
+    collect_with_options(
+        gc_int::GarbageCollectOptions options,
+        kasumi::application::integrity::GarbageCollectProgressCallback progress =
+            {}) {
         return gc_int::garbage_collect(
-            runtime, transport, test_key(), std::move(progress));
+            runtime, transport, test_key(), options, std::move(progress));
     }
 
     HeadReference publish(const kasumi::history::Commit& commit,
@@ -852,12 +879,16 @@ TEST(GarbageCollectionTest, UnknownStorageObjectsBlockMutation) {
     EXPECT_TRUE(fixture.present(repository.orphan_content));
 }
 
-TEST(GarbageCollectionTest, UnreachableCommitVariantsArePreserved) {
+TEST(GarbageCollectionTest, FreshUnreachableCommitIsDeferredByGracePeriod) {
     LocalFixture fixture;
     const auto reachable = commit_with_file("live");
     fixture.publish(reachable, "head");
     fixture.put_content("live", "live");
-    const auto orphan_commit = commit_with_file("unreachable");
+    const auto now_unix = *kasumi::platform::clock::unix_seconds();
+    const auto orphan_commit =
+        kasumi::history::make_commit(
+            0, {}, make_tree("unreachable.txt", "unreachable"), now_unix)
+            .value();
     const auto orphan_head =
         fixture.publish(orphan_commit, "orphan-commit", false);
     const auto orphan_variant = add_variant_object(fixture.storage.transport,
@@ -865,12 +896,94 @@ TEST(GarbageCollectionTest, UnreachableCommitVariantsArePreserved) {
                                                    orphan_commit,
                                                    "orphan-variant");
 
-    const auto result = fixture.collect();
+    const auto result =
+        fixture.collect_with_options(gc_int::GarbageCollectOptions{});
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->candidate_objects, 0U);
     EXPECT_EQ(result->removed_objects, 0U);
+    EXPECT_EQ(result->deferred_recent_objects, 2U);
+    EXPECT_EQ(result->effective_min_age_hours, 6U);
     EXPECT_TRUE(fixture.present(object_path(orphan_head)));
     EXPECT_TRUE(fixture.present(object_path(orphan_variant)));
+}
+
+TEST(GarbageCollectionTest, ExpiredCommitsBehindEpochArePrunedSafely) {
+    FakeFixture fixture("gc-expired-commits");
+    fixture.state->list_metadata_supported = true;
+    const auto now_unix = *kasumi::platform::clock::unix_seconds();
+    fixture.state->default_object_mtime = now_unix - 10LL * 3600LL;
+
+    const auto old_commit =
+        kasumi::history::make_commit(
+            0, {}, make_tree("old.txt", "old"), now_unix - 10LL * 3600LL)
+            .value();
+    const auto mid_commit = kasumi::history::make_commit(
+                                1,
+                                {commit_id(old_commit)},
+                                make_tree("mid.txt", "mid"),
+                                now_unix - 2LL * 3600LL)
+                                .value();
+    const auto head_commit = kasumi::history::make_commit(
+                                 2,
+                                 {commit_id(mid_commit)},
+                                 make_tree("live.txt", "live"),
+                                 now_unix - 60LL)
+                                 .value();
+
+    const auto old_ref = fixture.publish(old_commit, "old", false);
+    const auto mid_ref = fixture.publish(mid_commit, "mid", false);
+    fixture.publish(head_commit, "head", true);
+    const auto old_content = fixture.put_content("old", "old");
+    const auto mid_content = fixture.put_content("mid", "mid");
+    const auto live_content = fixture.put_content("live", "live");
+    fixture.state->object_mtimes[live_content] = now_unix - 60LL;
+    fixture.state->object_mtimes[object_path(mid_ref)] = now_unix - 2LL * 3600LL;
+    fixture.state->object_mtimes[object_path(old_ref)] = now_unix - 10LL * 3600LL;
+    fixture.state->object_mtimes[old_content] = now_unix - 10LL * 3600LL;
+
+    const Epoch epoch{
+        .vault_id = std::string(64, 'a'),
+        .sequence = 0,
+        .issued_at = now_unix - 3600LL,
+        .policy = {},
+        .anchors = {Anchor{.commit_id = commit_id(mid_commit), .height = 1}},
+    };
+    const auto sealed =
+        kasumi::application::history_storage::epoch::seal(epoch, test_key());
+    ASSERT_TRUE(sealed.has_value());
+    ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
+        fixture.transport,
+        test_key(),
+        *sealed,
+        kasumi::test::workspace_root(fixture.workspace)));
+    const auto epoch_object =
+        kasumi::application::history_storage::epoch::object_identifier(
+            layout(), sealed->reference);
+    ASSERT_TRUE(epoch_object.has_value());
+
+    const auto result =
+        fixture.collect_with_options(gc_int::GarbageCollectOptions{});
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->candidate_expired_commits, 1U);
+    EXPECT_EQ(result->candidate_content_objects, 1U);
+    EXPECT_EQ(result->candidate_objects, 2U);
+    EXPECT_EQ(result->removed_objects, 2U);
+    EXPECT_GT(result->candidate_bytes, 0U);
+    EXPECT_EQ(result->removed_bytes, result->candidate_bytes);
+    EXPECT_FALSE(fixture.present(object_path(old_ref)));
+    EXPECT_FALSE(fixture.present(old_content));
+    EXPECT_TRUE(fixture.present(object_path(mid_ref)));
+    EXPECT_TRUE(fixture.present(mid_content));
+    EXPECT_TRUE(fixture.present(live_content));
+    EXPECT_TRUE(fixture.present(*epoch_object));
+
+    const auto audited = gc_int::fsck(fixture.runtime, fixture.transport, test_key());
+    ASSERT_TRUE(audited.has_value()) << audited.error().detail;
+    const auto history = kasumi::application::history_storage::load_history(
+        fixture.transport,
+        test_key(),
+        kasumi::test::workspace_root(fixture.workspace));
+    ASSERT_TRUE(history.has_value()) << history.error().detail;
 }
 
 TEST(GarbageCollectionTest, UnmarkedReachableCommitKeepsOneRequiredVariant) {
@@ -1726,6 +1839,7 @@ TEST(GarbageCollectionTest, ProgressReportsAllStagesAndConfirmedRemovals) {
 
 TEST(GarbageCollectionTest, LegacyConcurrencyHintsAreValidated) {
     LocalFixture fixture;
+    fixture.runtime.min_history_age_hours = 0;
     seed_repository(fixture.storage.transport, fixture.storage.workspace);
 
     const auto invalid = gc_int::garbage_collect(
@@ -2991,6 +3105,273 @@ TEST(GarbageCollectionTest,
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->removed_objects, 16U);
     EXPECT_EQ(fixture.state->remove_batch_count, 2U);
+}
+
+TEST(GarbageCollectionTest, GracePeriodDefersRecentObjectsAndPrunesAgedObjects) {
+    FakeFixture fixture("gc-grace-mixed");
+    fixture.state->list_metadata_supported = true;
+    const auto now_unix = *kasumi::platform::clock::unix_seconds();
+    fixture.state->default_object_mtime = now_unix - 60LL;
+
+    fixture.publish(commit_with_file("live"), "head");
+    const auto live_id = fixture.put_content("live", "live");
+    const auto recent_orphan = fixture.put_content("recent-orph", "recent");
+    const auto aged_orphan = fixture.put_content("aged-orph", "aged");
+    fixture.state->object_mtimes[recent_orphan] = now_unix - 3600LL;
+    fixture.state->object_mtimes[aged_orphan] = now_unix - 7LL * 3600LL;
+
+    const auto first =
+        fixture.collect_with_options(gc_int::GarbageCollectOptions{});
+    ASSERT_TRUE(first.has_value()) << first.error().detail;
+    EXPECT_EQ(first->candidate_objects, 1U);
+    EXPECT_EQ(first->removed_objects, 1U);
+    EXPECT_EQ(first->deferred_recent_objects, 1U);
+    EXPECT_EQ(first->effective_min_age_hours, 6U);
+    EXPECT_FALSE(fixture.present(aged_orphan));
+    EXPECT_TRUE(fixture.present(recent_orphan));
+    EXPECT_TRUE(fixture.present(live_id));
+
+    const auto second = fixture.collect_with_options(
+        gc_int::GarbageCollectOptions{.min_orphan_age = std::chrono::seconds{0}});
+    ASSERT_TRUE(second.has_value()) << second.error().detail;
+    EXPECT_EQ(second->candidate_objects, 1U);
+    EXPECT_EQ(second->removed_objects, 1U);
+    EXPECT_EQ(second->deferred_recent_objects, 0U);
+    EXPECT_FALSE(fixture.present(recent_orphan));
+    EXPECT_TRUE(fixture.present(live_id));
+}
+
+TEST(GarbageCollectionTest,
+     GracePeriodFailsSafeOnMissingZeroAndFutureTimestamps) {
+    FakeFixture fixture("gc-grace-failsafe");
+    const auto now_unix = *kasumi::platform::clock::unix_seconds();
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    const auto orphan = fixture.put_content("orphan-ts", "orphan-ts");
+
+    // 1. Metadata listing unsupported -> must defer under positive grace period.
+    fixture.state->list_metadata_supported = false;
+    const auto no_meta =
+        fixture.collect_with_options(gc_int::GarbageCollectOptions{});
+    ASSERT_TRUE(no_meta.has_value()) << no_meta.error().detail;
+    EXPECT_EQ(no_meta->removed_objects, 0U);
+    EXPECT_EQ(no_meta->deferred_recent_objects, 1U);
+    EXPECT_TRUE(fixture.present(orphan));
+
+    // 2. Missing, zero, negative, and future mtimes -> all deferred fail-safe.
+    fixture.state->list_metadata_supported = true;
+    for (const std::optional<std::int64_t> bad_mtime : {
+             std::optional<std::int64_t>{std::nullopt},
+             std::optional<std::int64_t>{0},
+             std::optional<std::int64_t>{-100},
+             std::optional<std::int64_t>{now_unix + 600},
+         }) {
+        fixture.state->object_mtimes[orphan] = bad_mtime;
+        const auto res =
+            fixture.collect_with_options(gc_int::GarbageCollectOptions{});
+        ASSERT_TRUE(res.has_value()) << res.error().detail;
+        EXPECT_EQ(res->removed_objects, 0U);
+        EXPECT_EQ(res->deferred_recent_objects, 1U);
+        EXPECT_TRUE(fixture.present(orphan));
+    }
+
+    // 3. Dual-clock guard on expired commits: old mtime + fresh created_at is
+    // deferred, and old created_at + fresh mtime is deferred.
+    fixture.state->object_mtimes[orphan] = now_unix - 60LL; // keep orphan deferred
+    const auto fresh_created_commit =
+        kasumi::history::make_commit(
+            0, {}, make_tree("fresh-c.txt", "fresh-c"), now_unix - 60LL)
+            .value();
+    const auto fresh_created_ref =
+        fixture.publish(fresh_created_commit, "fresh-c", false);
+    fixture.state->object_mtimes[object_path(fresh_created_ref)] =
+        now_unix - 10LL * 3600LL;
+
+    const auto old_created_commit =
+        kasumi::history::make_commit(
+            0, {}, make_tree("old-c.txt", "old-c"), now_unix - 10LL * 3600LL)
+            .value();
+    const auto old_created_ref =
+        fixture.publish(old_created_commit, "old-c", false);
+    fixture.state->object_mtimes[object_path(old_created_ref)] = now_unix - 60LL;
+
+    const auto dual =
+        fixture.collect_with_options(gc_int::GarbageCollectOptions{});
+    ASSERT_TRUE(dual.has_value()) << dual.error().detail;
+    EXPECT_EQ(dual->removed_objects, 0U);
+    EXPECT_EQ(dual->deferred_recent_objects, 3U);
+    EXPECT_TRUE(fixture.present(object_path(fresh_created_ref)));
+    EXPECT_TRUE(fixture.present(object_path(old_created_ref)));
+}
+
+TEST(GarbageCollectionTest,
+     PreBarrierBusyCheckBailsOutReadOnlyWithoutCreatingBarrier) {
+    for (const bool use_batch : {false, true}) {
+        SCOPED_TRACE(use_batch);
+        FakeFixture fixture("gc-prebarrier-busy");
+        fixture.state->control_read_batch_supported = use_batch;
+        fixture.publish(commit_with_file("live"), "head");
+        fixture.put_content("live", "live");
+        fixture.put_content("orph", "orph");
+
+        // Register an active writer.
+        auto writer = protocol::register_writer(
+            fixture.transport,
+            layout(),
+            kasumi::test::workspace_root(fixture.workspace));
+        ASSERT_TRUE(writer.has_value());
+        reset_fake_traffic(*fixture.state);
+
+        const auto blocked_by_writer = fixture.collect();
+        ASSERT_FALSE(blocked_by_writer.has_value());
+        EXPECT_EQ(blocked_by_writer.error().code,
+                  GcErrorCode::ConcurrentChange);
+        EXPECT_EQ(fixture.state->put_count, 0U);
+        EXPECT_EQ(fixture.state->barrier_verification_count, 0U);
+        EXPECT_FALSE(fixture.present(layout().barrier_identifier));
+        if (use_batch) {
+            EXPECT_EQ(fixture.state->control_read_batch_count, 1U);
+        }
+
+        // Remove writer, insert foreign barrier -> still read-only bailout.
+        ASSERT_TRUE(protocol::release_registration(*writer));
+        fixture.state->objects[layout().barrier_identifier] =
+            protocol::testing::format_payload(
+                "barrier", "0123456789abcdef0123456789abcdef");
+        reset_fake_traffic(*fixture.state);
+
+        const auto blocked_by_barrier = fixture.collect();
+        ASSERT_FALSE(blocked_by_barrier.has_value());
+        EXPECT_EQ(blocked_by_barrier.error().code,
+                  GcErrorCode::ConcurrentChange);
+        EXPECT_EQ(fixture.state->put_count, 0U);
+        EXPECT_EQ(fixture.state->remove_count, 0U);
+        EXPECT_TRUE(fixture.present(layout().barrier_identifier));
+    }
+}
+
+TEST(GarbageCollectionTest, ZeroCandidateFastPathSkipsConsistencyProbe) {
+    FakeFixture fixture("gc-zero-cand-fast-path");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    reset_fake_traffic(*fixture.state);
+
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_EQ(result->candidate_objects, 0U);
+    EXPECT_EQ(result->removed_objects, 0U);
+    EXPECT_FALSE(result->analysis_only);
+    EXPECT_EQ(fixture.state->probe_list_count, 0U);
+}
+
+TEST(GarbageCollectionTest,
+     ProgressReportsSubStagesCommitCountsBytesAndDeferredObjects) {
+    FakeFixture fixture("gc-rich-progress");
+    fixture.state->list_metadata_supported = true;
+    const auto now_unix = *kasumi::platform::clock::unix_seconds();
+    fixture.state->default_object_mtime = now_unix - 60LL;
+
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    const auto aged_orphan =
+        fixture.put_content("aged-progress-payload", "aged-progress");
+    const auto fresh_orphan =
+        fixture.put_content("fresh-progress-payload", "fresh-progress");
+    fixture.state->object_mtimes[aged_orphan] = now_unix - 8LL * 3600LL;
+    fixture.state->object_mtimes[fresh_orphan] = now_unix - 120LL;
+
+    std::vector<GarbageCollectProgress> events;
+    const auto res = fixture.collect_with_options(
+        gc_int::GarbageCollectOptions{},
+        [&](const GarbageCollectProgress& ev) { events.push_back(ev); });
+    ASSERT_TRUE(res.has_value()) << res.error().detail;
+    EXPECT_EQ(res->removed_objects, 1U);
+    EXPECT_EQ(res->deferred_recent_objects, 1U);
+    EXPECT_GT(res->candidate_bytes, 0U);
+    EXPECT_EQ(res->removed_bytes, res->candidate_bytes);
+
+    const auto has_sub = [&](GarbageCollectSubStage sub) {
+        return std::ranges::any_of(events, [sub](const auto& ev) {
+            return ev.sub_stage == sub;
+        });
+    };
+    EXPECT_TRUE(has_sub(GarbageCollectSubStage::CheckingControls));
+    EXPECT_TRUE(has_sub(GarbageCollectSubStage::EstablishingBarrier));
+    EXPECT_TRUE(has_sub(GarbageCollectSubStage::ListingRemote));
+    EXPECT_TRUE(has_sub(GarbageCollectSubStage::AuthenticatingHistory));
+    EXPECT_TRUE(has_sub(GarbageCollectSubStage::AnalyzingReachability));
+    EXPECT_TRUE(has_sub(GarbageCollectSubStage::LoadingActivities));
+    EXPECT_TRUE(has_sub(GarbageCollectSubStage::ProbingConsistency));
+    EXPECT_TRUE(has_sub(GarbageCollectSubStage::RemovingObjects));
+    EXPECT_TRUE(has_sub(GarbageCollectSubStage::ReleasingBarrier));
+
+    EXPECT_TRUE(std::ranges::any_of(events, [](const auto& ev) {
+        return ev.sub_stage == GarbageCollectSubStage::AuthenticatingHistory &&
+               ev.commits_total == std::optional<std::size_t>{1} &&
+               ev.commits_processed == std::optional<std::size_t>{1};
+    }));
+    EXPECT_EQ(events.back().stage, GarbageCollectStage::Finalizing);
+    EXPECT_EQ(events.back().removed_bytes, res->removed_bytes);
+    EXPECT_EQ(events.back().deferred_recent_objects,
+              std::optional<std::size_t>{1});
+    EXPECT_EQ(events.back().min_age_hours, std::optional<std::uint32_t>{6});
+}
+
+TEST(GarbageCollectionTest,
+     ExplicitShorterMinAgeDoesNotShrinkActivityRetention) {
+    namespace activity = kasumi::application::history_storage::activity;
+    FakeFixture fixture("gc-min-age-activity-floor");
+    fixture.state->list_metadata_supported = true;
+    fixture.runtime.min_history_depth = 1;
+    fixture.runtime.min_history_age_hours = 168; // 7 days
+
+    const auto now_unix = *kasumi::platform::clock::unix_seconds();
+    fixture.state->default_object_mtime = now_unix - 60LL;
+
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    const auto orphan = fixture.put_content("aged-orphan-2h", "orphan-2h");
+    fixture.state->object_mtimes[orphan] = now_unix - 2LL * 3600LL;
+
+    const auto publish_activity = [&](std::string event_id,
+                                      std::int64_t finished_at) {
+        const activity::ActivityRecord record{
+            .event_id = std::move(event_id),
+            .operation = activity::ActivityOperation::Fsck,
+            .outcome = activity::ActivityOutcome::Succeeded,
+            .machine_id = {1, 2, 3, 4},
+            .machine_name = "host-a",
+            .started_at = finished_at - 5,
+            .finished_at = finished_at,
+            .duration_ms = 5000,
+            .metric_primary = 1,
+            .stage = "finalizing",
+            .detail = "ok",
+        };
+        const auto id = activity::publish(
+            fixture.transport, layout(), test_key(), record,
+            kasumi::test::workspace_root(fixture.workspace));
+        EXPECT_TRUE(id.has_value());
+        fixture.state->object_mtimes[*id] = finished_at;
+        return *id;
+    };
+
+    const auto older_act =
+        publish_activity(std::string(32, 'a'), now_unix - 24LL * 3600LL);
+    const auto newer_act =
+        publish_activity(std::string(32, 'b'), now_unix - 3600LL);
+
+    // Explicit --min-age 1 reclaims the 2h-old orphan content, while keeping
+    // the 24h-old KACT activity protected under the profile's 168h retention.
+    const auto res = fixture.collect_with_options(gc_int::GarbageCollectOptions{
+        .min_orphan_age = std::chrono::hours{1}});
+    ASSERT_TRUE(res.has_value()) << res.error().detail;
+    EXPECT_EQ(res->candidate_content_objects, 1U);
+    EXPECT_EQ(res->candidate_activities, 0U);
+    EXPECT_EQ(res->removed_objects, 1U);
+    EXPECT_FALSE(fixture.present(orphan));
+    EXPECT_TRUE(fixture.present(older_act));
+    EXPECT_TRUE(fixture.present(newer_act));
 }
 
 } // namespace

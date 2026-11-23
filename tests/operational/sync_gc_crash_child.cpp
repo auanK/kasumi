@@ -161,7 +161,11 @@ int main() {
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(key);
     auto result = kasumi::application::integrity::garbage_collect(
-        runtime, storage, key,
+        runtime,
+        storage,
+        key,
+        kasumi::application::integrity::GarbageCollectOptions{
+            .min_orphan_age = std::chrono::seconds{0}},
         [&](const kasumi::application::GarbageCollectProgress& progress) {
             if (progress.stage == kasumi::application::GarbageCollectStage::Analyzing) {
                 kasumi::platform::process_crash_test_hook::pause_at(

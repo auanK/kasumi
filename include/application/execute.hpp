@@ -33,6 +33,12 @@ enum class Activity {
     CheckingRemoteContent,
     PreparingPlan,
     PreparingRemote,
+    CheckingControls,
+    EstablishingBarrier,
+    ProbingConsistency,
+    AnalyzingReachability,
+    LoadingActivities,
+    ReleasingBarrier,
 };
 
 // Cumulative counters for the current activity, sampled outside worker threads.
@@ -62,13 +68,38 @@ struct SyncProgress {
     std::optional<std::uint32_t> applied_items = std::nullopt;
 };
 
+// Granular sub-stages reported inside high-level garbage collection phases.
+enum class GarbageCollectSubStage {
+    None,
+    CheckingControls,
+    EstablishingBarrier,
+    ProbingConsistency,
+    ListingRemote,
+    AuthenticatingHistory,
+    AnalyzingReachability,
+    LoadingActivities,
+    RemovingObjects,
+    ReleasingBarrier,
+};
+
 // Progress notification for high-level garbage collection phases.
 struct GarbageCollectProgress {
     GarbageCollectStage stage = GarbageCollectStage::Preparing;
+    GarbageCollectSubStage sub_stage = GarbageCollectSubStage::None;
     std::optional<std::size_t> candidate_count = std::nullopt;
     std::size_t removed_objects = 0;
     std::chrono::nanoseconds removal_elapsed{};
     std::optional<std::size_t> listed_objects = std::nullopt;
+    std::optional<std::size_t> commits_processed = std::nullopt;
+    std::optional<std::size_t> commits_total = std::nullopt;
+    std::optional<std::size_t> candidate_content_objects = std::nullopt;
+    std::optional<std::size_t> candidate_commit_variants = std::nullopt;
+    std::optional<std::size_t> candidate_expired_commits = std::nullopt;
+    std::optional<std::size_t> candidate_activities = std::nullopt;
+    std::optional<std::size_t> deferred_recent_objects = std::nullopt;
+    std::optional<std::uint64_t> candidate_bytes = std::nullopt;
+    std::uint64_t removed_bytes = 0;
+    std::optional<std::uint32_t> min_age_hours = std::nullopt;
 };
 
 // Progress notification for a read-only integrity audit.

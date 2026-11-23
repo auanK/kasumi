@@ -289,8 +289,12 @@ struct FakeState {
     std::map<std::string, std::vector<std::uint8_t>> hidden_objects;
     std::size_t list_count = 0;
     std::size_t full_list_count = 0;
+    std::size_t list_metadata_count = 0;
     std::size_t full_list_identifier_count = 0;
     std::size_t prefix_list_count = 0;
+    bool list_metadata_supported = false;
+    std::map<std::string, std::optional<std::int64_t>> object_mtimes;
+    std::optional<std::int64_t> default_object_mtime;
     std::size_t reveal_on_list_count = 0;
     std::size_t get_count = 0;
     std::size_t get_batch_count = 0;
@@ -402,7 +406,8 @@ FakeState* fake_state(void* context) {
 }
 
 [[maybe_unused]] void reset_fake_traffic(FakeState& state) {
-    state.list_count = state.full_list_count = state.prefix_list_count = 0;
+    state.list_count = state.full_list_count = state.list_metadata_count =
+        state.prefix_list_count = 0;
     state.full_list_identifier_count = 0;
     state.get_count = state.get_batch_count = 0;
     state.presence_count = state.remove_count = state.put_count = 0;
@@ -666,6 +671,51 @@ kasumi::transport::ListingResult fake_list(void* context) {
     for (const auto& [identifier, unused] : state->objects) {
         static_cast<void>(unused);
         result.push_back(identifier);
+    }
+    if (state->reverse_listing) {
+        std::ranges::reverse(result);
+    }
+    state->full_list_identifier_count += result.size();
+    if (state->on_operation) {
+        state->on_operation(*state, "after_list", {});
+    }
+    return result;
+}
+
+inline kasumi::transport::MetadataListingResult
+fake_list_metadata(void* context) {
+    auto* state = fake_state(context);
+    if (!state->list_metadata_supported) {
+        return std::unexpected(kasumi::transport::Error{
+            .code = kasumi::transport::ErrorCode::Unsupported,
+            .message = "metadata listing unavailable"});
+    }
+    ++state->list_count;
+    ++state->full_list_count;
+    ++state->list_metadata_count;
+    if (state->fail_list && (state->fail_list_at == 0 ||
+                             state->fail_list_at == state->list_count)) {
+        return std::unexpected(
+            kasumi::transport::Error{.code = *state->fail_list,
+                                     .message = "injected full list failure"});
+    }
+    if (state->reveal_on_list_count == state->list_count) {
+        state->objects.merge(state->hidden_objects);
+        state->reveal_on_list_count = 0;
+    }
+    std::vector<kasumi::transport::ObjectMetadata> result;
+    result.reserve(state->objects.size());
+    for (const auto& [identifier, bytes] : state->objects) {
+        std::optional<std::int64_t> mtime = state->default_object_mtime;
+        if (const auto it = state->object_mtimes.find(identifier);
+            it != state->object_mtimes.end()) {
+            mtime = it->second;
+        }
+        result.push_back(kasumi::transport::ObjectMetadata{
+            .identifier = identifier,
+            .modified_at_unix = mtime,
+            .size = static_cast<std::uint64_t>(bytes.size()),
+        });
     }
     if (state->reverse_listing) {
         std::ranges::reverse(result);
@@ -1128,6 +1178,7 @@ make_fake_transport(FakeState*& state) {
                 .get = fake_get,
                 .presence = fake_presence,
                 .list = fake_list,
+                .list_metadata = fake_list_metadata,
                 .list_prefix = fake_list_prefix,
                 .physical_hash = fake_physical_hash,
                 .physical_hash_batch = fake_physical_hash_batch,

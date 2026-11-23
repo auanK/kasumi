@@ -293,24 +293,48 @@ std::string format_compact_summary(const application::Response& response) {
             } else if constexpr (std::is_same_v<
                                      T,
                                      application::GarbageCollectCompleted>) {
+                std::string summary;
                 if (payload.dry_run) {
-                    return payload.candidate_objects == 0
-                               ? "no eligible candidates"
-                               : std::format(
-                                     "{} candidates ({} content, {} commits, "
-                                     "{} activities)",
-                                     payload.candidate_objects,
-                                     payload.candidate_content_objects,
-                                     payload.candidate_commit_variants,
-                                     payload.candidate_activities);
+                    summary =
+                        payload.candidate_objects == 0
+                            ? "no eligible candidates"
+                            : ((payload.candidate_expired_commits > 0 ||
+                                payload.candidate_bytes > 0)
+                                   ? std::format(
+                                         "{} candidates ({} content, {} "
+                                         "variants, {} expired commits, {} "
+                                         "activities, {})",
+                                         payload.candidate_objects,
+                                         payload.candidate_content_objects,
+                                         payload.candidate_commit_variants,
+                                         payload.candidate_expired_commits,
+                                         payload.candidate_activities,
+                                         format_size(payload.candidate_bytes))
+                                   : std::format(
+                                         "{} candidates ({} content, {} "
+                                         "commits, {} activities)",
+                                         payload.candidate_objects,
+                                         payload.candidate_content_objects,
+                                         payload.candidate_commit_variants,
+                                         payload.candidate_activities));
+                } else if (payload.removed_objects == 0) {
+                    summary = "no eligible objects removed";
+                } else {
+                    summary =
+                        payload.removed_objects == 1
+                            ? "1 object removed"
+                            : std::format("{} objects removed",
+                                          payload.removed_objects);
+                    if (payload.removed_bytes > 0) {
+                        summary += std::format(
+                            " ({})", format_size(payload.removed_bytes));
+                    }
                 }
-                if (payload.removed_objects == 0) {
-                    return "no eligible objects removed";
+                if (payload.deferred_recent_objects > 0) {
+                    summary += std::format(" ({} deferred)",
+                                           payload.deferred_recent_objects);
                 }
-                return payload.removed_objects == 1
-                           ? "1 object removed"
-                           : std::format(
-                                 "{} objects removed", payload.removed_objects);
+                return summary;
             } else if constexpr (std::is_same_v<
                                      T,
                                      application::RepackCompleted>) {
@@ -1332,8 +1356,10 @@ void present(const application::GarbageCollectProgress& progress,
     }
 
     if (progress.stage == application::GarbageCollectStage::Analyzing &&
-        progress.listed_objects) {
+        progress.listed_objects &&
+        state.last_listed_objects != progress.listed_objects) {
         i18n::println(i18n::Key::GcListedObjects, *progress.listed_objects);
+        state.last_listed_objects = progress.listed_objects;
     }
 
     if (progress.stage == application::GarbageCollectStage::Analyzing &&
@@ -1346,6 +1372,29 @@ void present(const application::GarbageCollectProgress& progress,
                          format_plural(*progress.candidate_count,
                                        i18n::Key::GcCandidatesSingular,
                                        i18n::Key::GcCandidatesPlural));
+            if (progress.candidate_content_objects ||
+                progress.candidate_commit_variants ||
+                progress.candidate_expired_commits ||
+                progress.candidate_activities || progress.candidate_bytes) {
+                i18n::println(
+                    i18n::Key::GcPlanDetails,
+                    progress.candidate_content_objects.value_or(0),
+                    progress.candidate_commit_variants.value_or(0),
+                    progress.candidate_expired_commits.value_or(0),
+                    progress.candidate_activities.value_or(0),
+                    format_size(progress.candidate_bytes.value_or(0)));
+            }
+        }
+        if (progress.deferred_recent_objects &&
+            *progress.deferred_recent_objects > 0) {
+            const auto hours = progress.min_age_hours.value_or(0);
+            if (*progress.deferred_recent_objects == 1) {
+                i18n::println(i18n::Key::GcDeferredRecentSingular, hours);
+            } else {
+                i18n::println(i18n::Key::GcDeferredRecentPlural,
+                              hours,
+                              *progress.deferred_recent_objects);
+            }
         }
         state.last_candidate_count = progress.candidate_count;
     }
@@ -1458,7 +1507,15 @@ i18n::Key progress_label(const application::ActivityProgress& event,
         K::ProgressCheckingRemoteContent,
         K::ProgressPreparingPlan,
         K::ProgressPreparingRemote,
+        K::ProgressCheckingControls,
+        K::ProgressEstablishingBarrier,
+        K::ProgressProbingConsistency,
+        K::ProgressAnalyzingReachability,
+        K::ProgressLoadingActivities,
+        K::ProgressReleasingBarrier,
     };
+    static_assert(labels.size() ==
+                  static_cast<std::size_t>(A::ReleasingBarrier) + 1);
     if (show_batch && event.total_objects && event.item_path.empty()) {
         switch (event.activity) {
             case A::Uploading:
@@ -2127,20 +2184,67 @@ void ProgressDisplay::update(const application::ExecutionProgress& progress,
                          detail);
                 }
             } else {
+                const auto gc_sub_activity =
+                    [](application::GarbageCollectSubStage sub)
+                    -> std::optional<A> {
+                    using S = application::GarbageCollectSubStage;
+                    switch (sub) {
+                        case S::None:
+                            return std::nullopt;
+                        case S::CheckingControls:
+                            return A::CheckingControls;
+                        case S::EstablishingBarrier:
+                            return A::EstablishingBarrier;
+                        case S::ProbingConsistency:
+                            return A::ProbingConsistency;
+                        case S::ListingRemote:
+                            return A::Listing;
+                        case S::AuthenticatingHistory:
+                            return A::Authenticating;
+                        case S::AnalyzingReachability:
+                            return A::AnalyzingReachability;
+                        case S::LoadingActivities:
+                            return A::LoadingActivities;
+                        case S::RemovingObjects:
+                            return A::Removing;
+                        case S::ReleasingBarrier:
+                            return A::ReleasingBarrier;
+                    }
+                    return std::nullopt;
+                };
                 if (gc_.last_stage != event.stage) {
-                    finish(gc_.last_stage ==
-                           application::GarbageCollectStage::Applying);
+                    const bool keep =
+                        gc_.last_stage ==
+                            application::GarbageCollectStage::Applying ||
+                        (full_ && gc_.last_stage.has_value());
+                    finish(keep);
                     started_ = std::chrono::steady_clock::now();
                     indented_ = true;
                     activity_.reset();
                     stage_id_ = 0;
                 }
                 present(event, gc_);
-                if (event.stage == application::GarbageCollectStage::Applying &&
-                    event.candidate_count && *event.candidate_count > 0) {
-                    show({.activity = A::Removing,
-                          .objects = event.removed_objects,
-                          .total_objects = *event.candidate_count});
+                if (const auto activity = gc_sub_activity(event.sub_stage)) {
+                    application::ActivityProgress ap{.activity = *activity};
+                    if (*activity == A::Authenticating && event.commits_total &&
+                        *event.commits_total > 0) {
+                        ap.objects = event.commits_processed.value_or(0);
+                        ap.total_objects = *event.commits_total;
+                        show(ap);
+                    } else if (*activity == A::Removing &&
+                               event.candidate_count &&
+                               *event.candidate_count > 0) {
+                        ap.objects = event.removed_objects;
+                        ap.total_objects = *event.candidate_count;
+                        if (event.candidate_bytes &&
+                            *event.candidate_bytes > 0) {
+                            ap.bytes = event.removed_bytes;
+                            ap.total_bytes = *event.candidate_bytes;
+                        }
+                        show(ap);
+                    } else if (terminal_.interactive) {
+                        show(ap);
+                    }
                 }
             }
         },
@@ -2422,6 +2526,19 @@ int present(const application::Response& response, bool full, bool quiet) {
                 if (op != Op::GarbageCollect) {
                     return 1;
                 }
+                const auto print_deferred_recent = [&](std::uint32_t hours,
+                                                       std::size_t count) {
+                    if (count == 0) {
+                        return;
+                    }
+                    if (count == 1) {
+                        i18n::println(
+                            i18n::Key::GcDeferredRecentSingular, hours);
+                    } else {
+                        i18n::println(
+                            i18n::Key::GcDeferredRecentPlural, hours, count);
+                    }
+                };
                 if (data.dry_run) {
                     if (data.candidate_objects == 0) {
                         print_ok_line(i18n::tr(i18n::Key::GcCandidatesNone));
@@ -2431,7 +2548,18 @@ int present(const application::Response& response, bool full, bool quiet) {
                                       data.candidate_content_objects,
                                       data.candidate_commit_variants,
                                       data.candidate_activities);
+                        if (data.candidate_expired_commits > 0 ||
+                            data.candidate_bytes > 0 || full) {
+                            i18n::println(i18n::Key::GcPlanDetails,
+                                          data.candidate_content_objects,
+                                          data.candidate_commit_variants,
+                                          data.candidate_expired_commits,
+                                          data.candidate_activities,
+                                          format_size(data.candidate_bytes));
+                        }
                     }
+                    print_deferred_recent(data.min_age_hours,
+                                          data.deferred_recent_objects);
                     i18n::println(i18n::Key::GcDryRunCompleted);
                     return 0;
                 }
@@ -2448,6 +2576,8 @@ int present(const application::Response& response, bool full, bool quiet) {
                         "{}{}", indent, i18n::tr(i18n::Key::GcWarningDetail1));
                     std::println(
                         "{}{}", indent, i18n::tr(i18n::Key::GcWarningDetail2));
+                    print_deferred_recent(data.min_age_hours,
+                                          data.deferred_recent_objects);
                     return 0;
                 }
                 print_ok_line(i18n::tr(i18n::Key::GcCompleted));
@@ -2456,6 +2586,11 @@ int present(const application::Response& response, bool full, bool quiet) {
                     " " +
                     i18n::format(i18n::Key::GcConfirmedRemovals,
                                  data.removed_objects);
+                if (data.removed_bytes > 0) {
+                    metrics +=
+                        " | " + i18n::format(i18n::Key::GcReclaimedBytes,
+                                             format_size(data.removed_bytes));
+                }
                 const auto seconds =
                     std::chrono::duration<double>(data.removal_elapsed).count();
                 if (data.removed_objects > 0 && seconds > 0.0) {
@@ -2468,6 +2603,18 @@ int present(const application::Response& response, bool full, bool quiet) {
                                                      seconds));
                 }
                 std::println("     {}", metrics);
+                if (data.candidate_objects > 0 &&
+                    (data.candidate_expired_commits > 0 ||
+                     data.candidate_bytes > 0 || full)) {
+                    i18n::println(i18n::Key::GcPlanDetails,
+                                  data.candidate_content_objects,
+                                  data.candidate_commit_variants,
+                                  data.candidate_expired_commits,
+                                  data.candidate_activities,
+                                  format_size(data.candidate_bytes));
+                }
+                print_deferred_recent(data.min_age_hours,
+                                      data.deferred_recent_objects);
                 return 0;
             } else if constexpr (std::is_same_v<
                                      T,

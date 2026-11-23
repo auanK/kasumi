@@ -164,6 +164,14 @@ run_with_recovery(OperationContext& context,
         }
         auto error = make_error(context, failure_code, described);
         error.garbage_collection = err.garbage_collection;
+        if (context.operation == Operation::GarbageCollect &&
+            err.code == integrity::ErrorCode::ConcurrentChange &&
+            (!err.garbage_collection ||
+             (err.garbage_collection->mutation_state !=
+                  GarbageCollectMutationState::Uncertain &&
+              !err.garbage_collection->barrier_cleanup_error.has_value()))) {
+            error.remote_busy = true;
+        }
         return std::unexpected(std::move(error));
     }
     return make_response(context, std::move(*res));
@@ -177,8 +185,13 @@ to_gc_completed(const integrity::GarbageCollectResult& collected) {
         .dry_run = collected.dry_run,
         .candidate_content_objects = collected.candidate_content_objects,
         .candidate_commit_variants = collected.candidate_commit_variants,
+        .candidate_expired_commits = collected.candidate_expired_commits,
         .candidate_activities = collected.candidate_activities,
+        .deferred_recent_objects = collected.deferred_recent_objects,
+        .candidate_bytes = collected.candidate_bytes,
         .removed_objects = collected.removed_objects,
+        .removed_bytes = collected.removed_bytes,
+        .min_age_hours = collected.effective_min_age_hours,
         .removal_elapsed = collected.removal_elapsed,
     };
 }
@@ -220,6 +233,14 @@ std::expected<Response, Error> run_fsck(OperationContext& context) {
 
 std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
     std::optional<GarbageCollectProgress> last_progress;
+    const integrity::GarbageCollectOptions options{
+        .dry_run = context.dry_run,
+        .min_orphan_age =
+            context.gc_min_age_hours.has_value()
+                ? std::optional<std::chrono::seconds>{std::chrono::hours{
+                      *context.gc_min_age_hours}}
+                : std::nullopt,
+    };
     if (context.dry_run) {
         const auto journal_paths = sync::journal::make_paths(
             context.runtime.database_path.parent_path());
@@ -244,13 +265,22 @@ std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
         auto collected = integrity::garbage_collect(context.runtime,
                                                     context.storage,
                                                     context.key,
-                                                    true,
+                                                    options,
                                                     std::move(callback));
         if (!collected) {
             auto error = make_error(context,
                                     ErrorCode::GarbageCollectionFailure,
                                     integrity::describe(collected.error()));
             error.garbage_collection = collected.error().garbage_collection;
+            if (collected.error().code ==
+                    integrity::ErrorCode::ConcurrentChange &&
+                (!collected.error().garbage_collection ||
+                 (collected.error().garbage_collection->mutation_state !=
+                      GarbageCollectMutationState::Uncertain &&
+                  !collected.error()
+                       .garbage_collection->barrier_cleanup_error.has_value()))) {
+                error.remote_busy = true;
+            }
             return std::unexpected(std::move(error));
         }
         return make_response(context, to_gc_completed(*collected));
@@ -261,8 +291,11 @@ std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
         last_progress,
         [&](integrity::GarbageCollectProgressCallback cb)
             -> std::expected<ResponseData, integrity::Error> {
-            auto collected = integrity::garbage_collect(
-                context.runtime, context.storage, context.key, std::move(cb));
+            auto collected = integrity::garbage_collect(context.runtime,
+                                                        context.storage,
+                                                        context.key,
+                                                        options,
+                                                        std::move(cb));
             if (!collected) {
                 return std::unexpected(std::move(collected.error()));
             }

@@ -69,6 +69,78 @@ TEST(RcloneStorageTest, RejectsUnsafeAndDuplicatePaths) {
               kasumi::transport::ErrorCode::ProtocolFailure);
 }
 
+TEST(RcloneStorageTest, ParsesRfc3339TimestampsAccurately) {
+    const auto parse_time = [](std::string_view mod_time)
+        -> std::optional<std::int64_t> {
+        const auto json =
+            std::string{R"({"list":[{"Path":"obj","Size":1,"ModTime":")"} +
+            std::string{mod_time} + "\"}]}";
+        const auto parsed = rclone_detail::parse_list_metadata_response(json);
+        EXPECT_TRUE(parsed.has_value());
+        if (!parsed || parsed->empty()) {
+            return std::nullopt;
+        }
+        return parsed->front().modified_at_unix;
+    };
+    EXPECT_EQ(parse_time("1970-01-01T00:00:00Z"),
+              std::optional<std::int64_t>{0});
+    EXPECT_EQ(parse_time("2024-02-29T23:59:59.987654321Z"),
+              std::optional<std::int64_t>{1709251199});
+    EXPECT_EQ(parse_time("2025-05-01T12:00:00+02:00"),
+              std::optional<std::int64_t>{1746093600});
+    EXPECT_EQ(parse_time("2025-05-01T06:30:00-03:30"),
+              std::optional<std::int64_t>{1746093600});
+
+    for (const auto* invalid : {"",
+                                "2024-02-29",
+                                "2023-02-29T00:00:00Z",
+                                "2024-13-01T00:00:00Z",
+                                "2024-01-32T00:00:00Z",
+                                "2024-01-01T24:00:00Z",
+                                "2024-01-01 00:00:00Z",
+                                "2024-01-01T00:00:00+25:00",
+                                "2024-01-01T00:00:00"}) {
+        EXPECT_FALSE(parse_time(invalid).has_value()) << invalid;
+    }
+}
+
+TEST(RcloneStorageTest, ParsesListMetadataWithSizesAndTimestamps) {
+    const auto parsed = rclone_detail::parse_list_metadata_response(R"({
+        "list": [
+            {"Path": "zeta", "Size": 42, "ModTime": "2025-05-01T12:00:00Z"},
+            {"Path": "alpha", "Size": -1, "ModTime": "not-a-date"},
+            {"Path": "beta", "Size": 0}
+        ]
+    })");
+    ASSERT_TRUE(parsed.has_value()) << parsed.error().message;
+    ASSERT_EQ(parsed->size(), 3U);
+
+    EXPECT_EQ((*parsed)[0].identifier, "alpha");
+    EXPECT_FALSE((*parsed)[0].size.has_value());
+    EXPECT_FALSE((*parsed)[0].modified_at_unix.has_value());
+
+    EXPECT_EQ((*parsed)[1].identifier, "beta");
+    EXPECT_EQ((*parsed)[1].size, std::optional<std::uint64_t>{0});
+    EXPECT_FALSE((*parsed)[1].modified_at_unix.has_value());
+
+    EXPECT_EQ((*parsed)[2].identifier, "zeta");
+    EXPECT_EQ((*parsed)[2].size, std::optional<std::uint64_t>{42});
+    EXPECT_EQ((*parsed)[2].modified_at_unix,
+              std::optional<std::int64_t>{1746100800});
+
+    const auto dup = rclone_detail::parse_list_metadata_response(
+        R"({"list":[{"Path":"a","Size":1},{"Path":"a","Size":2}]})");
+    ASSERT_FALSE(dup.has_value());
+    EXPECT_EQ(dup.error().code,
+              kasumi::transport::ErrorCode::ProtocolFailure);
+
+    const auto traversal = rclone_detail::parse_list_metadata_response(
+        R"({"list":[{"Path":"../a","Size":1}]})");
+    ASSERT_FALSE(traversal.has_value());
+    EXPECT_EQ(traversal.error().code,
+              kasumi::transport::ErrorCode::ProtocolFailure);
+}
+
 namespace {
 
 std::optional<std::string>

@@ -3,6 +3,7 @@
 
 #include "application/history_storage/detail.hpp"
 
+#include <functional>
 #include <optional>
 #include <string_view>
 
@@ -64,18 +65,24 @@ struct ReachabilityInventory {
 // Result of the history reachability inventory.
 using ReachabilityResult = std::expected<ReachabilityInventory, Error>;
 
+// Optional progress callback reporting commit variant authentication progress.
+using ReachabilityProgressCallback =
+    std::function<void(std::size_t commits_processed, std::size_t commits_total)>;
+
 // Inventories markers, commits, and reachability without removing objects.
 ReachabilityResult
 inventory_reachability(transport::Transport& storage,
                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                       const std::filesystem::path& workspace_root);
+                       const std::filesystem::path& workspace_root,
+                       ReachabilityProgressCallback on_progress = {});
 
 // Variant reusing an already captured physical listing.
 ReachabilityResult
 inventory_reachability(transport::Transport& storage,
                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                        std::span<const std::string> identifiers,
-                       const std::filesystem::path& workspace_root);
+                       const std::filesystem::path& workspace_root,
+                       ReachabilityProgressCallback on_progress = {});
 
 // Also reuses the Epoch chain already authenticated in this observation.
 ReachabilityResult
@@ -83,7 +90,8 @@ inventory_reachability(transport::Transport& storage,
                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                        std::span<const std::string> identifiers,
                        std::span<const epoch::VerifiedEpoch> verified_epochs,
-                       const std::filesystem::path& workspace_root);
+                       const std::filesystem::path& workspace_root,
+                       ReachabilityProgressCallback on_progress = {});
 
 } // namespace kasumi::application::history_storage
 

@@ -2470,6 +2470,124 @@ TEST(CliPresenterTest, JsonMapsInsufficientDiskSpaceErrorCode) {
               std::string::npos);
 }
 
+TEST(CliPresenterTest, JsonMapsRemoteBusyAndExtendedGcCompletedFields) {
+    using namespace kasumi::application;
+    Error busy{
+        .operation = Operation::GarbageCollect,
+        .code = ErrorCode::GarbageCollectionFailure,
+        .detail = "active writers block garbage collection",
+        .remote_busy = true,
+    };
+    const auto busy_json = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present_json(
+                      "demo", busy, std::chrono::milliseconds{5}),
+                  1);
+    });
+    EXPECT_NE(busy_json.find("\"code\":\"remote_busy\""), std::string::npos);
+
+    GarbageCollectCompleted completed{
+        .candidate_objects = 6,
+        .analysis_only = false,
+        .dry_run = true,
+        .candidate_content_objects = 2,
+        .candidate_commit_variants = 1,
+        .candidate_expired_commits = 2,
+        .candidate_activities = 1,
+        .deferred_recent_objects = 3,
+        .candidate_bytes = 2048,
+        .removed_objects = 0,
+        .removed_bytes = 0,
+        .min_age_hours = 6,
+    };
+    const auto gc_json = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present_json(
+                      "demo",
+                      response(completed, Operation::GarbageCollect),
+                      std::chrono::milliseconds{10}),
+                  0);
+    });
+    EXPECT_NE(gc_json.find("\"candidate_expired_commits\":2"),
+              std::string::npos);
+    EXPECT_NE(gc_json.find("\"deferred_recent_objects\":3"), std::string::npos);
+    EXPECT_NE(gc_json.find("\"candidate_bytes\":2048"), std::string::npos);
+    EXPECT_NE(gc_json.find("\"removed_bytes\":0"), std::string::npos);
+    EXPECT_NE(gc_json.find("\"min_age_hours\":6"), std::string::npos);
+}
+
+TEST(CliPresenterTest, GcInteractiveProgressRendersSubStagesBytesAndDetails) {
+    using namespace kasumi::application;
+    const ScopedLanguage en{Language::English};
+    const auto interactive_out = kasumi::test::capture_stdout([] {
+        kasumi::cli::ProgressDisplay display(
+            {.interactive = true, .ansi = true, .fixed_width = 140}, false);
+        display.update(
+            GarbageCollectProgress{
+                .stage = GarbageCollectStage::Preparing,
+                .sub_stage = GarbageCollectSubStage::CheckingControls,
+                .min_age_hours = 6,
+            },
+            Operation::GarbageCollect);
+        display.update(
+            GarbageCollectProgress{
+                .stage = GarbageCollectStage::Analyzing,
+                .sub_stage = GarbageCollectSubStage::AuthenticatingHistory,
+                .listed_objects = 10,
+                .commits_processed = 2,
+                .commits_total = 4,
+                .min_age_hours = 6,
+            },
+            Operation::GarbageCollect);
+        display.update(
+            GarbageCollectProgress{
+                .stage = GarbageCollectStage::Applying,
+                .sub_stage = GarbageCollectSubStage::RemovingObjects,
+                .candidate_count = 2,
+                .removed_objects = 2,
+                .candidate_bytes = 2048,
+                .removed_bytes = 2048,
+                .min_age_hours = 6,
+            },
+            Operation::GarbageCollect);
+        display.update(
+            GarbageCollectProgress{
+                .stage = GarbageCollectStage::Finalizing,
+                .sub_stage = GarbageCollectSubStage::ReleasingBarrier,
+                .candidate_count = 2,
+                .removed_objects = 2,
+                .candidate_bytes = 2048,
+                .removed_bytes = 2048,
+                .min_age_hours = 6,
+            },
+            Operation::GarbageCollect);
+    });
+    EXPECT_NE(interactive_out.find("Checking remote maintenance controls"),
+              std::string::npos);
+    EXPECT_NE(interactive_out.find("2/4 objects"), std::string::npos);
+    EXPECT_NE(interactive_out.find("Removing eligible objects"),
+              std::string::npos);
+    EXPECT_NE(interactive_out.find("2 KB/2 KB"), std::string::npos);
+    EXPECT_NE(interactive_out.find("Releasing maintenance barrier"),
+              std::string::npos);
+
+    const ScopedLanguage pt{Language::Portuguese};
+    const auto completed_pt = present_out(response(
+        GarbageCollectCompleted{
+            .candidate_objects = 3,
+            .candidate_content_objects = 1,
+            .candidate_expired_commits = 2,
+            .deferred_recent_objects = 4,
+            .candidate_bytes = 4096,
+            .removed_objects = 3,
+            .removed_bytes = 4096,
+            .min_age_hours = 6,
+            .removal_elapsed = std::chrono::seconds{1},
+        },
+        Operation::GarbageCollect));
+    EXPECT_NE(completed_pt.find("4 KB recuperados"), std::string::npos);
+    EXPECT_NE(completed_pt.find("2 commit(s) expirado(s)"), std::string::npos);
+    EXPECT_NE(completed_pt.find("4 objetos recentes"), std::string::npos);
+}
+
 TEST(CliPresenterTest, CompactSummariesStayLanguageIndependentAndDescriptive) {
     using namespace kasumi::application;
     const ScopedLanguage pt{Language::Portuguese};

@@ -87,7 +87,7 @@ Use `kasumi <command> --help` for the complete arguments, options and examples.
 | Synchronize (or fast-repair missing remote objects) | `kasumi sync <profile> [--repair]` |
 | Audit referenced payloads | `kasumi fsck <profile>` |
 | Consolidate fragmented Micro-Packs | `kasumi repack <profile> [--dry-run] [--reclaim-dirty] [--full]` |
-| Reclaim eligible remote storage | `kasumi gc <profile> [--dry-run]` |
+| Reclaim eligible remote storage | `kasumi gc <profile> [--dry-run] [--min-age <hours>]` |
 | Resolve permanently missing content as logical deletion | `kasumi resolve-missing <profile> [--dry-run \| --confirm]` |
 
 `--full` applies to `sync`, `status`, `repack`, `show`, and `remote summary`, after the profile. In `sync` and `status` it displays every plan and pending-path item (otherwise lists longer than ten items show the first and last five) and keeps detailed progress lines for each activity; in `repack` it displays the full pack inventory summary and published Commit/height details; in `show` it displays full Commit/machine IDs plus recorded local execution and cached remote maintenance histories (noting offline cache limits for other machines); in `remote summary` it expands full machine IDs and the complete operational activity timeline. Preview and Status do not execute the plan, recover transactions, or persist file-hash cache changes. See
@@ -119,14 +119,21 @@ of `v1.60.0` via `core/version`. Run `kasumi diagnostics [<profile>]` to inspect
 active locks, journals, and key availability read-only without remote access or
 exposing secrets.
 
-**GC permanently deletes eligible objects.** Stop Sync on every client and
-serialize maintenance across the vault. Use `kasumi gc <profile> --dry-run` to
-preview candidate counts (content objects, redundant commit variants, and expired
-activity records) read-only without establishing a barrier, deleting remote
-objects, or publishing a `KACT` activity record. Manual `gc remove-writer`
-requires an exact marker whose process is verified inactive. `gc remove-barrier`
-requires `--confirm-abandoned` after verifying no Sync or maintenance is active;
-barrier age alone is insufficient. See the [GC operational contract](architecture/garbage-collection.md#operational-contract).
+**GC permanently deletes eligible objects.** Scheduled unattended `kasumi gc <profile>`
+checks active writers and barriers read-only before barrier acquisition (backing off
+with `error.code = "remote_busy"` / `[BUSY]` when busy) and applies a default 6-hour
+grace period (`min_history_age_hours`, override with `--min-age <hours>` `0..8760`)
+using remote `ModTime` (and `Commit.created_at` for expired unreachable commits). Any
+object newer than `--min-age` or with missing, invalid, or future timestamps is
+deferred safely. Reserve `--min-age 0` for manual maintenance with Sync stopped on
+every client. Use `kasumi gc <profile> --dry-run` to preview candidate counts
+(content objects, redundant commit variants, expired commits, and expired activity
+records), reclaimable bytes, and deferred recent objects read-only without
+establishing a barrier, deleting objects, or publishing a `KACT` activity record.
+Manual `gc remove-writer` requires an exact marker whose process is verified inactive.
+`gc remove-barrier` requires `--confirm-abandoned` after verifying no Sync or
+maintenance is active; barrier age alone is insufficient. See the
+[GC operational contract](architecture/garbage-collection.md#operational-contract).
 
 `kasumi repack <profile>` consolidates loose small files and fragmented
 `KPAK\x01` Micro-Packs from live local files **without downloading payloads or
@@ -292,16 +299,16 @@ Pass `--quiet` after the profile (or after `kasumi list`, `kasumi diagnostics [<
 Pass `--json` on supported commands (`list`, `show`, `diagnostics`, `status`, `sync`, `fsck`, `gc <profile>`, `repack`, `resolve-missing`, and `remote summary`) to emit a single language-independent JSON object (`"schema_version": 1`) to `stdout` with empty `stderr`, suppressing banners, progress output, and localized text differences regardless of `--lang`:
 
 - Every response includes `schema_version`, `command`, `ok`, `exit_code`, and `timestamp` (UTC ISO-8601 ending in `Z`), plus `profile`, `duration_ms`, `data`, `warning`, or `error` as applicable.
-- Command `data` objects retain all raw numeric/boolean/array fields alongside a concise language-independent `summary` string (such as `"Everything in sync"` or `"3 changes | ↑ 2 (2 KB) | ↓ 1 (512 bytes)"`).
+- Command `data` objects retain all raw numeric/boolean/array fields alongside a concise language-independent `summary` string (such as `"Everything in sync"` or `"3 changes | ↑ 2 (2 KB) | ↓ 1 (512 bytes)"`). On `gc`, `data` also exposes `candidate_expired_commits`, `deferred_recent_objects`, `candidate_bytes`, `removed_bytes`, and `min_age_hours`.
 - `resolve-missing <profile> --json` without `--confirm` or `--dry-run` runs read-only and fails safely with `error.code = "confirmation_required"` and `data.resolved_paths` whenever unresolved paths exist (never blocking on `stdin`).
-- Stable `error.code` values: `invalid_arguments`, `profile_not_found`, `lock_busy`, `credentials_required`, `auth_failed`, `confirmation_required`, `insufficient_disk_space`, `io_error`, `cancelled`, `partial_pending`, `audit_findings`, `transport_error`, `plan_failed`, `sync_failed`, `recovery_failed`, `fsck_failed`, `gc_failed`, `repack_failed`, `writer_removal_failed`, `barrier_removal_failed`, `inventory_audit_failed`, `remote_observation_failed`, `config_error`, and `runtime_error`.
+- Stable `error.code` values: `invalid_arguments`, `profile_not_found`, `lock_busy`, `remote_busy`, `credentials_required`, `auth_failed`, `confirmation_required`, `insufficient_disk_space`, `io_error`, `cancelled`, `partial_pending`, `audit_findings`, `transport_error`, `plan_failed`, `sync_failed`, `recovery_failed`, `fsck_failed`, `gc_failed`, `repack_failed`, `writer_removal_failed`, `barrier_removal_failed`, `inventory_audit_failed`, `remote_observation_failed`, `config_error`, and `runtime_error`.
 
 ### Persistent Log File (`--log-file <path>`)
 
 Pass `--log-file <path>` (or `--log-file=<path>`) on supported non-interactive commands (`list`, `show`, `diagnostics`, `sync`, `status`, `fsck`, `gc`, `repack`, `resolve-missing`, and `remote ...`) to append durable logs without interrupting terminal output:
 
 - **With `--json`**: Appends the exact serialized JSON envelope (`timestamp`, `data.summary`, raw counts, and error codes) as one NDJSON line per invocation.
-- **Without `--json`**: Appends UTF-8 plain-text entries in one atomic write per command using local timestamps with UTC offset, status tags (`[OK]`, `[WARN]`, `[PARTIAL]`, `[LOCKED]`, `[CANCELLED]`, `[ERROR]`), command/profile target, ANSI-free compact summary (with human-readable sizes), duration (`(<seconds> s)`), and indented detail lines for pending paths, warnings, or unhealthy diagnostic items.
+- **Without `--json`**: Appends UTF-8 plain-text entries in one atomic write per command using local timestamps with UTC offset, status tags (`[OK]`, `[WARN]`, `[PARTIAL]`, `[LOCKED]`, `[BUSY]`, `[CANCELLED]`, `[ERROR]`), command/profile target, ANSI-free compact summary (with human-readable sizes), duration (`(<seconds> s)`), and indented detail lines for pending paths, warnings, or unhealthy diagnostic items.
 - The log path is validated before execution (creating missing parent directories; rejecting directories, symlinks, and unwritable targets with exit code `1` or `error.code = "io_error"` under `--json`). Passing `--help` / `-h` never creates or modifies the log file, and cryptographic keys or passwords are never logged.
 
 ## `.kasumiignore`
@@ -396,4 +403,4 @@ Kasumi does not normalize Unicode filename spelling.
 
 Sync, Status, and dry-run report the current planning activity, such as comparing snapshots, checking remote content, and preparing changes. Interactive output shows elapsed time when an ETA is unavailable. Known totals, such as objects checked and operations prepared, are shown as counts. While applying changes, Sync and Resolve Missing show confirmed operations out of the plan. A second line shows file or batch transfer progress and an ETA when the transfer total is known. A single checkpoint can advance the plan by several operations. FSCK, garbage collection, and remote content audits show progress against their known object totals. Redirected output uses plain stage lines and spaced progress milestones. With `--full`, Sync and Status retain more per-activity detail in the output.
 
-Sync keeps its logical plan summary and reports the actual encoded payload bytes, physical object counts, and local reuse (verified FastCDC slices and deduplicated uploads) separately. Transfer progress and speeds appear under Applying changes. FSCK reports the logical audit totals alongside wire download bytes, physical objects downloaded, and files reassembled. Garbage collection reports remote objects listed, candidates found, and removals confirmed by the transport. These payload measurements exclude HTTP headers and protocol control objects.
+Sync keeps its logical plan summary and reports the actual encoded payload bytes, physical object counts, and local reuse (verified FastCDC slices and deduplicated uploads) separately. Transfer progress and speeds appear under Applying changes. FSCK reports the logical audit totals alongside wire download bytes, physical objects downloaded, and files reassembled. Garbage collection reports live sub-stages (`CheckingControls`, `ListingRemote`, `AuthenticatingHistory` commit counts, `AnalyzingReachability`, `LoadingActivities`, `ProbingConsistency`, `RemovingObjects` with byte totals/rate/ETA, and `ReleasingBarrier`), listed remote objects, candidate breakdown (including expired commits and reclaimable bytes), deferred recent objects, and confirmed removals/reclaimed bytes. These payload measurements exclude HTTP headers and protocol control objects.

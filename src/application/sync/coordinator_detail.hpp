@@ -7,9 +7,12 @@
 #include "application/sync/mutation.hpp"
 #include "application/sync/mutation_batch.hpp"
 #include "application/sync/publication.hpp"
+#include "core/hasher.hpp"
 #include "core/history.hpp"
+#include "core/reconciliation/types.hpp"
 #include "core/transaction/types.hpp"
 #include "crypto/file_crypto.hpp"
+#include "crypto/pack.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/workspace.hpp"
 #include "runtime/resolver.hpp"
@@ -83,8 +86,24 @@ Error journal_error(std::string detail);
 // Indicates that the remote publication state could not be proven.
 Error indeterminate_publication(const publication::Error& error,
                                 std::string_view operation);
+// Maps a mutation failure into a coordinator error.
+Error mutation_error(const mutation::MutationError& error);
+// Maps a publication failure into a coordinator error.
+Error publication_error(const publication::Error& error);
 // Indicates that the file status represents a missing path.
 bool missing(std::filesystem::file_status status) noexcept;
+// Creates a filesystem/workspace error scoped to a local path.
+Error workspace_error(std::string_view operation,
+                      const std::filesystem::path& path,
+                      std::string detail);
+// Verifies that an observed status denotes a physical directory.
+std::expected<void, Error>
+require_physical_directory(std::filesystem::file_status status,
+                           const std::filesystem::path& path,
+                           std::string_view error_title);
+// Returns rollback failure first when rollback fails; otherwise original.
+std::unexpected<Error> fail_after_rollback(std::expected<void, Error> rolled,
+                                           Error original);
 
 // Reads path status and converts any failure.
 std::expected<std::filesystem::file_status, Error>
@@ -304,6 +323,96 @@ std::expected<void, Error> save_state_checked(
     const state_storage::StoredState& state,
     const std::optional<state_storage::AcceptedCommitMeta>& accepted_meta =
         std::nullopt);
+
+// Extracts the next bounded upload/download chunk window (<= 64 items,
+// <= upload_batch_max_bytes).
+template <typename Chunk>
+std::span<const Chunk> next_chunk_window(std::span<const Chunk> pending) {
+    constexpr std::size_t max_items = 64;
+    std::size_t count = 0;
+    std::uint64_t bytes = 0;
+    for (const auto& chunk :
+         pending.first(std::min(max_items, pending.size()))) {
+        if (count != 0 && bytes + chunk.size > upload_batch_max_bytes) {
+            break;
+        }
+        ++count;
+        bytes += chunk.size;
+    }
+    return pending.first(count);
+}
+
+struct PlannedSmallUpload {
+    Hash hash{};
+    std::uint32_t size = 0;
+    std::size_t op_index = 0;
+};
+
+struct PlannedPack {
+    Hash pack_hash{};
+    std::string pack_identifier;
+    std::vector<PlannedSmallUpload> blobs;
+    std::vector<std::size_t> operation_indices;
+};
+
+inline constexpr std::size_t pack_upload_window_size = std::min(
+    upload_batch_max_items,
+    static_cast<std::size_t>(upload_batch_max_bytes /
+                             crypto::pack::MAXIMUM_PACK_PLAINTEXT_SIZE));
+
+struct PlannedChunkUpload {
+    Hash file_hash{};
+    std::uint64_t file_size = 0;
+    std::size_t primary_op_index = 0;
+    std::vector<crypto::pack::FastCdcChunk> chunks;
+    std::vector<std::size_t> operation_indices;
+};
+
+struct UploadLayoutPlan {
+    history::StorageManifest target_manifest;
+    std::vector<PlannedPack> packs;
+    std::vector<PlannedChunkUpload> chunked_uploads;
+    std::unordered_map<Hash, std::size_t, decltype(&hash_key)> pack_by_hash{
+        0, hash_key};
+    std::unordered_map<Hash, std::size_t, decltype(&hash_key)> chunked_by_hash{
+        0, hash_key};
+};
+
+// Plans Micro-Pack and FastCDC chunk upload layout for a sync transaction.
+std::expected<UploadLayoutPlan, Error>
+build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
+                         const transport::Transport& storage,
+                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                         const reconciliation::Input& observed_input,
+                         const reconciliation::Result& reconciliation_result,
+                         const transaction::Record& record,
+                         const std::vector<bool>& content_upload_required,
+                         bool enable_micro_packs);
+
+// Builds, uploads, and authenticates a window of Micro-Packs.
+std::expected<void, UploadBatchError>
+execute_packed_upload_batch(std::span<const PlannedPack* const> packs,
+                            const transaction::Record& record,
+                            const std::filesystem::path& local_root,
+                            transport::Transport& storage,
+                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                            const platform::Workspace& workspace,
+                            std::size_t parallelism,
+                            ProgressMeter* meter);
+
+// Probes existing chunks, stages missing FastCDC slices, and verifies uploads.
+std::expected<void, UploadBatchError> execute_chunked_upload_batch(
+    std::span<const PlannedChunkUpload* const> uploads,
+    const transaction::Record& record,
+    const history::StorageManifest& live_manifest,
+    const HashSet& missing_files,
+    const HashSet& invalid_chunks,
+    const std::filesystem::path& local_root,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const platform::Workspace& workspace,
+    std::size_t parallelism,
+    ProgressMeter* meter);
 
 // Publishes and verifies an Epoch checkpointed via EpochUploaded ->
 // EpochVerified.

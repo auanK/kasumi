@@ -176,6 +176,13 @@ private:
     }
 };
 
+// Parses, validates, and verifies an authenticated KPAK v1 plaintext buffer
+// (magic, version, strict member hash ordering, bounds, pack_hash, and member
+// BLAKE3 digests), wiping the buffer on failure.
+std::expected<VerifiedPack, std::string>
+decode_verified_pack_plaintext(std::vector<std::uint8_t> plaintext,
+                               std::optional<Hash> expected_pack_hash = std::nullopt);
+
 // Decrypts and authenticates a KPAK v1 object in memory, verifying pack_hash
 // and every member's BLAKE3 digest.
 std::expected<VerifiedPack, std::string>

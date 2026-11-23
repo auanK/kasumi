@@ -975,6 +975,65 @@ class CliProcessTest(unittest.TestCase):
         self.assertIn("] [OK] sync demo | Everything in sync (", text_contents)
         self.assertIn("] [OK] list | completed", text_contents)
 
+    def test_gc_safe_automation_min_age_and_busy_log(self):
+        local, remote = self.root / "local", self.root / "remote"
+        local.mkdir()
+        self.invoke("config", input=f"n\ndemo\n{local}\n{remote}\n\nq\n".encode())
+        (local / "live.txt").write_text("live-gc-safe", encoding="utf-8")
+        self.invoke("sync", "demo")
+
+        # Capture <history>/<gc>/<v1>/<writers> right after sync, before gc
+        # creates the sibling <probes> directory (also 4 path segments deep).
+        writer_dirs = [
+            Path(root_dir)
+            for root_dir, _dirs, _files in os.walk(remote)
+            if len(Path(root_dir).relative_to(remote).parts) == 4
+        ]
+        self.assertEqual(len(writer_dirs), 1)
+        writer_dir = writer_dirs[0]
+
+        orphan_id = "a" * 64
+        orphan_payload = b"orphan-grace-payload-bytes"
+        (remote / orphan_id).write_bytes(orphan_payload)
+
+        # Default 6h grace period defers freshly created orphan object.
+        dry_proc = self.invoke_raw("gc", "demo", "--dry-run", "--json")
+        self.assertEqual(dry_proc.returncode, 0, dry_proc.stdout + dry_proc.stderr)
+        dry_doc = json.loads(dry_proc.stdout.decode("utf-8"))
+        self.assertTrue(dry_doc["ok"])
+        self.assertEqual(dry_doc["data"]["candidate_objects"], 0)
+        self.assertEqual(dry_doc["data"]["deferred_recent_objects"], 1)
+        self.assertEqual(dry_doc["data"]["min_age_hours"], 6)
+        self.assertTrue((remote / orphan_id).exists())
+
+        # Explicit --min-age 0 reclaims it cleanly and fsck stays green.
+        gc_proc = self.invoke_raw("gc", "demo", "--min-age", "0", "--json")
+        self.assertEqual(gc_proc.returncode, 0, gc_proc.stdout + gc_proc.stderr)
+        gc_doc = json.loads(gc_proc.stdout.decode("utf-8"))
+        self.assertTrue(gc_doc["ok"])
+        self.assertEqual(gc_doc["data"]["candidate_objects"], 1)
+        self.assertEqual(gc_doc["data"]["removed_objects"], 1)
+        self.assertEqual(gc_doc["data"]["candidate_bytes"], len(orphan_payload))
+        self.assertEqual(gc_doc["data"]["removed_bytes"], len(orphan_payload))
+        self.assertEqual(gc_doc["data"]["min_age_hours"], 0)
+        self.assertFalse((remote / orphan_id).exists())
+        self.invoke("fsck", "demo")
+
+        # Simulate active writer marker under <history>/<gc>/<v1>/<writers>/<token>
+        # and verify [BUSY] text log + remote_busy code without mutating barrier.
+        marker = writer_dir / ("0" * 32)
+        marker.write_bytes(b"kasumi-gc-v1:writer:" + b"0" * 32)
+        try:
+            busy_log = self.root / "logs" / "busy.log"
+            busy_res = self.invoke_raw(
+                "gc", "demo", "--log-file", str(busy_log)
+            )
+            self.assertEqual(busy_res.returncode, 1)
+            log_text = busy_log.read_text(encoding="utf-8")
+            self.assertIn("] [BUSY] gc demo | [remote_busy]", log_text)
+        finally:
+            marker.unlink()
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)

@@ -1,5 +1,6 @@
 #include "application/execute.hpp"
 #include "application/history_storage/history_storage.hpp"
+#include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/profile.hpp"
 #include "application/use_cases/context.hpp"
@@ -716,7 +717,9 @@ TEST(ApplicationExecuteTest,
     std::optional<std::size_t> listed;
     std::size_t confirmed = 0;
     const auto result = kasumi::application::execute(
-        {Request{Operation::GarbageCollect, "demo"},
+        {Request{.operation = Operation::GarbageCollect,
+                 .profile_name = "demo",
+                 .gc_min_age_hours = 0},
          Credentials{key()},
          ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")},
          [&](const auto& event) {
@@ -776,7 +779,9 @@ TEST(ApplicationExecuteTest,
     bool corrupted = false;
 
     const auto result = kasumi::application::execute(
-        {Request{Operation::GarbageCollect, "demo"},
+        {Request{.operation = Operation::GarbageCollect,
+                 .profile_name = "demo",
+                 .gc_min_age_hours = 0},
          Credentials{key()},
          ExecutionEnvironment{kasumi::test::workspace_path(workspace, "app")},
          [&](const kasumi::application::ExecutionProgress& progress) {
@@ -1521,7 +1526,8 @@ TEST(ApplicationExecuteTest,
     const auto dry = kasumi::application::execute(
         {Request{.operation = Operation::GarbageCollect,
                  .profile_name = "demo",
-                 .dry_run = true},
+                 .dry_run = true,
+                 .gc_min_age_hours = 0},
          Credentials{key()},
          env});
     ASSERT_TRUE(dry.has_value()) << dry.error().detail;
@@ -1551,7 +1557,11 @@ TEST(ApplicationExecuteTest,
 
     // Real GC still removes the orphan afterward.
     const auto live_gc = kasumi::application::execute(
-        {Request{Operation::GarbageCollect, "demo"}, Credentials{key()}, env});
+        {Request{.operation = Operation::GarbageCollect,
+                 .profile_name = "demo",
+                 .gc_min_age_hours = 0},
+         Credentials{key()},
+         env});
     ASSERT_TRUE(live_gc.has_value()) << live_gc.error().detail;
     const auto* live_data = std::get_if<GarbageCollectCompleted>(&live_gc->data);
     ASSERT_NE(live_data, nullptr);
@@ -1725,6 +1735,86 @@ TEST(ApplicationExecuteTest, DiskSpacePreflightEnforcesDownloadAndStagingSpace) 
                     local, profile, upload_plan,
                     [](const auto&) { return std::optional<std::uint64_t>{0}; })
                     .has_value());
+}
+
+TEST(ApplicationExecuteTest,
+     GcDefaultsToSixHourGraceAndSetsRemoteBusyOnWriterOrBarrier) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("application-gc-default-grace-busy");
+    write_profile(workspace);
+    const ExecutionEnvironment env{
+        kasumi::test::workspace_path(workspace, "app")};
+    ASSERT_TRUE(std::filesystem::create_directories(
+        kasumi::test::workspace_path(workspace, "local")));
+    std::string orphan_content;
+    seed_remote_history(workspace, orphan_content);
+
+    // Invalid --min-age combinations fail validation before touching remote.
+    for (const auto& bad : {
+             Request{.operation = Operation::Status,
+                     .profile_name = "demo",
+                     .gc_min_age_hours = 0},
+             Request{.operation = Operation::GarbageCollect,
+                     .profile_name = "demo",
+                     .gc_min_age_hours = 8761U},
+         }) {
+        const auto rejected =
+            kasumi::application::execute({bad, Credentials{key()}, env});
+        ASSERT_FALSE(rejected.has_value());
+        EXPECT_EQ(rejected.error().code, ErrorCode::RuntimeFailure);
+    }
+
+    // Default GC defers freshly created orphan under 6h grace period.
+    const auto deferred = kasumi::application::execute(
+        {Request{Operation::GarbageCollect, "demo"}, Credentials{key()}, env});
+    ASSERT_TRUE(deferred.has_value()) << deferred.error().detail;
+    const auto* def_gc = std::get_if<GarbageCollectCompleted>(&deferred->data);
+    ASSERT_NE(def_gc, nullptr);
+    EXPECT_EQ(def_gc->candidate_objects, 0U);
+    EXPECT_EQ(def_gc->removed_objects, 0U);
+    EXPECT_EQ(def_gc->deferred_recent_objects, 1U);
+    EXPECT_EQ(def_gc->min_age_hours, 6U);
+
+    // Active writer blocks GC read-only and marks error.remote_busy.
+    auto opened = kasumi::transport::open_transport(
+        kasumi::test::workspace_path(workspace, "remote").string());
+    ASSERT_TRUE(opened.has_value()) << opened.error().message;
+    const auto key_bytes = application_key();
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(key_bytes);
+    const auto stage = kasumi::test::workspace_path(workspace, "writer-stage");
+    ASSERT_TRUE(std::filesystem::create_directories(stage));
+    auto writer = kasumi::application::history_storage::maintenance_protocol::
+        register_writer(*opened, layout, stage);
+    ASSERT_TRUE(writer.has_value()) << writer.error().detail;
+
+    const auto busy = kasumi::application::execute(
+        {Request{.operation = Operation::GarbageCollect,
+                 .profile_name = "demo",
+                 .gc_min_age_hours = 0},
+         Credentials{key()},
+         env});
+    ASSERT_FALSE(busy.has_value());
+    EXPECT_TRUE(busy.error().remote_busy);
+    EXPECT_EQ(kasumi::transport::presence(*opened, layout.barrier_identifier)
+                  .value(),
+              kasumi::transport::Presence::Absent);
+
+    ASSERT_TRUE(kasumi::application::history_storage::maintenance_protocol::
+                    release_registration(*writer));
+
+    // With writer gone and --min-age 0, orphan is reclaimed cleanly.
+    const auto reclaimed = kasumi::application::execute(
+        {Request{.operation = Operation::GarbageCollect,
+                 .profile_name = "demo",
+                 .gc_min_age_hours = 0},
+         Credentials{key()},
+         env});
+    ASSERT_TRUE(reclaimed.has_value()) << reclaimed.error().detail;
+    const auto* rec_gc = std::get_if<GarbageCollectCompleted>(&reclaimed->data);
+    ASSERT_NE(rec_gc, nullptr);
+    EXPECT_EQ(rec_gc->removed_objects, 1U);
+    EXPECT_GT(rec_gc->removed_bytes, 0U);
 }
 
 } // namespace

@@ -780,7 +780,22 @@ fake_reachability_get_batch(void* context,
             return result;
         }
         --fake_state(context)->get_count;
-        --fake_state(context)->commit_get_count;
+        if (source.starts_with(
+                kasumi::application::history_storage::derive_remote_layout(
+                    test_key())
+                    .commits_prefix)) {
+            --fake_state(context)->commit_get_count;
+        } else if (source.starts_with(
+                       kasumi::application::history_storage::derive_remote_layout(
+                           test_key())
+                           .heads_prefix)) {
+            --fake_state(context)->marker_get_count;
+        } else if (source.starts_with(
+                       kasumi::application::history_storage::derive_remote_layout(
+                           test_key())
+                           .epochs_prefix)) {
+            --fake_state(context)->epoch_get_count;
+        }
         fake_state(context)->remote_events.pop_back();
     }
     return {};
@@ -809,8 +824,9 @@ TEST(ReachabilityTest, InventoryConsumesOneNativeCommitBatchWhenSupported) {
             transport, test_key(), kasumi::test::workspace_root(workspace));
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->commits.size(), 2U);
-    EXPECT_EQ(state->get_batch_count, 1U);
+    EXPECT_EQ(state->get_batch_count, 2U);
     EXPECT_EQ(state->commit_get_count, 0U);
+    EXPECT_EQ(state->marker_get_count, 0U);
 }
 
 TEST(ReachabilityTest, SingleCommitVariantBypassesBatchAndUsesDirectDownload) {
@@ -859,8 +875,9 @@ TEST(ReachabilityTest,
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(result->commits.size(), 1U);
     EXPECT_EQ(result->commits.front().variants.size(), 2U);
-    EXPECT_EQ(state->get_batch_count, 1U);
+    EXPECT_EQ(state->get_batch_count, 2U);
     EXPECT_EQ(state->commit_get_count, 0U);
+    EXPECT_EQ(state->marker_get_count, 0U);
 }
 
 TEST(ReachabilityTest, ZeroCommitVariantsPerformZeroDownloads) {
@@ -1086,6 +1103,158 @@ TEST(ReachabilityTest, AllocationBudgetAvoidsNodeBasedHistoryContainers) {
             test_key(),
             kasumi::test::workspace_root(storage.workspace));
     ASSERT_TRUE(result.has_value()) << result.error().detail;
+}
+
+TEST(ReachabilityTest, BatchesMultipleEpochsAndMarkersInPrefetch) {
+    namespace epoch = kasumi::application::history_storage::epoch;
+    auto workspace =
+        kasumi::test::make_temp_workspace("reachability-batch-epochs-markers");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+
+    const auto c0 = make_commit(0, {}, "a.txt", "a").value();
+    const auto c1 = make_commit(1, {commit_id(c0)}, "b.txt", "b").value();
+    add_fake_commit(transport, workspace, c0, "c0");
+    add_fake_commit(transport, workspace, c1, "c1");
+
+    const epoch::Epoch ep0{
+        .vault_id = std::string(64, 'e'),
+        .sequence = 0,
+        .issued_at = 100,
+        .policy = {},
+        .anchors = {epoch::Anchor{.commit_id = commit_id(c0), .height = 0}},
+    };
+    const auto s0 = epoch::seal(ep0, test_key()).value();
+    ASSERT_TRUE(epoch::publish(
+        transport, test_key(), s0, kasumi::test::workspace_root(workspace)));
+
+    const epoch::Epoch ep1{
+        .vault_id = std::string(64, 'e'),
+        .sequence = 1,
+        .issued_at = 200,
+        .policy = {},
+        .anchors = {epoch::Anchor{.commit_id = commit_id(c1), .height = 1}},
+        .previous_epoch_id = s0.reference.epoch_id,
+    };
+    const auto s1 = epoch::seal(ep1, test_key()).value();
+    ASSERT_TRUE(epoch::publish(
+        transport, test_key(), s1, kasumi::test::workspace_root(workspace)));
+
+    const auto sequential =
+        kasumi::application::history_storage::inventory_reachability(
+            transport, test_key(), kasumi::test::workspace_root(workspace));
+    ASSERT_TRUE(sequential.has_value()) << sequential.error().detail;
+
+    transport.storage.get_batch = fake_reachability_get_batch;
+    state->get_batch_count = 0;
+    state->commit_get_count = 0;
+    state->marker_get_count = 0;
+    state->epoch_get_count = 0;
+
+    const auto batched =
+        kasumi::application::history_storage::inventory_reachability(
+            transport, test_key(), kasumi::test::workspace_root(workspace));
+    ASSERT_TRUE(batched.has_value()) << batched.error().detail;
+    EXPECT_EQ(state->get_batch_count, 3U); // commits + epochs + markers
+    EXPECT_EQ(state->commit_get_count, 0U);
+    EXPECT_EQ(state->marker_get_count, 0U);
+    EXPECT_EQ(state->epoch_get_count, 0U);
+    EXPECT_EQ(batched->logical_heads, sequential->logical_heads);
+    EXPECT_EQ(batched->reachable_commits, sequential->reachable_commits);
+    EXPECT_EQ(batched->valid_epochs, sequential->valid_epochs);
+    EXPECT_EQ(batched->orphan_epochs, sequential->orphan_epochs);
+}
+
+TEST(ReachabilityTest, ProgressCallbackReportsCommitAuthenticationProgress) {
+    auto storage = make_local_storage();
+    const auto c0 = kasumi::history::make_empty_bootstrap().value();
+    const auto c1 = make_commit(1, {commit_id(c0)}, "1.txt", "1").value();
+    const auto c2 = make_commit(2, {commit_id(c1)}, "2.txt", "2").value();
+    publish(storage, c0);
+    publish(storage, c1);
+    publish(storage, c2);
+    add_variant(storage, c1);
+
+    std::vector<std::pair<std::size_t, std::size_t>> events;
+    const auto result =
+        kasumi::application::history_storage::inventory_reachability(
+            storage.transport,
+            test_key(),
+            kasumi::test::workspace_root(storage.workspace),
+            [&](std::size_t done, std::size_t total) {
+                events.emplace_back(done, total);
+            });
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    ASSERT_FALSE(events.empty());
+    EXPECT_EQ(events.front(), (std::pair<std::size_t, std::size_t>{0U, 4U}));
+    EXPECT_EQ(events.back(), (std::pair<std::size_t, std::size_t>{4U, 4U}));
+}
+
+TEST(ReachabilityTest,
+     LoadHistoryAndEpochChainSucceedAfterExpiredCommitsPruned) {
+    namespace epoch = kasumi::application::history_storage::epoch;
+    auto storage = make_local_storage();
+    const auto c0 =
+        kasumi::history::make_commit(0, {}, make_tree("old.txt", "old"), 100)
+            .value();
+    const auto c1 = kasumi::history::make_commit(
+                        1, {commit_id(c0)}, make_tree("mid.txt", "mid"), 200)
+                        .value();
+    const auto c2 = kasumi::history::make_commit(
+                        2, {commit_id(c1)}, make_tree("new.txt", "new"), 300)
+                        .value();
+    const auto r0 = publish(storage, c0);
+    const auto r1 = publish(storage, c1);
+    const auto r2 = publish(storage, c2);
+    ASSERT_TRUE(kasumi::transport::remove(storage.transport,
+                                          marker_path(r0.head)));
+    ASSERT_TRUE(kasumi::transport::remove(storage.transport,
+                                          marker_path(r1.head)));
+
+    const epoch::Epoch ep{
+        .vault_id = std::string(64, 'c'),
+        .sequence = 0,
+        .issued_at = 250,
+        .policy = {},
+        .anchors = {epoch::Anchor{.commit_id = commit_id(c1), .height = 1}},
+    };
+    const auto sealed = epoch::seal(ep, test_key()).value();
+    ASSERT_TRUE(epoch::publish(
+        storage.transport,
+        test_key(),
+        sealed,
+        kasumi::test::workspace_root(storage.workspace)));
+
+    // Simulate expired commit GC removing c0 strictly behind the Epoch anchor.
+    ASSERT_TRUE(kasumi::transport::remove(storage.transport,
+                                          object_path(r0.head)));
+
+    const auto inv =
+        kasumi::application::history_storage::inventory_reachability(
+            storage.transport,
+            test_key(),
+            kasumi::test::workspace_root(storage.workspace));
+    ASSERT_TRUE(inv.has_value()) << inv.error().detail;
+    EXPECT_EQ(inv->logical_heads, std::vector<std::string>{r2.head.commit_id});
+    EXPECT_TRUE(inv->missing_parent_ids.empty());
+    EXPECT_TRUE(inv->orphan_commits.empty());
+
+    const auto loaded =
+        kasumi::application::history_storage::load_history(
+            storage.transport,
+            test_key(),
+            kasumi::test::workspace_root(storage.workspace));
+    ASSERT_TRUE(loaded.has_value()) << loaded.error().detail;
+    EXPECT_EQ(loaded->marked_heads,
+              std::vector<std::string>{r2.head.commit_id});
+
+    const auto chain = epoch::load_chain(
+        storage.transport,
+        test_key(),
+        kasumi::test::workspace_root(storage.workspace));
+    ASSERT_TRUE(chain.has_value()) << chain.error().detail;
+    ASSERT_EQ(chain->size(), 1U);
 }
 
 } // namespace

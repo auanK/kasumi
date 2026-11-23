@@ -76,6 +76,8 @@ add_library(kasumi_application_fault_test_objects OBJECT
     ${PROJECT_SOURCE_DIR}/src/application/sync/mutation.cpp
     ${PROJECT_SOURCE_DIR}/src/application/sync/mutation_transaction.cpp
     ${PROJECT_SOURCE_DIR}/src/application/sync/coordinator.cpp
+    ${PROJECT_SOURCE_DIR}/src/application/sync/coordinator_downloads.cpp
+    ${PROJECT_SOURCE_DIR}/src/application/sync/coordinator_workspace.cpp
     ${PROJECT_SOURCE_DIR}/src/application/sync/reobservation.cpp
     ${PROJECT_SOURCE_DIR}/src/platform/workspace.cpp
 )
@@ -179,6 +181,7 @@ kasumi_add_test_suite(
         integration/sync/test_reobservation_safeguards.cpp
         integration/sync/test_mutation_contracts.cpp
         integration/sync/test_local_copy.cpp
+        integration/sync/test_soak_and_benchmark.cpp
     LIBRARIES
         kasumi_application
         kasumi_sqlite3
@@ -454,5 +457,30 @@ add_test(
         -DPROJECT_SOURCE_DIR=${PROJECT_SOURCE_DIR}
         -P ${PROJECT_SOURCE_DIR}/tests/architecture/check_dependency_dag.cmake
 )
+
+if(KASUMI_BUILD_FUZZERS)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "KASUMI_BUILD_FUZZERS=ON requires a Clang compiler")
+    endif()
+    function(kasumi_add_fuzzer_target target source)
+        add_executable(${target} ${source})
+        target_link_libraries(${target} PRIVATE
+            kasumi_application
+            kasumi_crypto
+            kasumi_core
+            kasumi_warnings
+        )
+        target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/src)
+        target_compile_options(${target} PRIVATE -fsanitize=fuzzer,address,undefined)
+        target_link_options(${target} PRIVATE -fsanitize=fuzzer,address,undefined)
+    endfunction()
+
+    kasumi_add_fuzzer_target(kasumi_fuzz_kcom fuzz/fuzz_kcom.cpp)
+    kasumi_add_fuzzer_target(kasumi_fuzz_kpak fuzz/fuzz_kpak.cpp)
+    kasumi_add_fuzzer_target(kasumi_fuzz_kact fuzz/fuzz_kact.cpp)
+    kasumi_add_fuzzer_target(kasumi_fuzz_epoch fuzz/fuzz_epoch.cpp)
+    kasumi_add_fuzzer_target(kasumi_fuzz_transaction fuzz/fuzz_transaction.cpp)
+    kasumi_add_fuzzer_target(kasumi_fuzz_aead fuzz/fuzz_aead.cpp)
+endif()
 
 set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES "${CMAKE_CURRENT_LIST_DIR}/release_critical_labels.cmake")

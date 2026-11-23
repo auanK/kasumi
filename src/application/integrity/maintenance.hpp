@@ -54,6 +54,14 @@ struct FsckResult {
 
 using FsckProgressCallback = std::function<void(const FsckProgress&)>;
 
+// Policy options controlling garbage collection safety grace periods and mode.
+struct GarbageCollectOptions {
+    bool dry_run = false;
+    // std::nullopt uses runtime_data.min_history_age_hours (default 6h).
+    // Explicit 0s disables the safety grace period (offline maintenance).
+    std::optional<std::chrono::seconds> min_orphan_age = std::nullopt;
+};
+
 // Counts produced by global-plan garbage collection.
 struct GarbageCollectResult {
     std::size_t candidate_objects = 0;
@@ -64,7 +72,12 @@ struct GarbageCollectResult {
     bool dry_run = false;
     std::size_t candidate_content_objects = 0;
     std::size_t candidate_commit_variants = 0;
+    std::size_t candidate_expired_commits = 0;
     std::size_t candidate_activities = 0;
+    std::size_t deferred_recent_objects = 0;
+    std::uint64_t candidate_bytes = 0;
+    std::uint64_t removed_bytes = 0;
+    std::uint32_t effective_min_age_hours = 0;
     std::chrono::nanoseconds removal_elapsed{};
     std::size_t pruned_activities = 0;
     std::vector<history_storage::activity::LoadedActivity> kept_activities;
@@ -73,12 +86,19 @@ struct GarbageCollectResult {
 using GarbageCollectProgressCallback =
     std::function<void(const GarbageCollectProgress&)>;
 
-// Removes authenticated, unreachable content and redundant commit variants.
-// One authenticated observation builds and validates the complete deletion
-// plan; Apply performs exactly one sequential REMOVE per planned candidate and
-// trusts the transport result. Exclusivity is cooperative: the barrier and
-// writer registration prevent cooperative writers, but there is no distributed
-// CAS against non-cooperative mutation after the observation.
+// Removes authenticated, unreachable content, expired commits, and redundant
+// commit variants. One authenticated observation builds and validates the
+// complete deletion plan; Apply removes planned candidates in bounded batches
+// and trusts the transport result. Exclusivity is cooperative: pre-barrier and
+// post-barrier writer checks plus the grace period protect in-flight Sync work.
+std::expected<GarbageCollectResult, Error>
+garbage_collect(const runtime::RuntimeData& runtime_data,
+                transport::Transport& storage,
+                std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                GarbageCollectOptions options,
+                GarbageCollectProgressCallback on_progress = {});
+
+// Default safe collection overload (uses profile's min_history_age_hours).
 std::expected<GarbageCollectResult, Error>
 garbage_collect(const runtime::RuntimeData& runtime_data,
                 transport::Transport& storage,

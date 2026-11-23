@@ -159,8 +159,13 @@ struct GarbageCollectCompleted {
     bool dry_run = false;
     std::size_t candidate_content_objects = 0;
     std::size_t candidate_commit_variants = 0;
+    std::size_t candidate_expired_commits = 0;
     std::size_t candidate_activities = 0;
+    std::size_t deferred_recent_objects = 0;
+    std::uint64_t candidate_bytes = 0;
     std::size_t removed_objects = 0;
+    std::uint64_t removed_bytes = 0;
+    std::uint32_t min_age_hours = 0;
     std::chrono::nanoseconds removal_elapsed{};
 };
 
@@ -296,6 +301,7 @@ struct Error {
     // Sync succeeded before a subsequent inventory audit failed.
     std::optional<SyncCompleted> sync_completed;
     bool lock_busy = false;
+    bool remote_busy = false;
     bool insufficient_disk_space = false;
 };
 

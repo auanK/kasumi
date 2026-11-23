@@ -76,10 +76,11 @@ std::string ascii_lower(std::string value) {
 }
 
 nlohmann::json stat_opt(bool files_only,
-                        std::optional<bool> recurse = std::nullopt) {
+                        std::optional<bool> recurse = std::nullopt,
+                        bool no_mod_time = true) {
     nlohmann::json opt{
         {"filesOnly", files_only},
-        {"noModTime", true},
+        {"noModTime", no_mod_time},
         {"noMimeType", true},
     };
     if (recurse.has_value()) {
@@ -1023,15 +1024,126 @@ Result rclone_get(void* context,
     return rclone_get_progress(context, identifier, destination, {});
 }
 
-ListingResult parse_list_response_json(const nlohmann::json& response,
-                                       std::string_view remote_prefix = {}) {
+std::optional<int> parse_fixed_uint(std::string_view text,
+                                    std::size_t pos,
+                                    std::size_t digits) noexcept {
+    if (pos + digits > text.size()) {
+        return std::nullopt;
+    }
+    int value = 0;
+    for (std::size_t i = 0; i < digits; ++i) {
+        const char ch = text[pos + i];
+        if (ch < '0' || ch > '9') {
+            return std::nullopt;
+        }
+        value = value * 10 + (ch - '0');
+    }
+    return value;
+}
+
+std::optional<std::int64_t>
+parse_rfc3339_utc_seconds(std::string_view text) noexcept {
+    // Minimum RFC3339 form: YYYY-MM-DDTHH:MM:SSZ
+    if (text.size() < 20 || text[4] != '-' || text[7] != '-' ||
+        (text[10] != 'T' && text[10] != 't') || text[13] != ':' ||
+        text[16] != ':') {
+        return std::nullopt;
+    }
+    const auto year = parse_fixed_uint(text, 0, 4);
+    const auto month = parse_fixed_uint(text, 5, 2);
+    const auto day = parse_fixed_uint(text, 8, 2);
+    const auto hour = parse_fixed_uint(text, 11, 2);
+    const auto minute = parse_fixed_uint(text, 14, 2);
+    const auto second = parse_fixed_uint(text, 17, 2);
+    if (!year || !month || !day || !hour || !minute || !second ||
+        *year < 1970 || *year > 9999 || *month < 1 || *month > 12 ||
+        *hour < 0 || *hour > 23 || *minute < 0 || *minute > 59 ||
+        *second < 0 || *second > 59) {
+        return std::nullopt;
+    }
+    static constexpr std::array<int, 12> days_per_month{
+        31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    const bool is_leap =
+        (*year % 4 == 0) && (*year % 100 != 0 || *year % 400 == 0);
+    const int max_day =
+        days_per_month[static_cast<std::size_t>(*month - 1)] +
+        ((*month == 2 && is_leap) ? 1 : 0);
+    if (*day < 1 || *day > max_day) {
+        return std::nullopt;
+    }
+
+    std::size_t pos = 19;
+    if (pos < text.size() && text[pos] == '.') {
+        ++pos;
+        if (pos >= text.size() || text[pos] < '0' || text[pos] > '9') {
+            return std::nullopt;
+        }
+        while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') {
+            ++pos;
+        }
+    }
+    if (pos >= text.size()) {
+        return std::nullopt;
+    }
+
+    std::int64_t tz_offset_seconds = 0;
+    if (text[pos] == 'Z' || text[pos] == 'z') {
+        if (pos + 1 != text.size()) {
+            return std::nullopt;
+        }
+    } else if (text[pos] == '+' || text[pos] == '-') {
+        const std::int64_t sign = text[pos] == '+' ? 1 : -1;
+        ++pos;
+        const auto tz_hour = parse_fixed_uint(text, pos, 2);
+        if (!tz_hour || *tz_hour > 23) {
+            return std::nullopt;
+        }
+        pos += 2;
+        if (pos < text.size() && text[pos] == ':') {
+            ++pos;
+        }
+        const auto tz_min = parse_fixed_uint(text, pos, 2);
+        if (!tz_min || *tz_min > 59 || pos + 2 != text.size()) {
+            return std::nullopt;
+        }
+        tz_offset_seconds =
+            sign * (static_cast<std::int64_t>(*tz_hour) * 3600LL +
+                    static_cast<std::int64_t>(*tz_min) * 60LL);
+    } else {
+        return std::nullopt;
+    }
+
+    std::int64_t civil_year = *year;
+    const auto m = static_cast<unsigned>(*month);
+    const auto d = static_cast<unsigned>(*day);
+    civil_year -= m <= 2 ? 1 : 0;
+    const std::int64_t era =
+        (civil_year >= 0 ? civil_year : civil_year - 399) / 400;
+    const auto yoe = static_cast<unsigned>(civil_year - era * 400);
+    const unsigned doy =
+        (153U * (m + (m > 2 ? static_cast<unsigned>(-3) : 9U)) + 2U) / 5U +
+        d - 1U;
+    const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+    const std::int64_t days =
+        era * 146097LL + static_cast<std::int64_t>(doe) - 719468LL;
+    const std::int64_t utc =
+        days * 86400LL + static_cast<std::int64_t>(*hour) * 3600LL +
+        static_cast<std::int64_t>(*minute) * 60LL +
+        static_cast<std::int64_t>(*second) - tz_offset_seconds;
+    return utc >= 0 ? std::optional<std::int64_t>{utc} : std::nullopt;
+}
+
+template <typename Fn>
+std::expected<void, Error> parse_list_entries_json(
+    const nlohmann::json& response,
+    std::string_view remote_prefix,
+    Fn&& on_entry) {
     if (!response.is_object() || !response.contains("list") ||
         !response["list"].is_array()) {
         return std::unexpected(make_error(ErrorCode::ProtocolFailure,
                                           "invalid operations/list response"));
     }
 
-    std::vector<std::string> identifiers;
     std::unordered_set<std::string> seen;
     for (const auto& item : response["list"]) {
         if (!item.is_object() || !item.contains("Path") ||
@@ -1056,10 +1168,48 @@ ListingResult parse_list_response_json(const nlohmann::json& response,
                 make_error(ErrorCode::ProtocolFailure,
                            "remote returned duplicate identifiers"));
         }
-        identifiers.push_back(std::move(identifier));
+        on_entry(item, std::move(identifier));
+    }
+    return {};
+}
+
+ListingResult parse_list_response_json(const nlohmann::json& response,
+                                       std::string_view remote_prefix = {}) {
+    std::vector<std::string> identifiers;
+    if (auto parsed = parse_list_entries_json(
+            response,
+            remote_prefix,
+            [&](const nlohmann::json&, std::string identifier) {
+                identifiers.push_back(std::move(identifier));
+            });
+        !parsed) {
+        return std::unexpected(parsed.error());
     }
     std::ranges::sort(identifiers);
     return identifiers;
+}
+
+MetadataListingResult
+parse_list_metadata_response_json(const nlohmann::json& response) {
+    std::vector<ObjectMetadata> entries;
+    if (auto parsed = parse_list_entries_json(
+            response,
+            {},
+            [&](const nlohmann::json& item, std::string identifier) {
+                ObjectMetadata meta{.identifier = std::move(identifier)};
+                meta.size = nonnegative_integer(item, "Size");
+                if (const auto mod = item.find("ModTime");
+                    mod != item.end() && mod->is_string()) {
+                    meta.modified_at_unix = parse_rfc3339_utc_seconds(
+                        mod->get_ref<const std::string&>());
+                }
+                entries.push_back(std::move(meta));
+            });
+        !parsed) {
+        return std::unexpected(parsed.error());
+    }
+    std::ranges::sort(entries, {}, &ObjectMetadata::identifier);
+    return entries;
 }
 
 PresenceResult rclone_presence(void* context, std::string_view identifier) {
@@ -1084,9 +1234,10 @@ PresenceResult rclone_presence(void* context, std::string_view identifier) {
                                "remote object is a directory");
 }
 
-ListingResult
-list_remote_objects(void* context,
-                    std::optional<std::string_view> prefix = std::nullopt) {
+std::expected<nlohmann::json, Error>
+fetch_remote_listing_json(void* context,
+                          std::optional<std::string_view> prefix,
+                          bool include_mod_time) {
     auto state = require_ready(context);
     if (!state) {
         return std::unexpected(state.error());
@@ -1099,7 +1250,7 @@ list_remote_objects(void* context,
     nlohmann::json list_request{
         {"fs", rooted_remote_fs(**state)},
         {"remote", effective_prefix},
-        {"opt", stat_opt(true, effective_prefix.empty())},
+        {"opt", stat_opt(true, effective_prefix.empty(), !include_mod_time)},
     };
     if (effective_prefix.empty()) {
         list_request["_config"] = {{"FastList", true}};
@@ -1118,11 +1269,30 @@ list_remote_objects(void* context,
         }
         return std::unexpected(response.error());
     }
-    return parse_list_response_json(*response, effective_prefix);
+    return *response;
+}
+
+ListingResult
+list_remote_objects(void* context,
+                    std::optional<std::string_view> prefix = std::nullopt) {
+    const auto response = fetch_remote_listing_json(context, prefix, false);
+    if (!response) {
+        return std::unexpected(response.error());
+    }
+    return parse_list_response_json(*response,
+                                    prefix.value_or(std::string_view{}));
 }
 
 ListingResult rclone_list(void* context) {
     return list_remote_objects(context);
+}
+
+MetadataListingResult rclone_list_metadata(void* context) {
+    const auto response = fetch_remote_listing_json(context, std::nullopt, true);
+    if (!response) {
+        return std::unexpected(response.error());
+    }
+    return parse_list_metadata_response_json(*response);
 }
 
 ListingResult rclone_list_prefix(void* context, std::string_view prefix) {
@@ -1860,6 +2030,16 @@ ListingResult parse_list_response(std::string_view response_body) {
         });
 }
 
+MetadataListingResult
+parse_list_metadata_response(std::string_view response_body) {
+    return parse_json_response(
+        response_body,
+        "invalid operations/list metadata response",
+        [](const auto& j) {
+            return parse_list_metadata_response_json(j);
+        });
+}
+
 StorageOperations make_storage_operations() noexcept {
     return StorageOperations{
         .initialize = rclone_initialize,
@@ -1869,6 +2049,7 @@ StorageOperations make_storage_operations() noexcept {
         .get_batch = rclone_get_batch,
         .presence = rclone_presence,
         .list = rclone_list,
+        .list_metadata = rclone_list_metadata,
         .list_prefix = rclone_list_prefix,
         .physical_hash = rclone_physical_hash,
         .physical_hash_batch = rclone_physical_hash_batch,
