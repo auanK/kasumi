@@ -628,9 +628,9 @@ download_remote_file(const InspectionRequest& request,
     if (!target) {
         return std::unexpected(target.error());
     }
-    const bool tree_available =
-        observed.history_present && target->tree != nullptr &&
-        target->manifest != nullptr;
+    const bool tree_available = observed.history_present &&
+                                target->tree != nullptr &&
+                                target->manifest != nullptr;
     const auto* row =
         tree_available
             ? find_row(*target->tree, request.logical_path.value_or(""))
