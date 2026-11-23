@@ -490,7 +490,7 @@ resolve_commit_target(const InspectionRequest& request,
     }
     return CommitInspectionTarget{
         .tree = &selected->commit.tree,
-        .manifest = &selected->commit.storage_manifest,
+        .manifest = &selected->commit.storage,
         .observed_height = selected->commit.height,
         .has_conflicts = false,
         .commit_id = selected->id,
