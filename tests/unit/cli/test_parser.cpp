@@ -118,6 +118,20 @@ INSTANTIATE_TEST_SUITE_P(
                          .profile_name = "demo",
                          .confirm_abandoned = true}},
         ApplicationCase{
+            "RemoveBarrierWithIdBeforeFlag",
+            {"gc", "remove-barrier", "demo", "deadbeef", "--confirm-abandoned"},
+            {.operation = Operation::RemoveBarrier,
+             .profile_name = "demo",
+             .barrier_identifier = "deadbeef",
+             .confirm_abandoned = true}},
+        ApplicationCase{
+            "RemoveBarrierWithIdAfterFlag",
+            {"gc", "remove-barrier", "demo", "--confirm-abandoned", "deadbeef"},
+            {.operation = Operation::RemoveBarrier,
+             .profile_name = "demo",
+             .barrier_identifier = "deadbeef",
+             .confirm_abandoned = true}},
+        ApplicationCase{
             "Repack",
             {"repack", "demo"},
             {.operation = Operation::Repack, .profile_name = "demo"}},
@@ -467,5 +481,14 @@ TEST(CliParserTest,
 
     EXPECT_FALSE(parse({"diagnostics", "--unknown"}).has_value());
     EXPECT_FALSE(parse({"diagnostics", "demo", "extra"}).has_value());
+    EXPECT_FALSE(
+        parse({"gc", "remove-barrier", "demo", "deadbeef"}).has_value());
+    EXPECT_FALSE(parse({"gc",
+                        "remove-barrier",
+                        "demo",
+                        "id1",
+                        "id2",
+                        "--confirm-abandoned"})
+                     .has_value());
 }
 } // namespace

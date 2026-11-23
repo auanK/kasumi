@@ -443,6 +443,41 @@ bool is_marker(std::string_view identifier) {
     return identifier.starts_with(layout.heads_prefix);
 }
 
+bool is_barrier(std::string_view identifier) {
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    return identifier == layout.barrier_identifier ||
+           identifier.starts_with(layout.barriers_prefix);
+}
+
+bool target_matches(std::string_view target, std::string_view identifier) {
+    if (target.empty()) {
+        return false;
+    }
+    if (identifier == target) {
+        return true;
+    }
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+    return target == layout.barrier_identifier &&
+           identifier.starts_with(layout.barriers_prefix);
+}
+
+std::optional<std::string> find_active_barrier(
+    const FakeState& state,
+    const kasumi::application::history_storage::RemoteLayout& layout) {
+    if (state.objects.contains(layout.barrier_identifier)) {
+        return layout.barrier_identifier;
+    }
+    for (const auto& [id, unused] : state.objects) {
+        static_cast<void>(unused);
+        if (id.starts_with(layout.barriers_prefix)) {
+            return id;
+        }
+    }
+    return std::nullopt;
+}
+
 bool is_epoch(std::string_view identifier) {
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(test_key());
@@ -467,8 +502,10 @@ kasumi::transport::Result fake_put(void* context,
                                    const std::filesystem::path& source,
                                    std::string_view identifier) {
     auto* state = fake_state(context);
-    const bool failed_target = identifier == state->fail_put_identifier;
-    const bool ambiguous_target = identifier == state->put_then_fail_identifier;
+    const bool failed_target =
+        target_matches(state->fail_put_identifier, identifier);
+    const bool ambiguous_target =
+        target_matches(state->put_then_fail_identifier, identifier);
     const bool failed_commit = is_commit(identifier) && state->fail_commit_put;
     const bool failed_marker = is_marker(identifier) && state->fail_marker_put;
     if ((failed_commit && !state->persist_commit_on_put_failure) ||
@@ -559,7 +596,7 @@ kasumi::transport::Result fake_get(void* context,
     }
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(test_key());
-    if (identifier == layout.barrier_identifier) {
+    if (is_barrier(identifier)) {
         ++state->barrier_verification_count;
         state->gc_events.emplace_back("barrier:" + std::string{identifier});
     }
@@ -796,7 +833,10 @@ kasumi::transport::ListingResult fake_list_prefix(void* context,
     }
     if (state->replace_barrier_after_writer_list && is_writers) {
         state->replace_barrier_after_writer_list = false;
-        replace_barrier_contents(state, test_layout.barrier_identifier);
+        const auto target_barrier =
+            find_active_barrier(*state, test_layout)
+                .value_or(test_layout.barrier_identifier);
+        replace_barrier_contents(state, target_barrier);
     }
     if (state->on_operation) {
         state->on_operation(*state, "after_prefix_list", prefix);
@@ -820,7 +860,7 @@ kasumi::transport::RemovalResult fake_remove(void* context,
     if (state->on_operation) {
         state->on_operation(*state, "before_remove", identifier);
     }
-    if (identifier == state->remove_then_fail_identifier) {
+    if (target_matches(state->remove_then_fail_identifier, identifier)) {
         state->remove_then_fail_identifier.clear();
         state->physical_hashes.erase(std::string{identifier});
         state->objects.erase(std::string{identifier});
@@ -844,7 +884,7 @@ kasumi::transport::RemovalResult fake_remove(void* context,
             .message = "injected candidate remove failure",
             .native_code = state->remove_failure_native_code});
     }
-    if (identifier == state->fail_remove_identifier) {
+    if (target_matches(state->fail_remove_identifier, identifier)) {
         state->fail_remove_identifier.clear();
         return std::unexpected(kasumi::transport::Error{
             .code = state->fail_remove_code.value_or(
@@ -865,11 +905,10 @@ kasumi::transport::RemovalResult fake_remove(void* context,
             ++state->source_remove_count ==
                 state->replace_barrier_after_source_remove_count) {
             state->replace_barrier_after_source_remove_count = 0;
-            replace_barrier_contents(
-                state,
-                kasumi::application::history_storage::derive_remote_layout(
-                    test_key())
-                    .barrier_identifier);
+            const auto target_barrier =
+                find_active_barrier(*state, test_layout)
+                    .value_or(test_layout.barrier_identifier);
+            replace_barrier_contents(state, target_barrier);
         }
         if (state->on_operation) {
             state->on_operation(*state, "after_remove", identifier);
@@ -996,14 +1035,15 @@ std::expected<std::string, kasumi::transport::Error> fake_physical_hash(
     }
     if (state->physical_hash_failure &&
         (state->physical_hash_failure_identifier.empty() ||
-         identifier == state->physical_hash_failure_identifier)) {
+         target_matches(state->physical_hash_failure_identifier, identifier))) {
         return std::unexpected(kasumi::transport::Error{
             .code = *state->physical_hash_failure,
             .message = "injected physical hash failure",
             .native_code = state->physical_hash_failure_native_code});
     }
     if (!state->physical_hash_supported || algorithm != "sha256" ||
-        identifier == state->physical_hash_unsupported_identifier) {
+        target_matches(state->physical_hash_unsupported_identifier,
+                       identifier)) {
         return std::unexpected(kasumi::transport::Error{
             .code = kasumi::transport::ErrorCode::Unsupported,
             .message = "physical hash unavailable"});
@@ -1019,10 +1059,10 @@ std::expected<std::string, kasumi::transport::Error> fake_physical_hash(
     }
     const bool mismatched =
         state->physical_hash_mismatch ||
-        identifier == state->physical_hash_mismatch_identifier;
+        target_matches(state->physical_hash_mismatch_identifier, identifier);
     const auto layout =
         kasumi::application::history_storage::derive_remote_layout(test_key());
-    if (identifier == layout.barrier_identifier) {
+    if (is_barrier(identifier)) {
         ++state->barrier_verification_count;
         state->gc_events.emplace_back("barrier:" + std::string{identifier});
     }

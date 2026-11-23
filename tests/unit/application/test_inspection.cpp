@@ -2273,4 +2273,76 @@ TEST(ApplicationInspectionTest,
     EXPECT_EQ(summary_rep.recent_activities.front().machine_name, "BuilderPC");
 }
 
+TEST(ApplicationInspectionTest,
+     RemoteWritersSurfacesMultipleBarriersAndDiagnosticMetadata) {
+    namespace protocol =
+        kasumi::application::history_storage::maintenance_protocol;
+    auto fixture = make_local_storage();
+    auto workspace =
+        kasumi::test::make_temp_workspace("application-writers-multi-meta");
+    const auto remote_root =
+        kasumi::test::workspace_path(fixture.workspace, "storage");
+    write_profile(workspace, remote_root);
+    publish(fixture, make_commit(0, {}, "file.txt", "contents").value());
+    const auto layout =
+        kasumi::application::history_storage::derive_remote_layout(test_key());
+
+    const std::string t1 = "11111111111111111111111111111111";
+    const std::string t2 = "22222222222222222222222222222222";
+    const std::string w1 = "33333333333333333333333333333333";
+    const auto b1 = layout.barriers_prefix + t1;
+    const auto b2 = layout.barriers_prefix + t2;
+    const auto wid = layout.writers_prefix + w1;
+
+    const auto write_bytes = [&](std::string_view id,
+                                 const std::vector<std::uint8_t>& data) {
+        const auto dst = remote_root / kasumi::platform::path::from_utf8(id);
+        std::filesystem::create_directories(dst.parent_path());
+        std::ofstream out(dst, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(data.data()),
+                  static_cast<std::streamsize>(data.size()));
+    };
+    write_bytes(b1,
+                protocol::testing::format_payload(
+                    "barrier",
+                    t1,
+                    protocol::MarkerMetadata{.machine_name = "gc-host-1",
+                                             .pid = 1001,
+                                             .started_at_unix = 1700000100}));
+    write_bytes(b2,
+                protocol::testing::format_payload(
+                    "barrier",
+                    t2,
+                    protocol::MarkerMetadata{.machine_name = "gc-host-2",
+                                             .pid = 2002,
+                                             .started_at_unix = 1700000200}));
+    write_bytes(wid,
+                protocol::testing::format_payload(
+                    "writer",
+                    w1,
+                    protocol::MarkerMetadata{.machine_name = "sync-host-3",
+                                             .pid = 3003,
+                                             .started_at_unix = 1700000300}));
+
+    const auto writers = inspect(workspace, InspectionOperation::RemoteWriters);
+    ASSERT_TRUE(writers.has_value()) << writers.error().detail;
+    const auto& report =
+        std::get<kasumi::application::RemoteWritersReport>(writers->payload);
+    EXPECT_TRUE(report.barrier_present);
+    EXPECT_TRUE(report.maintenance_blocked);
+    EXPECT_TRUE(report.protocol_consistent);
+    ASSERT_EQ(report.barriers.size(), 2U);
+    EXPECT_EQ(report.barriers[0].identifier, b1);
+    EXPECT_EQ(report.barriers[0].machine_name, "gc-host-1");
+    EXPECT_EQ(report.barriers[0].pid, 1001U);
+    EXPECT_EQ(report.barriers[0].started_at_unix, 1700000100);
+    EXPECT_EQ(report.barriers[1].identifier, b2);
+    EXPECT_EQ(report.barriers[1].machine_name, "gc-host-2");
+    ASSERT_EQ(report.writers.size(), 1U);
+    EXPECT_EQ(report.writers[0].identifier, wid);
+    EXPECT_EQ(report.writers[0].machine_name, "sync-host-3");
+    EXPECT_EQ(report.writers[0].pid, 3003U);
+    EXPECT_EQ(report.writers[0].started_at_unix, 1700000300);
+}
+
 } // namespace

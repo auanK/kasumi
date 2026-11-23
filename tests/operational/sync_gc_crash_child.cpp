@@ -1,4 +1,3 @@
-#include "application/history_storage/remote_layout.hpp"
 #include "application/integrity/maintenance.hpp"
 #include "application/use_cases/context.hpp"
 #include "platform/path.hpp"
@@ -172,8 +171,6 @@ int main() {
         return 0;
     }
 
-    const auto layout =
-        kasumi::application::history_storage::derive_remote_layout(key);
     auto result = kasumi::application::integrity::garbage_collect(
         runtime,
         storage,
@@ -184,7 +181,7 @@ int main() {
             if (progress.stage ==
                 kasumi::application::GarbageCollectStage::Analyzing) {
                 kasumi::platform::process_crash_test_hook::pause_at(
-                    "gc.barrier.acquired", layout.barrier_identifier);
+                    "gc.barrier.acquired", "");
             }
         });
     if (!result) {

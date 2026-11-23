@@ -325,9 +325,11 @@ TEST(ManualBarrierRemovalTest,
     state->objects[layout.barrier_identifier] = original_payload;
 
     // Simulate replacement right after initial GET (during writer listing)
+    const auto writers_dir =
+        layout.writers_prefix.substr(0, layout.writers_prefix.size() - 1);
     state->on_operation =
-        [&](FakeState& s, std::string_view op, std::string_view /*id*/) {
-            if (op == "after_prefix_list") {
+        [&](FakeState& s, std::string_view op, std::string_view id) {
+            if (op == "after_prefix_list" && id == writers_dir) {
                 s.objects[layout.barrier_identifier] = replaced_payload;
             }
         };
@@ -717,6 +719,150 @@ TEST(ManualBarrierRemovalTest,
     // No automatic background task or implicit cleanup removes this new barrier
     EXPECT_TRUE(state->objects.contains(layout.barrier_identifier));
     EXPECT_EQ(state->remove_count, 1U);
+}
+
+TEST(MaintenanceProtocolV024Test,
+     MultiBarrierSettleConflictDeletesOnlyOwnBarrierAndPreservesPeer) {
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    state->physical_hash_supported = true;
+    state->control_read_batch_supported = true;
+    const auto layout = history::derive_remote_layout(test_key());
+    auto workspace = kasumi::test::make_temp_workspace("multi-barrier-settle");
+
+    const std::string peer_token = "ffffffffffffffffffffffffffffffff";
+    const std::string peer_id = layout.barriers_prefix + peer_token;
+    bool injected = false;
+    state->on_operation =
+        [&](FakeState& s, std::string_view op, std::string_view id) {
+            if (!injected && op == "after_hash" &&
+                id.starts_with(layout.barriers_prefix)) {
+                injected = true;
+                s.objects[peer_id] =
+                    protocol::testing::format_payload("barrier", peer_token);
+            }
+        };
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto barrier = protocol::establish_barrier(
+        storage,
+        layout,
+        kasumi::test::workspace_root(workspace),
+        protocol::BarrierOptions{.settle_delay =
+                                     std::chrono::milliseconds{30}});
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+
+    ASSERT_FALSE(barrier.has_value());
+    EXPECT_EQ(barrier.error().code, protocol::ErrorCode::Blocked);
+    EXPECT_GE(elapsed, std::chrono::milliseconds{20});
+    EXPECT_TRUE(state->objects.contains(peer_id));
+    const auto remaining = protocol::active_barriers(storage, layout);
+    ASSERT_TRUE(remaining.has_value()) << remaining.error().detail;
+    EXPECT_EQ(*remaining, std::vector<std::string>{peer_id});
+}
+
+TEST(MaintenanceProtocolV024Test,
+     LegacySingleBarrierBlocksWriterAndMultiBarrierAndNeverAutoExpires) {
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    const auto layout = history::derive_remote_layout(test_key());
+    auto workspace =
+        kasumi::test::make_temp_workspace("legacy-barrier-and-no-ttl");
+    const auto root = kasumi::test::workspace_root(workspace);
+
+    // 1. Legacy v0.23.x barrier blocks both writer registration and new GC
+    // barriers.
+    state->objects[layout.barrier_identifier] =
+        protocol::testing::format_payload("barrier",
+                                          "0123456789abcdef0123456789abcdef");
+    const auto writer_blocked =
+        protocol::register_writer(storage, layout, root);
+    ASSERT_FALSE(writer_blocked.has_value());
+    EXPECT_EQ(writer_blocked.error().code, protocol::ErrorCode::Blocked);
+
+    const auto gc_blocked = protocol::establish_barrier(storage, layout, root);
+    ASSERT_FALSE(gc_blocked.has_value());
+    EXPECT_EQ(gc_blocked.error().code, protocol::ErrorCode::Blocked);
+    state->objects.erase(layout.barrier_identifier);
+
+    // 2. Old marker timestamps (e.g. Unix epoch + 1s) remain diagnostic-only
+    // and never auto-expire.
+    const protocol::MarkerMetadata ancient_meta{
+        .machine_name = "ancient\nworkstation",
+        .pid = 4242,
+        .started_at_unix = 1,
+    };
+    auto writer =
+        protocol::register_writer(storage, layout, root, ancient_meta);
+    ASSERT_TRUE(writer.has_value()) << writer.error().detail;
+
+    const auto parsed = protocol::read_marker_metadata(
+        storage, writer->identifier, "writer", writer->token, root);
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->machine_name, "ancient workstation");
+    EXPECT_EQ(parsed->pid, 4242U);
+    EXPECT_EQ(parsed->started_at_unix, 1);
+
+    const auto blocked_by_old_writer =
+        protocol::establish_barrier(storage, layout, root);
+    ASSERT_FALSE(blocked_by_old_writer.has_value());
+    EXPECT_EQ(blocked_by_old_writer.error().code, protocol::ErrorCode::Blocked);
+    EXPECT_TRUE(state->objects.contains(writer->identifier));
+    ASSERT_TRUE(protocol::release_registration(*writer));
+}
+
+TEST(MaintenanceProtocolV024Test,
+     MultiBarrierManualRemovalSupportsAutoSingleAmbiguousRejectAndTargetedId) {
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    const auto layout = history::derive_remote_layout(test_key());
+    auto workspace =
+        kasumi::test::make_temp_workspace("multi-barrier-manual-remove");
+    const auto root = kasumi::test::workspace_root(workspace);
+
+    const std::string token1 = "11111111111111111111111111111111";
+    const std::string token2 = "22222222222222222222222222222222";
+    const std::string id1 = layout.barriers_prefix + token1;
+    const std::string id2 = layout.barriers_prefix + token2;
+    const protocol::MarkerMetadata meta1{
+        .machine_name = "host-one", .pid = 101, .started_at_unix = 1700000100};
+    const protocol::MarkerMetadata meta2{
+        .machine_name = "host-two", .pid = 202, .started_at_unix = 1700000200};
+    state->objects[id1] =
+        protocol::testing::format_payload("barrier", token1, meta1);
+    state->objects[id2] =
+        protocol::testing::format_payload("barrier", token2, meta2);
+
+    // 1. Multiple active barriers require an explicit identifier/token.
+    const auto ambiguous = protocol::remove_barrier(storage, layout, root);
+    ASSERT_FALSE(ambiguous.has_value());
+    EXPECT_EQ(ambiguous.error().stage,
+              protocol::BarrierRemovalStage::CheckingPresence);
+    EXPECT_EQ(ambiguous.error().mutation_state,
+              protocol::BarrierRemovalMutationState::NotAttempted);
+    EXPECT_EQ(state->remove_count, 0U);
+    EXPECT_TRUE(state->objects.contains(id1));
+    EXPECT_TRUE(state->objects.contains(id2));
+
+    // 2. Targeted removal by bare 32-hex token deletes only barrier 1.
+    const auto first = protocol::remove_barrier(storage, layout, root, token1);
+    ASSERT_TRUE(first.has_value()) << first.error().detail;
+    EXPECT_EQ(first->outcome, protocol::BarrierRemovalOutcome::Removed);
+    EXPECT_EQ(first->remaining_barriers_count, 1U);
+    EXPECT_EQ(first->barrier_identifier, id1);
+    EXPECT_FALSE(state->objects.contains(id1));
+    EXPECT_TRUE(state->objects.contains(id2));
+
+    // 3. Auto-removal succeeds once a single barrier remains.
+    const auto second = protocol::remove_barrier(storage, layout, root);
+    ASSERT_TRUE(second.has_value()) << second.error().detail;
+    EXPECT_EQ(second->outcome, protocol::BarrierRemovalOutcome::Removed);
+    EXPECT_EQ(second->remaining_barriers_count, 0U);
+    EXPECT_EQ(second->barrier_identifier, id2);
+    EXPECT_FALSE(state->objects.contains(id2));
 }
 
 } // namespace

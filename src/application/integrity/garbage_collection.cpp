@@ -1140,9 +1140,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             while (chunk_start < total_candidates) {
                 failure_diagnostic.failed_identifier.reset();
                 failure_diagnostic.mutation_state =
-                    acknowledged_removals == 0
-                        ? GarbageCollectMutationState::NotAttempted
-                        : GarbageCollectMutationState::Confirmed;
+                    GarbageCollectMutationState::NotAttempted;
                 failure_diagnostic.transport_error.reset();
 
                 if (auto cancelled = cancellation_error();

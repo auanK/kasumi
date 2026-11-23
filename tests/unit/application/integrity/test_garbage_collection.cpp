@@ -116,8 +116,15 @@ std::size_t candidate_remove_attempts(const FakeState& state) {
 }
 
 std::size_t barrier_remove_attempts(const FakeState& state) {
-    return static_cast<std::size_t>(
-        std::ranges::count(state.remove_attempts, layout().barrier_identifier));
+    return static_cast<std::size_t>(std::ranges::count_if(
+        state.remove_attempts, [](const std::string& identifier) {
+            return is_barrier(identifier);
+        }));
+}
+
+std::string active_barrier_id(const FakeState& state) {
+    return find_active_barrier(state, layout())
+        .value_or(layout().barrier_identifier);
 }
 
 void after_full_list(FakeState* state,
@@ -315,14 +322,14 @@ TEST(GarbageCollectionTest, BarrierReplacementBeforeApplyPreventsAllDeletes) {
         auto expected = fixture.state->objects;
         std::vector<std::uint8_t> replacement;
 
+        std::string active_barrier;
         const auto result =
             fixture.collect([&](const GarbageCollectProgress& progress) {
                 if (progress.stage == GarbageCollectStage::Applying &&
                     progress.removed_objects == 0) {
-                    replace_barrier_contents(fixture.state,
-                                             layout().barrier_identifier);
-                    replacement =
-                        fixture.state->objects.at(layout().barrier_identifier);
+                    active_barrier = active_barrier_id(*fixture.state);
+                    replace_barrier_contents(fixture.state, active_barrier);
+                    replacement = fixture.state->objects.at(active_barrier);
                 }
             });
 
@@ -340,7 +347,7 @@ TEST(GarbageCollectionTest, BarrierReplacementBeforeApplyPreventsAllDeletes) {
         EXPECT_TRUE(diagnostic.barrier_cleanup_error.has_value());
         EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
         EXPECT_EQ(barrier_remove_attempts(*fixture.state), 0U);
-        expected[layout().barrier_identifier] = replacement;
+        expected[active_barrier] = replacement;
         EXPECT_EQ(fixture.state->objects, expected);
     }
 }
@@ -357,9 +364,10 @@ TEST(GarbageCollectionTest, BarrierDisappearanceBeforeApplyPreventsAllDeletes) {
             fixture.collect([&](const GarbageCollectProgress& progress) {
                 if (progress.stage == GarbageCollectStage::Applying &&
                     progress.removed_objects == 0) {
-                    fixture.state->objects.erase(layout().barrier_identifier);
-                    fixture.state->physical_hashes.erase(
-                        layout().barrier_identifier);
+                    const auto active_barrier =
+                        active_barrier_id(*fixture.state);
+                    fixture.state->objects.erase(active_barrier);
+                    fixture.state->physical_hashes.erase(active_barrier);
                 }
             });
 
@@ -386,13 +394,14 @@ TEST(GarbageCollectionTest,
             if (progress.stage == GarbageCollectStage::Applying &&
                 progress.removed_objects == 0) {
                 hashes_before_apply = fixture.state->physical_hash_count;
+                const auto active_barrier = active_barrier_id(*fixture.state);
                 fixture.state->physical_hash_failure_identifier =
-                    layout().barrier_identifier;
+                    active_barrier;
                 fixture.state->physical_hash_failure =
                     kasumi::transport::ErrorCode::Timeout;
                 fixture.state->physical_hash_failure_native_code = 10060;
-                expected[layout().barrier_identifier] =
-                    fixture.state->objects.at(layout().barrier_identifier);
+                expected[active_barrier] =
+                    fixture.state->objects.at(active_barrier);
             }
         });
 
@@ -463,7 +472,7 @@ TEST(GarbageCollectionTest,
             if (op == "after_remove" && id == orphans[1]) {
                 throw std::runtime_error("candidate exception after effect");
             }
-            if (op == "before_remove" && id == layout().barrier_identifier) {
+            if (op == "before_remove" && is_barrier(id)) {
                 throw std::runtime_error("cleanup exception");
             }
         };
@@ -490,7 +499,7 @@ TEST(GarbageCollectionTest,
     EXPECT_FALSE(fixture.state->objects.contains(orphans[0]));
     EXPECT_FALSE(fixture.state->objects.contains(orphans[1]));
     EXPECT_TRUE(fixture.state->objects.contains(orphans[2]));
-    EXPECT_TRUE(fixture.state->objects.contains(layout().barrier_identifier));
+    EXPECT_TRUE(find_active_barrier(*fixture.state, layout()).has_value());
 }
 
 TEST(GarbageCollectionTest, DeleteErrorCategoryDoesNotProveNoMutation) {
@@ -554,7 +563,7 @@ TEST(GarbageCollectionTest, OwnershipChecksStayFixedWithOneThousandCandidates) {
             fixture.state->on_operation = [&](FakeState&,
                                               std::string_view op,
                                               std::string_view id) {
-                if (op == "get" && id == layout().barrier_identifier) {
+                if (op == "get" && is_barrier(id)) {
                     ++control_gets;
                 }
                 if (op == "before_remove" &&
@@ -585,17 +594,26 @@ TEST(GarbageCollectionTest, OwnershipChecksStayFixedWithOneThousandCandidates) {
             ASSERT_TRUE(result.has_value()) << result.error().detail;
             EXPECT_EQ(result->candidate_objects, count);
             EXPECT_EQ(result->removed_objects, count);
-            const auto ownership_hashes = std::ranges::count(
-                fixture.state->gc_events,
-                "physical_hash:" + layout().barrier_identifier);
-            EXPECT_EQ(
-                ownership_hashes,
-                5U); // Acquisition, admission, pre-Apply, two cleanup checks.
-            EXPECT_EQ(control_gets, physical_hash ? 0U : 5U);
+            const std::size_t expected_mid_apply_checks =
+                count <= 128U ? 0U : (count - 1U) / 128U;
+            // Pre-apply + post-settle + acquire + admission + 2 cleanup checks
+            // + bounded periodic mid-Apply checkpoints (every 128 candidates).
+            const std::size_t expected_ownership_checks =
+                7U + expected_mid_apply_checks;
+            const auto ownership_hashes =
+                static_cast<std::size_t>(std::ranges::count_if(
+                    fixture.state->gc_events, [](const auto& ev) {
+                        return ev.starts_with("physical_hash:");
+                    }));
+            EXPECT_EQ(ownership_hashes, expected_ownership_checks);
+            EXPECT_EQ(control_gets,
+                      physical_hash ? 0U : 6U + expected_mid_apply_checks);
             EXPECT_EQ(after_apply[0] - before_apply[0],
-                      physical_hash ? 0U : 1U);
-            EXPECT_EQ(after_apply[1], before_apply[1]);
-            EXPECT_EQ(after_apply[2], before_apply[2]);
+                      physical_hash ? 0U : 1U + expected_mid_apply_checks);
+            EXPECT_EQ(after_apply[1] - before_apply[1],
+                      (1U + expected_mid_apply_checks) * 2U);
+            EXPECT_EQ(after_apply[2] - before_apply[2],
+                      1U + expected_mid_apply_checks);
             EXPECT_EQ(fixture.state->full_list_count, 1U);
             EXPECT_EQ(fixture.state->commit_get_count, 1U);
             EXPECT_EQ(fixture.state->marker_get_count, 1U);
@@ -914,7 +932,7 @@ TEST(GarbageCollectionTest, ExpiredCommitsBehindEpochArePrunedSafely) {
     FakeFixture fixture("gc-expired-commits");
     fixture.state->list_metadata_supported = true;
     const auto now_unix = *kasumi::platform::clock::unix_seconds();
-    fixture.state->default_object_mtime = now_unix - 10LL * 3600LL;
+    fixture.state->default_object_mtime = now_unix - 60LL;
 
     const auto old_commit =
         kasumi::history::make_commit(
@@ -1311,7 +1329,7 @@ TEST(GarbageCollectionTest,
     EXPECT_FALSE(fixture.present(std::min(first, second)));
     EXPECT_FALSE(fixture.present(std::max(first, second)));
     EXPECT_FALSE(diagnostic->barrier_release_attempted);
-    EXPECT_TRUE(fixture.present(layout().barrier_identifier));
+    EXPECT_TRUE(find_active_barrier(*fixture.state, layout()).has_value());
 }
 
 // BARRIER-R01
@@ -1323,7 +1341,7 @@ TEST(GarbageCollectionTest, SuccessfulRunReleasesBarrierExactlyOnce) {
     const auto result = fixture.collect();
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
-    EXPECT_FALSE(fixture.present(layout().barrier_identifier));
+    EXPECT_FALSE(find_active_barrier(*fixture.state, layout()).has_value());
 }
 
 // BARRIER-R02
@@ -1344,7 +1362,7 @@ TEST(GarbageCollectionTest,
     EXPECT_TRUE(diagnostic->barrier_release_confirmed);
     EXPECT_FALSE(diagnostic->barrier_cleanup_error.has_value());
     EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
-    EXPECT_FALSE(fixture.present(layout().barrier_identifier));
+    EXPECT_FALSE(find_active_barrier(*fixture.state, layout()).has_value());
 }
 
 // BARRIER-R03
@@ -1377,7 +1395,7 @@ TEST(GarbageCollectionTest,
               kasumi::transport::ErrorCode::Io);
     EXPECT_EQ(diagnostic.barrier_cleanup_transport_error->native_code, 777);
     EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
-    EXPECT_TRUE(fixture.present(layout().barrier_identifier));
+    EXPECT_TRUE(find_active_barrier(*fixture.state, layout()).has_value());
 }
 
 // BARRIER-R04
@@ -1404,7 +1422,7 @@ TEST(GarbageCollectionTest, AmbiguousBarrierRemovalIsNotRetriedOrConfirmed) {
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 1U);
     EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
     EXPECT_FALSE(fixture.present(orphan));
-    EXPECT_FALSE(fixture.present(layout().barrier_identifier));
+    EXPECT_FALSE(find_active_barrier(*fixture.state, layout()).has_value());
 }
 
 // BARRIER-R05
@@ -1425,7 +1443,7 @@ TEST(GarbageCollectionTest, ForeignBarrierIsNotRemovedDuringCleanup) {
     ASSERT_TRUE(diagnostic->barrier_cleanup_error.has_value());
     EXPECT_EQ(barrier_remove_attempts(*fixture.state), 0U);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 2U);
-    EXPECT_TRUE(fixture.present(layout().barrier_identifier));
+    EXPECT_TRUE(find_active_barrier(*fixture.state, layout()).has_value());
     EXPECT_FALSE(fixture.present(std::min(first, second)));
     EXPECT_FALSE(fixture.present(std::max(first, second)));
 }
@@ -1504,7 +1522,7 @@ TEST(GarbageCollectionTest,
     EXPECT_EQ(diagnostic.barrier_cleanup_transport_error->native_code, 783);
     EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
     EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
-    EXPECT_TRUE(fixture.present(layout().barrier_identifier));
+    EXPECT_TRUE(find_active_barrier(*fixture.state, layout()).has_value());
 }
 
 // BARRIER-R06
@@ -1525,7 +1543,7 @@ TEST(GarbageCollectionTest, ExceptionDuringAnalysisReleasesBarrierOnce) {
     EXPECT_NE(result.error().detail.find("injected analysis exception"),
               std::string::npos);
     EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
-    EXPECT_FALSE(fixture.present(layout().barrier_identifier));
+    EXPECT_FALSE(find_active_barrier(*fixture.state, layout()).has_value());
 }
 
 TEST(GarbageCollectionTest,
@@ -2154,7 +2172,7 @@ TEST_P(PostApplyMutationTest, MutationAfterFirstRemovalDoesNotChangeThePlan) {
             state.objects[layout().writers_prefix + std::string(32, 'a')] = {
                 'w'};
         } else if (change == "barrier") {
-            state.objects[layout().barrier_identifier] = {'f'};
+            state.objects[active_barrier_id(state)] = {'f'};
         } else if (change == "namespace") {
             state.objects["unexpected"] = {'x'};
         } else if (change == "exception_cleanup") {
@@ -2173,7 +2191,7 @@ TEST_P(PostApplyMutationTest, MutationAfterFirstRemovalDoesNotChangeThePlan) {
         const auto& diagnostic = *result.error().garbage_collection;
         EXPECT_EQ(diagnostic.confirmed_removed, 2U);
         EXPECT_EQ(barrier_remove_attempts(*fixture.state), 0U);
-        EXPECT_TRUE(fixture.present(layout().barrier_identifier));
+        EXPECT_TRUE(find_active_barrier(*fixture.state, layout()).has_value());
     } else if (change == "exception_cleanup") {
         ASSERT_FALSE(result.has_value());
         ASSERT_TRUE(result.error().garbage_collection.has_value());
@@ -3031,7 +3049,7 @@ TEST(GarbageCollectionTest,
     ASSERT_TRUE(diagnostic.has_value());
     EXPECT_TRUE(diagnostic->barrier_release_attempted);
     EXPECT_TRUE(diagnostic->barrier_release_confirmed);
-    EXPECT_FALSE(fixture.present(layout().barrier_identifier));
+    EXPECT_FALSE(find_active_barrier(*fixture.state, layout()).has_value());
 }
 
 // 13. Zero GETs de Content orfao.
@@ -3239,7 +3257,7 @@ TEST(GarbageCollectionTest,
                   GcErrorCode::ConcurrentChange);
         EXPECT_EQ(fixture.state->put_count, 0U);
         EXPECT_EQ(fixture.state->barrier_verification_count, 0U);
-        EXPECT_FALSE(fixture.present(layout().barrier_identifier));
+        EXPECT_FALSE(find_active_barrier(*fixture.state, layout()).has_value());
         if (use_batch) {
             EXPECT_EQ(fixture.state->control_read_batch_count, 1U);
         }
@@ -3387,6 +3405,129 @@ TEST(GarbageCollectionTest,
     EXPECT_FALSE(fixture.present(orphan));
     EXPECT_TRUE(fixture.present(older_act));
     EXPECT_TRUE(fixture.present(newer_act));
+}
+
+TEST(GarbageCollectionTest,
+     RemoteClockClampsMinAgeFailClosedWhenLocalClockIsAhead) {
+    FakeFixture fixture("gc-remote-clock-clamp");
+    fixture.state->list_metadata_supported = true;
+    const auto now_unix = *kasumi::platform::clock::unix_seconds();
+    // Simulate local clock 5h ahead of the remote server clock: backend stamps
+    // our freshly published barrier at remote_now = now_unix - 5h.
+    const auto simulated_remote_now = now_unix - 5LL * 3600LL;
+    fixture.state->default_object_mtime = simulated_remote_now;
+
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    // Uploaded 2h ago by remote clock (appears 7h old to skewed local clock).
+    const auto recent_by_remote =
+        fixture.put_content("remote-recent", "remote-recent");
+    fixture.state->object_mtimes[recent_by_remote] =
+        simulated_remote_now - 2LL * 3600LL;
+    // Uploaded 7h ago by remote clock -> aged even under min(local, remote).
+    const auto aged_by_remote =
+        fixture.put_content("remote-aged", "remote-aged");
+    fixture.state->object_mtimes[aged_by_remote] =
+        simulated_remote_now - 7LL * 3600LL;
+
+    const auto res =
+        fixture.collect_with_options(gc_int::GarbageCollectOptions{});
+    ASSERT_TRUE(res.has_value()) << res.error().detail;
+    EXPECT_EQ(res->candidate_objects, 1U);
+    EXPECT_EQ(res->removed_objects, 1U);
+    EXPECT_EQ(res->deferred_recent_objects, 1U);
+    EXPECT_TRUE(fixture.present(recent_by_remote));
+    EXPECT_FALSE(fixture.present(aged_by_remote));
+}
+
+TEST(GarbageCollectionTest,
+     RemoteClockMissingOrZeroBarrierMtimeDefersFailClosed) {
+    FakeFixture fixture("gc-remote-clock-missing");
+    fixture.state->list_metadata_supported = true;
+    const auto now_unix = *kasumi::platform::clock::unix_seconds();
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    const auto aged_orphan = fixture.put_content("aged-orphan", "aged-orphan");
+    fixture.state->object_mtimes[aged_orphan] = now_unix - 12LL * 3600LL;
+
+    // 1. Nullopt barrier mtime (default_object_mtime unset) -> fail-closed.
+    fixture.state->default_object_mtime.reset();
+    const auto null_res =
+        fixture.collect_with_options(gc_int::GarbageCollectOptions{});
+    ASSERT_TRUE(null_res.has_value()) << null_res.error().detail;
+    EXPECT_EQ(null_res->removed_objects, 0U);
+    EXPECT_EQ(null_res->deferred_recent_objects, 1U);
+    EXPECT_TRUE(fixture.present(aged_orphan));
+
+    // 2. Non-positive barrier mtime -> fail-closed.
+    fixture.state->default_object_mtime = 0;
+    const auto zero_res =
+        fixture.collect_with_options(gc_int::GarbageCollectOptions{});
+    ASSERT_TRUE(zero_res.has_value()) << zero_res.error().detail;
+    EXPECT_EQ(zero_res->removed_objects, 0U);
+    EXPECT_EQ(zero_res->deferred_recent_objects, 1U);
+    EXPECT_TRUE(fixture.present(aged_orphan));
+}
+
+TEST(
+    GarbageCollectionTest,
+    PeriodicApplyRevalidationStopsRemainingBatchesOnConcurrentWriterOrBarrier) {
+    for (const bool inject_competing_barrier : {false, true}) {
+        SCOPED_TRACE(inject_competing_barrier);
+        FakeBatchFixture fixture("gc-mid-apply-revalidation");
+        fixture.state->control_read_batch_supported = true;
+        fixture.publish(commit_with_file("live"), "head");
+        fixture.put_content("live", "live");
+
+        std::vector<std::string> orphans;
+        for (int i = 0; i < 16; ++i) {
+            orphans.push_back(fixture.put_content(
+                "reval-" + std::to_string(i), "reval-" + std::to_string(i)));
+        }
+        std::ranges::sort(orphans);
+
+        const std::string peer_control =
+            inject_competing_barrier
+                ? (layout().barriers_prefix + std::string(32, 'd'))
+                : (layout().writers_prefix + std::string(32, 'c'));
+        bool injected = false;
+        fixture.state->on_operation =
+            [&](FakeState& s, std::string_view op, std::string_view) {
+                if (!injected && op == "after_remove" &&
+                    s.candidate_remove_count == 8) {
+                    injected = true;
+                    s.objects[peer_control] = protocol::testing::format_payload(
+                        inject_competing_barrier ? "barrier" : "writer",
+                        std::string(32, inject_competing_barrier ? 'd' : 'c'));
+                }
+            };
+
+        const auto res =
+            fixture.collect_with_options(gc_int::GarbageCollectOptions{
+                .min_orphan_age = std::chrono::seconds{0},
+                .apply_revalidation_batch_interval = 1,
+            });
+        ASSERT_FALSE(res.has_value());
+        EXPECT_EQ(res.error().code, GcErrorCode::ConcurrentChange);
+        ASSERT_TRUE(res.error().garbage_collection.has_value());
+        const auto& diag = *res.error().garbage_collection;
+        EXPECT_EQ(diag.confirmed_removed, 8U);
+        EXPECT_EQ(
+            diag.mutation_state,
+            kasumi::application::GarbageCollectMutationState::NotAttempted);
+        EXPECT_TRUE(diag.barrier_release_confirmed);
+        EXPECT_EQ(candidate_remove_attempts(*fixture.state), 8U);
+        EXPECT_TRUE(fixture.present(peer_control));
+        // Only our own barrier was removed; peer marker remains untouched and
+        // batch 2 orphans stay intact.
+        for (std::size_t i = 0; i < 8; ++i) {
+            EXPECT_FALSE(fixture.present(orphans[i]));
+        }
+        for (std::size_t i = 8; i < 16; ++i) {
+            EXPECT_TRUE(fixture.present(orphans[i]));
+        }
+        fixture.state->objects.erase(peer_control);
+    }
 }
 
 } // namespace

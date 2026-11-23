@@ -1951,6 +1951,45 @@ TEST(CliPresenterTest, RemoteWritersPresentsBarrierIdentifierWhenPresent) {
     EXPECT_NE(output_pt.find("Barrier: presente"), std::string::npos);
     EXPECT_NE(output_pt.find("Identificador: gc/v1/barrier/sample-barrier-id"),
               std::string::npos);
+
+    const ScopedLanguage lang_multi{Language::English};
+    const auto output_multi = present_out(InspectionResponse{
+        .operation = InspectionOperation::RemoteWriters,
+        .payload = RemoteWritersReport{
+            .barrier_present = true,
+            .barrier_identifier = "history/gc/v1/barriers/aaa",
+            .maintenance_blocked = true,
+            .protocol_consistent = true,
+            .barriers =
+                {
+                    RemoteBarrierInfo{.identifier =
+                                          "history/gc/v1/barriers/aaa",
+                                      .legacy = false,
+                                      .structurally_valid = true,
+                                      .machine_name = "alpha-host",
+                                      .pid = 1234,
+                                      .started_at_unix = 1700000100},
+                    RemoteBarrierInfo{.identifier =
+                                          "history/gc/v1/barriers/bbb",
+                                      .legacy = false,
+                                      .structurally_valid = true,
+                                      .machine_name = "beta-host",
+                                      .pid = 5678,
+                                      .started_at_unix = 1700000200},
+                },
+            .writers = {RemoteWriterInfo{
+                .identifier = "history/gc/v1/writers/ccc",
+                .state = RemoteWriterState::Indeterminate,
+                .machine_name = "gamma-host",
+                .pid = 9012,
+                .started_at_unix = 1700000300}},
+        }});
+    EXPECT_NE(output_multi.find("Barriers (2):"), std::string::npos);
+    EXPECT_NE(output_multi.find("alpha-host"), std::string::npos);
+    EXPECT_NE(output_multi.find("PID: 1234"), std::string::npos);
+    EXPECT_NE(output_multi.find("beta-host"), std::string::npos);
+    EXPECT_NE(output_multi.find("gamma-host"), std::string::npos);
+    EXPECT_NE(output_multi.find("PID: 9012"), std::string::npos);
 }
 
 TEST(CliPresenterTest, RemoteWritersOmitsBarrierIdentifierWhenAbsent) {
@@ -1998,6 +2037,17 @@ TEST(CliPresenterTest, ManualBarrierRemovalPresentation) {
                      .active_writers_count = 0,
                  }});
     EXPECT_NE(absent.find("already absent"), std::string::npos);
+
+    const auto remaining_barriers =
+        present_out(Response{.operation = Operation::RemoveBarrier,
+                             .data = ManualBarrierRemovalCompleted{
+                                 .identifier = "history/gc/v1/barriers/aaa",
+                                 .outcome = BarrierRemovalOutcome::Removed,
+                                 .active_writers_count = 0,
+                                 .remaining_barriers_count = 1,
+                             }});
+    EXPECT_NE(remaining_barriers.find("Other maintenance barriers remain (1)"),
+              std::string::npos);
 }
 
 TEST(CliPresenterTest, ManualBarrierRemovalErrorPresentationWithDiagnostics) {

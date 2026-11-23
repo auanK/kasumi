@@ -261,19 +261,38 @@ public:
         return writers;
     }
 
-    bool remove_abandoned_barrier() {
+    std::expected<std::vector<std::string>, std::string> active_barriers() {
+        auto objects = listing();
+        if (!objects) {
+            return std::unexpected(objects.error().message);
+        }
         const auto layout =
             kasumi::application::history_storage::derive_remote_layout(key_);
+        std::vector<std::string> barriers;
+        for (const auto& object : *objects) {
+            if (object == layout.barrier_identifier ||
+                object.starts_with(layout.barriers_prefix)) {
+                barriers.push_back(object);
+            }
+        }
+        return barriers;
+    }
+
+    bool remove_abandoned_barrier() {
         auto writers = active_writers();
         if (!writers || !writers->empty()) {
             return false;
         }
-        auto removed =
-            kasumi::transport::remove(raw_storage_, layout.barrier_identifier);
+        auto barriers = active_barriers();
+        if (!barriers || barriers->size() != 1) {
+            return false;
+        }
+        const auto& target = barriers->front();
+        auto removed = kasumi::transport::remove(raw_storage_, target);
         if (!removed) {
             return false;
         }
-        auto after = presence(layout.barrier_identifier);
+        auto after = presence(target);
         return after && *after == kasumi::transport::Presence::Absent;
     }
 
@@ -649,16 +668,20 @@ TEST(SyncGcCrashTest, KilledAfterBarrierAcquisitionFailsClosedOnRestart) {
         kasumi::application::history_storage::derive_remote_layout(
             fixture.key());
 
+    const auto barriers_before = fixture.active_barriers();
+    ASSERT_TRUE(barriers_before.has_value());
+    EXPECT_TRUE(barriers_before->empty());
+
     const auto child = run_child(fixture,
                                  "gc",
                                  "gc.barrier.acquired",
-                                 layout.barrier_identifier,
+                                 "",
                                  fixture.profile() / "crash-r02.signal");
-    ASSERT_TRUE(expect_crash_point(
-        child, "gc.barrier.acquired", layout.barrier_identifier));
-    auto barrier = fixture.presence(layout.barrier_identifier);
-    ASSERT_TRUE(barrier.has_value());
-    EXPECT_EQ(*barrier, kasumi::transport::Presence::Present);
+    ASSERT_TRUE(expect_crash_point(child, "gc.barrier.acquired", ""));
+    auto barriers = fixture.active_barriers();
+    ASSERT_TRUE(barriers.has_value());
+    ASSERT_EQ(barriers->size(), 1U);
+    EXPECT_TRUE(barriers->front().starts_with(layout.barriers_prefix));
     auto orphan_after = fixture.presence(*orphan);
     ASSERT_TRUE(orphan_after.has_value());
     EXPECT_EQ(*orphan_after, kasumi::transport::Presence::Present);
@@ -713,13 +736,14 @@ TEST(SyncGcCrashTest,
     ASSERT_TRUE(expect_crash_point(child, "transport.remove", first_candidate));
     auto first_after = fixture.presence(first_candidate);
     auto second_after = fixture.presence(second_candidate);
-    auto barrier = fixture.presence(layout.barrier_identifier);
+    auto barriers = fixture.active_barriers();
     ASSERT_TRUE(first_after.has_value());
     ASSERT_TRUE(second_after.has_value());
-    ASSERT_TRUE(barrier.has_value());
+    ASSERT_TRUE(barriers.has_value());
     EXPECT_EQ(*first_after, kasumi::transport::Presence::Absent);
     EXPECT_EQ(*second_after, kasumi::transport::Presence::Present);
-    EXPECT_EQ(*barrier, kasumi::transport::Presence::Present);
+    EXPECT_EQ(barriers->size(), 1U);
+    EXPECT_TRUE(barriers->front().starts_with(layout.barriers_prefix));
     auto writers = fixture.active_writers();
     ASSERT_TRUE(writers.has_value());
     EXPECT_TRUE(writers->empty());

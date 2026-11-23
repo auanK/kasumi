@@ -574,6 +574,11 @@ kasumi::transport::ControlReadBatchResponse recording_control_read_batch(
     for (const auto& prefix : request.list_prefixes) {
         auto list_res = kasumi::transport::list(*state->base, prefix);
         if (!list_res) {
+            if (list_res.error().code ==
+                kasumi::transport::ErrorCode::StorageNotFound) {
+                result.listings.emplace_back();
+                continue;
+            }
             return std::unexpected(list_res.error());
         }
         result.listings.push_back(std::move(*list_res));
