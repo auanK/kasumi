@@ -20,6 +20,7 @@ struct RemoteLayout {
     std::string epochs_prefix;
     std::string gc_prefix;
     std::string barrier_identifier;
+    std::string barriers_prefix;
     std::string writers_prefix;
     std::string probes_prefix;
     std::string activity_prefix;
@@ -56,6 +57,9 @@ bool valid_hex_hash(std::string_view value) noexcept;
 bool valid_writer_identifier(std::string_view identifier) noexcept;
 bool valid_writer_identifier(const RemoteLayout& layout,
                              std::string_view identifier) noexcept;
+bool valid_barrier_identifier(std::string_view identifier) noexcept;
+bool valid_barrier_identifier(const RemoteLayout& layout,
+                              std::string_view identifier) noexcept;
 
 } // namespace kasumi::application::history_storage
 
