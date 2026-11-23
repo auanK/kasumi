@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.24.0]
+
+### Added
+
+- Add multi-barrier GC control layout (`<history-ns>/<gc-ns>/<version-ns>/<barriers-ns>/<32-hex-token>`) with a post-publish settle window (`2000 ms` in CLI runs), exclusivity verification, and full backward read/removal compatibility with legacy `v0.23.x` single barriers (`<barrier-id>`).
+- Add fail-closed remote-clock grace clamping (`effective_now = min(local_now, remote_now)`) for GC `--min-age > 0` using the newly published barrier's remote `ModTime`, protecting recent uploads from local clock skew while retaining the default `6`-hour / `5`-commit retention policy.
+- Add periodic mid-`Apply` exclusivity revalidation during GC (every `16` batches / `128` objects or `30s`) checking writers, competing barriers, legacy barriers, and own barrier integrity, stopping unstarted batches cleanly with `NotAttempted` while preserving `confirmed_removed`.
+- Add diagnostic-only metadata (`started_at`, `pid`, `machine`) inside writer and barrier marker payloads (never auto-expired by time), surfaced in `kasumi remote writers <profile>` (text and `--json`).
+- Add optional `[<barrier-id>]` target selection (full identifier or 32-hex token) to `kasumi gc remove-barrier <profile> [<barrier-id>] --confirm-abandoned` with remaining-barriers reporting, and enable `--json` output for both `remote writers` and `gc remove-barrier`.
+
+### Documentation
+
+- Redesign [README.md](README.md) with release/CI badges, pre-1.0 status notice, tool comparison matrix, CLI output preview, installation table, and command overview.
+- Update [garbage-collection.md](docs/architecture/garbage-collection.md), [remote-layout.md](docs/architecture/remote-layout.md), [remote-maintenance-inspection.md](docs/architecture/remote-maintenance-inspection.md), [remote-storage-and-maintenance.md](docs/architecture/remote-storage-and-maintenance.md), [configuration-and-usage.md](docs/configuration-and-usage.md), [troubleshooting.md](docs/troubleshooting.md), [best-practices.md](docs/best-practices.md), [security.md](docs/security.md), [build-and-test.md](docs/build-and-test.md), and architecture docs to cover `v0.24.0` GC concurrency hardening, `--json` commands, and Linux Clang `lld` / `run_with_linux_vault.py` workflows.
+
+### Upgrade Notes
+
+- Protocol and local storage formats remain unchanged (`KCOM` v4, `KACT` v1, `KPAK\x01`, `state.db` schema v2, `transaction.bin.enc`, and `config.toml`), staying 100% compatible with `v0.19.x`–`v0.23.1`. No re-sync is required; existing `v0.23.x` legacy barriers remain recognized and removable.
+
 ## [0.23.1]
 
 ### Added
