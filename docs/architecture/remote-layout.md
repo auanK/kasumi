@@ -15,7 +15,8 @@ structural notation, not literal path names:
   <history-ns>/<commits-ns>/<commit-id>_<ciphertext-id>
   <history-ns>/<heads-ns>/<commit-id>-<ciphertext-id>
   <history-ns>/<epochs-ns>/<version-ns>/<20-digit-sequence>-<epoch-id>
-  <history-ns>/<gc-ns>/<version-ns>/<barrier-id>
+  <history-ns>/<gc-ns>/<version-ns>/<barriers-ns>/<token>
+  <history-ns>/<gc-ns>/<version-ns>/<barrier-id>   (legacy v0.23.x barrier)
   <history-ns>/<gc-ns>/<version-ns>/<writers-ns>/<token>
   <history-ns>/<gc-ns>/<version-ns>/<probes-ns>/<token>
   <activity-ns>/<version-ns>/<20-digit-finished-at>-<event-id>
