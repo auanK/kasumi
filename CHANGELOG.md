@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.25.0]
+
+### Added
+
+- **Historical Inspection & Recovery**:
+  - `kasumi remote log <profile> <path> [--full]` to inspect per-file commit history on the encrypted remote repository.
+  - `--commit <id>` support on `kasumi remote stat` and `kasumi remote get` to inspect metadata or extract encrypted files at a specific historical commit.
+  - `kasumi remote restore <profile> [<prefix>] <dst> [--commit <id>] [--dry-run]` to restore a subtree or full repository state locally without altering the active remote state.
+- **Conflict Discovery & Atomic Resolution**:
+  - `kasumi conflicts <profile>` to list active conflict artifacts on a profile.
+  - `kasumi conflicts resolve <profile> <path> (--keep-canonical | --keep <artifact>) [--dry-run]` to atomically resolve conflicts by keeping either the canonical file or a chosen conflict artifact.
+- **Non-Interactive Profile Management & Onboarding**:
+  - `kasumi profile <create|edit|clone|storage|rename|delete>` for scriptable, non-interactive profile and storage configuration.
+  - `rclone listremotes` discovery hints and warnings in `kasumi config`.
+- **Shell Completions & Automation Output**:
+  - `kasumi completion <bash|zsh|fish|powershell>` for shell autocompletion.
+  - Expanded `--json` structured output across `profile`, `conflicts`, `conflicts resolve`, and `remote stat|get|log|restore`, alongside `--quiet` and `--log-file` support.
+
+### Fixed
+
+- Fixed concurrent Linux OS vault access in `src/runtime/vault.cpp` by rechecking KDE Wallet folder creation (`hasFolder` after `createFolder`) and entry deletion (`hasEntry` after `removeEntry`) across concurrent processes, and serializing intra-process D-Bus / `libsecret` vault calls.
+- Fixed `run_rclone_readonly_cli` EOF handling in `src/transport/rclone/session.cpp` by checking `read_err` before converting `reproc_read` counts to `size_t` and clamping buffer appends.
+- Fixed a dangling `std::string_view` lifetime issue in `src/cli/presenter.cpp`.
+
+### Documentation
+
+- Updated `README.md`, `docs/getting-started.md`, `docs/configuration-and-usage.md`, `docs/best-practices.md`, `docs/troubleshooting.md`, `docs/architecture.md`, and `docs/architecture/*.md` for historical inspection, restore workflows, conflict resolution, non-interactive profile commands, and shell completions.
+
+### Upgrade Notes
+
+- 100% compatible with existing `v0.19.x`–`v0.24.0` encrypted repositories and local state (`KCOM` v4, `KACT` v1, `KPAK\x01`, `state.db` v2, `transaction.bin.enc`, and `config.toml`).
+
 ## [0.24.0]
 
 ### Added
