@@ -114,18 +114,29 @@ ctest --test-dir build-clang64-release --output-on-failure --parallel 2
 
 ### Clang (Ubuntu / Linux)
 
-On Ubuntu with `clang`, `cmake`, and `ninja-build` installed:
+On Ubuntu with `clang`, `lld`, `cmake`, and `ninja-build` installed (pass `-DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld"` so Clang LTO links cleanly in Release):
 
 ```bash
 # Debug build and test
-cmake -S . -B build-clang-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DBUILD_TESTING=ON
+cmake -S . -B build-clang-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld" -DBUILD_TESTING=ON
 cmake --build build-clang-debug -j$(nproc)
 ctest --test-dir build-clang-debug --output-on-failure
 
 # Release build and test
-cmake -S . -B build-clang-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DBUILD_TESTING=ON
+cmake -S . -B build-clang-release -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld" -DBUILD_TESTING=ON
 cmake --build build-clang-release -j$(nproc)
 ctest --test-dir build-clang-release --output-on-failure
+```
+
+In headless Linux, WSL, or CI environments without an unlocked desktop keyring session, wrap `ctest` with `scripts/run_with_linux_vault.py` so OS vault tests execute against an isolated D-Bus keyring:
+
+```bash
+python3 scripts/run_with_linux_vault.py --backend gnome -- \
+  ctest --test-dir build-clang-release --output-on-failure --parallel $(nproc)
 ```
 
 ---

@@ -24,7 +24,7 @@ concurrency as rclone's transfer limit. The copy deadline applies per window.
 
 ## Control Read Batches
 
-`control_read_batch` aggregates read-only remote checks during observation and writer admission into single backend requests (such as rclone `job/batch`). Batches containing directory prefix listings (`list_prefixes`) preserve strict sequential execution (`concurrency = 1`) to uphold writer admission ordering (`LIST writers -> STAT barrier`). Independent content presence checks (`presence_identifiers` only) are partitioned into bounded chunks of up to 128 items executed with bounded concurrency (8 workers) to prevent request deadlines from expiring on large vaults. Results are correlated positionally, and any transport, parse, or timeout error fails closed without converting failures into false content absences.
+`control_read_batch` aggregates read-only remote checks during observation and writer admission into single backend requests (such as rclone `job/batch`). Batches containing directory prefix listings (`list_prefixes`) preserve strict sequential execution (`concurrency = 1`) to uphold control ordering (`LIST writers/barriers -> STAT legacy barrier`). Independent content presence checks (`presence_identifiers` only) are partitioned into bounded chunks of up to 128 items executed with bounded concurrency (8 workers) to prevent request deadlines from expiring on large vaults. Results are correlated positionally, and any transport, parse, or timeout error fails closed without converting failures into false content absences.
 
 ## Transfer telemetry
 

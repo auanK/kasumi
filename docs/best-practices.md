@@ -59,14 +59,22 @@ state or transaction evidence merely to make a failing synchronization proceed.
 ## Garbage Collection
 
 `kasumi gc <profile>` reclaims storage by directly deleting eligible orphan
-Content (loose objects, `KPAK\x01` Micro-Packs with no reachable members, and unreferenced FastCDC chunks) and redundant CommitVariants while preserving required history and
-Epochs. Deletions are permanent; keep independent backups.
+Content (loose objects, `KPAK\x01` Micro-Packs with no reachable members, and
+unreferenced FastCDC chunks), redundant CommitVariants, expired unreachable
+Commits behind Epochs, and pruned `KACT` activity records while preserving
+required history and Epochs. Deletions are permanent; keep independent backups.
 
-* **Reserve a Maintenance Window**: Stop Sync on every client and run only one
-  destructive maintenance or writer-removal operation at a time. Size the window
-  using observed GC duration; running GC after every Sync is unnecessary.
-* **Inspect Results**: Check acknowledged removals and investigate partial or
-  uncertain results before retrying. A later run builds a new plan.
+* **Scheduled vs. Manual Maintenance**: Routine unattended `kasumi gc <profile>`
+  uses the default 6-hour remote-clock-clamped grace period (`min_history_age_hours`),
+  read-only `remote_busy` backoff, multi-barrier settle checks, and periodic
+  mid-`Apply` revalidation (see [Automation](#automation)). For immediate
+  `--min-age 0` cleanups, reserve a maintenance window with Sync stopped on every
+  client and serialize destructive maintenance across the vault; running GC after
+  every Sync is unnecessary.
+* **Preview and Inspect Results**: Use `kasumi gc <profile> --dry-run` to preview
+  reclaimable counts and bytes read-only, check acknowledged removals after a real
+  run, and investigate partial or uncertain results before retrying. A later run
+  builds a new plan.
 * **Respect Protocol Objects**: Use Kasumi's maintenance commands rather than
   treating a provider listing as a deletion list.
 
@@ -111,7 +119,7 @@ Kasumi provides distinct tools for auditing vault integrity and remote storage h
 | `kasumi remote health` | No payload audit | No | No | No |
 | `kasumi remote contents <profile> --audit` | Yes (full download & verify) | Yes | No | No |
 | `kasumi repack` | No payload audit; verifies local sources before staging | No | Yes (`--dry-run` inspects read-only) | `--dry-run`: No. Real run: uploads consolidated packs and publishes Commit/HEAD; zero deletions |
-| `kasumi gc` | No Fsck-style payload audit | No | Yes | Yes: authorized direct deletions and control cleanup; preceding recovery may publish |
+| `kasumi gc` | No Fsck-style payload audit | No | Yes (`--dry-run` inspects read-only) | `--dry-run`: No. Real run: authorized direct deletions, control cleanup, and `KACT` v1 activity publication; preceding recovery may publish |
 
 Fsck and GC run pending Sync transaction recovery first. Recovery may change local files or complete remote publication; Fsck's audit does not publish or delete file contents or commits, though maintenance operations (`fsck`, `gc`, `gc remove-writer`, and `gc remove-barrier`) publish best-effort encrypted `KACT` v1 activity records inspectable from any client via `kasumi remote summary [--full]`.
 
@@ -188,5 +196,5 @@ Avoid these operational anti-patterns:
 * **Do NOT manually delete raw remote objects**: Never delete files directly in the remote storage directory using cloud consoles, SFTP clients, or `rclone delete`. Kasumi manages object reachability, Epoch anchors, and retention internally; deleting files manually can cause missing-content errors and break history continuity.
 * **Do NOT replace binaries during an unfinished transaction**: Complete recovery before replacing the application binary. Never delete the journal to bypass recovery.
 * **Do NOT rely on `key.bin` for offline protection without Full-Disk Encryption**: `key.bin` uses a reversible XOR mask and OS file permissions; always enable BitLocker or LUKS on devices containing sensitive profile keys.
-* **Do NOT run concurrent normal application operations on the same profile**: `status`, `sync --dry-run`, `sync`, `fsck`, and `gc` use the local exclusive `profile-<name>.lock`. `remote ...` inspection does not acquire it and reports a point-in-time view.
+* **Do NOT run concurrent normal application operations on the same profile**: `status`, `sync --dry-run`, `sync`, `fsck`, `repack`, `resolve-missing`, and `gc` use the local exclusive `profile-<name>.lock`. `remote ...` inspection does not acquire it and reports a point-in-time view.
 

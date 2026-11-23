@@ -10,7 +10,7 @@ other application operations. Exact syntax is in [Configuration and Usage](../co
 3. The operation chooses its input view. Logical tree/history queries authenticate HEAD references, Commit variants, Snapshot/DAG, and Epoch continuity, using accepted SQLite frontier hints where applicable. Epoch queries load the authenticated chain directly. Physical queries start from the provider listing and then authenticate history/metadata only where their specific report requires it.
 4. A typed report or error is returned. The temporary workspace, transport, and key are cleaned up. Read-only path protection may normalize local permissions. `remote get` additionally writes its explicit local destination. None of these operations publishes a Commit/HEAD/Epoch, runs GC, writes `remote_activity_cache`, or accepts a new `StoredState` base.
 
-These are point-in-time diagnostics, **not** a consistent remote snapshot against concurrent writers. Missing or invalid authenticated history, selector ambiguity, unsafe destination, unsupported transport result, or defensive history/listing limits fail rather than invent a usable tree. Physical-only listings intentionally make weaker claims. A pending Sync transaction remains pending until Sync, Fsck, `resolve-missing`, or GC invokes recovery.
+These are point-in-time diagnostics, **not** a consistent remote snapshot against concurrent writers. Missing or invalid authenticated history, selector ambiguity, unsafe destination, unsupported transport result, or defensive history/listing limits fail rather than invent a usable tree. Physical-only listings intentionally make weaker claims. A pending Sync transaction remains pending until Sync, Fsck, `resolve-missing`, `repack`, or GC invokes recovery.
 
 ## Choose the view
 
