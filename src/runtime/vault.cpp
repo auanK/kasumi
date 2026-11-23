@@ -1062,10 +1062,25 @@ std::expected<void, runtime::Error> kwallet_write(const std::string& target,
                                           kKWalletFolder,
                                           false,
                                           ErrorCode::KeyWriteFailure);
-        if (!created || !*created) {
-            return fail(ErrorCode::KeyWriteFailure,
-                        created ? "failed to create KDE Wallet folder"
-                                : created.error().detail);
+        if (!created) {
+            return std::unexpected(created.error());
+        }
+        if (!*created) {
+            // KDE Wallet's createFolder returns false if another concurrent
+            // caller created the folder after our initial hasFolder check.
+            auto recheck = kwallet_check_bool(dbus,
+                                              conn.conn,
+                                              session.endpoint,
+                                              "hasFolder",
+                                              session.handle,
+                                              kKWalletFolder,
+                                              false,
+                                              ErrorCode::KeyWriteFailure);
+            if (!recheck || !*recheck) {
+                return fail(ErrorCode::KeyWriteFailure,
+                            recheck ? "failed to create KDE Wallet folder"
+                                    : recheck.error().detail);
+            }
         }
     }
     std::string hex = encode_obscured_hex(clear_key);
@@ -1185,10 +1200,24 @@ std::expected<void, runtime::Error> kwallet_delete(const std::string& target) {
                           &err.err,
                           DbusApi::kTypeInt32,
                           &rc,
-                          DbusApi::kTypeInvalid) == 0 ||
-        rc != 0) {
+                          DbusApi::kTypeInvalid) == 0) {
         return fail(ErrorCode::IoFailure,
                     "failed to delete key from KDE Wallet");
+    }
+    if (rc != 0) {
+        auto still_present = kwallet_check_bool(dbus,
+                                                conn.conn,
+                                                session.endpoint,
+                                                "hasEntry",
+                                                session.handle,
+                                                target.c_str(),
+                                                true,
+                                                ErrorCode::IoFailure);
+        if (!still_present || *still_present) {
+            return fail(ErrorCode::IoFailure,
+                        still_present ? "failed to delete key from KDE Wallet"
+                                      : still_present.error().detail);
+        }
     }
     return {};
 }
@@ -1288,6 +1317,11 @@ enum class LinuxBackend {
     SecretService,
     KWallet,
 };
+
+std::mutex& linux_vault_mutex() noexcept {
+    static std::mutex instance;
+    return instance;
+}
 
 LinuxBackend select_linux_backend(std::string& reason) {
     if (!has_session_dbus()) {
@@ -1425,6 +1459,7 @@ read_vault(const std::filesystem::path& key_path) {
     obscure(key);
     return key;
 #elif defined(__linux__)
+    const std::lock_guard<std::mutex> lock{linux_vault_mutex()};
     std::string reason;
     const auto backend = select_linux_backend(reason);
     const auto target = linux_vault_target_name(key_path);
@@ -1466,6 +1501,7 @@ write_vault(const std::filesystem::path& key_path, const KeyBytes& clear_key) {
     }
     return {};
 #elif defined(__linux__)
+    const std::lock_guard<std::mutex> lock{linux_vault_mutex()};
     std::string reason;
     const auto backend = select_linux_backend(reason);
     const auto target = linux_vault_target_name(key_path);
@@ -1497,6 +1533,7 @@ delete_vault(const std::filesystem::path& key_path) {
     }
     return {};
 #elif defined(__linux__)
+    const std::lock_guard<std::mutex> lock{linux_vault_mutex()};
     std::string reason;
     const auto backend = select_linux_backend(reason);
     if (backend == LinuxBackend::None) {
