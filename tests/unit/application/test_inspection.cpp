@@ -2345,4 +2345,98 @@ TEST(ApplicationInspectionTest,
     EXPECT_EQ(report.writers[0].started_at_unix, 1700000300);
 }
 
+TEST(ApplicationInspectionTest,
+     RemoteStatAndGetWithCommitBypassFrontierAndRestoreHistoricalVersions) {
+    auto fixture = make_local_storage();
+    auto workspace =
+        kasumi::test::make_temp_workspace("application-remote-historical");
+    const auto remote_root =
+        kasumi::test::workspace_path(fixture.workspace, "storage");
+    write_profile(workspace, remote_root);
+
+    const std::string v1_content = "historical payload v1";
+    const auto c1 = kasumi::history::make_commit(
+                        0, {}, make_tree("docs/report.txt", v1_content), 100)
+                        .value();
+    const auto h1 = publish(fixture, c1);
+    const auto cid1 = put_content(fixture, v1_content);
+
+    const std::string v2_content = "newer payload v2";
+    const auto c2 =
+        kasumi::history::make_commit(1,
+                                     {h1.head.commit_id},
+                                     make_tree("docs/other.txt", v2_content),
+                                     200)
+            .value();
+    const auto h2 = publish(fixture, c2);
+    static_cast<void>(put_content(fixture, v2_content));
+
+    // Persist accepted state at c2 so cached_anchor would normally skip c1.
+    persist_state(workspace, c2, h2.head);
+
+    const auto stat_v1 =
+        inspect(workspace,
+                InspectionRequest{.operation = InspectionOperation::RemoteStat,
+                                  .profile_name = "demo",
+                                  .logical_path = "docs/report.txt",
+                                  .commit_id = h1.head.commit_id});
+    const auto stat_report =
+        require_report<kasumi::application::RemoteStatReport>(stat_v1);
+    ASSERT_TRUE(stat_report.has_value());
+    EXPECT_EQ(stat_report->commit_id, h1.head.commit_id);
+    EXPECT_EQ(stat_report->observed_height, 0U);
+    EXPECT_EQ(stat_report->size, v1_content.size());
+    EXPECT_EQ(stat_report->path, "docs/report.txt");
+
+    const auto dst = kasumi::test::workspace_path(workspace, "restored.txt");
+    const auto get_v1 =
+        inspect(workspace,
+                InspectionRequest{.operation = InspectionOperation::RemoteGet,
+                                  .profile_name = "demo",
+                                  .logical_path = "docs/report.txt",
+                                  .commit_id = h1.head.commit_id,
+                                  .destination_path =
+                                      kasumi::platform::path::to_utf8(dst)});
+    const auto file_report =
+        require_report<kasumi::application::RemoteFileReport>(get_v1);
+    ASSERT_TRUE(file_report.has_value());
+    EXPECT_EQ(file_report->commit_id, h1.head.commit_id);
+    EXPECT_EQ(file_report->content_id, cid1);
+    EXPECT_EQ(kasumi::test::read_text(dst), v1_content);
+
+    // Absent path in the selected historical commit fails cleanly.
+    const auto missing_in_c1 =
+        inspect(workspace,
+                InspectionRequest{.operation = InspectionOperation::RemoteStat,
+                                  .profile_name = "demo",
+                                  .logical_path = "docs/other.txt",
+                                  .commit_id = h1.head.commit_id});
+    ASSERT_FALSE(missing_in_c1.has_value());
+    EXPECT_EQ(missing_in_c1.error().code,
+              InspectionErrorCode::RemotePathNotFound);
+
+    // Unreachable commit fails with RemoteCommitNotFound.
+    const auto unreachable = inspect(
+        workspace,
+        InspectionRequest{.operation = InspectionOperation::RemoteGet,
+                          .profile_name = "demo",
+                          .logical_path = "docs/report.txt",
+                          .commit_id = std::string(64, 'f'),
+                          .destination_path = kasumi::platform::path::to_utf8(
+                              kasumi::test::workspace_path(workspace, "x"))});
+    ASSERT_FALSE(unreachable.has_value());
+    EXPECT_EQ(unreachable.error().code,
+              InspectionErrorCode::RemoteCommitNotFound);
+
+    // Malformed commit selector fails validation before remote access.
+    const auto malformed =
+        inspect(workspace,
+                InspectionRequest{.operation = InspectionOperation::RemoteStat,
+                                  .profile_name = "demo",
+                                  .logical_path = "docs/report.txt",
+                                  .commit_id = "not-a-commit"});
+    ASSERT_FALSE(malformed.has_value());
+    EXPECT_EQ(malformed.error().code, InspectionErrorCode::InvalidRequest);
+}
+
 } // namespace

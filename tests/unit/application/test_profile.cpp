@@ -3785,4 +3785,67 @@ TEST(ApplicationProfileTest,
               kasumi::application::ProfileErrorCode::NotFound);
 }
 
+TEST(ApplicationProfileTest,
+     ListLocalConflictsGroupsArtifactsAndRespectsIgnore) {
+    const TempWorkspace workspace("application-local-conflicts");
+    const ExecutionEnvironment env{
+        .app_data_dir = kasumi::test::workspace_path(workspace, "app")};
+    const auto local_dir = kasumi::test::workspace_path(workspace, "local");
+    const auto remote_dir = kasumi::test::workspace_path(workspace, "remote");
+    std::filesystem::create_directories(local_dir);
+    std::filesystem::create_directories(remote_dir);
+
+    const auto created = create_profile(
+        env,
+        Profile{.name = "demo",
+                .local_dir = local_dir,
+                .remote_dir = kasumi::platform::path::to_utf8(remote_dir),
+                .key_storage = KeyStorage::File},
+        ProfileCredentials{MasterKeyHex{std::string(64, 'a')}});
+    ASSERT_TRUE(created.has_value()) << created.error().detail;
+
+    kasumi::test::write_text(local_dir / ".kasumiignore", "*.tmp\n");
+    kasumi::test::write_text(local_dir / "doc.txt", "canonical");
+    kasumi::test::write_text(local_dir / "doc.txt.kasumiconflict_local",
+                             "local-edit");
+    kasumi::test::write_text(local_dir / "doc.txt.kasumiconflict_remote.1",
+                             "remote-edit");
+    kasumi::test::write_text(local_dir / "sub" /
+                                 "note.md.kasumiconflict_0123456789ab",
+                             "branch-edit");
+    kasumi::test::write_text(local_dir / "skip.tmp.kasumiconflict_local",
+                             "ignored-conflict");
+    kasumi::test::write_text(local_dir / "bad.txt.kasumiconflict_invalidtag",
+                             "not-a-conflict");
+
+    const auto report = kasumi::application::list_local_conflicts(env, "demo");
+    ASSERT_TRUE(report.has_value()) << report.error().detail;
+    EXPECT_EQ(report->profile_name, "demo");
+    EXPECT_EQ(report->total_artifacts, 3U);
+    ASSERT_EQ(report->groups.size(), 2U);
+
+    EXPECT_EQ(report->groups[0].canonical_path, "doc.txt");
+    EXPECT_TRUE(report->groups[0].canonical_exists);
+    EXPECT_EQ(report->groups[0].canonical_size, 9U);
+    ASSERT_EQ(report->groups[0].artifacts.size(), 2U);
+    EXPECT_EQ(report->groups[0].artifacts[0].origin,
+              kasumi::application::ConflictOrigin::Local);
+    EXPECT_EQ(report->groups[0].artifacts[0].origin_tag, "local");
+    EXPECT_EQ(report->groups[0].artifacts[1].origin,
+              kasumi::application::ConflictOrigin::Remote);
+    EXPECT_EQ(report->groups[0].artifacts[1].origin_tag, "remote");
+
+    EXPECT_EQ(report->groups[1].canonical_path, "sub/note.md");
+    EXPECT_FALSE(report->groups[1].canonical_exists);
+    ASSERT_EQ(report->groups[1].artifacts.size(), 1U);
+    EXPECT_EQ(report->groups[1].artifacts[0].origin,
+              kasumi::application::ConflictOrigin::BranchCommit);
+    EXPECT_EQ(report->groups[1].artifacts[0].origin_tag, "0123456789ab");
+
+    const auto not_found =
+        kasumi::application::list_local_conflicts(env, "missing");
+    ASSERT_FALSE(not_found.has_value());
+    EXPECT_EQ(not_found.error().code, ProfileErrorCode::NotFound);
+}
+
 } // namespace

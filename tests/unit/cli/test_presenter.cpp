@@ -2702,4 +2702,81 @@ TEST(CliPresenterTest, CompactSummariesStayLanguageIndependentAndDescriptive) {
     diag.overall_ok = true;
     EXPECT_EQ(kasumi::cli::format_compact_summary(diag),
               "0 profiles, overall=ok, rclone=v1.75.1");
+
+    LocalConflictsReport empty_conflicts{.profile_name = "demo"};
+    EXPECT_EQ(kasumi::cli::format_compact_summary(empty_conflicts),
+              "0 conflicts");
+}
+
+TEST(CliPresenterTest, PresentsHistoricalStatGetConflictsAndProfileJson) {
+    const ScopedLanguage en{Language::English};
+    const std::string cid(64, 'b');
+
+    RemoteStatReport stat{
+        .observed_height = 4,
+        .commit_id = cid,
+        .path = "notes.txt",
+        .logical_hash = std::string(64, 'c'),
+        .size = 42,
+        .modified_at_unix_nanoseconds = 1700000000000000000LL,
+    };
+    const auto stat_out = present_out(InspectionResponse{
+        .operation = InspectionOperation::RemoteStat,
+        .payload = stat,
+    });
+    EXPECT_NE(stat_out.find("Commit: " + cid), std::string::npos);
+
+    LocalConflictsReport conflicts{
+        .profile_name = "demo",
+        .local_dir = "/tmp/demo",
+        .total_artifacts = 1,
+        .groups = {LocalConflictGroup{
+            .canonical_path = "a.txt",
+            .canonical_exists = true,
+            .canonical_size = 10,
+            .canonical_modified_at = 1700000000,
+            .artifacts = {LocalConflictArtifact{
+                .path = "a.txt.kasumiconflict_local",
+                .origin = ConflictOrigin::Local,
+                .origin_tag = "local",
+                .size = 12,
+                .modified_at = 1700000005,
+            }},
+        }},
+    };
+    const auto text_out = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present(conflicts, false), 0);
+    });
+    EXPECT_NE(text_out.find("Local conflicts for \"demo\": 1"),
+              std::string::npos);
+    EXPECT_NE(text_out.find("a.txt.kasumiconflict_local"), std::string::npos);
+
+    const auto conflicts_json = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present_json_conflicts(
+                      conflicts, std::chrono::milliseconds{4}),
+                  0);
+    });
+    EXPECT_NE(conflicts_json.find("\"command\":\"conflicts\""),
+              std::string::npos);
+    EXPECT_NE(conflicts_json.find("\"total_artifacts\":1"), std::string::npos);
+
+    const Profile p{
+        .name = "work",
+        .local_dir = "/tmp/work",
+        .remote_dir = "/tmp/remote",
+        .key_storage = KeyStorage::File,
+    };
+    const auto prof_json = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present_json_profile_action(
+                      "profile create",
+                      &p,
+                      "work",
+                      "created profile 'work'",
+                      false,
+                      std::chrono::milliseconds{2}),
+                  0);
+    });
+    EXPECT_NE(prof_json.find("\"command\":\"profile create\""),
+              std::string::npos);
+    EXPECT_NE(prof_json.find("\"key_storage\":\"file\""), std::string::npos);
 }

@@ -491,4 +491,108 @@ TEST(CliParserTest,
                         "--confirm-abandoned"})
                      .has_value());
 }
+
+TEST(CliParserTest, ParsesRemoteStatAndGetWithCommitSelector) {
+    const auto stat_res =
+        parse({"remote", "stat", "demo", "a.txt", "--commit", id});
+    ASSERT_TRUE(stat_res.has_value());
+    ASSERT_TRUE(std::holds_alternative<InspectionRequest>(*stat_res));
+    const auto& stat_req = std::get<InspectionRequest>(*stat_res);
+    EXPECT_EQ(stat_req.operation, InspectionOperation::RemoteStat);
+    EXPECT_EQ(stat_req.logical_path, "a.txt");
+    EXPECT_EQ(stat_req.commit_id, id);
+
+    const auto get_res = parse({"remote",
+                                "get",
+                                "demo",
+                                "--commit=" + id,
+                                "--",
+                                "-src.txt",
+                                "-dst.txt"});
+    ASSERT_TRUE(get_res.has_value());
+    ASSERT_TRUE(std::holds_alternative<InspectionRequest>(*get_res));
+    const auto& get_req = std::get<InspectionRequest>(*get_res);
+    EXPECT_EQ(get_req.operation, InspectionOperation::RemoteGet);
+    EXPECT_EQ(get_req.logical_path, "-src.txt");
+    EXPECT_EQ(get_req.destination_path, "-dst.txt");
+    EXPECT_EQ(get_req.commit_id, id);
+
+    EXPECT_FALSE(
+        parse({"remote", "stat", "demo", "a.txt", "--commit", "badhex"})
+            .has_value());
+    EXPECT_FALSE(parse({"remote",
+                        "get",
+                        "demo",
+                        "a.txt",
+                        "b.txt",
+                        "--commit",
+                        id,
+                        "--commit=" + id})
+                     .has_value());
+}
+
+TEST(CliParserTest, ParsesProfileConflictsAndCompletionCommands) {
+    const auto conflicts = parse({"conflicts", "demo"});
+    ASSERT_TRUE(conflicts.has_value());
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::cli::ConflictsInvocation>(*conflicts));
+    EXPECT_EQ(
+        std::get<kasumi::cli::ConflictsInvocation>(*conflicts).profile_name,
+        "demo");
+    EXPECT_FALSE(parse({"conflicts"}).has_value());
+
+    for (const auto& [name, expected_shell] :
+         std::vector<std::pair<std::string, kasumi::cli::CompletionShell>>{
+             {"bash", kasumi::cli::CompletionShell::Bash},
+             {"zsh", kasumi::cli::CompletionShell::Zsh},
+             {"fish", kasumi::cli::CompletionShell::Fish},
+             {"powershell", kasumi::cli::CompletionShell::PowerShell},
+         }) {
+        const auto comp = parse({"completion", name});
+        ASSERT_TRUE(comp.has_value());
+        ASSERT_TRUE(
+            std::holds_alternative<kasumi::cli::CompletionInvocation>(*comp));
+        EXPECT_EQ(std::get<kasumi::cli::CompletionInvocation>(*comp).shell,
+                  expected_shell);
+        const auto script =
+            kasumi::cli::generate_completion_script(expected_shell);
+        EXPECT_NE(script.find("kasumi"), std::string::npos);
+        EXPECT_NE(script.find("profile"), std::string::npos);
+    }
+    EXPECT_FALSE(parse({"completion", "tcsh"}).has_value());
+
+    const auto create = parse({"profile",
+                               "create",
+                               "work",
+                               "--local",
+                               "/data/work",
+                               "--remote=drive:work",
+                               "--key-storage",
+                               "file",
+                               "--min-depth",
+                               "10",
+                               "--min-age=24"});
+    ASSERT_TRUE(create.has_value());
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::cli::ProfileInvocation>(*create));
+    const auto& create_inv = std::get<kasumi::cli::ProfileInvocation>(*create);
+    EXPECT_EQ(create_inv.action, kasumi::cli::ProfileAction::Create);
+    EXPECT_EQ(create_inv.profile_name, "work");
+    EXPECT_EQ(create_inv.local_dir, "/data/work");
+    EXPECT_EQ(create_inv.remote_dir, "drive:work");
+    EXPECT_EQ(create_inv.key_storage, kasumi::application::KeyStorage::File);
+    EXPECT_EQ(create_inv.min_history_depth, 10U);
+    EXPECT_EQ(create_inv.min_history_age_hours, 24U);
+
+    EXPECT_FALSE(
+        parse({"profile", "create", "work", "--local", "/data"}).has_value());
+    EXPECT_FALSE(parse({"profile", "edit", "work"}).has_value());
+    EXPECT_FALSE(parse({"profile", "delete", "work"}).has_value());
+
+    const auto del = parse({"profile", "delete", "work", "--confirm"});
+    ASSERT_TRUE(del.has_value());
+    EXPECT_EQ(std::get<kasumi::cli::ProfileInvocation>(*del).action,
+              kasumi::cli::ProfileAction::Delete);
+    EXPECT_TRUE(std::get<kasumi::cli::ProfileInvocation>(*del).confirm);
+}
 } // namespace
