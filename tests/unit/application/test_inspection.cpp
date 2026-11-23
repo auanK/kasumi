@@ -2356,17 +2356,15 @@ TEST(ApplicationInspectionTest,
 
     const std::string v1_content = "historical payload v1";
     const auto c1 = kasumi::history::make_commit(
-                        0, {}, make_tree("docs/report.txt", v1_content), 100)
+                        0, {}, make_tree("report.txt", v1_content), 100)
                         .value();
     const auto h1 = publish(fixture, c1);
     const auto cid1 = put_content(fixture, v1_content);
 
     const std::string v2_content = "newer payload v2";
     const auto c2 =
-        kasumi::history::make_commit(1,
-                                     {h1.head.commit_id},
-                                     make_tree("docs/other.txt", v2_content),
-                                     200)
+        kasumi::history::make_commit(
+            1, {h1.head.commit_id}, make_tree("other.txt", v2_content), 200)
             .value();
     const auto h2 = publish(fixture, c2);
     static_cast<void>(put_content(fixture, v2_content));
@@ -2378,7 +2376,7 @@ TEST(ApplicationInspectionTest,
         inspect(workspace,
                 InspectionRequest{.operation = InspectionOperation::RemoteStat,
                                   .profile_name = "demo",
-                                  .logical_path = "docs/report.txt",
+                                  .logical_path = "report.txt",
                                   .commit_id = h1.head.commit_id});
     const auto stat_report =
         require_report<kasumi::application::RemoteStatReport>(stat_v1);
@@ -2386,14 +2384,14 @@ TEST(ApplicationInspectionTest,
     EXPECT_EQ(stat_report->commit_id, h1.head.commit_id);
     EXPECT_EQ(stat_report->observed_height, 0U);
     EXPECT_EQ(stat_report->size, v1_content.size());
-    EXPECT_EQ(stat_report->path, "docs/report.txt");
+    EXPECT_EQ(stat_report->path, "report.txt");
 
     const auto dst = kasumi::test::workspace_path(workspace, "restored.txt");
     const auto get_v1 =
         inspect(workspace,
                 InspectionRequest{.operation = InspectionOperation::RemoteGet,
                                   .profile_name = "demo",
-                                  .logical_path = "docs/report.txt",
+                                  .logical_path = "report.txt",
                                   .commit_id = h1.head.commit_id,
                                   .destination_path =
                                       kasumi::platform::path::to_utf8(dst)});
@@ -2409,7 +2407,7 @@ TEST(ApplicationInspectionTest,
         inspect(workspace,
                 InspectionRequest{.operation = InspectionOperation::RemoteStat,
                                   .profile_name = "demo",
-                                  .logical_path = "docs/other.txt",
+                                  .logical_path = "other.txt",
                                   .commit_id = h1.head.commit_id});
     ASSERT_FALSE(missing_in_c1.has_value());
     EXPECT_EQ(missing_in_c1.error().code,
@@ -2420,7 +2418,7 @@ TEST(ApplicationInspectionTest,
         workspace,
         InspectionRequest{.operation = InspectionOperation::RemoteGet,
                           .profile_name = "demo",
-                          .logical_path = "docs/report.txt",
+                          .logical_path = "report.txt",
                           .commit_id = std::string(64, 'f'),
                           .destination_path = kasumi::platform::path::to_utf8(
                               kasumi::test::workspace_path(workspace, "x"))});
@@ -2433,7 +2431,7 @@ TEST(ApplicationInspectionTest,
         inspect(workspace,
                 InspectionRequest{.operation = InspectionOperation::RemoteStat,
                                   .profile_name = "demo",
-                                  .logical_path = "docs/report.txt",
+                                  .logical_path = "report.txt",
                                   .commit_id = "not-a-commit"});
     ASSERT_FALSE(malformed.has_value());
     EXPECT_EQ(malformed.error().code, InspectionErrorCode::InvalidRequest);

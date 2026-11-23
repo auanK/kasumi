@@ -3805,7 +3805,7 @@ TEST(ApplicationProfileTest,
         ProfileCredentials{MasterKeyHex{std::string(64, 'a')}});
     ASSERT_TRUE(created.has_value()) << created.error().detail;
 
-    kasumi::test::write_text(local_dir / ".kasumiignore", "*.tmp\n");
+    kasumi::test::write_text(local_dir / ".kasumiignore", "ignored/\n");
     kasumi::test::write_text(local_dir / "doc.txt", "canonical");
     kasumi::test::write_text(local_dir / "doc.txt.kasumiconflict_local",
                              "local-edit");
@@ -3814,7 +3814,8 @@ TEST(ApplicationProfileTest,
     kasumi::test::write_text(local_dir / "sub" /
                                  "note.md.kasumiconflict_0123456789ab",
                              "branch-edit");
-    kasumi::test::write_text(local_dir / "skip.tmp.kasumiconflict_local",
+    kasumi::test::write_text(local_dir / "ignored" /
+                                 "skip.txt.kasumiconflict_local",
                              "ignored-conflict");
     kasumi::test::write_text(local_dir / "bad.txt.kasumiconflict_invalidtag",
                              "not-a-conflict");

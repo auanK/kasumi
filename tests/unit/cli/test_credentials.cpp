@@ -44,6 +44,7 @@ std::string run_cli_out(std::initializer_list<const char*> arguments,
 std::string run_wizard_out(const kasumi::application::ExecutionEnvironment& env,
                            std::string_view stdin_text,
                            int* exit_code = nullptr) {
+    kasumi::platform::cancellation::reset();
     std::istringstream input{std::string{stdin_text}};
     auto* previous_input = std::cin.rdbuf(input.rdbuf());
     std::string output = kasumi::test::capture_stdout([&] {

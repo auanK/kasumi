@@ -1125,7 +1125,7 @@ class CliProcessTest(unittest.TestCase):
         remote.mkdir()
 
         # profile create in --json without env credentials fails cleanly with credentials_required.
-        no_cred_env = dict(self.env)
+        no_cred_env = dict(self.environment)
         no_cred_env.pop("KASUMI_PASSWORD", None)
         no_cred_env.pop("KASUMI_PASSWORD2", None)
         no_cred_env.pop("KASUMI_MASTER_KEY", None)

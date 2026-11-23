@@ -836,13 +836,15 @@ run_rclone_readonly_cli(const std::filesystem::path& executable,
         if ((events & reproc::event::out) != 0) {
             auto [count, read_err] =
                 proc.read(reproc::stream::out, buffer, sizeof(buffer));
-            if (count > 0) {
-                output.append(reinterpret_cast<const char*>(buffer),
-                              std::min<std::size_t>(
-                                  count, max_output_bytes - output.size()));
-            }
             if (read_err) {
                 break;
+            }
+            if (count > 0) {
+                output.append(
+                    reinterpret_cast<const char*>(buffer),
+                    std::min<std::size_t>({count,
+                                           sizeof(buffer),
+                                           max_output_bytes - output.size()}));
             }
         }
         if ((events & reproc::event::exit) != 0 &&
