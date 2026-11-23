@@ -689,14 +689,92 @@ int present_json_diagnostics(const application::DiagnosticsReport& report,
     return 0;
 }
 
-int present_json_profile_error(std::string_view command,
-                               std::string_view profile_name,
-                               const application::ProfileError& error) {
+int present_json_conflicts(const application::LocalConflictsReport& report,
+                           std::chrono::nanoseconds duration) {
+    auto doc =
+        make_envelope("conflicts", report.profile_name, true, 0, duration);
+    json groups = json::array();
+    for (const auto& group : report.groups) {
+        json artifacts = json::array();
+        for (const auto& art : group.artifacts) {
+            std::string_view origin_str = "branch";
+            if (art.origin == application::ConflictOrigin::Local) {
+                origin_str = "local";
+            } else if (art.origin == application::ConflictOrigin::Remote) {
+                origin_str = "remote";
+            }
+            artifacts.push_back(json{
+                {"path", art.path},
+                {"origin", origin_str},
+                {"origin_tag", art.origin_tag},
+                {"size", art.size},
+                {"modified_at", art.modified_at},
+            });
+        }
+        groups.push_back(json{
+            {"canonical_path", group.canonical_path},
+            {"canonical_exists", group.canonical_exists},
+            {"canonical_size", group.canonical_size},
+            {"canonical_modified_at", group.canonical_modified_at},
+            {"artifacts", std::move(artifacts)},
+        });
+    }
+    doc["data"] = json{
+        {"summary", format_compact_summary(report)},
+        {"local_dir", platform::path::to_utf8(report.local_dir)},
+        {"total_artifacts", report.total_artifacts},
+        {"group_count", report.groups.size()},
+        {"groups", std::move(groups)},
+    };
+    emit_json(doc);
+    return 0;
+}
+
+int present_json_profile_action(std::string_view command,
+                                const application::Profile* profile,
+                                std::string_view profile_name,
+                                std::string_view summary,
+                                bool needs_key,
+                                std::chrono::nanoseconds duration) {
+    auto doc = make_envelope(command, profile_name, true, 0, duration);
+    json data{
+        {"summary", summary},
+        {"needs_key", needs_key},
+    };
+    if (profile != nullptr) {
+        data["profile"] = json{
+            {"name", profile->name},
+            {"local_dir", platform::path::to_utf8(profile->local_dir)},
+            {"remote_dir", profile->remote_dir},
+            {"key_storage", application::to_string(profile->key_storage)},
+            {"min_history_depth", profile->min_history_depth},
+            {"min_history_age_hours", profile->min_history_age_hours},
+        };
+    }
+    doc["data"] = std::move(data);
+    emit_json(doc);
+    return 0;
+}
+
+int present_json_credentials_required(std::string_view command,
+                                      std::string_view profile_name,
+                                      std::string_view detail,
+                                      std::chrono::nanoseconds duration) {
+    return emit_json_error(
+        command, profile_name, 1, "credentials_required", detail, duration);
+}
+
+int present_json_profile_error(
+    std::string_view command,
+    std::string_view profile_name,
+    const application::ProfileError& error,
+    std::optional<std::chrono::nanoseconds> duration) {
     return emit_json_error(command,
                            profile_name,
                            1,
                            profile_error_code_string(error.code),
-                           error.detail);
+                           error.detail,
+                           duration);
 }
 
 int present_json_confirmation_required(

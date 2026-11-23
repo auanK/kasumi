@@ -254,6 +254,21 @@ bool meets_minimum_rclone_version(const RcloneVersion& version) noexcept;
 RcloneProbeResult probe_rclone_installation(
     const std::filesystem::path& forbidden_executable_root = {});
 
+struct RcloneRemotesResult {
+    bool available = false;
+    std::vector<std::string> remotes;
+    std::string detail;
+};
+
+// Parses stdout from `rclone listremotes` into sorted, unique remote names
+// without trailing colons.
+std::vector<std::string> parse_rclone_listremotes(std::string_view text);
+
+// Lists locally configured rclone remote names without contacting any remote
+// backend.
+RcloneRemotesResult list_rclone_remotes(
+    const std::filesystem::path& forbidden_executable_root = {});
+
 // Opens the implementation indicated by location.
 std::expected<Transport, Error>
 open_transport(std::string_view location,

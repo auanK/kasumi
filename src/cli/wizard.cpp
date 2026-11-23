@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <format>
 #include <iostream>
 #include <map>
@@ -611,7 +612,313 @@ int apply_profile_key_update(
     return 0;
 }
 
+application::RcloneRemotesInfo
+show_rclone_discovery_hint(const std::filesystem::path& local_dir) {
+    auto info = application::discover_rclone_remotes(local_dir);
+    if (info.available && !info.remotes.empty()) {
+        std::string joined;
+        for (std::size_t i = 0; i < info.remotes.size(); ++i) {
+            if (i > 0) {
+                joined += ", ";
+            }
+            joined += info.remotes[i];
+            joined.push_back(':');
+        }
+        i18n::println(i18n::Key::WizardRcloneRemotesHint,
+                      sanitize_terminal_text(joined));
+    }
+    return info;
+}
+
+void warn_if_unknown_rclone_remote(std::string_view destination,
+                                   const application::RcloneRemotesInfo& info) {
+    if (!info.available || destination.empty() ||
+        destination.starts_with("\\\\")) {
+        return;
+    }
+    const bool windows_drive =
+        destination.size() >= 3U &&
+        std::isalpha(static_cast<unsigned char>(destination[0])) != 0 &&
+        destination[1] == ':' &&
+        (destination[2] == '/' || destination[2] == '\\');
+    if (windows_drive) {
+        return;
+    }
+    const auto colon = destination.find(':');
+    if (colon == std::string_view::npos || colon == 0U) {
+        return;
+    }
+    const auto remote_name = destination.substr(0U, colon);
+    if (std::ranges::find(info.remotes, remote_name) == info.remotes.end()) {
+        print_warning_line(i18n::format(i18n::Key::WizardRcloneRemoteUnknown,
+                                        sanitize_terminal_text(remote_name)));
+    }
+}
+
 } // namespace
+
+int run_profile_command(const application::ExecutionEnvironment& environment,
+                        const ProfileInvocation& invocation,
+                        bool quiet,
+                        bool json,
+                        std::string* log_summary) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto elapsed = [&] {
+        return std::chrono::steady_clock::now() - started;
+    };
+
+    auto command_name = [&]() -> std::string_view {
+        switch (invocation.action) {
+            case ProfileAction::Create:
+                return "profile create";
+            case ProfileAction::Edit:
+                return "profile edit";
+            case ProfileAction::Clone:
+                return "profile clone";
+            case ProfileAction::Storage:
+                return "profile storage";
+            case ProfileAction::Rename:
+                return "profile rename";
+            case ProfileAction::Delete:
+                return "profile delete";
+        }
+        return "profile";
+    };
+    const std::string_view cmd = command_name();
+
+    const auto fail_error = [&](const application::ProfileError& err) -> int {
+        if (log_summary != nullptr) {
+            *log_summary =
+                std::format("[{}] {}", json_error_code(err.code), err.detail);
+        }
+        if (json) {
+            return present_json_profile_error(
+                cmd, invocation.profile_name, err, elapsed());
+        }
+        print_error_line(err.detail);
+        return 1;
+    };
+
+    const auto finish_success = [&](const application::Profile* profile,
+                                    std::string_view target_name,
+                                    std::string_view message,
+                                    std::string_view summary,
+                                    bool needs_key = false) -> int {
+        if (log_summary != nullptr) {
+            *log_summary = std::string{summary};
+        }
+        if (json) {
+            return present_json_profile_action(
+                cmd, profile, target_name, summary, needs_key, elapsed());
+        }
+        if (!quiet) {
+            print_ok_line(message);
+        }
+        return 0;
+    };
+
+    switch (invocation.action) {
+        case ProfileAction::Create: {
+            std::optional<application::ProfileCredentials> env_creds;
+            if (const char* hex = std::getenv("KASUMI_MASTER_KEY");
+                hex != nullptr && hex[0] != '\0') {
+                env_creds = application::MasterKeyHex{std::string(hex)};
+            } else {
+                const char* pw = std::getenv("KASUMI_PASSWORD");
+                const char* salt = std::getenv("KASUMI_PASSWORD2");
+                if (pw != nullptr && salt != nullptr) {
+                    env_creds = application::PasswordPair{std::string(pw),
+                                                          std::string(salt)};
+                }
+            }
+            if (!env_creds.has_value() && json) {
+                const auto msg =
+                    i18n::tr(i18n::Key::WizardProfileCredentialsRequired);
+                if (log_summary != nullptr) {
+                    *log_summary =
+                        std::format("[credentials_required] {}", msg);
+                }
+                return present_json_credentials_required(
+                    cmd, invocation.profile_name, msg, elapsed());
+            }
+            application::ProfileCredentials creds =
+                env_creds ? std::move(*env_creds)
+                          : application::ProfileCredentials{
+                                credentials::read_password_pair()};
+            struct CredsGuard {
+                application::ProfileCredentials& value;
+                ~CredsGuard() noexcept {
+                    application::wipe_credentials(value);
+                }
+            } guard{creds};
+            if (platform::cancellation::requested()) {
+                return 130;
+            }
+
+            application::Profile profile{
+                .name = invocation.profile_name,
+                .local_dir = platform::path::from_utf8(
+                    invocation.local_dir.value_or("")),
+                .remote_dir = invocation.remote_dir.value_or(""),
+                .min_history_depth = invocation.min_history_depth.value_or(5U),
+                .min_history_age_hours =
+                    invocation.min_history_age_hours.value_or(6U),
+                .key_storage = invocation.key_storage.value_or(
+                    application::KeyStorage::Vault),
+            };
+            auto res = application::create_profile(
+                environment, profile, std::move(creds));
+            if (!res) {
+                return fail_error(res.error());
+            }
+            return finish_success(
+                &profile,
+                profile.name,
+                i18n::tr(i18n::Key::WizardProfileCreated),
+                std::format("created profile '{}'", profile.name));
+        }
+        case ProfileAction::Edit: {
+            auto profiles = application::list_profiles(environment);
+            if (!profiles) {
+                return fail_error(profiles.error());
+            }
+            const auto it = std::ranges::find(*profiles,
+                                              invocation.profile_name,
+                                              &application::Profile::name);
+            if (it == profiles->end()) {
+                return fail_error(application::ProfileError{
+                    .code = application::ProfileErrorCode::NotFound,
+                    .detail = "profile not found"});
+            }
+            application::Profile updated = *it;
+            if (invocation.local_dir) {
+                updated.local_dir =
+                    platform::path::from_utf8(*invocation.local_dir);
+            }
+            if (invocation.remote_dir) {
+                updated.remote_dir = *invocation.remote_dir;
+            }
+            if (invocation.min_history_depth) {
+                updated.min_history_depth = *invocation.min_history_depth;
+            }
+            if (invocation.min_history_age_hours) {
+                updated.min_history_age_hours =
+                    *invocation.min_history_age_hours;
+            }
+            auto res = application::update_profile(environment, updated);
+            if (!res) {
+                return fail_error(res.error());
+            }
+            return finish_success(
+                &updated,
+                updated.name,
+                i18n::format(i18n::Key::WizardProfileEdited, updated.name),
+                std::format("edited profile '{}'", updated.name));
+        }
+        case ProfileAction::Clone: {
+            const std::string target = invocation.target_name.value_or("");
+            auto res = application::clone_profile(
+                environment, invocation.profile_name, target);
+            if (!res) {
+                return fail_error(res.error());
+            }
+            std::optional<application::Profile> cloned;
+            if (auto profiles = application::list_profiles(environment)) {
+                if (const auto it = std::ranges::find(
+                        *profiles, target, &application::Profile::name);
+                    it != profiles->end()) {
+                    cloned = *it;
+                }
+            }
+            return finish_success(cloned ? &*cloned : nullptr,
+                                  target,
+                                  i18n::format(i18n::Key::WizardProfileCloned,
+                                               target,
+                                               invocation.profile_name),
+                                  std::format("cloned '{}' -> '{}'",
+                                              invocation.profile_name,
+                                              target));
+        }
+        case ProfileAction::Storage: {
+            auto profiles = application::list_profiles(environment);
+            if (!profiles) {
+                return fail_error(profiles.error());
+            }
+            const auto it = std::ranges::find(*profiles,
+                                              invocation.profile_name,
+                                              &application::Profile::name);
+            if (it == profiles->end()) {
+                return fail_error(application::ProfileError{
+                    .code = application::ProfileErrorCode::NotFound,
+                    .detail = "profile not found"});
+            }
+            const auto target_storage =
+                invocation.key_storage.value_or(it->key_storage);
+            const bool needs_key =
+                target_storage != application::KeyStorage::Memory &&
+                target_storage != it->key_storage;
+            application::Profile updated = *it;
+            updated.key_storage = target_storage;
+            auto res = application::update_profile(environment, updated);
+            if (!res) {
+                return fail_error(res.error());
+            }
+            const auto msg =
+                needs_key
+                    ? i18n::format(
+                          i18n::Key::WizardProfileKeyStorageUpdatedNeedKey,
+                          updated.name,
+                          application::to_string(target_storage))
+                    : i18n::format(i18n::Key::WizardProfileKeyStorageUpdated,
+                                   updated.name,
+                                   application::to_string(target_storage));
+            return finish_success(
+                &updated,
+                updated.name,
+                msg,
+                std::format("key_storage={} ({})",
+                            application::to_string(target_storage),
+                            updated.name),
+                needs_key);
+        }
+        case ProfileAction::Rename: {
+            const std::string target = invocation.target_name.value_or("");
+            auto res = application::rename_profile(
+                environment, invocation.profile_name, target);
+            if (!res) {
+                return fail_error(res.error());
+            }
+            std::optional<application::Profile> renamed;
+            if (auto profiles = application::list_profiles(environment)) {
+                if (const auto it = std::ranges::find(
+                        *profiles, target, &application::Profile::name);
+                    it != profiles->end()) {
+                    renamed = *it;
+                }
+            }
+            return finish_success(
+                renamed ? &*renamed : nullptr,
+                target,
+                i18n::format(i18n::Key::WizardProfileRenamed, target),
+                std::format(
+                    "renamed '{}' -> '{}'", invocation.profile_name, target));
+        }
+        case ProfileAction::Delete: {
+            auto res = application::delete_profile(environment,
+                                                   invocation.profile_name);
+            if (!res) {
+                return fail_error(res.error());
+            }
+            return finish_success(
+                nullptr,
+                invocation.profile_name,
+                i18n::format(i18n::Key::WizardProfileDeleted,
+                             invocation.profile_name),
+                std::format("deleted profile '{}'", invocation.profile_name));
+        }
+    }
+    return 1;
+}
 
 bool prompt_confirmation(std::string_view message) {
     return confirm_change(message);
@@ -913,12 +1220,17 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             std::println();
             if (!prompt_field(i18n::tr(i18n::Key::WizardPromptLocalPath),
                               application::ProfileField::LocalPath,
-                              new_local) ||
-                !prompt_field(i18n::tr(i18n::Key::WizardPromptRemotePath),
+                              new_local)) {
+                continue;
+            }
+            const auto rclone_info = show_rclone_discovery_hint(
+                platform::path::from_utf8(new_local));
+            if (!prompt_field(i18n::tr(i18n::Key::WizardPromptRemotePath),
                               application::ProfileField::RemotePath,
                               new_remote)) {
                 continue;
             }
+            warn_if_unknown_rclone_remote(new_remote, rclone_info);
             const auto key_storage =
                 prompt_key_storage(application::KeyStorage::Vault);
             if (!key_storage) {
@@ -1000,12 +1312,17 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 std::string edit_local, edit_remote;
                 if (!prompt_default(i18n::Key::WizardPromptNewLocalPath,
                                     platform::path::to_utf8(it->local_dir),
-                                    edit_local) ||
-                    !prompt_default(i18n::Key::WizardPromptNewRemotePath,
+                                    edit_local)) {
+                    continue;
+                }
+                const auto rclone_info = show_rclone_discovery_hint(
+                    platform::path::from_utf8(edit_local));
+                if (!prompt_default(i18n::Key::WizardPromptNewRemotePath,
                                     it->remote_dir,
                                     edit_remote)) {
                     continue;
                 }
+                warn_if_unknown_rclone_remote(edit_remote, rclone_info);
 
                 application::Profile updated{
                     target,

@@ -799,6 +799,69 @@ void destroy_state(void* context) noexcept {
     delete state;
 }
 
+std::expected<std::string, std::string>
+run_rclone_readonly_cli(const std::filesystem::path& executable,
+                        std::string_view subcommand,
+                        std::size_t max_output_bytes = 65536U) {
+    auto environment = rclone_detail::build_sanitized_environment({});
+    if (!environment) {
+        return std::unexpected(environment.error().message);
+    }
+
+    reproc::process proc;
+    reproc::options options;
+    options.env.behavior = reproc::env::empty;
+    options.env.extra = reproc::env{*environment};
+    options.redirect.in.type = reproc::redirect::discard;
+    options.redirect.out.type = reproc::redirect::pipe;
+    options.redirect.err.type = reproc::redirect::discard;
+    const std::vector<std::string> args{platform::path::to_utf8(executable),
+                                        std::string{subcommand}};
+    if (const auto err = proc.start(args, options)) {
+        return std::unexpected(std::format(
+            "could not execute rclone {}: {}", subcommand, err.message()));
+    }
+
+    std::string output;
+    std::uint8_t buffer[512]{};
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (std::chrono::steady_clock::now() < deadline &&
+           output.size() < max_output_bytes) {
+        auto [events, poll_err] = proc.poll(
+            reproc::event::out | reproc::event::exit, reproc::milliseconds(50));
+        if (poll_err) {
+            break;
+        }
+        if ((events & reproc::event::out) != 0) {
+            auto [count, read_err] =
+                proc.read(reproc::stream::out, buffer, sizeof(buffer));
+            if (count > 0) {
+                output.append(reinterpret_cast<const char*>(buffer),
+                              std::min<std::size_t>(
+                                  count, max_output_bytes - output.size()));
+            }
+            if (read_err) {
+                break;
+            }
+        }
+        if ((events & reproc::event::exit) != 0 &&
+            (events & reproc::event::out) == 0) {
+            break;
+        }
+    }
+    const auto [status, wait_err] = proc.stop(reproc::stop_actions{
+        {reproc::stop::wait, reproc::milliseconds(1000)},
+        {reproc::stop::terminate, reproc::milliseconds(500)},
+        {reproc::stop::kill, reproc::milliseconds(500)},
+    });
+    if (wait_err || status != 0) {
+        return std::unexpected(
+            std::format("rclone {} exited with status {}", subcommand, status));
+    }
+    return output;
+}
+
 } // namespace kasumi::transport::rclone_detail
 
 namespace kasumi::transport {
@@ -894,66 +957,14 @@ RcloneProbeResult probe_rclone_installation(
         .found = true,
         .executable = *resolved,
     };
-    auto environment = rclone_detail::build_sanitized_environment({});
-    if (!environment) {
-        result.detail = environment.error().message;
+    const auto output =
+        rclone_detail::run_rclone_readonly_cli(*resolved, "version", 4096U);
+    if (!output) {
+        result.detail = output.error();
         return result;
     }
 
-    reproc::process proc;
-    reproc::options options;
-    options.env.behavior = reproc::env::empty;
-    options.env.extra = reproc::env{*environment};
-    options.redirect.in.type = reproc::redirect::discard;
-    options.redirect.out.type = reproc::redirect::pipe;
-    options.redirect.err.type = reproc::redirect::discard;
-    const std::vector<std::string> args{platform::path::to_utf8(*resolved),
-                                        "version"};
-    if (const auto err = proc.start(args, options)) {
-        result.detail = "could not execute rclone version: " + err.message();
-        return result;
-    }
-
-    std::string output;
-    std::uint8_t buffer[512]{};
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds{5};
-    while (std::chrono::steady_clock::now() < deadline &&
-           output.size() < 4096U) {
-        auto [events, poll_err] = proc.poll(
-            reproc::event::out | reproc::event::exit, reproc::milliseconds(50));
-        if (poll_err) {
-            break;
-        }
-        if ((events & reproc::event::out) != 0) {
-            auto [count, read_err] =
-                proc.read(reproc::stream::out, buffer, sizeof(buffer));
-            if (count > 0) {
-                output.append(
-                    reinterpret_cast<const char*>(buffer),
-                    std::min<std::size_t>(count, 4096U - output.size()));
-            }
-            if (read_err) {
-                break;
-            }
-        }
-        if ((events & reproc::event::exit) != 0 &&
-            (events & reproc::event::out) == 0) {
-            break;
-        }
-    }
-    const auto [status, wait_err] = proc.stop(reproc::stop_actions{
-        {reproc::stop::wait, reproc::milliseconds(1000)},
-        {reproc::stop::terminate, reproc::milliseconds(500)},
-        {reproc::stop::kill, reproc::milliseconds(500)},
-    });
-    if (wait_err || status != 0) {
-        result.detail =
-            "rclone version exited with status " + std::to_string(status);
-        return result;
-    }
-
-    result.version = parse_rclone_version(output);
+    result.version = parse_rclone_version(*output);
     if (!result.version) {
         result.detail = "could not parse rclone version output";
         return result;
@@ -968,6 +979,58 @@ RcloneProbeResult probe_rclone_installation(
             minimum_rclone_patch);
     }
     return result;
+}
+
+std::vector<std::string> parse_rclone_listremotes(std::string_view text) {
+    const auto trim_ws = [](std::string_view sv) noexcept {
+        while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t' ||
+                               sv.front() == '\r')) {
+            sv.remove_prefix(1);
+        }
+        while (!sv.empty() &&
+               (sv.back() == ' ' || sv.back() == '\t' || sv.back() == '\r')) {
+            sv.remove_suffix(1);
+        }
+        return sv;
+    };
+    std::vector<std::string> remotes;
+    while (!text.empty()) {
+        const auto nl = text.find('\n');
+        auto line = nl == std::string_view::npos ? text : text.substr(0, nl);
+        text = nl == std::string_view::npos ? std::string_view{}
+                                            : text.substr(nl + 1);
+        line = trim_ws(line);
+        if (line.size() >= 2U && line.back() == ':') {
+            line.remove_suffix(1);
+            if (!line.empty()) {
+                remotes.emplace_back(line);
+            }
+        }
+    }
+    std::ranges::sort(remotes);
+    const auto dupes = std::ranges::unique(remotes);
+    remotes.erase(dupes.begin(), dupes.end());
+    return remotes;
+}
+
+RcloneRemotesResult
+list_rclone_remotes(const std::filesystem::path& forbidden_executable_root) {
+    const auto probe = probe_rclone_installation(forbidden_executable_root);
+    if (!probe.found || !probe.meets_minimum) {
+        return RcloneRemotesResult{.available = false, .detail = probe.detail};
+    }
+    const auto output =
+        rclone_detail::run_rclone_readonly_cli(probe.executable, "listremotes");
+    if (!output) {
+        return RcloneRemotesResult{
+            .available = false,
+            .detail = output.error(),
+        };
+    }
+    return RcloneRemotesResult{
+        .available = true,
+        .remotes = parse_rclone_listremotes(*output),
+    };
 }
 
 } // namespace kasumi::transport

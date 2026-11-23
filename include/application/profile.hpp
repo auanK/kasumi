@@ -291,6 +291,52 @@ std::expected<DiagnosticsReport, ProfileError>
 collect_diagnostics(const ExecutionEnvironment& environment,
                     std::string_view profile_name = {});
 
+struct RcloneRemotesInfo {
+    bool available = false;
+    std::vector<std::string> remotes;
+    std::string detail;
+};
+
+// Queries configured local rclone remote names without contacting remote
+// storage.
+RcloneRemotesInfo discover_rclone_remotes(
+    const std::filesystem::path& forbidden_executable_root = {});
+
+enum class ConflictOrigin : std::uint8_t {
+    Local,
+    Remote,
+    BranchCommit,
+};
+
+struct LocalConflictArtifact {
+    std::string path;
+    ConflictOrigin origin = ConflictOrigin::Local;
+    std::string origin_tag;
+    std::uint64_t size = 0;
+    std::int64_t modified_at = 0;
+};
+
+struct LocalConflictGroup {
+    std::string canonical_path;
+    bool canonical_exists = false;
+    std::uint64_t canonical_size = 0;
+    std::int64_t canonical_modified_at = 0;
+    std::vector<LocalConflictArtifact> artifacts;
+};
+
+struct LocalConflictsReport {
+    std::string profile_name;
+    std::filesystem::path local_dir;
+    std::size_t total_artifacts = 0;
+    std::vector<LocalConflictGroup> groups;
+};
+
+// Scans a profile's synchronized folder read-only (respecting .kasumiignore
+// and skipping symlinks) for preserved `.kasumiconflict_*` artifacts.
+std::expected<LocalConflictsReport, ProfileError>
+list_local_conflicts(const ExecutionEnvironment& environment,
+                     std::string_view profile_name);
+
 } // namespace kasumi::application
 
 #endif

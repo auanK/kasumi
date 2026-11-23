@@ -122,6 +122,15 @@ enum class Key {
     HelpShow,
     HelpDiagnostics,
     HelpKey,
+    HelpProfile,
+    HelpProfileCreate,
+    HelpProfileEdit,
+    HelpProfileClone,
+    HelpProfileStorage,
+    HelpProfileRename,
+    HelpProfileDelete,
+    HelpConflicts,
+    HelpCompletion,
     HelpRemoteHeads,
     HelpRemoteTree,
     HelpRemoteCommits,
@@ -358,6 +367,17 @@ enum class Key {
     DiagnosticsOverallOk,
     DiagnosticsOverallIssues,
 
+    // Conflicts
+    ConflictsHeader,
+    ConflictsNone,
+    ConflictsCanonicalMissing,
+    ConflictsCanonicalPresent,
+    ConflictsArtifactItem,
+    ConflictsOriginLocal,
+    ConflictsOriginRemote,
+    ConflictsOriginBranch,
+    ConflictsTotalSummary,
+
     // Inspection field labels
     FieldCommit,
     FieldHeight,
@@ -572,6 +592,9 @@ enum class Key {
     WizardProfileKeyStorageUpdatedNeedKey,
     WizardConfirmReplaceKey,
     WizardKeyReplaceCancelled,
+    WizardRcloneRemotesHint,
+    WizardRcloneRemoteUnknown,
+    WizardProfileCredentialsRequired,
 };
 
 Language current_language() noexcept;

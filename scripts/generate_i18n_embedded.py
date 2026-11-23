@@ -30,6 +30,7 @@ PREFIXES = sorted(
         ("Label", "labels."),
         ("Progress", "progress."),
         ("Diagnostics", "diagnostics."),
+        ("Conflicts", "conflicts."),
         ("ResolveMissing", "resolve_missing."),
         ("Help", "command_help."),
         ("Error", "errors."),

@@ -96,6 +96,10 @@ void print_ok_line(std::string_view message) {
     print_status_line(style::green, i18n::Key::LabelOk, message);
 }
 
+void print_warning_line(std::string_view message) {
+    print_status_line(style::yellow, i18n::Key::LabelWarning, message);
+}
+
 void print_error_line(std::string_view message) {
     print_status_line(style::red, i18n::Key::LabelError, message);
 }
@@ -392,6 +396,16 @@ format_compact_summary(const application::DiagnosticsReport& report) {
                        n == 1 ? "profile" : "profiles",
                        report.overall_ok ? "ok" : "issues",
                        rclone_state);
+}
+
+std::string
+format_compact_summary(const application::LocalConflictsReport& report) {
+    if (report.total_artifacts == 0) {
+        return "0 conflicts";
+    }
+    return std::format("{} conflict(s) across {} path(s)",
+                       report.total_artifacts,
+                       report.groups.size());
 }
 
 std::string
@@ -3008,6 +3022,55 @@ int present(const application::DiagnosticsReport& report,
                           i18n::Key::LabelWarning,
                           i18n::tr(i18n::Key::DiagnosticsOverallIssues));
     }
+    return 0;
+}
+
+int present(const application::LocalConflictsReport& report, bool quiet) {
+    if (quiet) {
+        return 0;
+    }
+    i18n::println(i18n::Key::ConflictsHeader,
+                  sanitize_terminal_text(report.profile_name),
+                  report.total_artifacts);
+    if (report.groups.empty()) {
+        i18n::println(i18n::Key::ConflictsNone);
+        return 0;
+    }
+    for (const auto& group : report.groups) {
+        if (group.canonical_exists) {
+            i18n::println(i18n::Key::ConflictsCanonicalPresent,
+                          sanitize_terminal_text(group.canonical_path),
+                          format_size(group.canonical_size),
+                          platform::clock::format_local_timestamp(
+                              group.canonical_modified_at));
+        } else {
+            i18n::println(i18n::Key::ConflictsCanonicalMissing,
+                          sanitize_terminal_text(group.canonical_path));
+        }
+        for (const auto& art : group.artifacts) {
+            std::string origin_label;
+            if (art.origin == application::ConflictOrigin::Local) {
+                origin_label =
+                    std::string{i18n::tr(i18n::Key::ConflictsOriginLocal)};
+            } else if (art.origin == application::ConflictOrigin::Remote) {
+                origin_label =
+                    std::string{i18n::tr(i18n::Key::ConflictsOriginRemote)};
+            } else {
+                origin_label =
+                    i18n::format(i18n::Key::ConflictsOriginBranch,
+                                 sanitize_terminal_text(art.origin_tag));
+            }
+            i18n::println(
+                i18n::Key::ConflictsArtifactItem,
+                sanitize_terminal_text(art.path),
+                origin_label,
+                format_size(art.size),
+                platform::clock::format_local_timestamp(art.modified_at));
+        }
+    }
+    i18n::println(i18n::Key::ConflictsTotalSummary,
+                  report.total_artifacts,
+                  report.groups.size());
     return 0;
 }
 
