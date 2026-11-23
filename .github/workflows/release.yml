@@ -98,29 +98,32 @@ jobs:
       - name: Package
         run: |
           VERSION="$(python3 -c 'import re; print(re.search(r"project\(kasumi\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)", open("CMakeLists.txt").read()).group(1))')"
+          echo "KASUMI_VERSION=$VERSION" >> "$GITHUB_ENV"
           mkdir -p package
           cp build/kasumi LICENSE THIRD_PARTY_NOTICES.md package/
           cd package
-          tar -czf ../kasumi-linux-x86_64.tar.gz kasumi LICENSE THIRD_PARTY_NOTICES.md
+          tar -czf "../kasumi-v${VERSION}-linux-x86_64.tar.gz" kasumi LICENSE THIRD_PARTY_NOTICES.md
           cd ..
-          sha256sum kasumi-linux-x86_64.tar.gz > kasumi-linux-x86_64.tar.gz.sha256
+          sha256sum "kasumi-v${VERSION}-linux-x86_64.tar.gz" > "kasumi-v${VERSION}-linux-x86_64.tar.gz.sha256"
 
+          chmod 0755 packaging/linux/deb/postinst
           mkdir -p cpack-out
           cpack --config build/CPackConfig.cmake -G DEB -B cpack-out
           cpack --config build/CPackConfig.cmake -G RPM -B cpack-out
-          mv cpack-out/kasumi-linux-x86_64.deb cpack-out/kasumi-linux-x86_64.rpm .
+          mv "cpack-out/kasumi-v${VERSION}-linux-x86_64.deb" "cpack-out/kasumi-v${VERSION}-linux-x86_64.rpm" .
           rm -rf cpack-out
 
           python3 scripts/build_arch_package.py \
             --binary build/kasumi \
             --version "$VERSION" \
-            --output kasumi-linux-x86_64.pkg.tar.zst
+            --install-script packaging/arch/kasumi.install \
+            --output "kasumi-v${VERSION}-linux-x86_64.pkg.tar.zst"
 
-          for pkg in kasumi-linux-x86_64.deb kasumi-linux-x86_64.rpm kasumi-linux-x86_64.pkg.tar.zst; do
+          for pkg in "kasumi-v${VERSION}-linux-x86_64.deb" "kasumi-v${VERSION}-linux-x86_64.rpm" "kasumi-v${VERSION}-linux-x86_64.pkg.tar.zst"; do
             test -s "$pkg"
             sha256sum "$pkg" > "$pkg.sha256"
           done
-          ls -la kasumi-linux-x86_64.*
+          ls -la "kasumi-v${VERSION}-linux-x86_64."*
 
       - name: Release Gate - Verify Package
         env:
@@ -129,34 +132,34 @@ jobs:
           KASUMI_RELEASE_REF_NAME: ${{ github.ref_name }}
         run: |
           python3 scripts/verify_release_package.py \
-            --archive kasumi-linux-x86_64.tar.gz \
-            --checksum kasumi-linux-x86_64.tar.gz.sha256 \
+            --archive "kasumi-v${KASUMI_VERSION}-linux-x86_64.tar.gz" \
+            --checksum "kasumi-v${KASUMI_VERSION}-linux-x86_64.tar.gz.sha256" \
             --event-name "$KASUMI_RELEASE_EVENT" \
             --ref-type "$KASUMI_RELEASE_REF_TYPE" \
             --ref-name "$KASUMI_RELEASE_REF_NAME"
 
       - name: Release Gate - Verify Native Linux Installers
         run: |
-          VERSION="$(python3 -c 'import re; print(re.search(r"project\(kasumi\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)", open("CMakeLists.txt").read()).group(1))')"
-          sha256sum -c kasumi-linux-x86_64.deb.sha256 kasumi-linux-x86_64.rpm.sha256 kasumi-linux-x86_64.pkg.tar.zst.sha256
+          VERSION="${KASUMI_VERSION}"
+          sha256sum -c "kasumi-v${VERSION}-linux-x86_64.deb.sha256" "kasumi-v${VERSION}-linux-x86_64.rpm.sha256" "kasumi-v${VERSION}-linux-x86_64.pkg.tar.zst.sha256"
 
-          dpkg-deb --info kasumi-linux-x86_64.deb
-          sudo dpkg -i kasumi-linux-x86_64.deb
+          dpkg-deb --info "kasumi-v${VERSION}-linux-x86_64.deb"
+          sudo dpkg -i "kasumi-v${VERSION}-linux-x86_64.deb"
           test "$(/usr/bin/kasumi --version)" = "kasumi version $VERSION"
           test -f /usr/share/doc/kasumi/LICENSE
           test -f /usr/share/doc/kasumi/THIRD_PARTY_NOTICES.md
-          sudo dpkg -i kasumi-linux-x86_64.deb
+          sudo dpkg -i "kasumi-v${VERSION}-linux-x86_64.deb"
           test "$(/usr/bin/kasumi --version)" = "kasumi version $VERSION"
           sudo dpkg -r kasumi
           test ! -e /usr/bin/kasumi
 
           docker run --rm -v "$PWD:/work:ro" archlinux:latest bash -euo pipefail -c "
-            pacman -U --noconfirm /work/kasumi-linux-x86_64.pkg.tar.zst
+            pacman -U --noconfirm \"/work/kasumi-v${VERSION}-linux-x86_64.pkg.tar.zst\"
             test \"\$(/usr/bin/kasumi --version)\" = \"kasumi version $VERSION\"
             test -f /usr/share/licenses/kasumi/LICENSE
             test -f /usr/share/licenses/kasumi/THIRD_PARTY_NOTICES.md
             pacman -Qk kasumi
-            pacman -U --noconfirm /work/kasumi-linux-x86_64.pkg.tar.zst
+            pacman -U --noconfirm \"/work/kasumi-v${VERSION}-linux-x86_64.pkg.tar.zst\"
             test \"\$(/usr/bin/kasumi --version)\" = \"kasumi version $VERSION\"
             pacman -R --noconfirm kasumi
             test ! -e /usr/bin/kasumi
@@ -164,13 +167,13 @@ jobs:
 
           docker run --rm -v "$PWD:/work:ro" fedora:latest bash -euo pipefail -c "
             rpm --version
-            rpm -qpi --nosignature /work/kasumi-linux-x86_64.rpm
-            rpm -Uvh --nosignature /work/kasumi-linux-x86_64.rpm
+            rpm -qpi --nosignature \"/work/kasumi-v${VERSION}-linux-x86_64.rpm\"
+            rpm -Uvh --nosignature \"/work/kasumi-v${VERSION}-linux-x86_64.rpm\"
             test \"\$(/usr/bin/kasumi --version)\" = \"kasumi version $VERSION\"
             test -f /usr/share/doc/kasumi/LICENSE
             test -f /usr/share/doc/kasumi/THIRD_PARTY_NOTICES.md
             rpm -V --nosignature kasumi
-            rpm -Uvh --nosignature --replacepkgs /work/kasumi-linux-x86_64.rpm
+            rpm -Uvh --nosignature --replacepkgs \"/work/kasumi-v${VERSION}-linux-x86_64.rpm\"
             test \"\$(/usr/bin/kasumi --version)\" = \"kasumi version $VERSION\"
             rpm -e kasumi
             test ! -e /usr/bin/kasumi
@@ -181,14 +184,14 @@ jobs:
         with:
           name: kasumi-linux-x86_64
           path: |
-            kasumi-linux-x86_64.tar.gz
-            kasumi-linux-x86_64.tar.gz.sha256
-            kasumi-linux-x86_64.deb
-            kasumi-linux-x86_64.deb.sha256
-            kasumi-linux-x86_64.rpm
-            kasumi-linux-x86_64.rpm.sha256
-            kasumi-linux-x86_64.pkg.tar.zst
-            kasumi-linux-x86_64.pkg.tar.zst.sha256
+            kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.tar.gz
+            kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.tar.gz.sha256
+            kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.deb
+            kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.deb.sha256
+            kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.rpm
+            kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.rpm.sha256
+            kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.pkg.tar.zst
+            kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.pkg.tar.zst.sha256
 
   build-windows:
     name: Windows (x86_64)
@@ -289,27 +292,32 @@ jobs:
               throw "Failed to parse version from CMakeLists.txt"
           }
           $version = $Matches[1]
+          "KASUMI_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          $zipName = "kasumi-v$version-windows-x86_64.zip"
+          $msiName = "kasumi-v$version-windows-x86_64.msi"
 
           New-Item -ItemType Directory -Path package
           Copy-Item build-release/Release/kasumi.exe package/
           Copy-Item LICENSE, THIRD_PARTY_NOTICES.md package/
-          Compress-Archive -Path package/* -DestinationPath kasumi-windows-x86_64.zip
-          $hash = (Get-FileHash kasumi-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
-          "$hash *kasumi-windows-x86_64.zip" | Out-File -FilePath kasumi-windows-x86_64.zip.sha256 -Encoding ascii
+          Compress-Archive -Path package/* -DestinationPath $zipName
+          $hash = (Get-FileHash $zipName -Algorithm SHA256).Hash.ToLower()
+          "$hash *$zipName" | Out-File -FilePath "$zipName.sha256" -Encoding ascii
 
           $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
           wix build packaging/wix/kasumi.wxs `
             -arch x64 `
             -ext WixToolset.UI.wixext/5.0.2 `
+            -loc packaging/wix/KasumiStrings.wxl `
             -d "ProductVersion=$version" `
             -d "BinPath=build-release/Release/kasumi.exe" `
             -d "LicensePath=LICENSE" `
             -d "NoticesPath=THIRD_PARTY_NOTICES.md" `
             -d "LicenseRtf=packaging/wix/LICENSE.rtf" `
-            -o kasumi-windows-x86_64.msi
+            -o $msiName
           if ($LASTEXITCODE -ne 0) { throw "wix build failed with code $LASTEXITCODE" }
-          $msiHash = (Get-FileHash kasumi-windows-x86_64.msi -Algorithm SHA256).Hash.ToLower()
-          "$msiHash *kasumi-windows-x86_64.msi" | Out-File -FilePath kasumi-windows-x86_64.msi.sha256 -Encoding ascii
+          $msiHash = (Get-FileHash $msiName -Algorithm SHA256).Hash.ToLower()
+          "$msiHash *$msiName" | Out-File -FilePath "$msiName.sha256" -Encoding ascii
 
       - name: Release Gate - Verify Package
         shell: powershell
@@ -318,9 +326,10 @@ jobs:
           KASUMI_RELEASE_REF_TYPE: ${{ github.ref_type }}
           KASUMI_RELEASE_REF_NAME: ${{ github.ref_name }}
         run: |
+          $zipName = "kasumi-v$($env:KASUMI_VERSION)-windows-x86_64.zip"
           python scripts/verify_release_package.py `
-            --archive kasumi-windows-x86_64.zip `
-            --checksum kasumi-windows-x86_64.zip.sha256 `
+            --archive $zipName `
+            --checksum "$zipName.sha256" `
             --event-name $env:KASUMI_RELEASE_EVENT `
             --ref-type $env:KASUMI_RELEASE_REF_TYPE `
             --ref-name $env:KASUMI_RELEASE_REF_NAME
@@ -329,20 +338,17 @@ jobs:
       - name: Release Gate - Verify Windows MSI Installer
         shell: powershell
         run: |
-          $cmakeText = Get-Content -LiteralPath CMakeLists.txt -Raw
-          if ($cmakeText -notmatch '(?im)^\s*project\(kasumi\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)') {
-              throw "Failed to parse version from CMakeLists.txt"
-          }
-          $version = $Matches[1]
+          $version = $env:KASUMI_VERSION
+          $msiName = "kasumi-v$version-windows-x86_64.msi"
 
-          $expectedMsiHash = ((Get-Content -LiteralPath kasumi-windows-x86_64.msi.sha256 -Raw).Trim() -split '\s+')[0].ToLower()
-          $actualMsiHash = (Get-FileHash -LiteralPath kasumi-windows-x86_64.msi -Algorithm SHA256).Hash.ToLower()
+          $expectedMsiHash = ((Get-Content -LiteralPath "$msiName.sha256" -Raw).Trim() -split '\s+')[0].ToLower()
+          $actualMsiHash = (Get-FileHash -LiteralPath $msiName -Algorithm SHA256).Hash.ToLower()
           if ($actualMsiHash -ne $expectedMsiHash) {
               throw "MSI SHA-256 mismatch: expected $expectedMsiHash, got $actualMsiHash"
           }
 
           $installDir = "C:\Program Files\Kasumi"
-          $msiPath = (Resolve-Path -LiteralPath kasumi-windows-x86_64.msi).Path
+          $msiPath = (Resolve-Path -LiteralPath $msiName).Path
 
           function Get-MachinePathEntries {
               $raw = [Environment]::GetEnvironmentVariable("Path", "Machine")
@@ -365,6 +371,10 @@ jobs:
               if (-not (Test-Path -LiteralPath (Join-Path $installDir $f) -PathType Leaf)) {
                   throw "Missing installed file: $f"
               }
+          }
+          $installedVer = (Get-ItemPropertyValue -Path "HKLM:\Software\auanK\Kasumi" -Name "InstalledVersion")
+          if ($installedVer -ne $version) {
+              throw "Registry InstalledVersion expected '$version', got '$installedVer'"
           }
           $pathHits = @(Get-MachinePathEntries | Where-Object { $_ -ieq $installDir })
           if ($pathHits.Count -ne 1) {
@@ -404,10 +414,10 @@ jobs:
         with:
           name: kasumi-windows-x86_64
           path: |
-            kasumi-windows-x86_64.zip
-            kasumi-windows-x86_64.zip.sha256
-            kasumi-windows-x86_64.msi
-            kasumi-windows-x86_64.msi.sha256
+            kasumi-v${{ env.KASUMI_VERSION }}-windows-x86_64.zip
+            kasumi-v${{ env.KASUMI_VERSION }}-windows-x86_64.zip.sha256
+            kasumi-v${{ env.KASUMI_VERSION }}-windows-x86_64.msi
+            kasumi-v${{ env.KASUMI_VERSION }}-windows-x86_64.msi.sha256
 
   publish:
     name: Publish Release
@@ -428,6 +438,8 @@ jobs:
         run: |
           test -f RELEASE_NOTES.md
           test -s RELEASE_NOTES.md
+          VERSION="$(python3 -c 'import re; print(re.search(r"project\(kasumi\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)", open("CMakeLists.txt").read()).group(1))')"
+          echo "KASUMI_VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Download all artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -437,20 +449,21 @@ jobs:
 
       - name: Validate and consolidate SHA-256 checksums
         run: |
+          VERSION="${KASUMI_VERSION}"
           cd dist
-          sha256sum -c kasumi-linux-x86_64.tar.gz.sha256
-          sha256sum -c kasumi-linux-x86_64.deb.sha256
-          sha256sum -c kasumi-linux-x86_64.rpm.sha256
-          sha256sum -c kasumi-linux-x86_64.pkg.tar.zst.sha256
-          sha256sum -c kasumi-windows-x86_64.zip.sha256
-          sha256sum -c kasumi-windows-x86_64.msi.sha256
+          sha256sum -c "kasumi-v${VERSION}-linux-x86_64.tar.gz.sha256"
+          sha256sum -c "kasumi-v${VERSION}-linux-x86_64.deb.sha256"
+          sha256sum -c "kasumi-v${VERSION}-linux-x86_64.rpm.sha256"
+          sha256sum -c "kasumi-v${VERSION}-linux-x86_64.pkg.tar.zst.sha256"
+          sha256sum -c "kasumi-v${VERSION}-windows-x86_64.zip.sha256"
+          sha256sum -c "kasumi-v${VERSION}-windows-x86_64.msi.sha256"
           cat \
-            kasumi-linux-x86_64.tar.gz.sha256 \
-            kasumi-linux-x86_64.deb.sha256 \
-            kasumi-linux-x86_64.rpm.sha256 \
-            kasumi-linux-x86_64.pkg.tar.zst.sha256 \
-            kasumi-windows-x86_64.zip.sha256 \
-            kasumi-windows-x86_64.msi.sha256 > SHA256SUMS.txt
+            "kasumi-v${VERSION}-linux-x86_64.tar.gz.sha256" \
+            "kasumi-v${VERSION}-linux-x86_64.deb.sha256" \
+            "kasumi-v${VERSION}-linux-x86_64.rpm.sha256" \
+            "kasumi-v${VERSION}-linux-x86_64.pkg.tar.zst.sha256" \
+            "kasumi-v${VERSION}-windows-x86_64.zip.sha256" \
+            "kasumi-v${VERSION}-windows-x86_64.msi.sha256" > SHA256SUMS.txt
           sha256sum -c SHA256SUMS.txt
           ls -la
 
@@ -458,12 +471,12 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
-            dist/kasumi-linux-x86_64.tar.gz
-            dist/kasumi-linux-x86_64.deb
-            dist/kasumi-linux-x86_64.rpm
-            dist/kasumi-linux-x86_64.pkg.tar.zst
-            dist/kasumi-windows-x86_64.zip
-            dist/kasumi-windows-x86_64.msi
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.tar.gz
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.deb
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.rpm
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.pkg.tar.zst
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-windows-x86_64.zip
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-windows-x86_64.msi
             dist/SHA256SUMS.txt
 
       - name: Create GitHub Release
@@ -471,18 +484,18 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
-            dist/kasumi-linux-x86_64.tar.gz
-            dist/kasumi-linux-x86_64.tar.gz.sha256
-            dist/kasumi-linux-x86_64.deb
-            dist/kasumi-linux-x86_64.deb.sha256
-            dist/kasumi-linux-x86_64.rpm
-            dist/kasumi-linux-x86_64.rpm.sha256
-            dist/kasumi-linux-x86_64.pkg.tar.zst
-            dist/kasumi-linux-x86_64.pkg.tar.zst.sha256
-            dist/kasumi-windows-x86_64.zip
-            dist/kasumi-windows-x86_64.zip.sha256
-            dist/kasumi-windows-x86_64.msi
-            dist/kasumi-windows-x86_64.msi.sha256
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.tar.gz
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.tar.gz.sha256
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.deb
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.deb.sha256
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.rpm
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.rpm.sha256
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.pkg.tar.zst
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.pkg.tar.zst.sha256
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-windows-x86_64.zip
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-windows-x86_64.zip.sha256
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-windows-x86_64.msi
+            dist/kasumi-v${{ env.KASUMI_VERSION }}-windows-x86_64.msi.sha256
             dist/SHA256SUMS.txt
           body_path: RELEASE_NOTES.md
           prerelease: ${{ contains(github.ref_name, '-') }}

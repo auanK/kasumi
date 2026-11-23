@@ -18,7 +18,7 @@ from pathlib import Path
 
 PKGNAME = "kasumi"
 PKGDESC = (
-    "Multi-client encrypted bidirectional file synchronization without a dedicated server"
+    "Multi-device encrypted bidirectional file synchronization without a dedicated server"
 )
 PKGURL = "https://github.com/auanK/kasumi"
 PACKAGER = "auanK <https://github.com/auanK/kasumi>"
@@ -71,6 +71,7 @@ def _render_mtree(
     bin_bytes: bytes,
     license_bytes: bytes,
     notices_bytes: bytes,
+    install_bytes: bytes | None = None,
 ) -> bytes:
     def file_line(relpath: str, payload: bytes, mode: str | None = None) -> str:
         md5_hex, sha256_hex = _digests(payload)
@@ -87,6 +88,10 @@ def _render_mtree(
         "#mtree",
         "/set type=file uid=0 gid=0 mode=644",
         file_line(".PKGINFO", pkginfo_bytes),
+    ]
+    if install_bytes is not None:
+        lines.append(file_line(".INSTALL", install_bytes))
+    lines.extend([
         dir_line("usr"),
         dir_line("usr/bin"),
         file_line("usr/bin/kasumi", bin_bytes, mode="755"),
@@ -97,7 +102,7 @@ def _render_mtree(
         file_line(
             f"usr/share/licenses/{PKGNAME}/THIRD_PARTY_NOTICES.md", notices_bytes
         ),
-    ]
+    ])
     raw = ("\n".join(lines) + "\n").encode("utf-8")
     return gzip.compress(raw, mtime=0)
 
@@ -136,6 +141,7 @@ def build_arch_tar_bytes(
     version: str,
     license_path: Path,
     notices_path: Path,
+    install_script_path: Path | None = None,
     pkgrel: int = 1,
     arch: str = "x86_64",
     builddate: int | None = None,
@@ -148,6 +154,11 @@ def build_arch_tar_bytes(
     bin_bytes = binary_path.read_bytes()
     license_bytes = license_path.read_bytes()
     notices_bytes = notices_path.read_bytes()
+    install_bytes = (
+        install_script_path.read_bytes().replace(b"\r\n", b"\n")
+        if install_script_path is not None
+        else None
+    )
 
     installed_size = len(bin_bytes) + len(license_bytes) + len(notices_bytes)
     pkginfo_bytes = _render_pkginfo(
@@ -163,12 +174,15 @@ def build_arch_tar_bytes(
         bin_bytes=bin_bytes,
         license_bytes=license_bytes,
         notices_bytes=notices_bytes,
+        install_bytes=install_bytes,
     )
 
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
         _add_file(archive, ".PKGINFO", pkginfo_bytes, 0o644, builddate)
         _add_file(archive, ".MTREE", mtree_bytes, 0o644, builddate)
+        if install_bytes is not None:
+            _add_file(archive, ".INSTALL", install_bytes, 0o644, builddate)
         _add_dir(archive, "usr", builddate)
         _add_dir(archive, "usr/bin", builddate)
         _add_file(archive, "usr/bin/kasumi", bin_bytes, 0o755, builddate)
@@ -199,6 +213,7 @@ def build_arch_package(
     output_path: Path,
     license_path: Path,
     notices_path: Path,
+    install_script_path: Path | None = None,
     pkgrel: int = 1,
     arch: str = "x86_64",
     builddate: int | None = None,
@@ -210,6 +225,7 @@ def build_arch_package(
         version=version,
         license_path=license_path,
         notices_path=notices_path,
+        install_script_path=install_script_path,
         pkgrel=pkgrel,
         arch=arch,
         builddate=builddate,
@@ -250,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--notices", type=Path, default=Path("THIRD_PARTY_NOTICES.md")
     )
+    parser.add_argument("--install-script", type=Path, default=None)
     parser.add_argument("--pkgrel", type=int, default=1)
     parser.add_argument("--arch", default="x86_64")
     parser.add_argument("--builddate", type=int, default=None)
@@ -262,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         output_path=args.output,
         license_path=args.license,
         notices_path=args.notices,
+        install_script_path=args.install_script,
         pkgrel=args.pkgrel,
         arch=args.arch,
         builddate=args.builddate,

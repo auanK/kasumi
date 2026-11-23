@@ -47,20 +47,36 @@ class PackagingContractTest(unittest.TestCase):
         self.assertEqual(match.group(1), cmake_version)
         self.assertIn("pkgname=kasumi", pkgbuild)
         self.assertIn("license=('MIT')", pkgbuild)
+        self.assertIn("install=kasumi.install", pkgbuild)
         self.assertIn("install -Dm755 \"build/kasumi\" \"${pkgdir}/usr/bin/kasumi\"", pkgbuild)
+        install_script = ROOT / "packaging" / "arch" / "kasumi.install"
+        self.assertTrue(install_script.is_file())
+        install_text = install_script.read_text(encoding="utf-8")
+        self.assertIn("post_install()", install_text)
+        self.assertIn("post_upgrade()", install_text)
 
     def test_cpack_deb_and_rpm_configuration_present(self):
         cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
         for needle in (
             'install(\n    TARGETS kasumi',
             '${CMAKE_INSTALL_DOCDIR}',
-            'set(CPACK_DEBIAN_KASUMI_FILE_NAME "kasumi-linux-x86_64.deb")',
-            'set(CPACK_RPM_KASUMI_FILE_NAME "kasumi-linux-x86_64.rpm")',
+            'set(CPACK_DEBIAN_KASUMI_FILE_NAME "kasumi-v${PROJECT_VERSION}-linux-x86_64.deb")',
+            'set(CPACK_RPM_KASUMI_FILE_NAME "kasumi-v${PROJECT_VERSION}-linux-x86_64.rpm")',
+            'set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA\n    "${PROJECT_SOURCE_DIR}/packaging/linux/deb/postinst")',
+            'set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE\n    "${PROJECT_SOURCE_DIR}/packaging/linux/rpm/post.sh")',
             'set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)',
             'set(CPACK_RPM_PACKAGE_AUTOREQPROV "yes")',
             'include(CPack)',
         ):
             self.assertIn(needle, cmake)
+
+        deb_postinst = (ROOT / "packaging" / "linux" / "deb" / "postinst").read_bytes()
+        rpm_post = (ROOT / "packaging" / "linux" / "rpm" / "post.sh").read_bytes()
+        self.assertNotIn(b"\r\n", deb_postinst)
+        self.assertNotIn(b"\r\n", rpm_post)
+        self.assertTrue(deb_postinst.startswith(b"#!/bin/sh\n"))
+        self.assertIn(b"upgraded", deb_postinst)
+        self.assertIn(b"upgraded", rpm_post)
 
     def test_wix_manifest_and_license_rtf_contract(self):
         wxs_path = ROOT / "packaging" / "wix" / "kasumi.wxs"
@@ -78,6 +94,34 @@ class PackagingContractTest(unittest.TestCase):
         self.assertIsNotNone(upgrade)
         self.assertEqual(upgrade.attrib.get("AllowSameVersionUpgrades"), "yes")
 
+        prop_ids = {p.attrib.get("Id") for p in pkg.findall(f"{{{WIX_NS}}}Property")}
+        for expected_prop in (
+            "INSTALLFOLDER",
+            "PREVIOUS_VERSION",
+            "KASUMI_WELCOME_TITLE",
+            "KASUMI_WELCOME_DESC",
+            "KASUMI_READY_TITLE",
+            "KASUMI_READY_TEXT",
+            "KASUMI_PROGRESS_TITLE",
+            "KASUMI_EXIT_TITLE",
+        ):
+            self.assertIn(expected_prop, prop_ids)
+
+        reg_names = {
+            r.attrib.get("Name") for r in pkg.findall(f".//{{{WIX_NS}}}RegistryValue")
+        }
+        self.assertIn("InstallFolder", reg_names)
+        self.assertIn("InstalledVersion", reg_names)
+
+        seq = pkg.find(f"{{{WIX_NS}}}InstallUISequence")
+        self.assertIsNotNone(seq)
+        custom_elems = seq.findall(f"{{{WIX_NS}}}Custom")
+        custom_conds = [c.attrib.get("Condition", "") for c in custom_elems]
+        self.assertTrue(any("WIX_UPGRADE_DETECTED" in cond for cond in custom_conds))
+        for c in custom_elems:
+            self.assertNotEqual(c.attrib.get("Before"), "WelcomeDlg")
+            self.assertNotEqual(c.attrib.get("After"), "WelcomeDlg")
+
         env_elems = pkg.findall(f".//{{{WIX_NS}}}Environment")
         path_envs = [
             e for e in env_elems
@@ -91,6 +135,36 @@ class PackagingContractTest(unittest.TestCase):
         self.assertIsNotNone(ui_elem)
         self.assertEqual(ui_elem.attrib.get("Id"), "WixUI_InstallDir")
         self.assertEqual(ui_elem.attrib.get("InstallDirectory"), "INSTALLFOLDER")
+
+        publish_elems = pkg.findall(f".//{{{WIX_NS}}}Publish")
+        self.assertTrue(
+            any(
+                p.attrib.get("Dialog") == "WelcomeDlg"
+                and p.attrib.get("Control") == "Next"
+                and p.attrib.get("Value") == "VerifyReadyDlg"
+                and p.attrib.get("Condition") == "WIX_UPGRADE_DETECTED"
+                for p in publish_elems
+            )
+        )
+
+        wxl_path = ROOT / "packaging" / "wix" / "KasumiStrings.wxl"
+        wxl_root = ET.parse(wxl_path).getroot()
+        self.assertEqual(
+            wxl_root.tag, "{http://wixtoolset.org/schemas/v4/wxl}WixLocalization"
+        )
+        wxl_ids = {
+            s.attrib.get("Id")
+            for s in wxl_root.findall("{http://wixtoolset.org/schemas/v4/wxl}String")
+        }
+        for sid in (
+            "WelcomeDlgTitle",
+            "WelcomeDlgDescription",
+            "VerifyReadyDlgInstallTitle",
+            "VerifyReadyDlgInstallText",
+            "ProgressDlgTitleInstalling",
+            "ExitDialogTitle",
+        ):
+            self.assertIn(sid, wxl_ids)
 
         for comp in pkg.findall(f".//{{{WIX_NS}}}Component"):
             keypaths = [
@@ -112,14 +186,16 @@ class PackagingContractTest(unittest.TestCase):
         fake_binary_bytes = b"\x7fELFdummy-kasumi-binary-bytes-for-test"
         license_path = ROOT / "LICENSE"
         notices_path = ROOT / "THIRD_PARTY_NOTICES.md"
+        install_path = ROOT / "packaging" / "arch" / "kasumi.install"
         license_bytes = license_path.read_bytes()
         notices_bytes = notices_path.read_bytes()
+        install_bytes = install_path.read_bytes().replace(b"\r\n", b"\n")
 
         with tempfile.TemporaryDirectory(prefix="kasumi-arch-pkg-test-") as tmp:
             tmp_dir = Path(tmp)
             fake_bin = tmp_dir / "kasumi"
             fake_bin.write_bytes(fake_binary_bytes)
-            out_tar = tmp_dir / "kasumi-linux-x86_64.pkg.tar"
+            out_tar = tmp_dir / f"kasumi-v{version}-linux-x86_64.pkg.tar"
 
             build_arch_package.build_arch_package(
                 binary_path=fake_bin,
@@ -127,12 +203,14 @@ class PackagingContractTest(unittest.TestCase):
                 output_path=out_tar,
                 license_path=license_path,
                 notices_path=notices_path,
+                install_script_path=install_path,
                 builddate=1700000000,
             )
 
             expected_order = [
                 ".PKGINFO",
                 ".MTREE",
+                ".INSTALL",
                 "usr",
                 "usr/bin",
                 "usr/bin/kasumi",
@@ -178,6 +256,7 @@ class PackagingContractTest(unittest.TestCase):
 
             for tar_name, expected_data in (
                 (".PKGINFO", payloads[".PKGINFO"]),
+                (".INSTALL", install_bytes),
                 ("usr/bin/kasumi", fake_binary_bytes),
                 ("usr/share/licenses/kasumi/LICENSE", license_bytes),
                 ("usr/share/licenses/kasumi/THIRD_PARTY_NOTICES.md", notices_bytes),
@@ -196,13 +275,14 @@ class PackagingContractTest(unittest.TestCase):
 
             zstd = shutil.which("zstd")
             if zstd:
-                out_zst = tmp_dir / "kasumi-linux-x86_64.pkg.tar.zst"
+                out_zst = tmp_dir / f"kasumi-v{version}-linux-x86_64.pkg.tar.zst"
                 build_arch_package.build_arch_package(
                     binary_path=fake_bin,
                     version=version,
                     output_path=out_zst,
                     license_path=license_path,
                     notices_path=notices_path,
+                    install_script_path=install_path,
                     builddate=1700000000,
                     zstd_exe=zstd,
                 )

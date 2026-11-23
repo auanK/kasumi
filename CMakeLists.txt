@@ -803,7 +803,7 @@ install(
 set(CPACK_PACKAGE_NAME "kasumi")
 set(CPACK_PACKAGE_VENDOR "auanK")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
-    "Multi-client encrypted bidirectional file synchronization without a dedicated server")
+    "Multi-device encrypted bidirectional file synchronization without a dedicated server")
 set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/auanK/kasumi")
 set(CPACK_PACKAGE_CONTACT "auanK <https://github.com/auanK/kasumi>")
 set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
@@ -819,7 +819,9 @@ set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
 set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
 set(CPACK_DEBIAN_PACKAGE_SUGGESTS "rclone, gnome-keyring, libsecret-1-0")
-set(CPACK_DEBIAN_KASUMI_FILE_NAME "kasumi-linux-x86_64.deb")
+set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
+    "${PROJECT_SOURCE_DIR}/packaging/linux/deb/postinst")
+set(CPACK_DEBIAN_KASUMI_FILE_NAME "kasumi-v${PROJECT_VERSION}-linux-x86_64.deb")
 
 set(CPACK_RPM_COMPONENT_INSTALL ON)
 set(CPACK_RPM_PACKAGE_NAME "kasumi")
@@ -835,7 +837,9 @@ set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
     "/usr/share"
     "/usr/share/doc"
 )
-set(CPACK_RPM_KASUMI_FILE_NAME "kasumi-linux-x86_64.rpm")
+set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE
+    "${PROJECT_SOURCE_DIR}/packaging/linux/rpm/post.sh")
+set(CPACK_RPM_KASUMI_FILE_NAME "kasumi-v${PROJECT_VERSION}-linux-x86_64.rpm")
 
 include(CPack)
 
