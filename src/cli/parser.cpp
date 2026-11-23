@@ -190,13 +190,32 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 .writer_identifier = argv[4]};
         }
         if (argc >= 3 && std::string_view{argv[2]} == "remove-barrier") {
-            if (argc != 5 || !operand(argv[3]) ||
-                std::string_view{argv[4]} != "--confirm-abandoned") {
+            if (argc < 5 || argc > 6 || !operand(argv[3])) {
+                return std::unexpected(ParseError{});
+            }
+            bool confirm_abandoned = false;
+            std::optional<std::string> barrier_identifier;
+            for (int i = 4; i < argc; ++i) {
+                const std::string_view arg{argv[i]};
+                if (arg == "--confirm-abandoned") {
+                    if (confirm_abandoned) {
+                        return std::unexpected(ParseError{});
+                    }
+                    confirm_abandoned = true;
+                } else if (operand(argv[i]) &&
+                           !barrier_identifier.has_value()) {
+                    barrier_identifier = std::string{arg};
+                } else {
+                    return std::unexpected(ParseError{});
+                }
+            }
+            if (!confirm_abandoned) {
                 return std::unexpected(ParseError{});
             }
             return application::Request{
                 .operation = application::Operation::RemoveBarrier,
                 .profile_name = argv[3],
+                .barrier_identifier = std::move(barrier_identifier),
                 .confirm_abandoned = true};
         }
         if (argc < 3 || !operand(argv[2])) {

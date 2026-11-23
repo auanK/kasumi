@@ -1055,6 +1055,11 @@ RemoteObjectInfo classify_object(const history_storage::RemoteLayout& layout,
         result.category = RemoteObjectCategory::Barrier;
         result.structurally_valid = true;
         result.relation = "maintenance barrier";
+    } else if (id.starts_with(layout.barriers_prefix)) {
+        result.category = RemoteObjectCategory::Barrier;
+        result.structurally_valid =
+            history_storage::valid_barrier_identifier(layout, id);
+        result.relation = "maintenance barrier";
     } else if (id.starts_with(layout.writers_prefix)) {
         result.category = RemoteObjectCategory::Writer;
         result.structurally_valid =
@@ -1337,14 +1342,23 @@ RemoteWritersReport
 make_writers_report(const history_storage::RemoteLayout& layout,
                     const std::vector<std::string>& identifiers) {
     RemoteWritersReport report;
-    report.barrier_present =
-        std::ranges::find(identifiers, layout.barrier_identifier) !=
-        identifiers.end();
-    if (report.barrier_present) {
-        report.barrier_identifier = layout.barrier_identifier;
-    }
     for (const auto& identifier : identifiers) {
-        if (identifier.starts_with(layout.writers_prefix)) {
+        if (identifier == layout.barrier_identifier) {
+            report.barriers.push_back(RemoteBarrierInfo{
+                .identifier = identifier,
+                .legacy = true,
+                .structurally_valid = true,
+            });
+        } else if (identifier.starts_with(layout.barriers_prefix)) {
+            const bool valid =
+                history_storage::valid_barrier_identifier(layout, identifier);
+            report.protocol_consistent &= valid;
+            report.barriers.push_back(RemoteBarrierInfo{
+                .identifier = identifier,
+                .legacy = false,
+                .structurally_valid = valid,
+            });
+        } else if (identifier.starts_with(layout.writers_prefix)) {
             const auto state =
                 history_storage::valid_writer_identifier(layout, identifier)
                     ? RemoteWriterState::Indeterminate
@@ -1354,9 +1368,14 @@ make_writers_report(const history_storage::RemoteLayout& layout,
                 RemoteWriterInfo{.identifier = identifier, .state = state});
         } else if (identifier.starts_with(layout.gc_prefix) &&
                    identifier != layout.barrier_identifier &&
+                   !identifier.starts_with(layout.barriers_prefix) &&
                    !identifier.starts_with(layout.probes_prefix)) {
             report.protocol_consistent = false;
         }
+    }
+    report.barrier_present = !report.barriers.empty();
+    if (!report.barriers.empty()) {
+        report.barrier_identifier = report.barriers.front().identifier;
     }
     report.maintenance_blocked =
         report.barrier_present || !report.writers.empty();
@@ -1479,8 +1498,49 @@ inspect_physical(InspectionContext& context, InspectionOperation operation) {
             make_objects_report(context.layout, std::move(*identifiers)));
     }
     if (operation == InspectionOperation::RemoteWriters) {
-        return make_response(operation,
-                             make_writers_report(context.layout, *identifiers));
+        auto report = make_writers_report(context.layout, *identifiers);
+        for (auto& barrier : report.barriers) {
+            if (!barrier.structurally_valid) {
+                continue;
+            }
+            std::optional<std::string_view> expected_token;
+            if (!barrier.legacy && barrier.identifier.starts_with(
+                                       context.layout.barriers_prefix)) {
+                expected_token = std::string_view{barrier.identifier}.substr(
+                    context.layout.barriers_prefix.size());
+            }
+            if (auto meta =
+                    history_storage::maintenance_protocol::read_marker_metadata(
+                        context.storage,
+                        barrier.identifier,
+                        "barrier",
+                        expected_token,
+                        context.workspace->root)) {
+                barrier.machine_name = std::move(meta->machine_name);
+                barrier.pid = meta->pid;
+                barrier.started_at_unix = meta->started_at_unix;
+            }
+        }
+        for (auto& writer : report.writers) {
+            if (writer.state != RemoteWriterState::Indeterminate) {
+                continue;
+            }
+            const auto expected_token =
+                std::string_view{writer.identifier}.substr(
+                    context.layout.writers_prefix.size());
+            if (auto meta =
+                    history_storage::maintenance_protocol::read_marker_metadata(
+                        context.storage,
+                        writer.identifier,
+                        "writer",
+                        expected_token,
+                        context.workspace->root)) {
+                writer.machine_name = std::move(meta->machine_name);
+                writer.pid = meta->pid;
+                writer.started_at_unix = meta->started_at_unix;
+            }
+        }
+        return make_response(operation, std::move(report));
     }
     return make_response(operation,
                          make_health_report(context, operation, *identifiers));

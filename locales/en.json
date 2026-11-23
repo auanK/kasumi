@@ -330,6 +330,7 @@
     "classification": "  Classification: {}",
     "structural_candidate": "  Structural candidate: {}",
     "barrier": "  Barrier: {}",
+    "barriers": "  Barriers ({}):",
     "present": "present",
     "absent": "absent",
     "maintenance_blocked": "  Maintenance blocked: {}",
@@ -342,6 +343,8 @@
     "reasons": "  Reasons ({}):",
     "origin": "  Origin: {}",
     "machine": "  Machine: {}",
+    "pid": "  PID: {}",
+    "started_at": "  Started at: {}",
     "invalid_activities": "  Invalid activity records: {}"
   },
   "variants": {
@@ -485,6 +488,7 @@
     "completed": "Removed maintenance barrier: {}",
     "absent": "Maintenance barrier is already absent.",
     "writers_remain": "Active writer markers remain ({}). They can now be removed with 'kasumi gc remove-writer <profile> <writer-id>'.",
+    "barriers_remain": "Other maintenance barriers remain ({}). Inspect 'kasumi remote writers <profile>' and remove each abandoned barrier with 'kasumi gc remove-barrier <profile> <barrier-id> --confirm-abandoned'.",
     "stage_checking_presence": "Checking barrier presence",
     "stage_downloading_payload": "Downloading barrier payload",
     "stage_validating_payload": "Validating barrier control token",
@@ -502,7 +506,7 @@
     "fsck": "Usage: kasumi fsck <profile>\n\nAudit remote integrity and authenticated content.\nExample: kasumi fsck Programming\n",
     "gc": "Usage: kasumi gc <profile> [--dry-run] [--min-age <hours>]\n\nAnalyze garbage collection candidates and remove safe unreachable content, expired commits, redundant variants, and pruned activity records.\n--dry-run analyzes candidates without establishing a barrier or deleting objects.\n--min-age <hours> sets the minimum orphan age threshold (0-8760, defaults to the profile retention minimum of 6h); protects concurrent sync uploads and makes scheduled automatic GC safe.\nSafe to schedule automatically: checks for active writers or barriers read-only before mutation (returns remote_busy / BUSY when busy).\nSubcommands: remove-writer, remove-barrier (use each subcommand with --help).\nExample: kasumi gc Programming --dry-run\n",
     "gc_remove-writer": "Usage: kasumi gc remove-writer <profile> <writer-id>\n\nRemove one exact writer marker listed by remote writers.\nVerify that its process is inactive and no Sync or maintenance is running.\nNo Sync or GC is performed.\nExample: kasumi remote writers Programming\n",
-    "gc_remove-barrier": "Usage: kasumi gc remove-barrier <profile> --confirm-abandoned\n\nRemove an abandoned maintenance barrier after manual verification.\n--confirm-abandoned is required; verify no GC or Sync is active on any device.\nVerifies physical identity and confirms absence; never runs Sync or GC.\nExample: kasumi gc remove-barrier Programming --confirm-abandoned\n",
+    "gc_remove-barrier": "Usage: kasumi gc remove-barrier <profile> [<barrier-id>] --confirm-abandoned\n\nRemove an abandoned maintenance barrier after manual verification.\n--confirm-abandoned is required; verify no GC or Sync is active on any device.\nOmit <barrier-id> when only one barrier is active; specify <barrier-id> or its 32-hex token when multiple barriers exist.\nVerifies physical identity and confirms absence; never runs Sync or GC.\nExample: kasumi gc remove-barrier Programming --confirm-abandoned\n",
     "repack": "Usage: kasumi repack <profile> [--dry-run] [--reclaim-dirty] [--full]\n\nConsolidate fragmented Micro-Packs and loose small files from live local files.\nEnsure the workspace is clean, stop Sync on other clients, and run fsck/gc separately as needed.\n--dry-run previews consolidation without creating packs or mutating remote state.\n--reclaim-dirty also reclaims large partially dead packs; old packs remain until 'kasumi gc'.\n--full shows pack inventory breakdown and published commit details.\nExample: kasumi repack Programming --dry-run\n",
     "resolve-missing": "Usage: kasumi resolve-missing <profile> [--dry-run | --confirm]\n\nResolve unavailable content as logical deletions. Review pending paths first.\nLists eligible paths and asks confirmation before publishing; use --dry-run to preview\nwithout deleting, or --confirm for non-interactive automation.\nExample: kasumi resolve-missing Programming --dry-run\n",
     "remote": "Usage: kasumi remote <subcommand> <profile> [arguments] [options]\n\nRemote inspection. Subcommands:\n  heads, tree, commits, summary, stat, commit, get, epochs, epoch,\n  contents, content, markers, objects, orphans, writers, health\nUse kasumi remote <subcommand> --help for required arguments and restrictions.\nExample: kasumi remote summary Programming\n",

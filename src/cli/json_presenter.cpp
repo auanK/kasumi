@@ -884,6 +884,19 @@ int present_json(std::string_view profile_name,
                     {"resolved_paths", std::move(paths)},
                     {"published", payload.published},
                 };
+            } else if constexpr (
+                std::is_same_v<T, application::ManualBarrierRemovalCompleted>) {
+                data = json{
+                    {"identifier", payload.identifier},
+                    {"outcome",
+                     payload.outcome ==
+                             application::BarrierRemovalOutcome::Removed
+                         ? "removed"
+                         : "already_absent"},
+                    {"active_writers_count", payload.active_writers_count},
+                    {"remaining_barriers_count",
+                     payload.remaining_barriers_count},
+                };
             } else {
                 data = json::object();
             }
@@ -969,6 +982,58 @@ int present_json(std::string_view profile_name,
             {"active_writer_count", summary->active_writer_count},
             {"invalid_activity_count", summary->invalid_activity_count},
             {"recent_activities", std::move(activities)},
+        };
+    } else if (const auto* writers_report =
+                   std::get_if<application::RemoteWritersReport>(
+                       &response.payload)) {
+        json barriers = json::array();
+        for (const auto& barrier : writers_report->barriers) {
+            json item{
+                {"identifier", barrier.identifier},
+                {"legacy", barrier.legacy},
+                {"structurally_valid", barrier.structurally_valid},
+            };
+            if (barrier.machine_name.has_value()) {
+                item["machine_name"] = *barrier.machine_name;
+            }
+            if (barrier.pid.has_value()) {
+                item["pid"] = *barrier.pid;
+            }
+            if (barrier.started_at_unix.has_value()) {
+                item["started_at_unix"] = *barrier.started_at_unix;
+            }
+            barriers.push_back(std::move(item));
+        }
+        json writers = json::array();
+        for (const auto& writer : writers_report->writers) {
+            json item{
+                {"identifier", writer.identifier},
+                {"state",
+                 writer.state == application::RemoteWriterState::Invalid
+                     ? "invalid"
+                     : "indeterminate"},
+            };
+            if (writer.machine_name.has_value()) {
+                item["machine_name"] = *writer.machine_name;
+            }
+            if (writer.pid.has_value()) {
+                item["pid"] = *writer.pid;
+            }
+            if (writer.started_at_unix.has_value()) {
+                item["started_at_unix"] = *writer.started_at_unix;
+            }
+            writers.push_back(std::move(item));
+        }
+        doc["data"] = json{
+            {"barrier_present", writers_report->barrier_present},
+            {"barrier_identifier",
+             writers_report->barrier_identifier
+                 ? json(*writers_report->barrier_identifier)
+                 : json(nullptr)},
+            {"maintenance_blocked", writers_report->maintenance_blocked},
+            {"protocol_consistent", writers_report->protocol_consistent},
+            {"barriers", std::move(barriers)},
+            {"writers", std::move(writers)},
         };
     } else {
         doc["data"] = json::object();

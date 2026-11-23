@@ -317,6 +317,18 @@ enum class RemoteWriterState : std::uint8_t {
 struct RemoteWriterInfo {
     std::string identifier;
     RemoteWriterState state = RemoteWriterState::Indeterminate;
+    std::optional<std::string> machine_name = std::nullopt;
+    std::optional<std::uint64_t> pid = std::nullopt;
+    std::optional<std::int64_t> started_at_unix = std::nullopt;
+};
+
+struct RemoteBarrierInfo {
+    std::string identifier;
+    bool legacy = false;
+    bool structurally_valid = true;
+    std::optional<std::string> machine_name = std::nullopt;
+    std::optional<std::uint64_t> pid = std::nullopt;
+    std::optional<std::int64_t> started_at_unix = std::nullopt;
 };
 
 struct RemoteWritersReport {
@@ -324,6 +336,7 @@ struct RemoteWritersReport {
     std::optional<std::string> barrier_identifier;
     bool maintenance_blocked = false;
     bool protocol_consistent = true;
+    std::vector<RemoteBarrierInfo> barriers;
     std::vector<RemoteWriterInfo> writers;
 };
 
