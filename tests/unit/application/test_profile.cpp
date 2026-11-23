@@ -3787,7 +3787,8 @@ TEST(ApplicationProfileTest,
 
 TEST(ApplicationProfileTest,
      ListLocalConflictsGroupsArtifactsAndRespectsIgnore) {
-    const TempWorkspace workspace("application-local-conflicts");
+    const auto workspace =
+        kasumi::test::make_temp_workspace("application-local-conflicts");
     const ExecutionEnvironment env{
         .app_data_dir = kasumi::test::workspace_path(workspace, "app")};
     const auto local_dir = kasumi::test::workspace_path(workspace, "local");
