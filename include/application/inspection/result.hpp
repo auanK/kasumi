@@ -149,6 +149,7 @@ struct RemoteSummaryReport {
 struct RemoteStatReport {
     std::uint64_t observed_height = 0;
     bool has_conflicts = false;
+    std::optional<std::string> commit_id;
     std::string path;
     RemoteTreeEntryType type = RemoteTreeEntryType::File;
     std::string logical_hash;
@@ -174,6 +175,7 @@ struct RemoteCommitReport {
 };
 
 struct RemoteFileReport {
+    std::optional<std::string> commit_id;
     std::string path;
     std::string destination_path;
     std::string logical_hash;

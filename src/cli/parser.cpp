@@ -22,6 +22,50 @@ bool literal_operand(const char* value) noexcept {
     return value != nullptr && value[0] != '\0';
 }
 
+struct PositionalsWithCommit {
+    std::vector<std::string_view> positionals;
+    std::optional<std::string> commit_id;
+};
+
+std::optional<PositionalsWithCommit>
+parse_positionals_with_commit(int start_index, int argc, char* argv[]) {
+    PositionalsWithCommit parsed;
+    bool after_delimiter = false;
+    for (int i = start_index; i < argc; ++i) {
+        const std::string_view arg{argv[i]};
+        if (!after_delimiter && arg == "--") {
+            after_delimiter = true;
+            continue;
+        }
+        if (!after_delimiter &&
+            (arg == "--commit" || arg.starts_with("--commit="))) {
+            if (parsed.commit_id.has_value()) {
+                return std::nullopt;
+            }
+            std::string_view value;
+            if (arg == "--commit") {
+                if (i + 1 >= argc) {
+                    return std::nullopt;
+                }
+                value = argv[++i];
+            } else {
+                value = arg.substr(std::string_view{"--commit="}.size());
+            }
+            if (!application::history_storage::valid_hex_hash(value)) {
+                return std::nullopt;
+            }
+            parsed.commit_id = std::string{value};
+            continue;
+        }
+        if (after_delimiter ? literal_operand(argv[i]) : operand(argv[i])) {
+            parsed.positionals.push_back(arg);
+            continue;
+        }
+        return std::nullopt;
+    }
+    return parsed;
+}
+
 std::expected<Invocation, ParseError>
 request(application::Operation operation, int argc, char* argv[]) {
     if (argc != 3 || !operand(argv[2])) {
@@ -345,28 +389,16 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 .profile_name = argv[3],
                 .head_commit_id = std::string{argv[5]}};
         }
-        const auto return_stat = [&](const char* logical) {
+        if (inspection == "stat") {
+            const auto parsed = parse_positionals_with_commit(4, argc, argv);
+            if (!parsed || parsed->positionals.size() != 1) {
+                return std::unexpected(ParseError{});
+            }
             return application::InspectionRequest{
                 .operation = application::InspectionOperation::RemoteStat,
                 .profile_name = argv[3],
-                .logical_path = std::string{logical}};
-        };
-        const auto return_get = [&](const char* logical, const char* dst) {
-            return application::InspectionRequest{
-                .operation = application::InspectionOperation::RemoteGet,
-                .profile_name = argv[3],
-                .logical_path = std::string{logical},
-                .destination_path = std::string{dst}};
-        };
-        if (inspection == "stat") {
-            if (argc == 5 && operand(argv[4])) {
-                return return_stat(argv[4]);
-            }
-            if (argc == 6 && std::string_view{argv[4]} == "--" &&
-                literal_operand(argv[5])) {
-                return return_stat(argv[5]);
-            }
-            return std::unexpected(ParseError{});
+                .logical_path = std::string{parsed->positionals[0]},
+                .commit_id = parsed->commit_id};
         }
         if (inspection == "commit" && argc == 5 &&
             application::history_storage::valid_hex_hash(argv[4])) {
@@ -376,20 +408,16 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 .commit_id = std::string{argv[4]}};
         }
         if (inspection == "get") {
-            if (argc == 6 && operand(argv[4]) && operand(argv[5])) {
-                return return_get(argv[4], argv[5]);
+            const auto parsed = parse_positionals_with_commit(4, argc, argv);
+            if (!parsed || parsed->positionals.size() != 2) {
+                return std::unexpected(ParseError{});
             }
-            if (argc == 7) {
-                if (std::string_view{argv[4]} == "--" &&
-                    literal_operand(argv[5]) && literal_operand(argv[6])) {
-                    return return_get(argv[5], argv[6]);
-                }
-                if (operand(argv[4]) && std::string_view{argv[5]} == "--" &&
-                    literal_operand(argv[6])) {
-                    return return_get(argv[4], argv[6]);
-                }
-            }
-            return std::unexpected(ParseError{});
+            return application::InspectionRequest{
+                .operation = application::InspectionOperation::RemoteGet,
+                .profile_name = argv[3],
+                .logical_path = std::string{parsed->positionals[0]},
+                .commit_id = parsed->commit_id,
+                .destination_path = std::string{parsed->positionals[1]}};
         }
         if (inspection == "epoch" && argc == 5 && operand(argv[4])) {
             return application::InspectionRequest{

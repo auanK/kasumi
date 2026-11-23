@@ -456,23 +456,72 @@ bool valid_logical_path(std::string_view path) {
     return path == "/" || kasumi::valid_logical_path(path);
 }
 
+struct CommitInspectionTarget {
+    const Snapshot* tree = nullptr;
+    const kasumi::history::StorageManifest* manifest = nullptr;
+    std::uint64_t observed_height = 0;
+    bool has_conflicts = false;
+    std::optional<std::string> commit_id;
+};
+
+std::expected<CommitInspectionTarget, InspectionError>
+resolve_commit_target(const InspectionRequest& request,
+                      const observation::history::StorageView& observed,
+                      InspectionOperation operation) {
+    if (!request.commit_id) {
+        return CommitInspectionTarget{
+            .tree = &observed.effective_tree,
+            .manifest = &observed.storage_manifest,
+            .observed_height = observed.observed_height,
+            .has_conflicts = observed.has_conflicts,
+            .commit_id = std::nullopt,
+        };
+    }
+    const auto selected = std::ranges::find(observed.reachable_commits,
+                                            *request.commit_id,
+                                            &kasumi::history::LoadedCommit::id);
+    if (selected == observed.reachable_commits.end()) {
+        return fail(operation,
+                    InspectionErrorCode::RemoteCommitNotFound,
+                    "commit is not reachable in current remote history");
+    }
+    if (!valid_commit_snapshot(*selected)) {
+        return obs_fail(operation, "remote commit does not have a valid tree");
+    }
+    return CommitInspectionTarget{
+        .tree = &selected->commit.tree,
+        .manifest = &selected->commit.storage_manifest,
+        .observed_height = selected->commit.height,
+        .has_conflicts = false,
+        .commit_id = selected->id,
+    };
+}
+
 std::expected<RemoteStatReport, InspectionError>
 make_stat_report(const InspectionRequest& request,
                  const observation::history::StorageView& observed,
                  InspectionOperation operation) {
+    auto target = resolve_commit_target(request, observed, operation);
+    if (!target) {
+        return std::unexpected(target.error());
+    }
     const auto requested = request.logical_path.value_or("");
     const auto canonical = requested == "/" ? std::string_view{} : requested;
-    const auto* row = observed.history_present
-                          ? find_row(observed.effective_tree, canonical)
-                          : nullptr;
+    const bool tree_available =
+        observed.history_present && target->tree != nullptr;
+    const auto* row =
+        tree_available ? find_row(*target->tree, canonical) : nullptr;
     if (row == nullptr) {
         return fail(operation,
                     InspectionErrorCode::RemotePathNotFound,
-                    "path does not exist in remote logical tree");
+                    target->commit_id
+                        ? "path does not exist in requested remote commit"
+                        : "path does not exist in remote logical tree");
     }
     return RemoteStatReport{
-        .observed_height = observed.observed_height,
-        .has_conflicts = observed.has_conflicts,
+        .observed_height = target->observed_height,
+        .has_conflicts = target->has_conflicts,
+        .commit_id = target->commit_id,
         .path = row->path.empty() ? "/" : row->path,
         .type = row->is_directory ? RemoteTreeEntryType::Directory
                                   : RemoteTreeEntryType::File,
@@ -575,14 +624,23 @@ download_remote_file(const InspectionRequest& request,
                      const observation::history::StorageView& observed,
                      InspectionContext& context,
                      InspectionOperation operation) {
-    const auto* row = observed.history_present
-                          ? find_row(observed.effective_tree,
-                                     request.logical_path.value_or(""))
-                          : nullptr;
+    auto target = resolve_commit_target(request, observed, operation);
+    if (!target) {
+        return std::unexpected(target.error());
+    }
+    const bool tree_available =
+        observed.history_present && target->tree != nullptr &&
+        target->manifest != nullptr;
+    const auto* row =
+        tree_available
+            ? find_row(*target->tree, request.logical_path.value_or(""))
+            : nullptr;
     if (row == nullptr) {
         return fail(operation,
                     InspectionErrorCode::RemotePathNotFound,
-                    "path does not exist in remote logical tree");
+                    target->commit_id
+                        ? "path does not exist in requested remote commit"
+                        : "path does not exist in remote logical tree");
     }
     if (row->is_directory) {
         return fail(operation,
@@ -594,16 +652,15 @@ download_remote_file(const InspectionRequest& request,
         return std::unexpected(destination.error());
     }
 
-    const auto* chunk_layout =
-        history::find_chunked_file(observed.storage_manifest, row->hash);
+    const auto& manifest = *target->manifest;
+    const auto* chunk_layout = history::find_chunked_file(manifest, row->hash);
     context.progress->phase(Activity::Downloading,
                             chunk_layout ? chunk_layout->chunks.size() : 1);
     const auto logical_hash = hash_hex(row->hash);
     const auto plaintext = context.workspace->root / "remote-content.plain";
     std::string content_id;
 
-    if (const auto* packed =
-            history::find_packed_blob(observed.storage_manifest, row->hash)) {
+    if (const auto* packed = history::find_packed_blob(manifest, row->hash)) {
         content_id = crypto::pack_identifier(context.key, packed->pack_hash);
         const auto encrypted = context.workspace->root / "remote-pack.enc";
         const auto extract_dir = context.workspace->root / "pack-extract";
@@ -641,14 +698,15 @@ download_remote_file(const InspectionRequest& request,
             return std::unexpected(installed.error());
         }
         ProgressMeter::add(context.progress->work);
-        return RemoteFileReport{.path = row->path,
+        return RemoteFileReport{.commit_id = target->commit_id,
+                                .path = row->path,
                                 .destination_path =
                                     platform::path::to_utf8(*destination),
                                 .logical_hash = logical_hash,
                                 .content_id = content_id,
                                 .size = row->size};
-    } else if (const auto* chunked = history::find_chunked_file(
-                   observed.storage_manifest, row->hash)) {
+    } else if (const auto* chunked =
+                   history::find_chunked_file(manifest, row->hash)) {
         content_id = crypto::content_identifier(context.key, row->hash);
         const auto enc = context.workspace->root / "remote-chunk.enc";
         const auto chunk_plain = context.workspace->root / "remote-chunk.plain";
@@ -748,7 +806,8 @@ download_remote_file(const InspectionRequest& request,
         return std::unexpected(installed.error());
     }
     ProgressMeter::add(context.progress->work);
-    return RemoteFileReport{.path = row->path,
+    return RemoteFileReport{.commit_id = target->commit_id,
+                            .path = row->path,
                             .destination_path =
                                 platform::path::to_utf8(*destination),
                             .logical_hash = logical_hash,
@@ -1628,7 +1687,8 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
         (!req.head_commit_id || operation == Op::RemoteTree) &&
         (!req.logical_path || operation == Op::RemoteStat ||
          operation == Op::RemoteGet) &&
-        (!req.commit_id || operation == Op::RemoteCommit) &&
+        (!req.commit_id || operation == Op::RemoteCommit ||
+         operation == Op::RemoteStat || operation == Op::RemoteGet) &&
         (!req.destination_path || operation == Op::RemoteGet) &&
         (!req.epoch_selector || operation == Op::RemoteEpoch) &&
         (!req.content_id || operation == Op::RemoteContent);
@@ -1647,6 +1707,10 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     }
     if (operation == Op::RemoteCommit &&
         (!req.commit_id || !history::valid_commit_id(*req.commit_id))) {
+        return invalid("requested commit ID is invalid");
+    }
+    if ((operation == Op::RemoteStat || operation == Op::RemoteGet) &&
+        req.commit_id && !history::valid_commit_id(*req.commit_id)) {
         return invalid("requested commit ID is invalid");
     }
     if (operation == Op::RemoteContent &&
@@ -1712,15 +1776,21 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     const bool audit_content_objects =
         operation == Op::RemoteSummary || operation == Op::RemoteContents ||
         operation == Op::RemoteContentsAudit || operation == Op::RemoteContent;
+    const bool need_complete_history =
+        requires_complete_history(operation) ||
+        ((operation == Op::RemoteStat || operation == Op::RemoteGet) &&
+         input.request.commit_id.has_value());
     meter.phase(Activity::Authenticating);
     auto observed = observation::history::observe(
         context.storage,
         context.key,
         context.workspace->root,
         audit_content_objects,
-        context.hints.frontier ? &*context.hints.frontier : nullptr,
+        need_complete_history
+            ? nullptr
+            : (context.hints.frontier ? &*context.hints.frontier : nullptr),
         context.hints.trusted_marker_identifiers,
-        requires_complete_history(operation));
+        need_complete_history);
     if (!observed) {
         return obs_fail(operation, "failed to observe remote history");
     }

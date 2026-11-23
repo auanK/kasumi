@@ -883,7 +883,11 @@ int present_remote_report(const application::RemoteSummaryReport& report,
 
 int present_remote_report(const application::RemoteStatReport& report) {
     i18n::println(i18n::Key::RemoteStatHeader);
-    i18n::println(i18n::Key::RemoteStatView);
+    if (report.commit_id) {
+        i18n::println(i18n::Key::FieldCommit, remote_text(*report.commit_id));
+    } else {
+        i18n::println(i18n::Key::RemoteStatView);
+    }
     i18n::println(i18n::Key::FieldHeight, report.observed_height);
     i18n::println(i18n::Key::FieldConflicts, yes_no(report.has_conflicts));
     i18n::println(i18n::Key::FieldPath, remote_text(report.path));
@@ -945,6 +949,9 @@ int present_remote_report(const application::RemoteCommitReport& report) {
 
 int present_remote_report(const application::RemoteFileReport& report) {
     i18n::println(i18n::Key::RemoteFileSavedHeader);
+    if (report.commit_id) {
+        i18n::println(i18n::Key::FieldCommit, remote_text(*report.commit_id));
+    }
     i18n::println(i18n::Key::FieldPath, remote_text(report.path));
     i18n::println(i18n::Key::FieldDestination,
                   remote_text(report.destination_path));
