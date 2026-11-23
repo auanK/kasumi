@@ -1,6 +1,6 @@
 # Maintainer: auanK <https://github.com/auanK/kasumi>
 pkgname=kasumi
-pkgver=0.22.0
+pkgver=0.23.0
 pkgrel=1
 pkgdesc="Multi-client encrypted bidirectional file synchronization without a dedicated server"
 arch=('x86_64')

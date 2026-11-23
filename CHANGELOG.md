@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.23.0]
+
+### Added
+
+- Add safe, automatable garbage collection with a default fail-closed grace period (`--min-age <hours>`, `0..8760`, defaulting to the profile's `min_history_age_hours` = 6h) that defers freshly uploaded orphan blobs and unreachable commits while enforcing a floor on `KACT` activity retention, plus dual-clock (`ModTime` + authenticated `created_at`) pruning of expired commits behind Epoch boundaries.
+- Add single-pass `transport::list_metadata` across local storage and `rclone` (`operations/list` with `noModTime: false` and `FastList: true`) for object sizes and RFC3339 timestamps, batched Epoch and HEAD marker prefetch during history reachability, pre-barrier read-only busy detection (`remote_busy` JSON error code and `[BUSY]` log tag without mutating the remote barrier), zero-candidate fast path skipping the consistency probe, and granular GC live progress reporting (sub-stages, commit counts, reclaimable/removed bytes, rate, ETA, and deferred counts).
+- Expand binary codec fuzzing across `KCOM`, `KPAK`, `KACT`, `Epoch`, `Transaction`, and AEAD envelopes (10-seed deterministic corpus plus 6 libFuzzer harnesses under `KASUMI_BUILD_FUZZERS=ON`), and add randomized multi-client soak, transport fault-injection, and sync throughput benchmark integration tests.
+
+### Changed
+
+- Refactor `src/application/sync/coordinator.cpp` into focused internal translation units (`coordinator_workspace.cpp`, `coordinator_uploads.cpp`, `coordinator_downloads.cpp`, and `coordinator_detail.hpp`) with zero external behavior or performance regression.
+
+### Documentation
+
+- Document safe automatable GC, `--min-age`, expired commit pruning, `remote_busy` / `[BUSY]` automation logs, `list_metadata`, and granular GC progress across [garbage-collection.md](docs/architecture/garbage-collection.md), [history-and-concurrency.md](docs/architecture/history-and-concurrency.md), [remote-layout.md](docs/architecture/remote-layout.md), [transport.md](docs/architecture/transport.md), [best-practices.md](docs/best-practices.md), [configuration-and-usage.md](docs/configuration-and-usage.md), [troubleshooting.md](docs/troubleshooting.md), and [README.md](README.md).
+
+### Upgrade Notes
+
+- Protocol and local storage formats remain unchanged (`KCOM` v4, `KACT` v1, `KPAK\x01`, `state.db` schema v2, `transaction.bin.enc`, and `config.toml`), staying 100% compatible with `v0.19.x`–`v0.22.0`.
+
 ## [0.22.0]
 
 ### Added
