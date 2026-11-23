@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.22.0]
+
+### Added
+
+- Add Windows x86_64 `.msi` installer ([packaging/wix/kasumi.wxs](packaging/wix/kasumi.wxs), WiX v5) that installs into `C:\Program Files\Kasumi`, adds the installation directory to the system `PATH`, and supports automatic in-place major upgrades via a fixed `UpgradeCode` with custom install-folder persistence.
+- Add native Arch Linux `.pkg.tar.zst` package builder ([scripts/build_arch_package.py](scripts/build_arch_package.py)) and Arch [PKGBUILD](packaging/arch/PKGBUILD) for `pacman -U` / `makepkg -si` installation and upgrades under `/usr/bin/kasumi`.
+- Configure CPack DEB and RPM packaging rules in [CMakeLists.txt](CMakeLists.txt) to build `kasumi-linux-x86_64.deb` and `kasumi-linux-x86_64.rpm` alongside the portable `.zip` and `.tar.gz` archives.
+- Add packaging contract tests ([tests/architecture/test_packaging.py](tests/architecture/test_packaging.py)) and automated release-gate live install, in-place upgrade/reinstall, and clean removal verification across Windows MSI, Ubuntu `.deb`, Arch Linux `.pkg.tar.zst`, and Fedora `.rpm`, publishing SHA-256 sidecars, `SHA256SUMS.txt`, and GitHub build provenance attestations for all 6 packages.
+
+### Documentation
+
+- Document native installer installation, SHA-256 / `gh attestation verify` verification, and in-place upgrade instructions across [README.md](README.md), [getting-started.md](docs/getting-started.md), and [configuration-and-usage.md](docs/configuration-and-usage.md).
+
+### Upgrade Notes
+
+- Protocol and local storage formats remain unchanged (`KCOM` v4, `KACT` v1, `KPAK\x01`, `state.db` schema v2, `transaction.bin.enc`, and `config.toml`), staying 100% compatible with `v0.19.x`–`v0.21.2`.
+
 ## [0.21.2]
 
 ### Fixed
