@@ -239,6 +239,11 @@ std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
                 ? std::optional<std::chrono::seconds>{std::chrono::hours{
                       *context.gc_min_age_hours}}
                 : std::nullopt,
+        .barrier_settle_delay = std::chrono::milliseconds{2000},
+        .machine_name =
+            context.machine_identity.has_value()
+                ? std::optional<std::string>{context.machine_identity->name}
+                : std::nullopt,
     };
     if (context.dry_run) {
         const auto journal_paths = sync::journal::make_paths(
@@ -307,8 +312,15 @@ std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
 
 std::expected<Response, Error> run_remove_barrier(OperationContext& context) {
     const auto layout = history_storage::derive_remote_layout(context.key);
+    const std::optional<std::string_view> target_barrier =
+        context.barrier_identifier.has_value()
+            ? std::optional<std::string_view>{*context.barrier_identifier}
+            : std::nullopt;
     auto removed = history_storage::maintenance_protocol::remove_barrier(
-        context.storage, layout, maintenance_workspace_root(context.runtime));
+        context.storage,
+        layout,
+        maintenance_workspace_root(context.runtime),
+        target_barrier);
     if (!removed) {
         const auto& err = removed.error();
         const auto stage = err.stage.has_value()
@@ -384,9 +396,11 @@ std::expected<Response, Error> run_remove_barrier(OperationContext& context) {
     return make_response(
         context,
         ManualBarrierRemovalCompleted{
-            .identifier = layout.barrier_identifier,
+            .identifier =
+                removed->barrier_identifier.value_or(layout.barrier_identifier),
             .outcome = outcome,
             .active_writers_count = removed->active_writers_count,
+            .remaining_barriers_count = removed->remaining_barriers_count,
         });
 }
 

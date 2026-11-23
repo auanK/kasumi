@@ -37,6 +37,7 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     output.reclaim_dirty = input.request.reclaim_dirty;
     output.gc_min_age_hours = input.request.gc_min_age_hours;
     output.writer_identifier = input.request.writer_identifier;
+    output.barrier_identifier = input.request.barrier_identifier;
     output.on_progress = input.on_progress;
     const auto invalid_request = [&](std::string_view detail) {
         return std::unexpected(Error{
