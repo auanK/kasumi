@@ -1,11 +1,11 @@
-#include "platform/cancellation.hpp"
-#include "platform/profile_lock.hpp"
 #include "application/profile.hpp"
 #include "cli/app.hpp"
 #include "cli/log_file.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
+#include "platform/cancellation.hpp"
+#include "platform/profile_lock.hpp"
 
 #include <csignal>
 #include <fstream>
@@ -191,8 +191,7 @@ INSTANTIATE_TEST_SUITE_P(
                            "sync"},
         InvalidCommandLine{
             "MissingOperand", {"remote", "get", "demo", "file"}, "remote get"},
-        InvalidCommandLine{
-            "UnknownCommand", {"unknown"}, ""}),
+        InvalidCommandLine{"UnknownCommand", {"unknown"}, ""}),
     [](const auto& case_info) {
         return case_info.param.name;
     });
@@ -238,10 +237,10 @@ TEST_F(CliInterfaceTest, ShowAndRemoteSummaryFullGrammarValidation) {
     }
 }
 
-TEST_F(CliInterfaceTest,
-       ShowOfflineRemoteSummaryAndConfigReflectTraceability) {
+TEST_F(CliInterfaceTest, ShowOfflineRemoteSummaryAndConfigReflectTraceability) {
     const auto root = kasumi::test::workspace_root(workspace);
-    const kasumi::application::ExecutionEnvironment environment{root / "kasumi"};
+    const kasumi::application::ExecutionEnvironment environment{root /
+                                                                "kasumi"};
     const auto remote = root / "remote";
     const kasumi::application::Profile profile{
         "demo", root / "local", remote.string()};
@@ -297,9 +296,11 @@ TEST_F(CliInterfaceTest,
     EXPECT_NE(config.out.find("(ok)"), std::string::npos);
 }
 
-TEST_F(CliInterfaceTest, QuietSuppressesProgressAndSuccessOutputButPreservesErrors) {
+TEST_F(CliInterfaceTest,
+       QuietSuppressesProgressAndSuccessOutputButPreservesErrors) {
     const auto root = kasumi::test::workspace_root(workspace);
-    const kasumi::application::ExecutionEnvironment environment{root / "kasumi"};
+    const kasumi::application::ExecutionEnvironment environment{root /
+                                                                "kasumi"};
     const kasumi::application::Profile profile{
         "demo", root / "local", (root / "remote").string()};
     ASSERT_TRUE(kasumi::application::create_profile(
@@ -352,7 +353,8 @@ TEST_F(CliInterfaceTest, QuietSuppressesProgressAndSuccessOutputButPreservesErro
 
 TEST_F(CliInterfaceTest, JsonOutputsStructuredSchemaLockBusyAndErrorCodes) {
     const auto root = kasumi::test::workspace_root(workspace);
-    const kasumi::application::ExecutionEnvironment environment{root / "kasumi"};
+    const kasumi::application::ExecutionEnvironment environment{root /
+                                                                "kasumi"};
     const kasumi::application::Profile profile{
         "demo", root / "local", (root / "remote").string()};
     ASSERT_TRUE(kasumi::application::create_profile(
@@ -385,8 +387,8 @@ TEST_F(CliInterfaceTest, JsonOutputsStructuredSchemaLockBusyAndErrorCodes) {
     EXPECT_TRUE(locked.err.empty());
     EXPECT_NE(locked.out.find("\"code\":\"lock_busy\""), std::string::npos);
 
-    const auto sync_dry =
-        run({"kasumi", "--lang", "pt-BR", "sync", "demo", "--dry-run", "--json"});
+    const auto sync_dry = run(
+        {"kasumi", "--lang", "pt-BR", "sync", "demo", "--dry-run", "--json"});
     EXPECT_EQ(sync_dry.code, 0) << sync_dry.out;
     EXPECT_TRUE(sync_dry.err.empty());
     EXPECT_NE(sync_dry.out.find("\"command\":\"sync\""), std::string::npos);
@@ -414,16 +416,16 @@ TEST_F(CliInterfaceTest, JsonOutputsStructuredSchemaLockBusyAndErrorCodes) {
     EXPECT_TRUE(diag_quiet.err.empty());
 }
 
-TEST_F(CliInterfaceTest, LogFileWritesCleanTextAndAppendsNdjsonWithoutCreatingOnHelp) {
+TEST_F(CliInterfaceTest,
+       LogFileWritesCleanTextAndAppendsNdjsonWithoutCreatingOnHelp) {
     const auto root = kasumi::test::workspace_root(workspace);
-    const kasumi::application::ExecutionEnvironment environment{root / "kasumi"};
+    const kasumi::application::ExecutionEnvironment environment{root /
+                                                                "kasumi"};
     const std::string master_key(64, '8');
     const kasumi::application::Profile profile{
         "demo", root / "local", (root / "remote").string()};
     ASSERT_TRUE(kasumi::application::create_profile(
-        environment,
-        profile,
-        kasumi::application::MasterKeyHex{master_key}));
+        environment, profile, kasumi::application::MasterKeyHex{master_key}));
     std::filesystem::create_directories(profile.local_dir);
     kasumi::test::write_text(profile.local_dir / "item.txt", "log payload");
 
@@ -493,30 +495,20 @@ TEST_F(CliInterfaceTest, LogFileWritesCleanTextAndAppendsNdjsonWithoutCreatingOn
     EXPECT_EQ(ndjson_lines[2].find(master_key), std::string::npos);
 
     const auto text_log = root / "logs" / "text.log";
-    const auto text_sync_noop = run({"kasumi",
-                                     "sync",
-                                     "demo",
-                                     "--quiet",
-                                     "--log-file",
-                                     text_log.string()});
+    const auto text_sync_noop = run(
+        {"kasumi", "sync", "demo", "--quiet", "--log-file", text_log.string()});
     ASSERT_EQ(text_sync_noop.code, 0) << text_sync_noop.err;
 
     const auto lock_path = environment.app_data_dir / "profile-demo.lock";
     auto held_lock = kasumi::platform::acquire_profile_lock(lock_path);
     ASSERT_TRUE(held_lock.has_value()) << held_lock.error();
-    const auto text_locked = run({"kasumi",
-                                  "sync",
-                                  "demo",
-                                  "--quiet",
-                                  "--log-file",
-                                  text_log.string()});
+    const auto text_locked = run(
+        {"kasumi", "sync", "demo", "--quiet", "--log-file", text_log.string()});
     kasumi::platform::release_profile_lock(*held_lock);
     EXPECT_EQ(text_locked.code, 1);
 
-    const auto text_diag = run({"kasumi",
-                                "diagnostics",
-                                "absent",
-                                "--log-file=" + text_log.string()});
+    const auto text_diag = run(
+        {"kasumi", "diagnostics", "absent", "--log-file=" + text_log.string()});
     EXPECT_EQ(text_diag.code, 1);
 
     std::string text_content;
@@ -530,17 +522,20 @@ TEST_F(CliInterfaceTest, LogFileWritesCleanTextAndAppendsNdjsonWithoutCreatingOn
               std::string::npos);
     EXPECT_NE(text_content.find("] [LOCKED] sync demo | [lock_busy] "),
               std::string::npos);
-    EXPECT_NE(text_content.find("] [ERROR] diagnostics absent | [profile_not_found] "),
+    EXPECT_NE(text_content.find(
+                  "] [ERROR] diagnostics absent | [profile_not_found] "),
               std::string::npos);
     EXPECT_EQ(text_content.find(master_key), std::string::npos);
 
-    EXPECT_EQ(kasumi::cli::strip_ansi_sequences("\x1b[32m[OK]\x1b[0m\tOl\xC3\xA1\n"),
-              "[OK] Ol\xC3\xA1");
+    EXPECT_EQ(
+        kasumi::cli::strip_ansi_sequences("\x1b[32m[OK]\x1b[0m\tOl\xC3\xA1\n"),
+        "[OK] Ol\xC3\xA1");
 }
 
 TEST_F(CliInterfaceTest, ActiveLockShowsRunningAcrossShowConfigAndDiagnostics) {
     const auto root = kasumi::test::workspace_root(workspace);
-    const kasumi::application::ExecutionEnvironment environment{root / "kasumi"};
+    const kasumi::application::ExecutionEnvironment environment{root /
+                                                                "kasumi"};
     const kasumi::application::Profile profile{
         "demo", root / "local", (root / "remote").string()};
     ASSERT_TRUE(kasumi::application::create_profile(
@@ -608,7 +603,8 @@ TEST_F(CliInterfaceTest, MissingCommandPrintsHelpAndFails) {
 
 TEST_F(CliInterfaceTest, InspectsLogicalPathsStartingWithHyphenUsingDelimiter) {
     const auto root = kasumi::test::workspace_root(workspace);
-    const kasumi::application::ExecutionEnvironment environment{root / "kasumi"};
+    const kasumi::application::ExecutionEnvironment environment{root /
+                                                                "kasumi"};
     const kasumi::application::Profile profile{
         "demo", root / "local", (root / "remote").string()};
     ASSERT_TRUE(kasumi::application::create_profile(
@@ -616,7 +612,8 @@ TEST_F(CliInterfaceTest, InspectsLogicalPathsStartingWithHyphenUsingDelimiter) {
         profile,
         kasumi::application::MasterKeyHex{std::string(64, '7')}));
     std::filesystem::create_directories(profile.local_dir);
-    kasumi::test::write_text(profile.local_dir / "--notes.txt", "hyphen content");
+    kasumi::test::write_text(profile.local_dir / "--notes.txt",
+                             "hyphen content");
     kasumi::test::write_text(profile.local_dir / "notes.txt", "normal content");
 
     const auto sync_output = run({"kasumi", "sync", "demo"});
@@ -628,8 +625,13 @@ TEST_F(CliInterfaceTest, InspectsLogicalPathsStartingWithHyphenUsingDelimiter) {
     EXPECT_NE(stat_output.out.find("--notes.txt"), std::string::npos);
 
     const auto destination = root / "downloaded-notes.txt";
-    const auto get_output =
-        run({"kasumi", "remote", "get", "demo", "--", "--notes.txt", destination.string()});
+    const auto get_output = run({"kasumi",
+                                 "remote",
+                                 "get",
+                                 "demo",
+                                 "--",
+                                 "--notes.txt",
+                                 destination.string()});
     EXPECT_EQ(get_output.code, 0) << get_output.err;
     EXPECT_TRUE(std::filesystem::exists(destination));
     if (std::filesystem::exists(destination)) {
@@ -637,8 +639,13 @@ TEST_F(CliInterfaceTest, InspectsLogicalPathsStartingWithHyphenUsingDelimiter) {
     }
 
     const auto hyphen_dst = root / "-notes-copy.txt";
-    const auto get_hyphen_dst =
-        run({"kasumi", "remote", "get", "demo", "notes.txt", "--", hyphen_dst.string()});
+    const auto get_hyphen_dst = run({"kasumi",
+                                     "remote",
+                                     "get",
+                                     "demo",
+                                     "notes.txt",
+                                     "--",
+                                     hyphen_dst.string()});
     EXPECT_EQ(get_hyphen_dst.code, 0) << get_hyphen_dst.err;
     EXPECT_TRUE(std::filesystem::exists(hyphen_dst));
     if (std::filesystem::exists(hyphen_dst)) {
@@ -646,8 +653,13 @@ TEST_F(CliInterfaceTest, InspectsLogicalPathsStartingWithHyphenUsingDelimiter) {
     }
 
     const auto both_dst = root / "-both-copy.txt";
-    const auto get_both_hyphen =
-        run({"kasumi", "remote", "get", "demo", "--", "--notes.txt", both_dst.string()});
+    const auto get_both_hyphen = run({"kasumi",
+                                      "remote",
+                                      "get",
+                                      "demo",
+                                      "--",
+                                      "--notes.txt",
+                                      both_dst.string()});
     EXPECT_EQ(get_both_hyphen.code, 0) << get_both_hyphen.err;
     EXPECT_TRUE(std::filesystem::exists(both_dst));
     if (std::filesystem::exists(both_dst)) {
@@ -789,9 +801,9 @@ TEST_F(CliInterfaceTest, SignalCancelsBlockedWizardInput) {
     std::promise<void> input_started;
     auto input_started_future = input_started.get_future();
     struct BlockingInput : std::streambuf {
-        BlockingInput(int input_descriptor,
-                      std::promise<void>& input_started)
-            : descriptor(input_descriptor), started(input_started) {}
+        BlockingInput(int input_descriptor, std::promise<void>& input_started)
+            : descriptor(input_descriptor), started(input_started) {
+        }
         int_type underflow() override {
             if (!announced) {
                 announced = true;

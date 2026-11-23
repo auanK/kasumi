@@ -123,10 +123,12 @@ check_sync_disk_space(const std::filesystem::path& local_dir,
     std::uint64_t max_download_bytes = 0;
     for (const auto& op : sync_plan_operations(plan)) {
         if (op.action == Action::Download) {
-            required_local_bytes = saturating_add(required_local_bytes, op.size);
+            required_local_bytes =
+                saturating_add(required_local_bytes, op.size);
             max_download_bytes = std::max(max_download_bytes, op.size);
         } else if (op.action == Action::CopyLocal) {
-            required_local_bytes = saturating_add(required_local_bytes, op.size);
+            required_local_bytes =
+                saturating_add(required_local_bytes, op.size);
         }
     }
     if (required_local_bytes == 0) {

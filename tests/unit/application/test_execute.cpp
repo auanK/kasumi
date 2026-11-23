@@ -12,8 +12,8 @@
 #include "crypto/file_crypto.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
-#include "platform/profile_lock.hpp"
 #include "platform/metadata.hpp"
+#include "platform/profile_lock.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
 
@@ -1316,8 +1316,7 @@ TEST(ApplicationExecuteTest, RepackRunsDryRunAndPublishThroughPublicBoundary) {
     const Profile profile{.name = "demo",
                           .local_dir = local,
                           .remote_dir = remote.string(),
-                          .key_storage =
-                              kasumi::application::KeyStorage::File};
+                          .key_storage = kasumi::application::KeyStorage::File};
     ASSERT_TRUE(std::filesystem::create_directories(local));
     ASSERT_TRUE(std::filesystem::create_directories(remote));
     ASSERT_TRUE(kasumi::application::create_profile(env, profile, key()));
@@ -1345,12 +1344,12 @@ TEST(ApplicationExecuteTest, RepackRunsDryRunAndPublishThroughPublicBoundary) {
          env});
     ASSERT_TRUE(sync2.has_value()) << sync2.error().detail;
 
-    const auto dry = kasumi::application::execute(
-        {Request{.operation = Operation::Repack,
-                 .profile_name = "demo",
-                 .dry_run = true},
-         Credentials{NoCredentials{}},
-         env});
+    const auto dry =
+        kasumi::application::execute({Request{.operation = Operation::Repack,
+                                              .profile_name = "demo",
+                                              .dry_run = true},
+                                      Credentials{NoCredentials{}},
+                                      env});
     ASSERT_TRUE(dry.has_value()) << dry.error().detail;
     const auto* dry_data = std::get_if<RepackCompleted>(&dry->data);
     ASSERT_NE(dry_data, nullptr);
@@ -1399,9 +1398,7 @@ TEST(ApplicationExecuteTest, RepackRunsDryRunAndPublishThroughPublicBoundary) {
     EXPECT_FALSE(noop_data->published);
 
     const auto checked = kasumi::application::execute(
-        {Request{Operation::Fsck, "demo"},
-         Credentials{NoCredentials{}},
-         env});
+        {Request{Operation::Fsck, "demo"}, Credentials{NoCredentials{}}, env});
     ASSERT_TRUE(checked.has_value()) << checked.error().detail;
 }
 
@@ -1431,18 +1428,18 @@ TEST(ApplicationExecuteTest,
     std::filesystem::create_directories(stray_path.parent_path(), dir_ec);
     ASSERT_FALSE(dir_ec) << dir_ec.message();
     kasumi::test::write_text(stray_path, "foreign");
-    const auto audit_sync = kasumi::application::execute(
-        {Request{.operation = Operation::Sync,
-                 .profile_name = "demo",
-                 .audit_inventory = true},
-         Credentials{key()},
-         env});
+    const auto audit_sync =
+        kasumi::application::execute({Request{.operation = Operation::Sync,
+                                              .profile_name = "demo",
+                                              .audit_inventory = true},
+                                      Credentials{key()},
+                                      env});
     ASSERT_FALSE(audit_sync.has_value());
     EXPECT_EQ(audit_sync.error().code, ErrorCode::InventoryAuditFailure);
     EXPECT_TRUE(audit_sync.error().sync_completed.has_value());
 
-    const auto activity = kasumi::application::inspect_profile_activity(
-        env, "demo");
+    const auto activity =
+        kasumi::application::inspect_profile_activity(env, "demo");
     ASSERT_TRUE(activity.last_attempt.has_value());
     EXPECT_EQ(activity.last_attempt->status,
               kasumi::application::ProfileExecutionStatus::Failed);
@@ -1541,7 +1538,8 @@ TEST(ApplicationExecuteTest,
     EXPECT_EQ(gc->candidate_activities, 0U);
     EXPECT_EQ(gc->removed_objects, 0U);
 
-    // Orphan remains present, no barrier remains, and no activity was published.
+    // Orphan remains present, no barrier remains, and no activity was
+    // published.
     EXPECT_EQ(kasumi::transport::presence(*opened, orphan_id).value(),
               kasumi::transport::Presence::Present);
     const auto layout =
@@ -1549,8 +1547,8 @@ TEST(ApplicationExecuteTest,
     EXPECT_EQ(
         kasumi::transport::presence(*opened, layout.barrier_identifier).value(),
         kasumi::transport::Presence::Absent);
-    const auto activity = kasumi::application::inspect_profile_activity(
-        env, "demo");
+    const auto activity =
+        kasumi::application::inspect_profile_activity(env, "demo");
     ASSERT_TRUE(activity.last_attempt.has_value());
     EXPECT_EQ(activity.last_attempt->operation,
               kasumi::application::ProfileOperationKind::Sync);
@@ -1563,7 +1561,8 @@ TEST(ApplicationExecuteTest,
          Credentials{key()},
          env});
     ASSERT_TRUE(live_gc.has_value()) << live_gc.error().detail;
-    const auto* live_data = std::get_if<GarbageCollectCompleted>(&live_gc->data);
+    const auto* live_data =
+        std::get_if<GarbageCollectCompleted>(&live_gc->data);
     ASSERT_NE(live_data, nullptr);
     EXPECT_FALSE(live_data->dry_run);
     EXPECT_EQ(live_data->removed_objects, 1U);
@@ -1603,18 +1602,18 @@ TEST(ApplicationExecuteTest,
         kasumi::test::workspace_path(workspace, "app")};
     ASSERT_TRUE(std::filesystem::create_directories(local));
 
-    // > 256 KiB file is stored as a loose Content object; 16 small files trigger
-    // Micro-Packing even on local transport (min_pack_blobs == 16 when no
-    // backend physical_hash_batch is present).
+    // > 256 KiB file is stored as a loose Content object; 16 small files
+    // trigger Micro-Packing even on local transport (min_pack_blobs == 16 when
+    // no backend physical_hash_batch is present).
     std::string loose_payload(300U * 1024U, 'L');
     for (std::size_t i = 0; i < loose_payload.size(); i += 131U) {
         loose_payload[i] = static_cast<char>('A' + (i % 26U));
     }
     kasumi::test::write_text(local / "loose.bin", loose_payload);
     for (int i = 0; i < 16; ++i) {
-        kasumi::test::write_text(
-            local / ("small_" + std::to_string(i) + ".txt"),
-            "packed-repair-" + std::to_string(i));
+        kasumi::test::write_text(local /
+                                     ("small_" + std::to_string(i) + ".txt"),
+                                 "packed-repair-" + std::to_string(i));
     }
 
     const auto initial = kasumi::application::execute(
@@ -1626,7 +1625,8 @@ TEST(ApplicationExecuteTest,
     ASSERT_TRUE(activity_before.accepted_commit.has_value());
     const auto head_before = activity_before.accepted_commit->commit_id;
 
-    // Delete both the loose Content object and the Micro-Pack from remote storage.
+    // Delete both the loose Content object and the Micro-Pack from remote
+    // storage.
     auto opened = kasumi::transport::open_transport(remote.string());
     ASSERT_TRUE(opened.has_value()) << opened.error().message;
     const auto key_bytes = application_key();
@@ -1648,7 +1648,8 @@ TEST(ApplicationExecuteTest,
     }
     ASSERT_EQ(removed_packs.size(), 1U);
 
-    // Ordinary NOOP sync does not list the full vault or repair unreferenced objects.
+    // Ordinary NOOP sync does not list the full vault or repair unreferenced
+    // objects.
     const auto noop = kasumi::application::execute(
         {Request{Operation::Sync, "demo"}, Credentials{key()}, env});
     ASSERT_TRUE(noop.has_value()) << noop.error().detail;
@@ -1658,13 +1659,14 @@ TEST(ApplicationExecuteTest,
     EXPECT_EQ(kasumi::transport::presence(*opened, loose_cid).value(),
               kasumi::transport::Presence::Absent);
 
-    // --repair lists remote storage, detects missing loose + pack objects, and repairs them.
-    const auto repaired = kasumi::application::execute(
-        {Request{.operation = Operation::Sync,
-                 .profile_name = "demo",
-                 .repair = true},
-         Credentials{key()},
-         env});
+    // --repair lists remote storage, detects missing loose + pack objects, and
+    // repairs them.
+    const auto repaired =
+        kasumi::application::execute({Request{.operation = Operation::Sync,
+                                              .profile_name = "demo",
+                                              .repair = true},
+                                      Credentials{key()},
+                                      env});
     ASSERT_TRUE(repaired.has_value()) << repaired.error().detail;
     const auto* repaired_sync = std::get_if<SyncCompleted>(&repaired->data);
     ASSERT_NE(repaired_sync, nullptr);
@@ -1672,8 +1674,9 @@ TEST(ApplicationExecuteTest,
     EXPECT_FALSE(repaired_sync->published);
     EXPECT_EQ(kasumi::transport::presence(*opened, loose_cid).value(),
               kasumi::transport::Presence::Present);
-    EXPECT_EQ(kasumi::transport::presence(*opened, removed_packs.front()).value(),
-              kasumi::transport::Presence::Present);
+    EXPECT_EQ(
+        kasumi::transport::presence(*opened, removed_packs.front()).value(),
+        kasumi::transport::Presence::Present);
 
     const auto activity_after =
         kasumi::application::inspect_profile_activity(env, "demo");
@@ -1685,7 +1688,8 @@ TEST(ApplicationExecuteTest,
     ASSERT_TRUE(audit.has_value()) << audit.error().detail;
 }
 
-TEST(ApplicationExecuteTest, DiskSpacePreflightEnforcesDownloadAndStagingSpace) {
+TEST(ApplicationExecuteTest,
+     DiskSpacePreflightEnforcesDownloadAndStagingSpace) {
     using kasumi::Action;
     using kasumi::application::detail::check_sync_disk_space;
 
@@ -1693,24 +1697,26 @@ TEST(ApplicationExecuteTest, DiskSpacePreflightEnforcesDownloadAndStagingSpace) 
     const auto profile = std::filesystem::path{"C:/fake/profile"};
 
     // Plan with Download (1000 bytes) + CopyLocal (500 bytes) requires
-    // 1500 + min(1500, 16 MiB) = 3000 bytes on local, and 1000 bytes on staging.
+    // 1500 + min(1500, 16 MiB) = 3000 bytes on local, and 1000 bytes on
+    // staging.
     const auto plan = kasumi::make_sync_plan(
         {
-            kasumi::Operation{.action = Action::Download,
-                              .path = "a.bin",
-                              .size = 1000},
-            kasumi::Operation{.action = Action::CopyLocal,
-                              .path = "b.bin",
-                              .size = 500},
+            kasumi::Operation{
+                .action = Action::Download, .path = "a.bin", .size = 1000},
+            kasumi::Operation{
+                .action = Action::CopyLocal, .path = "b.bin", .size = 500},
         },
         1);
 
     EXPECT_TRUE(check_sync_disk_space(local, profile, plan, [&](const auto&) {
-        return std::optional<std::uint64_t>{4096};
-    }).has_value());
+                    return std::optional<std::uint64_t>{4096};
+                }).has_value());
 
     const auto low_local = check_sync_disk_space(
-        local, profile, plan, [&](const auto& p) -> std::optional<std::uint64_t> {
+        local,
+        profile,
+        plan,
+        [&](const auto& p) -> std::optional<std::uint64_t> {
             return p == local ? 2999ULL : 4096ULL;
         });
     ASSERT_FALSE(low_local.has_value());
@@ -1718,7 +1724,10 @@ TEST(ApplicationExecuteTest, DiskSpacePreflightEnforcesDownloadAndStagingSpace) 
               std::string::npos);
 
     const auto low_staging = check_sync_disk_space(
-        local, profile, plan, [&](const auto& p) -> std::optional<std::uint64_t> {
+        local,
+        profile,
+        plan,
+        [&](const auto& p) -> std::optional<std::uint64_t> {
             return p == profile ? 999ULL : 10000ULL;
         });
     ASSERT_FALSE(low_staging.has_value());
@@ -1727,14 +1736,13 @@ TEST(ApplicationExecuteTest, DiskSpacePreflightEnforcesDownloadAndStagingSpace) 
 
     // Upload-only plan bypasses download space check even when free space is 0.
     const auto upload_plan = kasumi::make_sync_plan(
-        {kasumi::Operation{.action = Action::Upload,
-                           .path = "up.bin",
-                           .size = 5000}},
+        {kasumi::Operation{
+            .action = Action::Upload, .path = "up.bin", .size = 5000}},
         1);
-    EXPECT_TRUE(check_sync_disk_space(
-                    local, profile, upload_plan,
-                    [](const auto&) { return std::optional<std::uint64_t>{0}; })
-                    .has_value());
+    EXPECT_TRUE(
+        check_sync_disk_space(local, profile, upload_plan, [](const auto&) {
+            return std::optional<std::uint64_t>{0};
+        }).has_value());
 }
 
 TEST(ApplicationExecuteTest,
@@ -1796,9 +1804,9 @@ TEST(ApplicationExecuteTest,
          env});
     ASSERT_FALSE(busy.has_value());
     EXPECT_TRUE(busy.error().remote_busy);
-    EXPECT_EQ(kasumi::transport::presence(*opened, layout.barrier_identifier)
-                  .value(),
-              kasumi::transport::Presence::Absent);
+    EXPECT_EQ(
+        kasumi::transport::presence(*opened, layout.barrier_identifier).value(),
+        kasumi::transport::Presence::Absent);
 
     ASSERT_TRUE(kasumi::application::history_storage::maintenance_protocol::
                     release_registration(*writer));

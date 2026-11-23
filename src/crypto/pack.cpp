@@ -68,11 +68,13 @@ write_ciphertext_atomically(const std::filesystem::path& output_path,
     std::error_code ec;
     const auto dest_status = std::filesystem::symlink_status(target_path, ec);
     if (ec && ec != std::errc::no_such_file_or_directory) {
-        return std::unexpected("failed to inspect output path: " + ec.message());
+        return std::unexpected("failed to inspect output path: " +
+                               ec.message());
     }
-    if (!ec && (std::filesystem::is_directory(dest_status) ||
-                std::filesystem::is_symlink(dest_status) ||
-                platform::private_storage::is_reparse_or_symlink(target_path))) {
+    if (!ec &&
+        (std::filesystem::is_directory(dest_status) ||
+         std::filesystem::is_symlink(dest_status) ||
+         platform::private_storage::is_reparse_or_symlink(target_path))) {
         return std::unexpected("output path is an invalid directory or link");
     }
 
@@ -93,7 +95,8 @@ write_ciphertext_atomically(const std::filesystem::path& output_path,
                       target_path, ".k_", "." + id->substr(0, 8))
                 : target_path.parent_path() /
                       platform::path::from_utf8(".k_" + id->substr(0, 16));
-        auto created = platform::private_storage::create_private_file(candidate);
+        auto created =
+            platform::private_storage::create_private_file(candidate);
         if (created) {
             temp_file = std::move(*created);
             reserved = true;
@@ -130,12 +133,11 @@ write_ciphertext_atomically(const std::filesystem::path& output_path,
     return digest;
 }
 
-std::expected<void, std::string>
-read_regular_file_checked(const std::filesystem::path& path,
-                          std::uint64_t max_bytes,
-                          std::vector<std::uint8_t>& out,
-                          std::optional<std::uint64_t> expected_size =
-                              std::nullopt) {
+std::expected<void, std::string> read_regular_file_checked(
+    const std::filesystem::path& path,
+    std::uint64_t max_bytes,
+    std::vector<std::uint8_t>& out,
+    std::optional<std::uint64_t> expected_size = std::nullopt) {
     // Wipe the old contents before shrinking or reallocating the buffer.
     secure_memory::wipe(out.data(), out.size());
     out.clear();
@@ -185,8 +187,8 @@ read_regular_file_checked(const std::filesystem::path& path,
 
 } // namespace
 
-std::optional<Hash>
-compute_pack_hash(std::span<const PackMemberDescriptor> sorted_members) noexcept {
+std::optional<Hash> compute_pack_hash(
+    std::span<const PackMemberDescriptor> sorted_members) noexcept {
     if (sorted_members.empty() ||
         sorted_members.size() > MAXIMUM_PACK_MEMBERS) {
         return std::nullopt;
@@ -271,8 +273,8 @@ write_encrypted_pack(std::span<const PackMemberSource> members,
 
     std::memcpy(plain.data(), kpak_magic.data(), kpak_magic.size());
     plain[4] = kpak_version;
-    wire::encode_le<std::uint32_t>(
-        static_cast<std::uint32_t>(sorted.size()), plain.data() + 5);
+    wire::encode_le<std::uint32_t>(static_cast<std::uint32_t>(sorted.size()),
+                                   plain.data() + 5);
 
     std::uint32_t payload_cursor = 0;
     std::vector<std::uint8_t> member_bytes;
@@ -358,14 +360,16 @@ decode_verified_pack_plaintext(std::vector<std::uint8_t> plaintext,
         const std::uint32_t size =
             wire::decode_le<std::uint32_t>(entry + HASH_SIZE + 4);
         if (i > 0 && !(pack.members.back().hash < hash)) {
-            return std::unexpected("KPAK member hashes are not strictly sorted");
+            return std::unexpected(
+                "KPAK member hashes are not strictly sorted");
         }
         if (offset != expected_cursor ||
             size > MAXIMUM_PACK_PLAINTEXT_SIZE - expected_cursor) {
             return std::unexpected("KPAK member offsets or sizes are invalid");
         }
         expected_cursor += size;
-        pack.members.push_back(PackMemberDescriptor{.hash = hash, .size = size});
+        pack.members.push_back(
+            PackMemberDescriptor{.hash = hash, .size = size});
         pack.slices.push_back(
             VerifiedPackSlice{.offset = data_offset + offset, .size = size});
     }
@@ -398,9 +402,9 @@ std::expected<VerifiedPack, std::string>
 load_verified_pack(const std::filesystem::path& encrypted_path,
                    std::span<const std::uint8_t, KEY_SIZE> master_key,
                    std::optional<Hash> expected_pack_hash) {
-    const auto max_plain_wire =
-        kpak_header_size + MAXIMUM_PACK_MEMBERS * kpak_entry_size +
-        MAXIMUM_PACK_PLAINTEXT_SIZE;
+    const auto max_plain_wire = kpak_header_size +
+                                MAXIMUM_PACK_MEMBERS * kpak_entry_size +
+                                MAXIMUM_PACK_PLAINTEXT_SIZE;
     const auto max_cipher_wire = encoded_file_size(max_plain_wire);
     if (!max_cipher_wire) {
         return std::unexpected("invalid Micro-Pack size ceiling");
@@ -410,14 +414,16 @@ load_verified_pack(const std::filesystem::path& encrypted_path,
     if (auto read =
             read_regular_file_checked(encrypted_path, *max_cipher_wire, cipher);
         !read) {
-        return std::unexpected("could not read encrypted pack: " + read.error());
+        return std::unexpected("could not read encrypted pack: " +
+                               read.error());
     }
 
     auto plain = decrypt_bytes(cipher, master_key, FilePurpose::Pack);
     if (!plain) {
         return std::unexpected("failed to authenticate and decrypt Micro-Pack");
     }
-    return decode_verified_pack_plaintext(std::move(*plain), expected_pack_hash);
+    return decode_verified_pack_plaintext(std::move(*plain),
+                                          expected_pack_hash);
 }
 
 std::expected<std::vector<PackMemberDescriptor>, std::string>
@@ -449,8 +455,7 @@ decrypt_and_verify_pack(const std::filesystem::path& encrypted_path,
                 content::verify_file(out_path, hex, loaded->members[i].size)) {
                 continue;
             }
-            const auto slice =
-                loaded->member_bytes(loaded->members[i].hash);
+            const auto slice = loaded->member_bytes(loaded->members[i].hash);
             if (!slice) {
                 return std::unexpected("invalid KPAK member slice bounds");
             }
@@ -525,9 +530,10 @@ chunk_file_fastcdc(const std::filesystem::path& path, FastCdcProfile profile) {
             return;
         }
         Hash chunk_hash{};
-        blake3_hasher_finalize(&chunk_hasher,
-                               reinterpret_cast<std::uint8_t*>(chunk_hash.data()),
-                               chunk_hash.size());
+        blake3_hasher_finalize(
+            &chunk_hasher,
+            reinterpret_cast<std::uint8_t*>(chunk_hash.data()),
+            chunk_hash.size());
         result.chunks.push_back(FastCdcChunk{
             .hash = chunk_hash,
             .offset = chunk_offset,
@@ -557,7 +563,8 @@ chunk_file_fastcdc(const std::filesystem::path& path, FastCdcProfile profile) {
                 if (chunk_len < profile.min_chunk) {
                     const std::size_t skip = std::min<std::size_t>(
                         avail,
-                        static_cast<std::size_t>(profile.min_chunk - chunk_len));
+                        static_cast<std::size_t>(profile.min_chunk -
+                                                 chunk_len));
                     blake3_hasher_update(
                         &chunk_hasher, slab.data() + pos, skip);
                     chunk_len += static_cast<std::uint32_t>(skip);
@@ -576,8 +583,9 @@ chunk_file_fastcdc(const std::filesystem::path& path, FastCdcProfile profile) {
                 const std::size_t normal_end =
                     chunk_len < profile.avg_chunk
                         ? std::min(scan_end,
-                                   start_pos + static_cast<std::size_t>(
-                                                   profile.avg_chunk - chunk_len))
+                                   start_pos +
+                                       static_cast<std::size_t>(
+                                           profile.avg_chunk - chunk_len))
                         : start_pos;
 
                 bool cut = false;
@@ -623,23 +631,24 @@ chunk_file_fastcdc(const std::filesystem::path& path, FastCdcProfile profile) {
     return result;
 }
 
-std::optional<EncryptionResult>
-encrypt_file_slice_with_hashes(const std::filesystem::path& input_path,
-                               std::uint64_t offset,
-                               std::uint32_t length,
-                               const Hash& expected_slice_hash,
-                               const std::filesystem::path& output_path,
-                               std::span<const std::uint8_t, KEY_SIZE> master_key,
-                               std::string* error_detail) {
-    const auto fail = [&](std::string_view msg) -> std::optional<EncryptionResult> {
+std::optional<EncryptionResult> encrypt_file_slice_with_hashes(
+    const std::filesystem::path& input_path,
+    std::uint64_t offset,
+    std::uint32_t length,
+    const Hash& expected_slice_hash,
+    const std::filesystem::path& output_path,
+    std::span<const std::uint8_t, KEY_SIZE> master_key,
+    std::string* error_detail) {
+    const auto fail =
+        [&](std::string_view msg) -> std::optional<EncryptionResult> {
         if (error_detail != nullptr) {
             *error_detail = std::string(msg);
         }
         return std::nullopt;
     };
 
-    if (input_path.empty() || output_path.empty() ||
-        length == 0 || length > FASTCDC_MAX_CHUNK) {
+    if (input_path.empty() || output_path.empty() || length == 0 ||
+        length > FASTCDC_MAX_CHUNK) {
         return fail("invalid slice parameters");
     }
 
@@ -648,7 +657,8 @@ encrypt_file_slice_with_hashes(const std::filesystem::path& input_path,
     if (ec || std::filesystem::is_symlink(status) ||
         platform::private_storage::is_reparse_or_symlink(input_path) ||
         !std::filesystem::is_regular_file(status)) {
-        return fail("slice input is missing, redirected, or not a regular file");
+        return fail(
+            "slice input is missing, redirected, or not a regular file");
     }
 
     const auto pre_identity =

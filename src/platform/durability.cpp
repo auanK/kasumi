@@ -38,9 +38,8 @@ DWORD rename_windows_handle(HANDLE file,
     std::error_code path_error;
     const auto resolved = std::filesystem::absolute(target, path_error);
     if (path_error) {
-        return path_error.value() != 0
-                   ? static_cast<DWORD>(path_error.value())
-                   : ERROR_INVALID_NAME;
+        return path_error.value() != 0 ? static_cast<DWORD>(path_error.value())
+                                       : ERROR_INVALID_NAME;
     }
     const auto& name = resolved.native();
     if (name.size() >

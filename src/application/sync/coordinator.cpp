@@ -331,8 +331,6 @@ bool same_materialized_rows(std::span<const NodeRow> expected,
                });
 }
 
-
-
 } // namespace detail
 
 namespace {
@@ -536,7 +534,8 @@ run_content_window(
             });
             for (std::size_t slot = 0; slot < worker_count; ++slot) {
                 if (state.completions[slot].has_value()) {
-                    batch.emplace_back(slot, std::move(*state.completions[slot]));
+                    batch.emplace_back(slot,
+                                       std::move(*state.completions[slot]));
                     state.completions[slot].reset();
                 }
             }
@@ -647,15 +646,14 @@ std::vector<bool> required_content_uploads(const reconciliation::Input& input,
     return required;
 }
 
-
-using detail::PlannedChunkUpload;
-using detail::PlannedPack;
-using detail::UploadLayoutPlan;
 using detail::build_upload_layout_plan;
 using detail::execute_chunked_upload_batch;
 using detail::execute_packed_upload_batch;
 using detail::next_chunk_window;
 using detail::pack_upload_window_size;
+using detail::PlannedChunkUpload;
+using detail::PlannedPack;
+using detail::UploadLayoutPlan;
 
 } // namespace
 
@@ -1141,9 +1139,9 @@ execute(const runtime::RuntimeData& runtime_data,
         detail::local_type_changes(record->plan.operations);
     for (std::size_t index = 0; index < record->plan.operations.size();
          ++index) {
-        const auto& current_progress =
-            use_handoff_progress ? handoff_progress[index]
-                                 : record->progress[index];
+        const auto& current_progress = use_handoff_progress
+                                           ? handoff_progress[index]
+                                           : record->progress[index];
         if (type_changes[index] == detail::TypeChangeStep::Install &&
             current_progress.state == transaction::OperationState::Pending) {
             continue;
@@ -1500,9 +1498,8 @@ execute(const runtime::RuntimeData& runtime_data,
                     hash_from_hex(record->plan.operations[op_idx].hash);
                 if (h && history::find_packed_blob(manifest, *h) != nullptr) {
                     packed_indices.push_back(op_idx);
-                } else if (h &&
-                           history::find_chunked_file(manifest, *h) !=
-                               nullptr) {
+                } else if (h && history::find_chunked_file(manifest, *h) !=
+                                    nullptr) {
                     chunked_indices.push_back(op_idx);
                 } else {
                     loose_indices.push_back(op_idx);
@@ -1739,7 +1736,8 @@ execute(const runtime::RuntimeData& runtime_data,
         loose_pending_uploads.reserve(pending_uploads.size());
 
         for (const auto op_index : pending_uploads) {
-            const auto h = hash_from_hex(record->plan.operations[op_index].hash);
+            const auto h =
+                hash_from_hex(record->plan.operations[op_index].hash);
             if (h) {
                 if (const auto it = layout_plan->pack_by_hash.find(*h);
                     it != layout_plan->pack_by_hash.end()) {

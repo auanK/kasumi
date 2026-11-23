@@ -280,19 +280,19 @@ struct ChunkDownloadSession {
 
 // Downloads FastCDC chunks in bounded windows, assembles directly into the
 // destination staging candidate, and registers verified slices for reuse.
-mutation::MutationResult apply_chunked_download(
-    const history::ChunkedFileEntry& entry,
-    const kasumi::Operation& operation,
-    std::size_t operation_index,
-    const std::filesystem::path& local_root,
-    transport::Transport& storage,
-    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-    const platform::Workspace& workspace,
-    std::size_t parallelism,
-    const transaction::OperationProgress& progress,
-    const mutation::DestinationPrecondition* destination,
-    ChunkDownloadSession& session,
-    ProgressMeter* meter = nullptr);
+mutation::MutationResult
+apply_chunked_download(const history::ChunkedFileEntry& entry,
+                       const kasumi::Operation& operation,
+                       std::size_t operation_index,
+                       const std::filesystem::path& local_root,
+                       transport::Transport& storage,
+                       std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                       const platform::Workspace& workspace,
+                       std::size_t parallelism,
+                       const transaction::OperationProgress& progress,
+                       const mutation::DestinationPrecondition* destination,
+                       ChunkDownloadSession& session,
+                       ProgressMeter* meter = nullptr);
 
 using CheckpointCallback = std::function<std::expected<void, Error>()>;
 using AppliedOpsCallback = std::function<void(std::span<const std::size_t>)>;

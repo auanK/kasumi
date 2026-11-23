@@ -158,9 +158,9 @@ int run(int argc, char* argv[]) {
     }
     i18n::init_language(argc, argv);
     const auto sanitized = i18n::extract_language_argument(argc, argv);
-    const std::string_view cmd =
-        sanitized.size() > 1 ? std::string_view{sanitized[1]}
-                             : std::string_view{};
+    const std::string_view cmd = sanitized.size() > 1
+                                     ? std::string_view{sanitized[1]}
+                                     : std::string_view{};
     const bool has_profile_arg = sanitized.size() > 2 &&
                                  !sanitized[2].empty() &&
                                  sanitized[2].front() != '-';
@@ -174,20 +174,19 @@ int run(int argc, char* argv[]) {
                                !sanitized[3].empty() &&
                                sanitized[3].front() != '-';
     const bool supports_command_full =
-        has_profile_arg && (cmd == "sync" || cmd == "status" ||
-                            cmd == "repack" || cmd == "show");
+        has_profile_arg &&
+        (cmd == "sync" || cmd == "status" || cmd == "repack" || cmd == "show");
     const bool supports_remote_summary_full =
         is_remote_sub && sanitized[2] == "summary";
     const bool supports_full =
         supports_command_full || supports_remote_summary_full;
-    const std::size_t full_start_index =
-        supports_remote_summary_full ? 4U : 3U;
+    const std::size_t full_start_index = supports_remote_summary_full ? 4U : 3U;
 
     const bool supports_quiet =
         cmd == "list" || cmd == "diagnostics" ||
         (has_profile_arg &&
-         (cmd == "show" || cmd == "sync" || cmd == "status" ||
-          cmd == "fsck" || cmd == "repack" || cmd == "resolve-missing" ||
+         (cmd == "show" || cmd == "sync" || cmd == "status" || cmd == "fsck" ||
+          cmd == "repack" || cmd == "resolve-missing" ||
           (cmd == "gc" && !is_gc_sub_kw))) ||
         is_gc_subcommand || is_remote_sub;
     const std::size_t quiet_start_index =
@@ -198,8 +197,8 @@ int run(int argc, char* argv[]) {
     const bool supports_json =
         cmd == "list" || cmd == "diagnostics" ||
         (has_profile_arg &&
-         (cmd == "show" || cmd == "sync" || cmd == "status" ||
-          cmd == "fsck" || cmd == "repack" || cmd == "resolve-missing" ||
+         (cmd == "show" || cmd == "sync" || cmd == "status" || cmd == "fsck" ||
+          cmd == "repack" || cmd == "resolve-missing" ||
           (cmd == "gc" && !is_gc_sub_kw))) ||
         supports_remote_summary_full;
     const std::size_t json_start_index =
@@ -358,8 +357,10 @@ int run(int argc, char* argv[]) {
                 return present_json_io_error(
                     log_command_label, err_profile, valid.error());
             }
-            std::println(
-                stderr, "{} {}", i18n::tr(i18n::Key::LabelError), valid.error());
+            std::println(stderr,
+                         "{} {}",
+                         i18n::tr(i18n::Key::LabelError),
+                         valid.error());
             return 1;
         }
     }
@@ -426,16 +427,15 @@ int run(int argc, char* argv[]) {
                     "diagnostics", diag->profile_name, report.error());
             }
             print_error_line(report.error().detail);
-            const auto summary = std::format(
-                "[{}] {}",
-                json_error_code(report.error().code),
-                report.error().detail);
-            return log_text_entry(
-                {.status = "ERROR",
-                 .command = "diagnostics",
-                 .profile = diag->profile_name,
-                 .summary = summary},
-                1);
+            const auto summary =
+                std::format("[{}] {}",
+                            json_error_code(report.error().code),
+                            report.error().detail);
+            return log_text_entry({.status = "ERROR",
+                                   .command = "diagnostics",
+                                   .profile = diag->profile_name,
+                                   .summary = summary},
+                                  1);
         }
         if (json) {
             return present_json_diagnostics(
@@ -450,14 +450,13 @@ int run(int argc, char* argv[]) {
                     std::format("{}: {}", entry.profile.name, entry.detail));
             }
         }
-        return log_text_entry(
-            {.status = report->overall_ok ? "OK" : "WARN",
-             .command = "diagnostics",
-             .profile = diag->profile_name,
-             .summary = summary,
-             .duration = elapsed(),
-             .detail_lines = std::move(details)},
-            code);
+        return log_text_entry({.status = report->overall_ok ? "OK" : "WARN",
+                               .command = "diagnostics",
+                               .profile = diag->profile_name,
+                               .summary = summary,
+                               .duration = elapsed(),
+                               .detail_lines = std::move(details)},
+                              code);
     }
 
     if (std::holds_alternative<ConfigureInvocation>(*parse_result)) {
@@ -487,13 +486,12 @@ int run(int argc, char* argv[]) {
             }
             const int code =
                 finish(present_cancellation(application::Operation::Preview));
-            return log_text_entry(
-                {.status = "CANCELLED",
-                 .command = remote_cmd,
-                 .profile = request.profile_name,
-                 .summary = "cancelled",
-                 .duration = elapsed()},
-                code);
+            return log_text_entry({.status = "CANCELLED",
+                                   .command = remote_cmd,
+                                   .profile = request.profile_name,
+                                   .summary = "cancelled",
+                                   .duration = elapsed()},
+                                  code);
         }
         std::optional<CommandProgress> display;
         application::ProgressCallback on_progress;
@@ -522,13 +520,12 @@ int run(int argc, char* argv[]) {
             }
             const int code =
                 finish(present_cancellation(application::Operation::Preview));
-            return log_text_entry(
-                {.status = "CANCELLED",
-                 .command = remote_cmd,
-                 .profile = request.profile_name,
-                 .summary = "cancelled",
-                 .duration = elapsed()},
-                code);
+            return log_text_entry({.status = "CANCELLED",
+                                   .command = remote_cmd,
+                                   .profile = request.profile_name,
+                                   .summary = "cancelled",
+                                   .duration = elapsed()},
+                                  code);
         }
 
         if (result) {
@@ -538,13 +535,12 @@ int run(int argc, char* argv[]) {
             }
             const int code = finish(present(*result, full));
             const auto summary = format_compact_summary(*result);
-            return log_text_entry(
-                {.status = "OK",
-                 .command = remote_cmd,
-                 .profile = request.profile_name,
-                 .summary = summary,
-                 .duration = elapsed()},
-                code);
+            return log_text_entry({.status = "OK",
+                                   .command = remote_cmd,
+                                   .profile = request.profile_name,
+                                   .summary = summary,
+                                   .duration = elapsed()},
+                                  code);
         }
         if (json) {
             return present_json(
@@ -553,13 +549,12 @@ int run(int argc, char* argv[]) {
         const int code = finish(present(result.error()));
         const auto summary = std::format(
             "[{}] {}", json_error_code(result.error()), result.error().detail);
-        return log_text_entry(
-            {.status = "ERROR",
-             .command = remote_cmd,
-             .profile = request.profile_name,
-             .summary = summary,
-             .duration = elapsed()},
-            code);
+        return log_text_entry({.status = "ERROR",
+                               .command = remote_cmd,
+                               .profile = request.profile_name,
+                               .summary = summary,
+                               .duration = elapsed()},
+                              code);
     }
 
     auto request = std::get<application::Request>(*parse_result);
@@ -606,18 +601,17 @@ int run(int argc, char* argv[]) {
         break;
     }
 
-    const std::string request_cmd =
-        is_gc_subcommand ? std::format("gc {}", sanitized[2])
-                         : std::string{log_command_label};
+    const std::string request_cmd = is_gc_subcommand
+                                        ? std::format("gc {}", sanitized[2])
+                                        : std::string{log_command_label};
     const auto log_request_cancelled = [&](std::string_view reason,
                                            int code) -> int {
-        return log_text_entry(
-            {.status = "CANCELLED",
-             .command = request_cmd,
-             .profile = request.profile_name,
-             .summary = reason,
-             .duration = elapsed()},
-            code);
+        return log_text_entry({.status = "CANCELLED",
+                               .command = request_cmd,
+                               .profile = request.profile_name,
+                               .summary = reason,
+                               .duration = elapsed()},
+                              code);
     };
     const auto log_request_error = [&](const application::Error& err,
                                        int code) -> int {
@@ -657,14 +651,13 @@ int run(int argc, char* argv[]) {
                              ? "WARN"
                              : "OK");
         const auto summary = format_compact_summary(res);
-        return log_text_entry(
-            {.status = status,
-             .command = request_cmd,
-             .profile = request.profile_name,
-             .summary = summary,
-             .duration = elapsed(),
-             .detail_lines = std::move(details)},
-            code);
+        return log_text_entry({.status = status,
+                               .command = request_cmd,
+                               .profile = request.profile_name,
+                               .summary = summary,
+                               .duration = elapsed(),
+                               .detail_lines = std::move(details)},
+                              code);
     };
 
     const auto cancel_json = [&]() -> int {
@@ -720,22 +713,24 @@ int run(int argc, char* argv[]) {
                               finish(present_cancellation(request.operation)));
         }
         if (!preview_res) {
-            return json
-                       ? present_json(
-                             request.profile_name, preview_res.error(), elapsed())
-                       : log_request_error(
-                             preview_res.error(),
-                             finish(present(preview_res.error())));
+            return json ? present_json(request.profile_name,
+                                       preview_res.error(),
+                                       elapsed())
+                        : log_request_error(
+                              preview_res.error(),
+                              finish(present(preview_res.error())));
         }
         const auto* preview_data =
-            std::get_if<application::ResolveMissingCompleted>(&preview_res->data);
+            std::get_if<application::ResolveMissingCompleted>(
+                &preview_res->data);
         if (preview_data == nullptr || preview_data->resolved_paths.empty()) {
-            return json
-                       ? present_json(
-                             request.profile_name, *preview_res, elapsed(), full)
-                       : log_request_response(
-                             *preview_res,
-                             finish(present(*preview_res, full, quiet)));
+            return json ? present_json(request.profile_name,
+                                       *preview_res,
+                                       elapsed(),
+                                       full)
+                        : log_request_response(
+                              *preview_res,
+                              finish(present(*preview_res, full, quiet)));
         }
         if (json) {
             return present_json_confirmation_required(
@@ -746,9 +741,9 @@ int run(int argc, char* argv[]) {
         for (const auto& path : preview_data->resolved_paths) {
             std::println("  {}", sanitize_terminal_text(path));
         }
-        if (!prompt_confirmation(i18n::format(
-                i18n::Key::ResolveMissingConfirmPrompt,
-                preview_data->resolved_paths.size()))) {
+        if (!prompt_confirmation(
+                i18n::format(i18n::Key::ResolveMissingConfirmPrompt,
+                             preview_data->resolved_paths.size()))) {
             if (platform::cancellation::requested()) {
                 return log_request_cancelled(
                     "cancelled",
@@ -786,18 +781,17 @@ int run(int argc, char* argv[]) {
 
     if (result) {
         if (json) {
-            return present_json(
-                request.profile_name, *result, elapsed(), full);
+            return present_json(request.profile_name, *result, elapsed(), full);
         }
-        return log_request_response(
-            *result, finish(present(*result, full, quiet)));
+        return log_request_response(*result,
+                                    finish(present(*result, full, quiet)));
     } else {
         if (json) {
             return present_json(
                 request.profile_name, result.error(), elapsed());
         }
-        return log_request_error(
-            result.error(), finish(present(result.error())));
+        return log_request_error(result.error(),
+                                 finish(present(result.error())));
     }
 }
 

@@ -105,7 +105,8 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                 std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                 GarbageCollectProgressCallback on_progress = {});
 
-// Dry-run overload when dry_run is true; otherwise identical to garbage_collect.
+// Dry-run overload when dry_run is true; otherwise identical to
+// garbage_collect.
 std::expected<GarbageCollectResult, Error>
 garbage_collect(const runtime::RuntimeData& runtime_data,
                 transport::Transport& storage,

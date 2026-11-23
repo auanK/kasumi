@@ -1017,7 +1017,6 @@ TEST(TransactionCodecTest, RejectsLegacyV9BytesAndDecodesCurrentV10Format) {
     EXPECT_FALSE(kasumi::transaction::codec::decode(v9_bytes).has_value());
 }
 
-
 // Grupo F — Testes de Journal e Codec para Action::CopyLocal (wire id 10)
 TEST(TransactionCodecTest, CopyUsesStableWireId) {
     const auto hash_hex = std::string(64, 'a');
@@ -1025,14 +1024,13 @@ TEST(TransactionCodecTest, CopyUsesStableWireId) {
         std::string(32, '5'),
         2,
         5,
-        kasumi::make_sync_plan(
-            {Operation{.action = Action::CopyLocal,
-                       .path = "source/file.txt",
-                       .hash = hash_hex,
-                       .alt_path = "dest/file.txt",
-                       .size = 2048,
-                       .exclusive_destination = false}},
-            6));
+        kasumi::make_sync_plan({Operation{.action = Action::CopyLocal,
+                                          .path = "source/file.txt",
+                                          .hash = hash_hex,
+                                          .alt_path = "dest/file.txt",
+                                          .size = 2048,
+                                          .exclusive_destination = false}},
+                               6));
     ASSERT_TRUE(record.has_value());
     record->progress[0].backup_slot = 0;
     record->progress[0].state = OperationState::Prepared;
@@ -1051,14 +1049,13 @@ TEST(TransactionCodecTest, CopyCodecRoundTrip) {
         std::string(32, '6'),
         1,
         3,
-        kasumi::make_sync_plan(
-            {Operation{.action = Action::CopyLocal,
-                       .path = "dir/original.bin",
-                       .hash = hash_hex,
-                       .alt_path = "dir/clone.bin",
-                       .size = 8192,
-                       .exclusive_destination = false}},
-            4));
+        kasumi::make_sync_plan({Operation{.action = Action::CopyLocal,
+                                          .path = "dir/original.bin",
+                                          .hash = hash_hex,
+                                          .alt_path = "dir/clone.bin",
+                                          .size = 8192,
+                                          .exclusive_destination = false}},
+                               4));
     ASSERT_TRUE(record.has_value());
     record->progress[0].backup_slot = 0;
     record->progress[0].state = OperationState::Applied;
@@ -1075,8 +1072,10 @@ TEST(TransactionCodecTest, CopyCodecRoundTrip) {
     const auto& op = decoded->plan.operations[0];
     const auto& prog = decoded->progress[0];
     EXPECT_EQ(op.action, Action::CopyLocal);
-    EXPECT_EQ(kasumi::platform::path::to_logical_utf8(op.path), "dir/original.bin");
-    EXPECT_EQ(kasumi::platform::path::to_logical_utf8(op.alt_path), "dir/clone.bin");
+    EXPECT_EQ(kasumi::platform::path::to_logical_utf8(op.path),
+              "dir/original.bin");
+    EXPECT_EQ(kasumi::platform::path::to_logical_utf8(op.alt_path),
+              "dir/clone.bin");
     EXPECT_EQ(op.hash, hash_hex);
     EXPECT_EQ(op.size, 8192U);
     EXPECT_FALSE(op.exclusive_destination);
@@ -1085,7 +1084,6 @@ TEST(TransactionCodecTest, CopyCodecRoundTrip) {
     EXPECT_TRUE(prog.had_original);
     EXPECT_EQ(prog.previous_hash, hash_hex);
 }
-
 
 TEST(TransactionCodecTest, V9RecordRejectsDisposableAction11) {
     const std::array<WireOperationSpec, 1> disposable_spec{{
@@ -1143,8 +1141,8 @@ TEST(TransactionCodecTest, DisposableFileUsesWireId11AndPersistsIdentity) {
     std::array<std::byte, 24> identity_bytes{};
     const auto write_u64 = [&](std::size_t offset, std::uint64_t value) {
         for (std::size_t index = 0; index < sizeof(value); ++index) {
-            identity_bytes[offset + index] = static_cast<std::byte>(
-                (value >> (index * 8)) & 0xffU);
+            identity_bytes[offset + index] =
+                static_cast<std::byte>((value >> (index * 8)) & 0xffU);
         }
     };
     write_u64(0, identity.volume_or_dev);
@@ -1163,36 +1161,112 @@ TEST(TransactionCodecTest, DisposableFileUsesWireId11AndPersistsIdentity) {
 
 TEST(TransactionCodecTest, LegacyActionIdsUnchanged) {
     // Verifies that wire IDs 0 to 9 are completely stable and unchanged
-    EXPECT_EQ(extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
-        *kasumi::transaction::make_record(std::string(32, '1'), 0, 0,
-            kasumi::make_sync_plan({Operation{.action = Action::RenameLocal, .path = "a", .alt_path = "b"}}, 0))))[0], 0U);
-    EXPECT_EQ(extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
-        *kasumi::transaction::make_record(std::string(32, '1'), 0, 0,
-            kasumi::make_sync_plan({Operation{.action = Action::Upload, .path = "a"}}, 0))))[0], 1U);
-    EXPECT_EQ(extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
-        *kasumi::transaction::make_record(std::string(32, '1'), 0, 0,
-            kasumi::make_sync_plan({Operation{.action = Action::CreateLocalDirectory, .path = "a"}}, 0))))[0], 2U);
-    EXPECT_EQ(extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
-        *kasumi::transaction::make_record(std::string(32, '1'), 0, 0,
-            kasumi::make_sync_plan({Operation{.action = Action::CreateRemoteDirectory, .path = "a"}}, 0))))[0], 3U);
-    EXPECT_EQ(extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
-        *kasumi::transaction::make_record(std::string(32, '1'), 0, 0,
-            kasumi::make_sync_plan({Operation{.action = Action::Download, .path = "a"}}, 0))))[0], 4U);
-    EXPECT_EQ(extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
-        *kasumi::transaction::make_record(std::string(32, '1'), 0, 0,
-            kasumi::make_sync_plan({Operation{.action = Action::DeleteLocal, .path = "a"}}, 0))))[0], 5U);
-    EXPECT_EQ(extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
-        *kasumi::transaction::make_record(std::string(32, '1'), 0, 0,
-            kasumi::make_sync_plan({Operation{.action = Action::DeleteLocalDirectory, .path = "a"}}, 0))))[0], 6U);
-    EXPECT_EQ(extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
-        *kasumi::transaction::make_record(std::string(32, '1'), 0, 0,
-            kasumi::make_sync_plan({Operation{.action = Action::DeleteRemote, .path = "a"}}, 0))))[0], 7U);
-    EXPECT_EQ(extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
-        *kasumi::transaction::make_record(std::string(32, '1'), 0, 0,
-            kasumi::make_sync_plan({Operation{.action = Action::DeleteRemoteDirectory, .path = "a"}}, 0))))[0], 8U);
-    EXPECT_EQ(extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
-        *kasumi::transaction::make_record(std::string(32, '1'), 0, 0,
-            kasumi::make_sync_plan({Operation{.action = Action::MoveLocal, .path = "a", .alt_path = "b"}}, 0))))[0], 9U);
+    EXPECT_EQ(
+        extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
+            *kasumi::transaction::make_record(
+                std::string(32, '1'),
+                0,
+                0,
+                kasumi::make_sync_plan({Operation{.action = Action::RenameLocal,
+                                                  .path = "a",
+                                                  .alt_path = "b"}},
+                                       0))))[0],
+        0U);
+    EXPECT_EQ(
+        extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
+            *kasumi::transaction::make_record(
+                std::string(32, '1'),
+                0,
+                0,
+                kasumi::make_sync_plan(
+                    {Operation{.action = Action::Upload, .path = "a"}},
+                    0))))[0],
+        1U);
+    EXPECT_EQ(
+        extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
+            *kasumi::transaction::make_record(
+                std::string(32, '1'),
+                0,
+                0,
+                kasumi::make_sync_plan(
+                    {Operation{.action = Action::CreateLocalDirectory,
+                               .path = "a"}},
+                    0))))[0],
+        2U);
+    EXPECT_EQ(
+        extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
+            *kasumi::transaction::make_record(
+                std::string(32, '1'),
+                0,
+                0,
+                kasumi::make_sync_plan(
+                    {Operation{.action = Action::CreateRemoteDirectory,
+                               .path = "a"}},
+                    0))))[0],
+        3U);
+    EXPECT_EQ(
+        extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
+            *kasumi::transaction::make_record(
+                std::string(32, '1'),
+                0,
+                0,
+                kasumi::make_sync_plan(
+                    {Operation{.action = Action::Download, .path = "a"}},
+                    0))))[0],
+        4U);
+    EXPECT_EQ(
+        extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
+            *kasumi::transaction::make_record(
+                std::string(32, '1'),
+                0,
+                0,
+                kasumi::make_sync_plan(
+                    {Operation{.action = Action::DeleteLocal, .path = "a"}},
+                    0))))[0],
+        5U);
+    EXPECT_EQ(
+        extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
+            *kasumi::transaction::make_record(
+                std::string(32, '1'),
+                0,
+                0,
+                kasumi::make_sync_plan(
+                    {Operation{.action = Action::DeleteLocalDirectory,
+                               .path = "a"}},
+                    0))))[0],
+        6U);
+    EXPECT_EQ(
+        extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
+            *kasumi::transaction::make_record(
+                std::string(32, '1'),
+                0,
+                0,
+                kasumi::make_sync_plan(
+                    {Operation{.action = Action::DeleteRemote, .path = "a"}},
+                    0))))[0],
+        7U);
+    EXPECT_EQ(
+        extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
+            *kasumi::transaction::make_record(
+                std::string(32, '1'),
+                0,
+                0,
+                kasumi::make_sync_plan(
+                    {Operation{.action = Action::DeleteRemoteDirectory,
+                               .path = "a"}},
+                    0))))[0],
+        8U);
+    EXPECT_EQ(
+        extract_persisted_action_bytes(*kasumi::transaction::codec::encode(
+            *kasumi::transaction::make_record(
+                std::string(32, '1'),
+                0,
+                0,
+                kasumi::make_sync_plan({Operation{.action = Action::MoveLocal,
+                                                  .path = "a",
+                                                  .alt_path = "b"}},
+                                       0))))[0],
+        9U);
 }
 
 TEST(TransactionCodecTest, InvalidCopyProgressRejected) {

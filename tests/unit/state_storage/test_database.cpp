@@ -1407,21 +1407,24 @@ TEST(StateStorageDatabaseTest, ObsoleteEntriesRemovedByDelta) {
     EXPECT_EQ(loaded->front().path, "keep.txt");
 }
 
-TEST(StateStorageDatabaseTest,
-     RejectsLegacySchemaV1WithoutModifyingDatabase) {
+TEST(StateStorageDatabaseTest, RejectsLegacySchemaV1WithoutModifyingDatabase) {
     auto workspace = kasumi::test::make_temp_workspace("persistence-reject-v1");
     const auto db = kasumi::test::workspace_path(workspace, "state.db");
     execute_sql(
         db,
         "PRAGMA journal_mode=WAL;"
         "CREATE TABLE nodes (path TEXT PRIMARY KEY, hash TEXT NOT NULL, "
-        "size INTEGER NOT NULL, mtime INTEGER NOT NULL, is_dir INTEGER NOT NULL);"
+        "size INTEGER NOT NULL, mtime INTEGER NOT NULL, is_dir INTEGER NOT "
+        "NULL);"
         "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
-        "CREATE TABLE pending_materializations (path TEXT PRIMARY KEY NOT NULL, "
+        "CREATE TABLE pending_materializations (path TEXT PRIMARY KEY NOT "
+        "NULL, "
         "hash TEXT NOT NULL, size INTEGER NOT NULL, mtime INTEGER NOT NULL);"
-        "CREATE TABLE file_cache (path TEXT PRIMARY KEY NOT NULL, hash TEXT NOT NULL, "
+        "CREATE TABLE file_cache (path TEXT PRIMARY KEY NOT NULL, hash TEXT "
+        "NOT NULL, "
         "size INTEGER NOT NULL, fingerprint_kind INTEGER NOT NULL, "
-        "fp0 TEXT NOT NULL, fp1 TEXT NOT NULL, fp2 TEXT NOT NULL, fp3 TEXT NOT NULL);"
+        "fp0 TEXT NOT NULL, fp1 TEXT NOT NULL, fp2 TEXT NOT NULL, fp3 TEXT NOT "
+        "NULL);"
         "PRAGMA user_version = 1;",
         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
 
@@ -1430,8 +1433,9 @@ TEST(StateStorageDatabaseTest,
     EXPECT_FALSE(kasumi::state_storage::load_state(db).has_value());
     EXPECT_FALSE(kasumi::state_storage::load_local_activity(db).has_value());
     EXPECT_FALSE(kasumi::state_storage::save_state(
-        db, kasumi::state_storage::StoredState{
-                make_snapshot("a.txt", "alpha", 1), 1, std::string(64, 'a')}));
+        db,
+        kasumi::state_storage::StoredState{
+            make_snapshot("a.txt", "alpha", 1), 1, std::string(64, 'a')}));
     EXPECT_EQ(query_text(db, "PRAGMA user_version"),
               std::vector<std::string>{"1"});
 }
@@ -1440,7 +1444,8 @@ TEST(StateStorageDatabaseTest,
      LocalExecutionsAcceptedMetaAndActivityCacheRoundTripAndBoundHistory) {
     auto [workspace, db] = make_db("persistence-v2-activity");
 
-    // Recording an execution on an uninitialized vault keeps load_state()==nullopt.
+    // Recording an execution on an uninitialized vault keeps
+    // load_state()==nullopt.
     kasumi::state_storage::LocalExecutionRecord start_rec{
         .execution_id = "exec-initial",
         .operation = kasumi::state_storage::LocalOperationKind::Fsck,
@@ -1462,7 +1467,8 @@ TEST(StateStorageDatabaseTest,
     start_rec.summary_a = 42;
     ASSERT_TRUE(kasumi::state_storage::record_execution_finish(db, start_rec));
 
-    // Insert 55 completed sync executions -> capped at max_local_execution_history (50).
+    // Insert 55 completed sync executions -> capped at
+    // max_local_execution_history (50).
     for (int i = 0; i < 55; ++i) {
         kasumi::state_storage::LocalExecutionRecord rec{
             .execution_id = "sync-" + std::to_string(i),
@@ -1472,8 +1478,8 @@ TEST(StateStorageDatabaseTest,
             .started_at = 1700000100 + i,
             .finished_at = 1700000100 + i,
             .duration_ms = 25,
-            .status = kasumi::state_storage::LocalExecutionStatus::
-                SucceededNoChanges,
+            .status =
+                kasumi::state_storage::LocalExecutionStatus::SucceededNoChanges,
             .commit_id = std::string(64, 'c'),
         };
         ASSERT_TRUE(kasumi::state_storage::record_execution_complete(db, rec));
@@ -1532,7 +1538,8 @@ TEST(StateStorageDatabaseTest,
         .machine_name = "Workstation-A",
         .accepted_at = 1700000105,
     };
-    ASSERT_TRUE(kasumi::state_storage::save_state(db, initial_state, initial_meta));
+    ASSERT_TRUE(
+        kasumi::state_storage::save_state(db, initial_state, initial_meta));
 
     const auto bad_snapshot = make_snapshot("beta.txt", "beta", 20);
     const kasumi::state_storage::StoredState next_state{

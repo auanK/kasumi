@@ -1871,7 +1871,8 @@ forge_commit_with_component(std::string_view component_name) {
     }
     commit.insert(commit.end(), tree.begin(), tree.end());
     append_zero_bytes(commit, 8); // empty StorageManifest (0 packed, 0 chunked)
-    append_zero_bytes(commit, 21); // empty CommitAuthorship (1B Unknown + 16B zero id + 4B empty name len)
+    append_zero_bytes(commit, 21); // empty CommitAuthorship (1B Unknown + 16B
+                                   // zero id + 4B empty name len)
     return commit;
 }
 
@@ -2394,9 +2395,22 @@ TEST(HistoryTest,
 
 TEST(HistoryTest, SerializesAndValidatesKcomV4Authorship) {
     auto tree = make_valid_snapshot();
-    const std::array<std::uint8_t, machine_id_byte_count> machine_id{
-        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-        0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe};
+    const std::array<std::uint8_t, machine_id_byte_count> machine_id{0x01,
+                                                                     0x23,
+                                                                     0x45,
+                                                                     0x67,
+                                                                     0x89,
+                                                                     0xab,
+                                                                     0xcd,
+                                                                     0xef,
+                                                                     0x10,
+                                                                     0x32,
+                                                                     0x54,
+                                                                     0x76,
+                                                                     0x98,
+                                                                     0xba,
+                                                                     0xdc,
+                                                                     0xfe};
 
     for (const auto op : {CommitOriginOperation::Sync,
                           CommitOriginOperation::Repack,

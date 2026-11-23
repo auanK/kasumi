@@ -60,8 +60,8 @@ bool valid_identifier(std::string_view identifier) noexcept {
 }
 
 Result reparse_rejected_error(std::string_view context) {
-    return std::unexpected(detail::make_error(
-        ErrorCode::InvalidContext, std::string{context}, 0));
+    return std::unexpected(
+        detail::make_error(ErrorCode::InvalidContext, std::string{context}, 0));
 }
 
 bool contains_reparse_in_relative_chain(const std::filesystem::path& base,
@@ -142,7 +142,8 @@ Result copy_file_overwrite(const std::filesystem::path& source,
                            const TransportProgressCallback& callback) {
     std::error_code error;
     if (platform::private_storage::is_reparse_or_symlink(source)) {
-        return reparse_rejected_error("source cannot be a symlink or reparse point");
+        return reparse_rejected_error(
+            "source cannot be a symlink or reparse point");
     }
     const auto dest_status =
         std::filesystem::symlink_status(destination, error);
@@ -232,34 +233,36 @@ Result copy_file_overwrite(const std::filesystem::path& source,
         progress.total_bytes = progress.bytes_transferred;
     } else {
 #if defined(_WIN32)
-    if (!CopyFileW(source.c_str(), staging.c_str(), TRUE)) {
-        const auto win_err = GetLastError();
-        if (win_err == ERROR_FILE_EXISTS || win_err == ERROR_ALREADY_EXISTS) {
-            guard.active = false;
+        if (!CopyFileW(source.c_str(), staging.c_str(), TRUE)) {
+            const auto win_err = GetLastError();
+            if (win_err == ERROR_FILE_EXISTS ||
+                win_err == ERROR_ALREADY_EXISTS) {
+                guard.active = false;
+            }
+            return std::unexpected(make_error(std::error_code(
+                static_cast<int>(win_err), std::system_category())));
         }
-        return std::unexpected(make_error(std::error_code(
-            static_cast<int>(win_err), std::system_category())));
-    }
-    const auto attributes = GetFileAttributesW(staging.c_str());
-    if (attributes == INVALID_FILE_ATTRIBUTES ||
-        ((attributes & FILE_ATTRIBUTE_READONLY) != 0 &&
-         !SetFileAttributesW(staging.c_str(),
-                             (attributes & ~FILE_ATTRIBUTE_READONLY) == 0
-                                 ? FILE_ATTRIBUTE_NORMAL
-                                 : attributes & ~FILE_ATTRIBUTE_READONLY))) {
-        return std::unexpected(make_error(std::error_code(
-            static_cast<int>(GetLastError()), std::system_category())));
-    }
+        const auto attributes = GetFileAttributesW(staging.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES ||
+            ((attributes & FILE_ATTRIBUTE_READONLY) != 0 &&
+             !SetFileAttributesW(staging.c_str(),
+                                 (attributes & ~FILE_ATTRIBUTE_READONLY) == 0
+                                     ? FILE_ATTRIBUTE_NORMAL
+                                     : attributes &
+                                           ~FILE_ATTRIBUTE_READONLY))) {
+            return std::unexpected(make_error(std::error_code(
+                static_cast<int>(GetLastError()), std::system_category())));
+        }
 #else
-    error.clear();
-    std::filesystem::copy_file(
-        source, staging, std::filesystem::copy_options::none, error);
-    if (error) {
-        if (error == std::errc::file_exists) {
-            guard.active = false;
+        error.clear();
+        std::filesystem::copy_file(
+            source, staging, std::filesystem::copy_options::none, error);
+        if (error) {
+            if (error == std::errc::file_exists) {
+                guard.active = false;
+            }
+            return std::unexpected(make_error(error));
         }
-        return std::unexpected(make_error(error));
-    }
 #endif
     }
     if (const auto synced = platform::durability::sync_file(staging); !synced) {
@@ -285,9 +288,8 @@ Result copy_file_overwrite(const std::filesystem::path& source,
 }
 
 template <typename Iterator, typename Fn>
-std::expected<void, Error> scan_regular_entries(const std::filesystem::path& base,
-                                                bool use_filename_only,
-                                                Fn&& on_entry) {
+std::expected<void, Error> scan_regular_entries(
+    const std::filesystem::path& base, bool use_filename_only, Fn&& on_entry) {
     if (platform::private_storage::is_reparse_or_symlink(base)) {
         return std::unexpected(detail::make_error(
             ErrorCode::InvalidContext,
@@ -307,8 +309,8 @@ std::expected<void, Error> scan_regular_entries(const std::filesystem::path& bas
         if (error) {
             return std::unexpected(make_error(error));
         }
-        if (is_link ||
-            platform::private_storage::is_reparse_or_symlink(iterator->path())) {
+        if (is_link || platform::private_storage::is_reparse_or_symlink(
+                           iterator->path())) {
             return std::unexpected(detail::make_error(
                 ErrorCode::InvalidContext,
                 "local storage cannot traverse a symlink or reparse point",
@@ -326,7 +328,8 @@ std::expected<void, Error> scan_regular_entries(const std::filesystem::path& bas
             if (error) {
                 return std::unexpected(make_error(error));
             }
-            if (auto res = on_entry(*iterator, platform::path::to_logical_utf8(rel));
+            if (auto res =
+                    on_entry(*iterator, platform::path::to_logical_utf8(rel));
                 !res) {
                 return res;
             }
@@ -343,9 +346,10 @@ ListingResult scan_directory(const std::filesystem::path& base,
                              bool use_filename_only) {
     std::vector<std::string> identifiers;
     auto scanned = scan_regular_entries<Iterator>(
-        base, use_filename_only,
-        [&](const std::filesystem::directory_entry&, std::string identifier)
-            -> std::expected<void, Error> {
+        base,
+        use_filename_only,
+        [&](const std::filesystem::directory_entry&,
+            std::string identifier) -> std::expected<void, Error> {
             identifiers.push_back(std::move(identifier));
             return {};
         });
@@ -457,7 +461,8 @@ MetadataListingResult local_list_metadata(void* context) {
     std::vector<ObjectMetadata> entries;
     auto scanned =
         scan_regular_entries<std::filesystem::recursive_directory_iterator>(
-            base, false,
+            base,
+            false,
             [&](const std::filesystem::directory_entry& entry,
                 std::string identifier) -> std::expected<void, Error> {
                 ObjectMetadata meta{.identifier = std::move(identifier)};

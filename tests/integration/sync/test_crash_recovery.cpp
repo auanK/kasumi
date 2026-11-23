@@ -36,8 +36,8 @@
 #include <windows.h>
 #else
 #include <cerrno>
-#include <spawn.h>
 #include <signal.h>
+#include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
 extern char** environ;
@@ -64,10 +64,9 @@ kasumi::transport::Result counting_initialize(void* context) {
         *static_cast<CountingStorageState*>(context)->base);
 }
 
-kasumi::transport::Result counting_put(
-    void* context,
-    const std::filesystem::path& source,
-    std::string_view identifier) {
+kasumi::transport::Result counting_put(void* context,
+                                       const std::filesystem::path& source,
+                                       std::string_view identifier) {
     auto* state = static_cast<CountingStorageState*>(context);
     if (identifier.find('/') == std::string_view::npos) {
         ++state->content_puts;
@@ -75,19 +74,18 @@ kasumi::transport::Result counting_put(
     return kasumi::transport::put(*state->base, source, identifier);
 }
 
-kasumi::transport::Result counting_get(
-    void* context,
-    std::string_view identifier,
-    const std::filesystem::path& destination) {
+kasumi::transport::Result
+counting_get(void* context,
+             std::string_view identifier,
+             const std::filesystem::path& destination) {
     return kasumi::transport::get(
         *static_cast<CountingStorageState*>(context)->base,
         identifier,
         destination);
 }
 
-kasumi::transport::PresenceResult counting_presence(
-    void* context,
-    std::string_view identifier) {
+kasumi::transport::PresenceResult
+counting_presence(void* context, std::string_view identifier) {
     return kasumi::transport::presence(
         *static_cast<CountingStorageState*>(context)->base, identifier);
 }
@@ -97,33 +95,33 @@ kasumi::transport::ListingResult counting_list(void* context) {
         *static_cast<CountingStorageState*>(context)->base);
 }
 
-kasumi::transport::ListingResult counting_list_prefix(
-    void* context,
-    std::string_view prefix) {
+kasumi::transport::ListingResult counting_list_prefix(void* context,
+                                                      std::string_view prefix) {
     return kasumi::transport::list(
         *static_cast<CountingStorageState*>(context)->base, prefix);
 }
 
-kasumi::transport::RemovalResult counting_remove(
-    void* context,
-    std::string_view identifier) {
+kasumi::transport::RemovalResult counting_remove(void* context,
+                                                 std::string_view identifier) {
     return kasumi::transport::remove(
         *static_cast<CountingStorageState*>(context)->base, identifier);
 }
 
 Transport make_counting_storage(CountingStorageState& state) {
     return Transport{
-        .state = kasumi::transport::TransportStateHandle{
-            &state, destroy_counting_storage},
-        .storage = kasumi::transport::StorageOperations{
-            .initialize = counting_initialize,
-            .put = counting_put,
-            .get = counting_get,
-            .presence = counting_presence,
-            .list = counting_list,
-            .list_prefix = counting_list_prefix,
-            .remove = counting_remove,
-        },
+        .state =
+            kasumi::transport::TransportStateHandle{&state,
+                                                    destroy_counting_storage},
+        .storage =
+            kasumi::transport::StorageOperations{
+                .initialize = counting_initialize,
+                .put = counting_put,
+                .get = counting_get,
+                .presence = counting_presence,
+                .list = counting_list,
+                .list_prefix = counting_list_prefix,
+                .remove = counting_remove,
+            },
     };
 }
 
@@ -141,8 +139,8 @@ public:
         std::filesystem::create_directories(local_, error);
         valid_ = valid_ && !error;
         std::filesystem::create_directories(storage_root_, error);
-        valid_ = valid_ && !error &&
-                 kasumi::state_storage::initialize(database_);
+        valid_ =
+            valid_ && !error && kasumi::state_storage::initialize(database_);
         auto opened = kasumi::transport::open_transport(
             kasumi::platform::path::to_utf8(storage_root_));
         if (!opened) {
@@ -150,15 +148,14 @@ public:
             return;
         }
         raw_storage_ = std::move(*opened);
-        valid_ = valid_ &&
-                 kasumi::transport::initialize(raw_storage_).has_value();
+        valid_ =
+            valid_ && kasumi::transport::initialize(raw_storage_).has_value();
         counting_state_.base = &raw_storage_;
         runtime_ = kasumi::runtime::RuntimeData{
             .local_dir = local_,
             .database_path = database_,
             .key_path = profile_ / "key.bin",
-            .storage_location =
-                kasumi::platform::path::to_utf8(storage_root_),
+            .storage_location = kasumi::platform::path::to_utf8(storage_root_),
         };
         context_ = kasumi::application::detail::OperationContext{
             .operation = kasumi::application::Operation::Sync,
@@ -170,7 +167,9 @@ public:
         };
     }
 
-    bool valid() const noexcept { return valid_; }
+    bool valid() const noexcept {
+        return valid_;
+    }
 
     void write(std::string_view relative, std::string_view contents) {
         const auto path = local_ / kasumi::platform::path::from_utf8(relative);
@@ -178,8 +177,7 @@ public:
         kasumi::test::write_text(path, contents);
     }
 
-    std::expected<kasumi::application::Response,
-                  kasumi::application::Error>
+    std::expected<kasumi::application::Response, kasumi::application::Error>
     sync() {
         return kasumi::application::detail::run_sync(context_);
     }
@@ -222,17 +220,17 @@ public:
             return std::nullopt;
         }
         const auto source = root / kasumi::platform::path::from_utf8(
-                                        std::string{name} + ".plain");
+                                       std::string{name} + ".plain");
         const auto encrypted = root / kasumi::platform::path::from_utf8(
-                                           std::string{name} + ".enc");
+                                          std::string{name} + ".enc");
         kasumi::test::write_text(source, contents);
-        const auto result = kasumi::crypto::encrypt_file_with_hashes(
-            source, encrypted, key_);
+        const auto result =
+            kasumi::crypto::encrypt_file_with_hashes(source, encrypted, key_);
         if (!result) {
             return std::nullopt;
         }
-        const auto identifier = kasumi::crypto::content_identifier(
-            key_, result->plaintext_hash);
+        const auto identifier =
+            kasumi::crypto::content_identifier(key_, result->plaintext_hash);
         if (!kasumi::transport::put(raw_storage_, encrypted, identifier)) {
             return std::nullopt;
         }
@@ -270,8 +268,8 @@ public:
         if (!writers || !writers->empty()) {
             return false;
         }
-        auto removed = kasumi::transport::remove(
-            raw_storage_, layout.barrier_identifier);
+        auto removed =
+            kasumi::transport::remove(raw_storage_, layout.barrier_identifier);
         if (!removed) {
             return false;
         }
@@ -279,23 +277,33 @@ public:
         return after && *after == kasumi::transport::Presence::Absent;
     }
 
-    const std::filesystem::path& profile() const noexcept { return profile_; }
-    const std::filesystem::path& local() const noexcept { return local_; }
+    const std::filesystem::path& profile() const noexcept {
+        return profile_;
+    }
+    const std::filesystem::path& local() const noexcept {
+        return local_;
+    }
     const std::filesystem::path& storage_root() const noexcept {
         return storage_root_;
     }
-    const std::filesystem::path& database() const noexcept { return database_; }
+    const std::filesystem::path& database() const noexcept {
+        return database_;
+    }
     const kasumi::runtime::RuntimeData& runtime() const noexcept {
         return runtime_;
     }
     const kasumi::runtime::vault::KeyBytes& key() const noexcept {
         return key_;
     }
-    Transport& storage() noexcept { return raw_storage_; }
+    Transport& storage() noexcept {
+        return raw_storage_;
+    }
     std::size_t content_puts() const noexcept {
         return counting_state_.content_puts;
     }
-    void reset_content_puts() noexcept { counting_state_.content_puts = 0; }
+    void reset_content_puts() noexcept {
+        counting_state_.content_puts = 0;
+    }
 
 private:
     kasumi::test::TempWorkspace workspace_;
@@ -398,14 +406,14 @@ ChildRun run_child(const CrashFixture& fixture,
                         nullptr,
                         &startup,
                         &process)) {
-        result.detail = "CreateProcessW failed: " +
-                        std::to_string(GetLastError());
+        result.detail =
+            "CreateProcessW failed: " + std::to_string(GetLastError());
         return result;
     }
     CloseHandle(process.hThread);
 
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::seconds{30};
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{30};
     while (std::chrono::steady_clock::now() < deadline) {
         if (std::filesystem::exists(signal_path)) {
             result.reached_point = true;
@@ -415,8 +423,9 @@ ChildRun run_child(const CrashFixture& fixture,
         if (state == WAIT_OBJECT_0) {
             DWORD exit_code = 0;
             GetExitCodeProcess(process.hProcess, &exit_code);
-            result.detail = "child exited before the requested point with code " +
-                            std::to_string(exit_code);
+            result.detail =
+                "child exited before the requested point with code " +
+                std::to_string(exit_code);
             CloseHandle(process.hProcess);
             return result;
         }
@@ -427,9 +436,8 @@ ChildRun run_child(const CrashFixture& fixture,
         result.detail = "timed out waiting for child crash point";
     } else {
         std::ifstream signal{signal_path, std::ios::binary};
-        result.signal_contents.assign(
-            std::istreambuf_iterator<char>{signal},
-            std::istreambuf_iterator<char>{});
+        result.signal_contents.assign(std::istreambuf_iterator<char>{signal},
+                                      std::istreambuf_iterator<char>{});
     }
     if (TerminateProcess(process.hProcess, 137) &&
         WaitForSingleObject(process.hProcess, 5000) == WAIT_OBJECT_0) {
@@ -487,8 +495,8 @@ ChildRun run_child(const CrashFixture& fixture,
     environment_pointers.push_back(nullptr);
 
     const auto executable = crash_child_path().string();
-    std::array<char*, 2> arguments{
-        const_cast<char*>(executable.c_str()), nullptr};
+    std::array<char*, 2> arguments{const_cast<char*>(executable.c_str()),
+                                   nullptr};
     pid_t child = -1;
     const int spawned = posix_spawn(&child,
                                     executable.c_str(),
@@ -501,8 +509,8 @@ ChildRun run_child(const CrashFixture& fixture,
         return result;
     }
 
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::seconds{30};
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{30};
     int child_status = 0;
     bool child_reaped = false;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -513,9 +521,8 @@ ChildRun run_child(const CrashFixture& fixture,
         const auto waited = waitpid(child, &child_status, WNOHANG);
         if (waited == child) {
             child_reaped = true;
-            const int exit_code = WIFEXITED(child_status)
-                                      ? WEXITSTATUS(child_status)
-                                      : -1;
+            const int exit_code =
+                WIFEXITED(child_status) ? WEXITSTATUS(child_status) : -1;
             result.detail =
                 "child exited before the requested point with code " +
                 std::to_string(exit_code);
@@ -532,17 +539,16 @@ ChildRun run_child(const CrashFixture& fixture,
         result.detail = "timed out waiting for child crash point";
     } else if (result.reached_point) {
         std::ifstream signal{signal_path, std::ios::binary};
-        result.signal_contents.assign(
-            std::istreambuf_iterator<char>{signal},
-            std::istreambuf_iterator<char>{});
+        result.signal_contents.assign(std::istreambuf_iterator<char>{signal},
+                                      std::istreambuf_iterator<char>{});
     }
 
     if (!child_reaped) {
         if (kill(child, SIGKILL) == 0 || errno == ESRCH) {
             while (waitpid(child, &child_status, 0) < 0 && errno == EINTR) {
             }
-            result.was_killed = WIFSIGNALED(child_status) &&
-                                WTERMSIG(child_status) == SIGKILL;
+            result.was_killed =
+                WIFSIGNALED(child_status) && WTERMSIG(child_status) == SIGKILL;
         }
     }
     if (!result.was_killed && result.detail.empty()) {
@@ -566,8 +572,8 @@ testing::AssertionResult expect_crash_point(const ChildRun& child,
         std::string{point} + "\n" + std::string{subject} + "\n";
     if (child.signal_contents != expected) {
         return testing::AssertionFailure()
-               << "child signaled '" << child.signal_contents
-               << "', expected '" << expected << "'";
+               << "child signaled '" << child.signal_contents << "', expected '"
+               << expected << "'";
     }
     return testing::AssertionSuccess();
 }
@@ -588,11 +594,8 @@ TEST(SyncGcCrashTest, KilledAfterRepairPutBeforeCheckpointRecoversSafely) {
     fixture.reset_content_puts();
 
     const auto signal = fixture.profile() / "crash-r01.signal";
-    const auto child = run_child(fixture,
-                                 "sync",
-                                 "transport.put",
-                                 content_id,
-                                 signal);
+    const auto child =
+        run_child(fixture, "sync", "transport.put", content_id, signal);
     ASSERT_TRUE(expect_crash_point(child, "transport.put", content_id));
     ASSERT_TRUE(fixture.presence(content_id).has_value());
     EXPECT_EQ(*fixture.presence(content_id),
@@ -621,7 +624,8 @@ TEST(SyncGcCrashTest, KilledAfterRepairPutBeforeCheckpointRecoversSafely) {
     EXPECT_NE((*after)->commit_id, (*before)->commit_id);
     EXPECT_NE((*after)->ciphertext_id, (*before)->ciphertext_id);
     EXPECT_NE((*after)->tree, (*before)->tree);
-    ASSERT_TRUE(std::filesystem::is_regular_file(fixture.local() / "repair.txt"));
+    ASSERT_TRUE(
+        std::filesystem::is_regular_file(fixture.local() / "repair.txt"));
     ASSERT_TRUE(
         std::filesystem::is_regular_file(fixture.local() / "repair-copy.txt"));
     auto audited = fixture.fsck();
@@ -635,23 +639,23 @@ TEST(SyncGcCrashTest, KilledAfterBarrierAcquisitionFailsClosedOnRestart) {
     ASSERT_TRUE(fixture.sync().has_value());
     const auto before = fixture.state();
     ASSERT_TRUE(before.has_value() && *before);
-    const auto orphan = fixture.add_orphan("orphan for abandoned barrier",
-                                           "barrier-orphan");
+    const auto orphan =
+        fixture.add_orphan("orphan for abandoned barrier", "barrier-orphan");
     ASSERT_TRUE(orphan.has_value());
     auto orphan_before = fixture.presence(*orphan);
     ASSERT_TRUE(orphan_before.has_value());
     ASSERT_EQ(*orphan_before, kasumi::transport::Presence::Present);
     const auto layout =
-        kasumi::application::history_storage::derive_remote_layout(fixture.key());
+        kasumi::application::history_storage::derive_remote_layout(
+            fixture.key());
 
     const auto child = run_child(fixture,
                                  "gc",
                                  "gc.barrier.acquired",
                                  layout.barrier_identifier,
                                  fixture.profile() / "crash-r02.signal");
-    ASSERT_TRUE(expect_crash_point(child,
-                                   "gc.barrier.acquired",
-                                   layout.barrier_identifier));
+    ASSERT_TRUE(expect_crash_point(
+        child, "gc.barrier.acquired", layout.barrier_identifier));
     auto barrier = fixture.presence(layout.barrier_identifier);
     ASSERT_TRUE(barrier.has_value());
     EXPECT_EQ(*barrier, kasumi::transport::Presence::Present);
@@ -698,7 +702,8 @@ TEST(SyncGcCrashTest,
     const auto first_candidate = std::min(*first, *second);
     const auto second_candidate = std::max(*first, *second);
     const auto layout =
-        kasumi::application::history_storage::derive_remote_layout(fixture.key());
+        kasumi::application::history_storage::derive_remote_layout(
+            fixture.key());
 
     const auto child = run_child(fixture,
                                  "gc",

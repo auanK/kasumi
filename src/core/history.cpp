@@ -800,9 +800,8 @@ read_storage_manifest(wire::Reader& reader) {
                         "chunked files not strictly sorted");
         }
 
-        ChunkedFileEntry entry{.file_hash = *file_hash,
-                               .file_size = *file_size,
-                               .chunks = {}};
+        ChunkedFileEntry entry{
+            .file_hash = *file_hash, .file_size = *file_size, .chunks = {}};
         entry.chunks.reserve(*chunk_count);
         std::uint64_t total_chunk_bytes = 0;
         for (std::uint32_t c = 0; c < *chunk_count; ++c) {
@@ -992,8 +991,8 @@ filter_and_merge_storage_manifests(const Snapshot& tree,
         return merged;
     }
 
-    std::unordered_map<Hash, std::uint64_t, decltype(&hash_key)> live{
-        0, hash_key};
+    std::unordered_map<Hash, std::uint64_t, decltype(&hash_key)> live{0,
+                                                                      hash_key};
     live.reserve(tree.rows.size());
     for (const auto& row : tree.rows) {
         if (!row.is_directory && row.path != ".kasumiignore") {
@@ -1015,7 +1014,8 @@ filter_and_merge_storage_manifests(const Snapshot& tree,
             if (found_live == live.end() || found_live->second != entry.size) {
                 continue;
             }
-            auto [it, inserted] = packed_map.try_emplace(entry.blob_hash, entry);
+            auto [it, inserted] =
+                packed_map.try_emplace(entry.blob_hash, entry);
             if (!inserted && entry.pack_hash < it->second.pack_hash) {
                 it->second = entry;
             }
@@ -1023,8 +1023,7 @@ filter_and_merge_storage_manifests(const Snapshot& tree,
         for (const auto& entry : candidate.chunked_files) {
             const auto found_live = live.find(entry.file_hash);
             if (found_live == live.end() ||
-                found_live->second != entry.file_size ||
-                entry.chunks.empty()) {
+                found_live->second != entry.file_size || entry.chunks.empty()) {
                 continue;
             }
             auto [it, inserted] =
@@ -1137,15 +1136,18 @@ bool is_valid_utf8(std::string_view text) noexcept {
 } // namespace
 
 bool has_commit_authorship(const CommitAuthorship& authorship) noexcept {
-    const bool any_id = std::ranges::any_of(
-        authorship.machine_id, [](std::uint8_t b) { return b != 0U; });
+    const bool any_id =
+        std::ranges::any_of(authorship.machine_id, [](std::uint8_t b) {
+            return b != 0U;
+        });
     return authorship.operation != CommitOriginOperation::Unknown || any_id ||
            !authorship.machine_name.empty();
 }
 
 bool valid_commit_authorship(const CommitAuthorship& authorship) noexcept {
     const auto op_raw = static_cast<std::uint8_t>(authorship.operation);
-    if (op_raw > static_cast<std::uint8_t>(CommitOriginOperation::ResolveMissing)) {
+    if (op_raw >
+        static_cast<std::uint8_t>(CommitOriginOperation::ResolveMissing)) {
         return false;
     }
     if (!has_commit_authorship(authorship)) {
@@ -1163,8 +1165,10 @@ bool valid_commit_authorship(const CommitAuthorship& authorship) noexcept {
     if (!is_valid_utf8(authorship.machine_name)) {
         return false;
     }
-    const bool any_id = std::ranges::any_of(
-        authorship.machine_id, [](std::uint8_t b) { return b != 0U; });
+    const bool any_id =
+        std::ranges::any_of(authorship.machine_id, [](std::uint8_t b) {
+            return b != 0U;
+        });
     if (authorship.operation != CommitOriginOperation::Unknown && !any_id) {
         return false;
     }
@@ -1380,8 +1384,7 @@ CommitResult deserialize(std::span<const std::uint8_t> bytes) {
         StorageManifest storage = std::move(*parsed_manifest);
 
         auto raw_op = wire::read<std::uint8_t>(reader);
-        auto machine_id_bytes =
-            wire::read_array<machine_id_byte_count>(reader);
+        auto machine_id_bytes = wire::read_array<machine_id_byte_count>(reader);
         auto machine_name =
             wire::read_string(reader, maximum_machine_name_bytes);
         if (!raw_op || !machine_id_bytes || !machine_name) {
@@ -1678,8 +1681,8 @@ resolve_impl(std::span<const LoadedCommit> commits,
                 }
             }
         }
-        auto resolved_storage = filter_and_merge_storage_manifests(
-            *merged, candidate_manifests);
+        auto resolved_storage =
+            filter_and_merge_storage_manifests(*merged, candidate_manifests);
         return Resolution{.tree = std::move(*merged),
                           .height = height,
                           .heads = std::move(logical_heads),

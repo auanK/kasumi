@@ -18,8 +18,7 @@ using json = nlohmann::json;
 thread_local const std::filesystem::path* g_json_log_file = nullptr;
 
 void emit_json(const json& doc) {
-    const auto line =
-        doc.dump(-1, ' ', false, json::error_handler_t::replace);
+    const auto line = doc.dump(-1, ' ', false, json::error_handler_t::replace);
     std::println("{}", line);
     if (g_json_log_file != nullptr) {
         (void)append_log_line(*g_json_log_file, line);
@@ -53,14 +52,14 @@ json make_envelope(std::string_view command,
     return doc;
 }
 
-int emit_json_error(std::string_view command,
-                    std::string_view profile_name,
-                    int exit_code,
-                    std::string_view error_code,
-                    std::string_view message,
-                    std::optional<std::chrono::nanoseconds> duration =
-                        std::nullopt,
-                    std::optional<json> data = std::nullopt) {
+int emit_json_error(
+    std::string_view command,
+    std::string_view profile_name,
+    int exit_code,
+    std::string_view error_code,
+    std::string_view message,
+    std::optional<std::chrono::nanoseconds> duration = std::nullopt,
+    std::optional<json> data = std::nullopt) {
     auto doc = make_envelope(command, profile_name, false, exit_code, duration);
     doc["error"] = json{
         {"code", error_code},
@@ -76,23 +75,23 @@ int emit_json_error(std::string_view command,
 std::string_view operation_command_name(application::Operation op) noexcept {
     using Op = application::Operation;
     switch (op) {
-    case Op::Sync:
-    case Op::Preview:
-        return "sync";
-    case Op::Status:
-        return "status";
-    case Op::Fsck:
-        return "fsck";
-    case Op::GarbageCollect:
-        return "gc";
-    case Op::ResolveMissing:
-        return "resolve-missing";
-    case Op::RemoveWriter:
-        return "gc remove-writer";
-    case Op::RemoveBarrier:
-        return "gc remove-barrier";
-    case Op::Repack:
-        return "repack";
+        case Op::Sync:
+        case Op::Preview:
+            return "sync";
+        case Op::Status:
+            return "status";
+        case Op::Fsck:
+            return "fsck";
+        case Op::GarbageCollect:
+            return "gc";
+        case Op::ResolveMissing:
+            return "resolve-missing";
+        case Op::RemoveWriter:
+            return "gc remove-writer";
+        case Op::RemoveBarrier:
+            return "gc remove-barrier";
+        case Op::Repack:
+            return "repack";
     }
     return "unknown";
 }
@@ -108,32 +107,32 @@ inspection_command_name(application::InspectionOperation op) noexcept {
 std::string_view plan_action_name(application::PlanAction action) noexcept {
     using A = application::PlanAction;
     switch (action) {
-    case A::RenameLocal:
-        return "rename_local";
-    case A::Upload:
-        return "upload";
-    case A::CreateLocalDirectory:
-        return "create_local_directory";
-    case A::CreateRemoteDirectory:
-        return "create_remote_directory";
-    case A::MoveLocal:
-        return "move_local";
-    case A::Download:
-        return "download";
-    case A::DeleteLocal:
-        return "delete_local";
-    case A::DeleteLocalDirectory:
-        return "delete_local_directory";
-    case A::DeleteRemote:
-        return "delete_remote";
-    case A::DeleteRemoteDirectory:
-        return "delete_remote_directory";
-    case A::CopyLocal:
-        return "copy_local";
-    case A::DeleteIgnoredLocalFile:
-        return "delete_ignored_local_file";
-    case A::Count:
-        break;
+        case A::RenameLocal:
+            return "rename_local";
+        case A::Upload:
+            return "upload";
+        case A::CreateLocalDirectory:
+            return "create_local_directory";
+        case A::CreateRemoteDirectory:
+            return "create_remote_directory";
+        case A::MoveLocal:
+            return "move_local";
+        case A::Download:
+            return "download";
+        case A::DeleteLocal:
+            return "delete_local";
+        case A::DeleteLocalDirectory:
+            return "delete_local_directory";
+        case A::DeleteRemote:
+            return "delete_remote";
+        case A::DeleteRemoteDirectory:
+            return "delete_remote_directory";
+        case A::CopyLocal:
+            return "copy_local";
+        case A::DeleteIgnoredLocalFile:
+            return "delete_ignored_local_file";
+        case A::Count:
+            break;
     }
     return "unknown";
 }
@@ -142,32 +141,32 @@ std::string_view
 local_problem_name(application::ProfileLocalProblem problem) noexcept {
     using P = application::ProfileLocalProblem;
     switch (problem) {
-    case P::None:
-        return "none";
-    case P::InvalidName:
-        return "invalid_name";
-    case P::Paths:
-        return "paths";
-    case P::Directory:
-        return "directory";
-    case P::Key:
-        return "key";
-    case P::Database:
-        return "database";
-    case P::Lock:
-        return "lock";
-    case P::Sidecar:
-        return "sidecar";
-    case P::Journal:
-        return "journal";
-    case P::Workspace:
-        return "workspace";
-    case P::Snapshot:
-        return "snapshot";
-    case P::Cleanup:
-        return "cleanup";
-    case P::Count:
-        break;
+        case P::None:
+            return "none";
+        case P::InvalidName:
+            return "invalid_name";
+        case P::Paths:
+            return "paths";
+        case P::Directory:
+            return "directory";
+        case P::Key:
+            return "key";
+        case P::Database:
+            return "database";
+        case P::Lock:
+            return "lock";
+        case P::Sidecar:
+            return "sidecar";
+        case P::Journal:
+            return "journal";
+        case P::Workspace:
+            return "workspace";
+        case P::Snapshot:
+            return "snapshot";
+        case P::Cleanup:
+            return "cleanup";
+        case P::Count:
+            break;
     }
     return "unspecified";
 }
@@ -176,20 +175,20 @@ std::string_view
 profile_op_name(application::ProfileOperationKind op) noexcept {
     using K = application::ProfileOperationKind;
     switch (op) {
-    case K::Sync:
-        return "sync";
-    case K::Fsck:
-        return "fsck";
-    case K::GarbageCollect:
-        return "gc";
-    case K::Repack:
-        return "repack";
-    case K::ResolveMissing:
-        return "resolve-missing";
-    case K::RemoveWriter:
-        return "gc remove-writer";
-    case K::RemoveBarrier:
-        return "gc remove-barrier";
+        case K::Sync:
+            return "sync";
+        case K::Fsck:
+            return "fsck";
+        case K::GarbageCollect:
+            return "gc";
+        case K::Repack:
+            return "repack";
+        case K::ResolveMissing:
+            return "resolve-missing";
+        case K::RemoveWriter:
+            return "gc remove-writer";
+        case K::RemoveBarrier:
+            return "gc remove-barrier";
     }
     return "unknown";
 }
@@ -198,28 +197,28 @@ std::string_view
 profile_status_name(application::ProfileExecutionStatus status) noexcept {
     using S = application::ProfileExecutionStatus;
     switch (status) {
-    case S::InProgress:
-        return "in_progress";
-    case S::Succeeded:
-        return "ok";
-    case S::SucceededNoChanges:
-        return "no_changes";
-    case S::SucceededDownloadedOnly:
-        return "downloaded_only";
-    case S::SucceededPartial:
-        return "partial";
-    case S::IssuesFound:
-        return "issues_found";
-    case S::Blocked:
-        return "blocked";
-    case S::Cancelled:
-        return "cancelled";
-    case S::Failed:
-        return "failed";
-    case S::Uncertain:
-        return "uncertain";
-    case S::Interrupted:
-        return "interrupted";
+        case S::InProgress:
+            return "in_progress";
+        case S::Succeeded:
+            return "ok";
+        case S::SucceededNoChanges:
+            return "no_changes";
+        case S::SucceededDownloadedOnly:
+            return "downloaded_only";
+        case S::SucceededPartial:
+            return "partial";
+        case S::IssuesFound:
+            return "issues_found";
+        case S::Blocked:
+            return "blocked";
+        case S::Cancelled:
+            return "cancelled";
+        case S::Failed:
+            return "failed";
+        case S::Uncertain:
+            return "uncertain";
+        case S::Interrupted:
+            return "interrupted";
     }
     return "unknown";
 }
@@ -228,12 +227,12 @@ std::string_view
 remote_publish_name(application::ProfileRemotePublishState state) noexcept {
     using S = application::ProfileRemotePublishState;
     switch (state) {
-    case S::NotApplicable:
-        return "not_applicable";
-    case S::Published:
-        return "published";
-    case S::Pending:
-        return "pending";
+        case S::NotApplicable:
+            return "not_applicable";
+        case S::Published:
+            return "published";
+        case S::Pending:
+            return "pending";
     }
     return "not_applicable";
 }
@@ -241,14 +240,14 @@ remote_publish_name(application::ProfileRemotePublishState state) noexcept {
 std::string_view remote_op_name(std::uint8_t op) noexcept {
     using O = application::RemoteActivityOperation;
     switch (static_cast<O>(op)) {
-    case O::Fsck:
-        return "fsck";
-    case O::GarbageCollect:
-        return "gc";
-    case O::RemoveWriter:
-        return "gc remove-writer";
-    case O::RemoveBarrier:
-        return "gc remove-barrier";
+        case O::Fsck:
+            return "fsck";
+        case O::GarbageCollect:
+            return "gc";
+        case O::RemoveWriter:
+            return "gc remove-writer";
+        case O::RemoveBarrier:
+            return "gc remove-barrier";
     }
     return "unknown";
 }
@@ -256,18 +255,18 @@ std::string_view remote_op_name(std::uint8_t op) noexcept {
 std::string_view remote_outcome_name(std::uint8_t outcome) noexcept {
     using R = application::RemoteActivityOutcome;
     switch (static_cast<R>(outcome)) {
-    case R::Succeeded:
-        return "ok";
-    case R::IssuesFound:
-        return "issues_found";
-    case R::Blocked:
-        return "blocked";
-    case R::Cancelled:
-        return "cancelled";
-    case R::Failed:
-        return "failed";
-    case R::Uncertain:
-        return "uncertain";
+        case R::Succeeded:
+            return "ok";
+        case R::IssuesFound:
+            return "issues_found";
+        case R::Blocked:
+            return "blocked";
+        case R::Cancelled:
+            return "cancelled";
+        case R::Failed:
+            return "failed";
+        case R::Uncertain:
+            return "uncertain";
     }
     return "unknown";
 }
@@ -275,14 +274,14 @@ std::string_view remote_outcome_name(std::uint8_t outcome) noexcept {
 std::string_view commit_origin_name(std::uint8_t origin) noexcept {
     using O = application::RemoteCommitOrigin;
     switch (static_cast<O>(origin)) {
-    case O::Sync:
-        return "sync";
-    case O::Repack:
-        return "repack";
-    case O::ResolveMissing:
-        return "resolve-missing";
-    case O::Unknown:
-        return "unknown";
+        case O::Sync:
+            return "sync";
+        case O::Repack:
+            return "repack";
+        case O::ResolveMissing:
+            return "resolve-missing";
+        case O::Unknown:
+            return "unknown";
     }
     return "unknown";
 }
@@ -297,71 +296,72 @@ std::string_view error_code_string(const application::Error& error) noexcept {
     if (error.remote_busy) {
         return "remote_busy";
     }
-    if ((error.garbage_collection && error.garbage_collection->transport_error) ||
+    if ((error.garbage_collection &&
+         error.garbage_collection->transport_error) ||
         (error.barrier_removal && error.barrier_removal->transport_error)) {
         return "transport_error";
     }
     using C = application::ErrorCode;
     switch (error.code) {
-    case C::InvalidProfile:
-        return "config_error";
-    case C::ProfileNotFound:
-        return "profile_not_found";
-    case C::RuntimeFailure:
-        return "runtime_error";
-    case C::CredentialsRequired:
-        return "credentials_required";
-    case C::CredentialFailure:
-        return "auth_failed";
-    case C::PlanFailure:
-        return "plan_failed";
-    case C::FsckFailure:
-        return "fsck_failed";
-    case C::GarbageCollectionFailure:
-        return "gc_failed";
-    case C::WriterRemovalFailure:
-        return "writer_removal_failed";
-    case C::BarrierRemovalFailure:
-        return "barrier_removal_failed";
-    case C::SynchronizationFailure:
-        return "sync_failed";
-    case C::RecoveryFailure:
-        return "recovery_failed";
-    case C::InventoryAuditFailure:
-        return "inventory_audit_failed";
-    case C::RepackFailure:
-        return "repack_failed";
+        case C::InvalidProfile:
+            return "config_error";
+        case C::ProfileNotFound:
+            return "profile_not_found";
+        case C::RuntimeFailure:
+            return "runtime_error";
+        case C::CredentialsRequired:
+            return "credentials_required";
+        case C::CredentialFailure:
+            return "auth_failed";
+        case C::PlanFailure:
+            return "plan_failed";
+        case C::FsckFailure:
+            return "fsck_failed";
+        case C::GarbageCollectionFailure:
+            return "gc_failed";
+        case C::WriterRemovalFailure:
+            return "writer_removal_failed";
+        case C::BarrierRemovalFailure:
+            return "barrier_removal_failed";
+        case C::SynchronizationFailure:
+            return "sync_failed";
+        case C::RecoveryFailure:
+            return "recovery_failed";
+        case C::InventoryAuditFailure:
+            return "inventory_audit_failed";
+        case C::RepackFailure:
+            return "repack_failed";
     }
     return "runtime_error";
 }
 
-std::string_view
-inspection_error_code_string(const application::InspectionError& error) noexcept {
+std::string_view inspection_error_code_string(
+    const application::InspectionError& error) noexcept {
     using C = application::InspectionErrorCode;
     switch (error.code) {
-    case C::InvalidRequest:
-        return "invalid_arguments";
-    case C::InvalidProfile:
-        return "config_error";
-    case C::ProfileNotFound:
-        return "profile_not_found";
-    case C::CredentialsRequired:
-        return "credentials_required";
-    case C::CredentialFailure:
-        return "auth_failed";
-    case C::RuntimeFailure:
-        return "runtime_error";
-    case C::RemoteObservationFailure:
-    case C::HeadSelectionRequired:
-    case C::RemoteHeadNotFound:
-    case C::RemotePathNotFound:
-    case C::RemoteCommitNotFound:
-    case C::RemotePathIsDirectory:
-    case C::RemoteContentNotFound:
-    case C::RemoteContentInvalid:
-    case C::DestinationFailure:
-    case C::RemoteEpochNotFound:
-        return "remote_observation_failed";
+        case C::InvalidRequest:
+            return "invalid_arguments";
+        case C::InvalidProfile:
+            return "config_error";
+        case C::ProfileNotFound:
+            return "profile_not_found";
+        case C::CredentialsRequired:
+            return "credentials_required";
+        case C::CredentialFailure:
+            return "auth_failed";
+        case C::RuntimeFailure:
+            return "runtime_error";
+        case C::RemoteObservationFailure:
+        case C::HeadSelectionRequired:
+        case C::RemoteHeadNotFound:
+        case C::RemotePathNotFound:
+        case C::RemoteCommitNotFound:
+        case C::RemotePathIsDirectory:
+        case C::RemoteContentNotFound:
+        case C::RemoteContentInvalid:
+        case C::DestinationFailure:
+        case C::RemoteEpochNotFound:
+            return "remote_observation_failed";
     }
     return "runtime_error";
 }
@@ -370,18 +370,18 @@ std::string_view
 profile_error_code_string(application::ProfileErrorCode code) noexcept {
     using C = application::ProfileErrorCode;
     switch (code) {
-    case C::InvalidName:
-        return "invalid_arguments";
-    case C::NotFound:
-        return "profile_not_found";
-    case C::LockFailure:
-        return "lock_busy";
-    case C::CredentialFailure:
-        return "auth_failed";
-    case C::AlreadyExists:
-    case C::ConfigFailure:
-    case C::StorageFailure:
-        return "config_error";
+        case C::InvalidName:
+            return "invalid_arguments";
+        case C::NotFound:
+            return "profile_not_found";
+        case C::LockFailure:
+            return "lock_busy";
+        case C::CredentialFailure:
+            return "auth_failed";
+        case C::AlreadyExists:
+        case C::ConfigFailure:
+        case C::StorageFailure:
+            return "config_error";
     }
     return "config_error";
 }
@@ -415,7 +415,8 @@ json serialize_sync_completed(const application::SyncCompleted& sync) {
     };
 }
 
-json serialize_execution_summary(const application::ProfileExecutionSummary& e) {
+json serialize_execution_summary(
+    const application::ProfileExecutionSummary& e) {
     json out{
         {"execution_id", e.execution_id},
         {"operation", profile_op_name(e.operation)},
@@ -446,24 +447,23 @@ json serialize_execution_summary(const application::ProfileExecutionSummary& e) 
 std::string_view
 profile_local_state_name(application::ProfileLocalState state) noexcept {
     switch (state) {
-    case application::ProfileLocalState::Initialized:
-        return "initialized";
-    case application::ProfileLocalState::Ready:
-        return "ready";
-    case application::ProfileLocalState::Pending:
-        return "pending";
-    case application::ProfileLocalState::Running:
-        return "running";
-    case application::ProfileLocalState::Problem:
-        return "problem";
+        case application::ProfileLocalState::Initialized:
+            return "initialized";
+        case application::ProfileLocalState::Ready:
+            return "ready";
+        case application::ProfileLocalState::Pending:
+            return "pending";
+        case application::ProfileLocalState::Running:
+            return "running";
+        case application::ProfileLocalState::Problem:
+            return "problem";
     }
     return "problem";
 }
 
 } // namespace
 
-ScopedJsonLogFile::ScopedJsonLogFile(
-    std::optional<std::filesystem::path> path)
+ScopedJsonLogFile::ScopedJsonLogFile(std::optional<std::filesystem::path> path)
     : path_(std::move(path)), previous_(g_json_log_file) {
     if (path_.has_value()) {
         g_json_log_file = &*path_;
@@ -477,8 +477,11 @@ ScopedJsonLogFile::~ScopedJsonLogFile() noexcept {
 int present_json_io_error(std::string_view command,
                           std::string_view profile_name,
                           std::string_view detail) {
-    return emit_json_error(
-        command.empty() ? "kasumi" : command, profile_name, 1, "io_error", detail);
+    return emit_json_error(command.empty() ? "kasumi" : command,
+                           profile_name,
+                           1,
+                           "io_error",
+                           detail);
 }
 
 std::string_view json_error_code(const application::Error& error) noexcept {
@@ -496,17 +499,17 @@ std::string_view json_error_code(application::ProfileErrorCode code) noexcept {
 
 int present_json_parse_error(std::string_view command,
                              std::string_view detail) {
-    return emit_json_error(
-        command.empty() ? "kasumi" : command, {}, 1, "invalid_arguments", detail);
+    return emit_json_error(command.empty() ? "kasumi" : command,
+                           {},
+                           1,
+                           "invalid_arguments",
+                           detail);
 }
 
 int present_json_cancellation(std::string_view command,
                               std::string_view profile_name) {
-    return emit_json_error(command,
-                           profile_name,
-                           130,
-                           "cancelled",
-                           "operation cancelled by user");
+    return emit_json_error(
+        command, profile_name, 130, "cancelled", "operation cancelled by user");
 }
 
 int present_json_list(const std::vector<application::Profile>& profiles) {
@@ -528,9 +531,9 @@ int present_json_show(const application::Profile& profile,
     auto doc = make_envelope("show", profile.name, true, 0, std::nullopt);
     const std::string_view state_str = profile_local_state_name(state);
     const bool lock_active = state == application::ProfileLocalState::Running;
-    const auto active_op =
-        lock_active ? application::active_profile_operation(activity)
-                    : std::nullopt;
+    const auto active_op = lock_active
+                               ? application::active_profile_operation(activity)
+                               : std::nullopt;
 
     json data{
         {"name", profile.name},
@@ -820,7 +823,8 @@ int present_json(std::string_view profile_name,
                     {"candidate_expired_commits",
                      payload.candidate_expired_commits},
                     {"candidate_activities", payload.candidate_activities},
-                    {"deferred_recent_objects", payload.deferred_recent_objects},
+                    {"deferred_recent_objects",
+                     payload.deferred_recent_objects},
                     {"candidate_bytes", payload.candidate_bytes},
                     {"removed_objects", payload.removed_objects},
                     {"removed_bytes", payload.removed_bytes},
@@ -852,7 +856,8 @@ int present_json(std::string_view profile_name,
                     {"physical_objects_uploaded",
                      payload.physical_objects_uploaded},
                 };
-            } else if constexpr (std::is_same_v<T, application::FsckCompleted>) {
+            } else if constexpr (std::is_same_v<T,
+                                                application::FsckCompleted>) {
                 data = json{
                     {"checked_objects", payload.checked_objects},
                     {"wire_download_bytes", payload.wire_download_bytes},
@@ -885,8 +890,8 @@ int present_json(std::string_view profile_name,
         },
         response.data);
 
-    auto doc = make_envelope(
-        cmd, profile_name, exit_code == 0, exit_code, duration);
+    auto doc =
+        make_envelope(cmd, profile_name, exit_code == 0, exit_code, duration);
     if (exit_code != 0) {
         doc["error"] = json{
             {"code", error_code},

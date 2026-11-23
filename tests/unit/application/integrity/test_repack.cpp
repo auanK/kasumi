@@ -80,24 +80,28 @@ MachineEnv create_machine(const TempWorkspace& workspace,
                           std::string_view tag,
                           const std::filesystem::path& remote_dir,
                           bool initialize_db = true) {
-    const auto app = kasumi::test::workspace_path(workspace, std::string{tag} + "_app");
+    const auto app =
+        kasumi::test::workspace_path(workspace, std::string{tag} + "_app");
     const auto local =
         kasumi::test::workspace_path(workspace, std::string{tag} + "_local");
     std::filesystem::create_directories(app / "profiles" / "demo");
     std::filesystem::create_directories(local);
     std::filesystem::create_directories(remote_dir);
 
-    kasumi::test::write_text(
-        app / "config.toml",
-        "[profiles.demo]\n"
-        "local_dir = '" + local.string() + "'\n"
-        "remote_dir = '" + remote_dir.string() + "'\n"
-        "min_history_depth = 5\n"
-        "min_history_age_hours = 6\n"
-        "key_storage = 'file'\n");
+    kasumi::test::write_text(app / "config.toml",
+                             "[profiles.demo]\n"
+                             "local_dir = '" +
+                                 local.string() +
+                                 "'\n"
+                                 "remote_dir = '" +
+                                 remote_dir.string() +
+                                 "'\n"
+                                 "min_history_depth = 5\n"
+                                 "min_history_age_hours = 6\n"
+                                 "key_storage = 'file'\n");
     if (initialize_db) {
-        EXPECT_TRUE(kasumi::state_storage::initialize(
-            app / "profiles" / "demo" / "db.sqlite"));
+        EXPECT_TRUE(kasumi::state_storage::initialize(app / "profiles" /
+                                                      "demo" / "db.sqlite"));
     }
     return MachineEnv{
         .app_dir = app,
@@ -127,8 +131,8 @@ kasumi::application::Response run_sync(const MachineEnv& machine,
     return std::move(*res);
 }
 
-std::vector<kasumi::Hash> unique_pack_hashes(
-    const kasumi::history::StorageManifest& manifest) {
+std::vector<kasumi::Hash>
+unique_pack_hashes(const kasumi::history::StorageManifest& manifest) {
     std::vector<kasumi::Hash> hashes;
     hashes.reserve(manifest.packed_blobs.size());
     for (const auto& entry : manifest.packed_blobs) {
@@ -176,8 +180,8 @@ kasumi::transport::Result wrapped_get(void* ctx,
     return kasumi::transport::get(state->inner, identifier, dest);
 }
 
-kasumi::transport::PresenceResult wrapped_presence(void* ctx,
-                                                   std::string_view identifier) {
+kasumi::transport::PresenceResult
+wrapped_presence(void* ctx, std::string_view identifier) {
     auto* state = static_cast<WrappedStorageContext*>(ctx);
     return kasumi::transport::presence(state->inner, identifier);
 }
@@ -199,10 +203,8 @@ kasumi::transport::RemovalResult wrapped_remove(void* ctx,
     return kasumi::transport::remove(state->inner, identifier);
 }
 
-std::expected<std::string, kasumi::transport::Error>
-wrapped_physical_hash(void* ctx,
-                      std::string_view identifier,
-                      std::string_view algo) {
+std::expected<std::string, kasumi::transport::Error> wrapped_physical_hash(
+    void* ctx, std::string_view identifier, std::string_view algo) {
     auto* state = static_cast<WrappedStorageContext*>(ctx);
     return kasumi::transport::physical_hash(state->inner, identifier, algo);
 }
@@ -249,10 +251,11 @@ TEST(RepackTest, ConsolidatesLooseSmallFilesWithDryRunFsckAndIdempotency) {
     const auto key = test_key();
     const auto layout = test_layout();
 
-    // Sync 3 small files across separate syncs so local transport leaves them as
-    // loose objects (local threshold is 16).
+    // Sync 3 small files across separate syncs so local transport leaves them
+    // as loose objects (local threshold is 16).
     for (int i = 0; i < 3; ++i) {
-        write_settled_file(machine.local_dir / ("note_" + std::to_string(i) + ".txt"),
+        write_settled_file(machine.local_dir /
+                               ("note_" + std::to_string(i) + ".txt"),
                            "small loose payload number " + std::to_string(i));
         run_sync(machine);
     }
@@ -262,12 +265,14 @@ TEST(RepackTest, ConsolidatesLooseSmallFilesWithDryRunFsckAndIdempotency) {
                                                      runtime.local_dir);
     ASSERT_TRUE(storage.has_value());
 
-    const auto before_state = kasumi::state_storage::load_state(runtime.database_path);
+    const auto before_state =
+        kasumi::state_storage::load_state(runtime.database_path);
     ASSERT_TRUE(before_state.has_value() && before_state->has_value());
     const auto before_listing = kasumi::transport::list(*storage);
     ASSERT_TRUE(before_listing.has_value());
 
-    // Dry-run plans the pack without touching remote objects or local db.sqlite.
+    // Dry-run plans the pack without touching remote objects or local
+    // db.sqlite.
     const auto dry = repack::execute(runtime, *storage, key, {.dry_run = true});
     ASSERT_TRUE(dry.has_value()) << dry.error().detail;
     EXPECT_TRUE(dry->dry_run);
@@ -277,8 +282,9 @@ TEST(RepackTest, ConsolidatesLooseSmallFilesWithDryRunFsckAndIdempotency) {
     EXPECT_EQ(dry->plan.new_packs.size(), 1U);
     EXPECT_EQ(dry->wire_upload_bytes, 0U);
     EXPECT_EQ(*kasumi::transport::list(*storage), *before_listing);
-    EXPECT_EQ((*kasumi::state_storage::load_state(runtime.database_path))->commit_id,
-              (*before_state)->commit_id);
+    EXPECT_EQ(
+        (*kasumi::state_storage::load_state(runtime.database_path))->commit_id,
+        (*before_state)->commit_id);
 
     // Real repack publishes the pack and updates commit + db.sqlite.
     const auto exec = repack::execute(runtime, *storage, key);
@@ -291,7 +297,8 @@ TEST(RepackTest, ConsolidatesLooseSmallFilesWithDryRunFsckAndIdempotency) {
     EXPECT_GT(exec->wire_upload_bytes, 0U);
     EXPECT_GE(exec->physical_objects_uploaded, 1U);
 
-    const auto after_state = kasumi::state_storage::load_state(runtime.database_path);
+    const auto after_state =
+        kasumi::state_storage::load_state(runtime.database_path);
     ASSERT_TRUE(after_state.has_value() && after_state->has_value());
     EXPECT_EQ((*after_state)->commit_id, exec->published_commit_id);
     EXPECT_EQ((*after_state)->tree, (*before_state)->tree);
@@ -315,7 +322,8 @@ TEST(RepackTest, ConsolidatesLooseSmallFilesWithDryRunFsckAndIdempotency) {
     EXPECT_EQ(second->physical_objects_uploaded, 0U);
 }
 
-TEST(RepackTest, ReclaimsDirtyPackSecondMachineFastForwardsAndFreshMachineEnrolls) {
+TEST(RepackTest,
+     ReclaimsDirtyPackSecondMachineFastForwardsAndFreshMachineEnrolls) {
     const auto ws = kasumi::test::make_temp_workspace("repack-multi-machine");
     const auto remote = kasumi::test::workspace_path(ws, "remote");
     init_remote(remote);
@@ -324,25 +332,28 @@ TEST(RepackTest, ReclaimsDirtyPackSecondMachineFastForwardsAndFreshMachineEnroll
     const auto machine_c = create_machine(ws, "c", remote, false);
     const auto key = test_key();
 
-    // Sync 18 small files at once on Machine A so local transport creates P_old.
+    // Sync 18 small files at once on Machine A so local transport creates
+    // P_old.
     for (int i = 0; i < 18; ++i) {
-        write_settled_file(
-            machine_a.local_dir / ("item_" + std::to_string(i) + ".txt"),
-            std::string(2048, static_cast<char>('a' + i)));
+        write_settled_file(machine_a.local_dir /
+                               ("item_" + std::to_string(i) + ".txt"),
+                           std::string(2048, static_cast<char>('a' + i)));
     }
     run_sync(machine_a);
 
     const auto runtime_a = machine_a.resolve();
-    const auto init_state = kasumi::state_storage::load_state(runtime_a.database_path);
+    const auto init_state =
+        kasumi::state_storage::load_state(runtime_a.database_path);
     ASSERT_TRUE(init_state.has_value() && init_state->has_value());
-    const auto initial_packs = unique_pack_hashes((*init_state)->storage_manifest);
+    const auto initial_packs =
+        unique_pack_hashes((*init_state)->storage_manifest);
     ASSERT_EQ(initial_packs.size(), 1U);
     const auto p_old = initial_packs.front();
 
     // Delete 16 files and sync so P_old now contains mostly dead blobs.
     for (int i = 2; i < 18; ++i) {
-        std::filesystem::remove(
-            machine_a.local_dir / ("item_" + std::to_string(i) + ".txt"));
+        std::filesystem::remove(machine_a.local_dir /
+                                ("item_" + std::to_string(i) + ".txt"));
     }
     run_sync(machine_a);
 
@@ -364,7 +375,8 @@ TEST(RepackTest, ReclaimsDirtyPackSecondMachineFastForwardsAndFreshMachineEnroll
     const auto audited = integrity::fsck(runtime_a, *storage, key, 1);
     ASSERT_TRUE(audited.has_value()) << audited.error().detail;
 
-    // Machine B fast-forwards to the repacked commit with zero downloads/mutations.
+    // Machine B fast-forwards to the repacked commit with zero
+    // downloads/mutations.
     const auto sync_b = run_sync(machine_b);
     const auto* summary_b = std::get_if<SyncCompleted>(&sync_b.data);
     ASSERT_NE(summary_b, nullptr);
@@ -380,12 +392,10 @@ TEST(RepackTest, ReclaimsDirtyPackSecondMachineFastForwardsAndFreshMachineEnroll
 
     // Fresh Machine C enrolls using initial sync and downloads from P_new.
     run_sync(machine_c, true);
-    EXPECT_EQ(
-        kasumi::test::read_text(machine_c.local_dir / "item_0.txt"),
-        kasumi::test::read_text(machine_a.local_dir / "item_0.txt"));
-    EXPECT_EQ(
-        kasumi::test::read_text(machine_c.local_dir / "item_1.txt"),
-        kasumi::test::read_text(machine_a.local_dir / "item_1.txt"));
+    EXPECT_EQ(kasumi::test::read_text(machine_c.local_dir / "item_0.txt"),
+              kasumi::test::read_text(machine_a.local_dir / "item_0.txt"));
+    EXPECT_EQ(kasumi::test::read_text(machine_c.local_dir / "item_1.txt"),
+              kasumi::test::read_text(machine_a.local_dir / "item_1.txt"));
     EXPECT_FALSE(std::filesystem::exists(machine_c.local_dir / "item_2.txt"));
 }
 
@@ -395,7 +405,8 @@ TEST(RepackTest, RejectsDirtyLocalWorkspaceUnsyncedRemoteAndEmptyHistory) {
 
     // Case 1: Empty remote history.
     {
-        const auto ws = kasumi::test::make_temp_workspace("repack-empty-history");
+        const auto ws =
+            kasumi::test::make_temp_workspace("repack-empty-history");
         const auto remote = kasumi::test::workspace_path(ws, "remote");
         init_remote(remote);
         const auto machine = create_machine(ws, "a", remote);
@@ -435,7 +446,8 @@ TEST(RepackTest, RejectsDirtyLocalWorkspaceUnsyncedRemoteAndEmptyHistory) {
 
     // Case 3: Remote has a newer commit not yet synced to local db.sqlite.
     {
-        const auto ws = kasumi::test::make_temp_workspace("repack-behind-remote");
+        const auto ws =
+            kasumi::test::make_temp_workspace("repack-behind-remote");
         const auto remote = kasumi::test::workspace_path(ws, "remote");
         init_remote(remote);
         const auto machine_a = create_machine(ws, "a", remote);
@@ -467,7 +479,8 @@ TEST(RepackTest, RejectsWhenGcBarrierIsActive) {
     const auto layout = test_layout();
 
     for (int i = 0; i < 3; ++i) {
-        write_settled_file(machine.local_dir / ("f_" + std::to_string(i) + ".txt"),
+        write_settled_file(machine.local_dir /
+                               ("f_" + std::to_string(i) + ".txt"),
                            "barrier payload " + std::to_string(i));
         run_sync(machine);
     }
@@ -493,7 +506,8 @@ TEST(RepackTest, RejectsWhenGcBarrierIsActive) {
     EXPECT_EQ(*kasumi::transport::list(*storage), *before_listing);
 }
 
-TEST(RepackTest, RejectsOnConcurrentRemoteHeadWithoutPublishingDivergentCommit) {
+TEST(RepackTest,
+     RejectsOnConcurrentRemoteHeadWithoutPublishingDivergentCommit) {
     const auto ws = kasumi::test::make_temp_workspace("repack-concurrent-head");
     const auto remote = kasumi::test::workspace_path(ws, "remote");
     init_remote(remote);
@@ -503,7 +517,8 @@ TEST(RepackTest, RejectsOnConcurrentRemoteHeadWithoutPublishingDivergentCommit) 
     const auto layout = test_layout();
 
     for (int i = 0; i < 3; ++i) {
-        write_settled_file(machine_a.local_dir / ("f_" + std::to_string(i) + ".txt"),
+        write_settled_file(machine_a.local_dir /
+                               ("f_" + std::to_string(i) + ".txt"),
                            "concurrent test payload " + std::to_string(i));
         run_sync(machine_a);
     }
@@ -525,10 +540,8 @@ TEST(RepackTest, RejectsOnConcurrentRemoteHeadWithoutPublishingDivergentCommit) 
         kasumi::crypto::pack_identifier(key, dry->plan.new_packs[0].pack_hash);
 
     std::string concurrent_commit_id;
-    auto wrapped = make_wrapped_transport(
-        std::move(*inner),
-        target_pack_id,
-        [&] {
+    auto wrapped =
+        make_wrapped_transport(std::move(*inner), target_pack_id, [&] {
             write_settled_file(machine_b.local_dir / "concurrent_b.txt",
                                "published while repack was uploading");
             run_sync(machine_b);
@@ -543,7 +556,8 @@ TEST(RepackTest, RejectsOnConcurrentRemoteHeadWithoutPublishingDivergentCommit) 
     EXPECT_EQ(res.error().code, integrity::ErrorCode::ConcurrentChange);
 
     // Local db.sqlite must stay at before_state and remote head must be only
-    // Machine B's concurrent commit (repack did not publish a divergent commit).
+    // Machine B's concurrent commit (repack did not publish a divergent
+    // commit).
     const auto after_a =
         kasumi::state_storage::load_state(runtime_a.database_path);
     ASSERT_TRUE(after_a.has_value() && after_a->has_value());
@@ -571,20 +585,24 @@ TEST(RepackTest, DryRunRefusesPendingJournalWithoutMutatingFiles) {
 
     const auto runtime = machine.resolve();
     const auto profile_dir = runtime.database_path.parent_path();
-    const auto paths = kasumi::application::sync::journal::make_paths(profile_dir);
+    const auto paths =
+        kasumi::application::sync::journal::make_paths(profile_dir);
     ASSERT_TRUE(paths.has_value());
 
     const auto state = kasumi::state_storage::load_state(runtime.database_path);
     ASSERT_TRUE(state.has_value() && state->has_value());
-    auto record = kasumi::application::sync::journal::create_record(
-        (*state)->height,
-        (*state)->height,
-        kasumi::SyncPlan{},
-        false,
-        (*state)->commit_id);
+    auto record =
+        kasumi::application::sync::journal::create_record((*state)->height,
+                                                          (*state)->height,
+                                                          kasumi::SyncPlan{},
+                                                          false,
+                                                          (*state)->commit_id);
     ASSERT_TRUE(record.has_value());
     ASSERT_TRUE(kasumi::application::sync::journal::save(
-        *paths, *record, key, kasumi::application::sync::journal::SaveMode::Advance));
+        *paths,
+        *record,
+        key,
+        kasumi::application::sync::journal::SaveMode::Advance));
     ASSERT_EQ(kasumi::application::sync::journal::inspect(*paths, key),
               kasumi::application::sync::journal::InspectionResult::Active);
 
@@ -606,21 +624,22 @@ TEST(RepackTest, OldDirtyPackIsCollectedByGcAfterEpochAdvances) {
     const auto key = test_key();
 
     for (int i = 0; i < 18; ++i) {
-        write_settled_file(
-            machine.local_dir / ("gc_" + std::to_string(i) + ".txt"),
-            std::string(2048, static_cast<char>('A' + i)));
+        write_settled_file(machine.local_dir /
+                               ("gc_" + std::to_string(i) + ".txt"),
+                           std::string(2048, static_cast<char>('A' + i)));
     }
     run_sync(machine);
 
     const auto runtime = machine.resolve();
-    const auto state_0 = kasumi::state_storage::load_state(runtime.database_path);
+    const auto state_0 =
+        kasumi::state_storage::load_state(runtime.database_path);
     ASSERT_TRUE(state_0.has_value() && state_0->has_value());
     const auto p_old = unique_pack_hashes((*state_0)->storage_manifest).front();
     const auto p_old_id = kasumi::crypto::pack_identifier(key, p_old);
 
     for (int i = 2; i < 18; ++i) {
-        std::filesystem::remove(
-            machine.local_dir / ("gc_" + std::to_string(i) + ".txt"));
+        std::filesystem::remove(machine.local_dir /
+                                ("gc_" + std::to_string(i) + ".txt"));
     }
     run_sync(machine);
 
@@ -631,11 +650,12 @@ TEST(RepackTest, OldDirtyPackIsCollectedByGcAfterEpochAdvances) {
     ASSERT_TRUE(repacked.has_value()) << repacked.error().detail;
     ASSERT_TRUE(repacked->published);
     ASSERT_EQ(repacked->plan.new_packs.size(), 1U);
-    const auto p_new_id =
-        kasumi::crypto::pack_identifier(key, repacked->plan.new_packs[0].pack_hash);
+    const auto p_new_id = kasumi::crypto::pack_identifier(
+        key, repacked->plan.new_packs[0].pack_hash);
 
     // Anchor an Epoch advancing from the vault's genesis Epoch at the repacked
-    // commit so commits referencing P_old fall outside reachable ancestry for GC.
+    // commit so commits referencing P_old fall outside reachable ancestry for
+    // GC.
     const auto latest_epoch = history_storage::epoch::load_latest(
         *storage, key, kasumi::test::workspace_root(ws));
     ASSERT_TRUE(latest_epoch.has_value() && latest_epoch->has_value());
@@ -662,8 +682,8 @@ TEST(RepackTest, OldDirtyPackIsCollectedByGcAfterEpochAdvances) {
         runtime,
         *storage,
         key,
-        integrity::GarbageCollectOptions{
-            .min_orphan_age = std::chrono::seconds{0}});
+        integrity::GarbageCollectOptions{.min_orphan_age =
+                                             std::chrono::seconds{0}});
     ASSERT_TRUE(gc_res.has_value()) << gc_res.error().detail;
     EXPECT_GE(gc_res->removed_objects, 1U);
 
@@ -676,14 +696,16 @@ TEST(RepackTest, OldDirtyPackIsCollectedByGcAfterEpochAdvances) {
     ASSERT_TRUE(audited.has_value()) << audited.error().detail;
 }
 
-TEST(RepackTest, BoundedWindowsCleanStagingBetweenBatchesAndPublishSingleCommit) {
+TEST(RepackTest,
+     BoundedWindowsCleanStagingBetweenBatchesAndPublishSingleCommit) {
     const auto ws = kasumi::test::make_temp_workspace("repack-windows");
     const auto remote = kasumi::test::workspace_path(ws, "remote");
     init_remote(remote);
     const auto machine = create_machine(ws, "a", remote);
     const auto key = test_key();
 
-    // Sync 6 loose 220 KiB files one by one so local transport keeps them loose.
+    // Sync 6 loose 220 KiB files one by one so local transport keeps them
+    // loose.
     for (int i = 0; i < 6; ++i) {
         write_settled_file(
             machine.local_dir / ("win_" + std::to_string(i) + ".bin"),
@@ -714,8 +736,8 @@ TEST(RepackTest, BoundedWindowsCleanStagingBetweenBatchesAndPublishSingleCommit)
             ++pack_puts_seen;
             std::size_t staged_now = 0;
             std::error_code ec;
-            for (const auto& entry :
-                 std::filesystem::directory_iterator(source.parent_path(), ec)) {
+            for (const auto& entry : std::filesystem::directory_iterator(
+                     source.parent_path(), ec)) {
                 static_cast<void>(entry);
                 ++staged_now;
             }
@@ -744,8 +766,7 @@ TEST(RepackTest,
      ExecutePublishesRepackAuthorshipViaApplicationWhileDryRunStaysReadOnly) {
     const auto workspace =
         kasumi::test::make_temp_workspace("repack-authorship-kcom-v4");
-    const auto remote_dir =
-        kasumi::test::workspace_path(workspace, "remote");
+    const auto remote_dir = kasumi::test::workspace_path(workspace, "remote");
     init_remote(remote_dir);
     auto machine = create_machine(workspace, "m1", remote_dir);
 
@@ -781,8 +802,7 @@ TEST(RepackTest,
          observer.creds(),
          observer.env()});
     ASSERT_TRUE(dry_resp.has_value()) << dry_resp.error().detail;
-    EXPECT_FALSE(
-        std::filesystem::exists(observer.app_dir / "machine.id"));
+    EXPECT_FALSE(std::filesystem::exists(observer.app_dir / "machine.id"));
 
     // Run real repack through application::execute -> embeds KCOM v4 Repack
     // authorship and atomically updates accepted_commit_meta.
@@ -804,10 +824,9 @@ TEST(RepackTest,
     const auto observed = kasumi::application::observation::history::observe(
         *storage, key, machine.app_dir, false);
     ASSERT_TRUE(observed.has_value()) << observed.error().detail;
-    const auto head_it =
-        std::ranges::find(observed->reachable_commits,
-                          repacked->published_commit_id,
-                          &kasumi::history::LoadedCommit::id);
+    const auto head_it = std::ranges::find(observed->reachable_commits,
+                                           repacked->published_commit_id,
+                                           &kasumi::history::LoadedCommit::id);
     ASSERT_NE(head_it, observed->reachable_commits.end());
     EXPECT_TRUE(
         kasumi::history::has_commit_authorship(head_it->commit.authorship));

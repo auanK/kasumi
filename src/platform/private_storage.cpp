@@ -111,18 +111,18 @@ ProcessSecurityContext build_process_security_context() noexcept {
         return context;
     }
     DWORD admins_sid_size = static_cast<DWORD>(context.admins_sid.size());
-    context.has_admins_sid =
-        CreateWellKnownSid(WinBuiltinAdministratorsSid,
-                           nullptr,
-                           context.admins_sid.data(),
-                           &admins_sid_size) != 0 &&
-        IsValidSid(context.admins_sid.data());
+    context.has_admins_sid = CreateWellKnownSid(WinBuiltinAdministratorsSid,
+                                                nullptr,
+                                                context.admins_sid.data(),
+                                                &admins_sid_size) != 0 &&
+                             IsValidSid(context.admins_sid.data());
     context.valid = true;
     return context;
 }
 
 const ProcessSecurityContext& get_process_security_context() noexcept {
-    static const ProcessSecurityContext cached = build_process_security_context();
+    static const ProcessSecurityContext cached =
+        build_process_security_context();
     return cached;
 }
 
@@ -190,8 +190,7 @@ SecurityInspection inspect_path_security(const std::filesystem::path& path,
         return SecurityInspection::UntrustedOwner;
     }
     const bool trusted_owner =
-        EqualSid(owner_sid,
-                 const_cast<std::byte*>(context.user_sid.data())) ||
+        EqualSid(owner_sid, const_cast<std::byte*>(context.user_sid.data())) ||
         EqualSid(owner_sid,
                  const_cast<std::byte*>(context.system_sid.data())) ||
         (context.has_admins_sid &&
@@ -372,8 +371,8 @@ protect_entry(const std::filesystem::path& path,
     }
     const bool is_dir = (*attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     if (is_dir != directory) {
-        return std::unexpected(std::format("{}'{}'", mismatch_msg,
-                                           platform::path::to_utf8(path)));
+        return std::unexpected(
+            std::format("{}'{}'", mismatch_msg, platform::path::to_utf8(path)));
     }
     return apply_acl(path, directory);
 #else
@@ -382,8 +381,8 @@ protect_entry(const std::filesystem::path& path,
         return std::unexpected(status.error());
     }
     if (directory ? !S_ISDIR(status->st_mode) : !S_ISREG(status->st_mode)) {
-        return std::unexpected(std::format("{}'{}'", mismatch_msg,
-                                           platform::path::to_utf8(path)));
+        return std::unexpected(
+            std::format("{}'{}'", mismatch_msg, platform::path::to_utf8(path)));
     }
     const uid_t expected_uid = ::geteuid();
     if (status->st_uid != expected_uid) {
@@ -417,8 +416,9 @@ protect_entry(const std::filesystem::path& path,
             opened_status.st_dev != status->st_dev ||
             opened_status.st_ino != status->st_ino ||
             opened_status.st_uid != expected_uid) {
-            return std::unexpected("private path identity changed during protection '" +
-                                   platform::path::to_utf8(path) + "'");
+            return std::unexpected(
+                "private path identity changed during protection '" +
+                platform::path::to_utf8(path) + "'");
         }
         if (::fchmod(fd, mode) != 0) {
             return std::unexpected(system_error(
@@ -430,15 +430,15 @@ protect_entry(const std::filesystem::path& path,
     const int open_err = errno;
     if (directory && open_err == EACCES) {
         if (::chmod(path.c_str(), mode) != 0) {
-            return std::unexpected(system_error(
-                "chmod 0700 failed",
-                std::error_code{errno, std::generic_category()}));
+            return std::unexpected(
+                system_error("chmod 0700 failed",
+                             std::error_code{errno, std::generic_category()}));
         }
         return {};
     }
-    return std::unexpected(system_error(
-        "open failed during private storage protection",
-        std::error_code{open_err, std::generic_category()}));
+    return std::unexpected(
+        system_error("open failed during private storage protection",
+                     std::error_code{open_err, std::generic_category()}));
 #endif
 }
 
@@ -1403,7 +1403,8 @@ stream_regular_file_raw(const std::filesystem::path& path,
                                  "file size does not match expected size");
     }
     if (slice) {
-        if (slice->offset > file_size || slice->size > file_size - slice->offset) {
+        if (slice->offset > file_size ||
+            slice->size > file_size - slice->offset) {
             return make_stream_error(StreamErrorKind::SizeMismatch,
                                      "slice exceeds file size");
         }
@@ -1414,10 +1415,10 @@ stream_regular_file_raw(const std::filesystem::path& path,
     }
     std::uint64_t total_read = 0;
     while (!slice || total_read < slice->size) {
-        const auto requested = slice
-            ? static_cast<std::size_t>(std::min<std::uint64_t>(
-                  scratch.size(), slice->size - total_read))
-            : scratch.size();
+        const auto requested =
+            slice ? static_cast<std::size_t>(std::min<std::uint64_t>(
+                        scratch.size(), slice->size - total_read))
+                  : scratch.size();
         const auto count = input->read(scratch.first(requested));
         if (!count) {
             return std::unexpected(count.error());

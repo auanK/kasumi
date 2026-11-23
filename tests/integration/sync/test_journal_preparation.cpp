@@ -473,8 +473,7 @@ build_legacy_v091_recovery_payload(std::string_view op_id,
     return writer.buffer;
 }
 
-TEST(JournalPreparationTest,
-     RejectsHistoricalV091JournalWithoutChangingFiles) {
+TEST(JournalPreparationTest, RejectsHistoricalV091JournalWithoutChangingFiles) {
     auto owner = kasumi::test::make_temp_workspace("v091-historical-recovery");
     const auto profile = kasumi::test::workspace_path(owner, "profile");
     const auto local = kasumi::test::workspace_path(owner, "local");
@@ -536,7 +535,8 @@ TEST(JournalPreparationTest,
                      payload.size());
     const std::vector<std::byte> snapshot{
         reinterpret_cast<const std::byte*>(encrypted.data()),
-        reinterpret_cast<const std::byte*>(encrypted.data() + encrypted.size())};
+        reinterpret_cast<const std::byte*>(encrypted.data() +
+                                           encrypted.size())};
     kasumi::test::write_binary(paths->final_path, snapshot);
     const auto confirmation_path =
         paths->final_path.parent_path() / "confirmed.enc";

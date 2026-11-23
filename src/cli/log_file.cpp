@@ -20,19 +20,19 @@ validate_log_file_path(const std::filesystem::path& path) {
     const auto status = std::filesystem::symlink_status(path, error);
     if (!error && status.type() != std::filesystem::file_type::not_found) {
         if (std::filesystem::is_symlink(status)) {
-            return std::unexpected(std::format(
-                "log file path '{}' cannot be a symbolic link",
-                platform::path::to_utf8(path)));
+            return std::unexpected(
+                std::format("log file path '{}' cannot be a symbolic link",
+                            platform::path::to_utf8(path)));
         }
         if (std::filesystem::is_directory(status)) {
-            return std::unexpected(std::format(
-                "log file path '{}' is a directory",
-                platform::path::to_utf8(path)));
+            return std::unexpected(
+                std::format("log file path '{}' is a directory",
+                            platform::path::to_utf8(path)));
         }
         if (!std::filesystem::is_regular_file(status)) {
-            return std::unexpected(std::format(
-                "log file path '{}' is not a regular file",
-                platform::path::to_utf8(path)));
+            return std::unexpected(
+                std::format("log file path '{}' is not a regular file",
+                            platform::path::to_utf8(path)));
         }
     }
 
@@ -40,18 +40,18 @@ validate_log_file_path(const std::filesystem::path& path) {
     if (!parent.empty()) {
         std::filesystem::create_directories(parent, error);
         if (error) {
-            return std::unexpected(std::format(
-                "cannot create log directory '{}': {}",
-                platform::path::to_utf8(parent),
-                error.message()));
+            return std::unexpected(
+                std::format("cannot create log directory '{}': {}",
+                            platform::path::to_utf8(parent),
+                            error.message()));
         }
     }
 
     std::ofstream out(path, std::ios::binary | std::ios::app);
     if (!out.is_open()) {
-        return std::unexpected(std::format(
-            "cannot open log file '{}' for appending",
-            platform::path::to_utf8(path)));
+        return std::unexpected(
+            std::format("cannot open log file '{}' for appending",
+                        platform::path::to_utf8(path)));
     }
     return {};
 }
@@ -109,27 +109,25 @@ std::string format_utc_iso8601_now() {
     if (utc.size() < 19 || utc[10] != ' ') {
         return {};
     }
-    return std::format(
-        "{}T{}Z",
-        std::string_view{utc}.substr(0, 10),
-        std::string_view{utc}.substr(11, 8));
+    return std::format("{}T{}Z",
+                       std::string_view{utc}.substr(0, 10),
+                       std::string_view{utc}.substr(11, 8));
 }
 
 std::expected<void, std::string>
 append_log_line(const std::filesystem::path& path, std::string_view line) {
     std::ofstream out(path, std::ios::binary | std::ios::app);
     if (!out.is_open()) {
-        return std::unexpected(std::format(
-            "cannot open log file '{}' for appending",
-            platform::path::to_utf8(path)));
+        return std::unexpected(
+            std::format("cannot open log file '{}' for appending",
+                        platform::path::to_utf8(path)));
     }
     out.write(line.data(), static_cast<std::streamsize>(line.size()));
     out.put('\n');
     out.flush();
     if (!out.good()) {
-        return std::unexpected(std::format(
-            "failed to write log entry to '{}'",
-            platform::path::to_utf8(path)));
+        return std::unexpected(std::format("failed to write log entry to '{}'",
+                                           platform::path::to_utf8(path)));
     }
     return {};
 }
@@ -149,9 +147,10 @@ append_text_log_entry(const std::filesystem::path& path,
         clean_status.empty() ? std::string_view{"INFO"} : clean_status;
     const std::string_view final_command =
         clean_command.empty() ? std::string_view{"kasumi"} : clean_command;
-    const std::string target = clean_profile.empty()
-                                   ? std::string{final_command}
-                                   : std::format("{} {}", final_command, clean_profile);
+    const std::string target =
+        clean_profile.empty()
+            ? std::string{final_command}
+            : std::format("{} {}", final_command, clean_profile);
 
     std::string dur_suffix;
     if (entry.duration.has_value()) {
@@ -162,19 +161,18 @@ append_text_log_entry(const std::filesystem::path& path,
         dur_suffix = std::format(" ({:.3f} s)", secs);
     }
 
-    std::string buffer =
-        clean_summary.empty()
-            ? std::format("[{}] [{}] {}{}\n",
-                          timestamp,
-                          final_status,
-                          target,
-                          dur_suffix)
-            : std::format("[{}] [{}] {} | {}{}\n",
-                          timestamp,
-                          final_status,
-                          target,
-                          clean_summary,
-                          dur_suffix);
+    std::string buffer = clean_summary.empty()
+                             ? std::format("[{}] [{}] {}{}\n",
+                                           timestamp,
+                                           final_status,
+                                           target,
+                                           dur_suffix)
+                             : std::format("[{}] [{}] {} | {}{}\n",
+                                           timestamp,
+                                           final_status,
+                                           target,
+                                           clean_summary,
+                                           dur_suffix);
 
     for (const auto& raw_detail : entry.detail_lines) {
         const std::string clean_detail = strip_ansi_sequences(raw_detail);
@@ -187,16 +185,15 @@ append_text_log_entry(const std::filesystem::path& path,
 
     std::ofstream out(path, std::ios::binary | std::ios::app);
     if (!out.is_open()) {
-        return std::unexpected(std::format(
-            "cannot open log file '{}' for appending",
-            platform::path::to_utf8(path)));
+        return std::unexpected(
+            std::format("cannot open log file '{}' for appending",
+                        platform::path::to_utf8(path)));
     }
     out.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
     out.flush();
     if (!out.good()) {
-        return std::unexpected(std::format(
-            "failed to write log entry to '{}'",
-            platform::path::to_utf8(path)));
+        return std::unexpected(std::format("failed to write log entry to '{}'",
+                                           platform::path::to_utf8(path)));
     }
     return {};
 }

@@ -161,28 +161,28 @@ TEST(IgnoreTest, DispositionUsesLastMatchingRuleAndKeepsIgnoreFileManaged) {
     EXPECT_EQ(classify_ignore("nested/.kasumiignore", false, broad_disposable),
               IgnoreDisposition::IgnoredProtected);
 
-    const auto protected_later =
-        parse_ignore_rules("(?d)*.bak\n*.bak\n");
+    const auto protected_later = parse_ignore_rules("(?d)*.bak\n*.bak\n");
     EXPECT_EQ(classify_ignore("file.bak", false, protected_later),
               IgnoreDisposition::IgnoredProtected);
 
-    const auto disposable_later =
-        parse_ignore_rules("*.bak\n(?d)*.bak\n");
+    const auto disposable_later = parse_ignore_rules("*.bak\n(?d)*.bak\n");
     EXPECT_EQ(classify_ignore("file.bak", false, disposable_later),
               IgnoreDisposition::IgnoredDisposable);
 
-    const auto negated =
-        parse_ignore_rules("(?d)*.bak\n!important.bak\n");
+    const auto negated = parse_ignore_rules("(?d)*.bak\n!important.bak\n");
     EXPECT_EQ(classify_ignore("important.bak", false, negated),
               IgnoreDisposition::Managed);
 }
 
 TEST(IgnoreTest, MalformedDisposableRulesRejectTheWholeListWithLineNumber) {
-    for (const auto* invalid : {"(?d)", "(?d)!file", "!(?d)file",
-                                "(?d)cache/", "(?x)file",
+    for (const auto* invalid : {"(?d)",
+                                "(?d)!file",
+                                "!(?d)file",
+                                "(?d)cache/",
+                                "(?x)file",
                                 "(?d)(?x)file"}) {
-        const auto list = parse_ignore_rules(
-            std::string("valid.txt\n") + invalid + "\nother.txt\n");
+        const auto list = parse_ignore_rules(std::string("valid.txt\n") +
+                                             invalid + "\nother.txt\n");
         ASSERT_TRUE(list.parse_error.has_value()) << invalid;
         EXPECT_EQ(list.parse_error->line, 2U) << invalid;
         EXPECT_TRUE(list.rules.empty()) << invalid;
@@ -255,7 +255,8 @@ TEST(IgnoreTest, PatternSizeLimitSkipped) {
     EXPECT_TRUE(is_ignored(std::string(300, 'x'), allowed, false));
     EXPECT_TRUE(is_ignored("valid.txt", allowed, false));
 
-    std::string oversized_pattern(kasumi::ignore::max_ignore_pattern_size + 1, 'x');
+    std::string oversized_pattern(kasumi::ignore::max_ignore_pattern_size + 1,
+                                  'x');
     oversized_pattern += "\nvalid.txt\n";
     const auto oversized = parse_ignore_rules(oversized_pattern);
     ASSERT_TRUE(oversized.parse_error.has_value());

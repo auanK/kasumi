@@ -400,13 +400,13 @@ observe(transport::Transport& storage,
     progress.emit(GarbageCollectStage::Analyzing,
                   GarbageCollectSubStage::AuthenticatingHistory);
 
-    const auto find_metadata = [&](std::string_view identifier)
-        -> const transport::ObjectMetadata* {
-        const auto it = std::ranges::lower_bound(
-            metadata_entries,
-            identifier,
-            {},
-            &transport::ObjectMetadata::identifier);
+    const auto find_metadata =
+        [&](std::string_view identifier) -> const transport::ObjectMetadata* {
+        const auto it =
+            std::ranges::lower_bound(metadata_entries,
+                                     identifier,
+                                     {},
+                                     &transport::ObjectMetadata::identifier);
         if (it != metadata_entries.end() && it->identifier == identifier) {
             return &*it;
         }
@@ -457,22 +457,22 @@ observe(transport::Transport& storage,
         return std::unexpected(history_error(activities.error()));
     }
     if (!activities->invalid_objects.empty()) {
-        return std::unexpected(make_error(
-            ErrorCode::IntegrityFailure,
-            "remote contains invalid operational activity objects",
-            activities->invalid_objects.front()));
+        return std::unexpected(
+            make_error(ErrorCode::IntegrityFailure,
+                       "remote contains invalid operational activity objects",
+                       activities->invalid_objects.front()));
     }
     const auto now_unix = platform::clock::unix_seconds();
     if (!now_unix) {
-        return std::unexpected(make_error(
-            ErrorCode::StateFailure,
-            "failed to read system clock for retention check: " +
-                now_unix.error()));
+        return std::unexpected(
+            make_error(ErrorCode::StateFailure,
+                       "failed to read system clock for retention check: " +
+                           now_unix.error()));
     }
 
-    const auto is_old_enough = [&](std::string_view identifier,
-                                   std::optional<std::int64_t> commit_created_at)
-        -> bool {
+    const auto is_old_enough =
+        [&](std::string_view identifier,
+            std::optional<std::int64_t> commit_created_at) -> bool {
         if (effective_grace == std::chrono::seconds{0}) {
             return true;
         }
@@ -544,8 +544,8 @@ observe(transport::Transport& storage,
     std::size_t candidate_expired_commits = 0;
     std::size_t candidate_activities = 0;
 
-    const auto validate_unprotected = [&](std::string_view identifier)
-        -> std::expected<void, Error> {
+    const auto validate_unprotected =
+        [&](std::string_view identifier) -> std::expected<void, Error> {
         if (identifier.empty() ||
             protocol::is_control_object(layout, identifier) ||
             std::ranges::binary_search(protected_objects, identifier)) {
@@ -617,7 +617,8 @@ observe(transport::Transport& storage,
         ++candidate_activities;
     }
 
-    std::ranges::sort(planned, {}, &std::pair<std::string, std::uint64_t>::first);
+    std::ranges::sort(
+        planned, {}, &std::pair<std::string, std::uint64_t>::first);
     const auto dup = std::ranges::unique(
         planned, {}, &std::pair<std::string, std::uint64_t>::first);
     planned.erase(dup.begin(), dup.end());
@@ -706,9 +707,9 @@ check_pre_barrier_controls(transport::Transport& storage,
         auto barrier_presence =
             transport::presence(storage, layout.barrier_identifier);
         if (!barrier_presence) {
-            return std::unexpected(transport_error(
-                barrier_presence.error(),
-                "could not inspect maintenance barrier"));
+            return std::unexpected(
+                transport_error(barrier_presence.error(),
+                                "could not inspect maintenance barrier"));
         }
         if (*barrier_presence == transport::Presence::Present) {
             return std::unexpected(
@@ -765,9 +766,9 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
     }
     if (options.min_orphan_age.has_value() &&
         *options.min_orphan_age < std::chrono::seconds{0}) {
-        return std::unexpected(
-            make_error(ErrorCode::InvalidInput,
-                       "garbage collection min_orphan_age must be non-negative"));
+        return std::unexpected(make_error(
+            ErrorCode::InvalidInput,
+            "garbage collection min_orphan_age must be non-negative"));
     }
     const auto workspace_root =
         application::detail::maintenance_workspace_root(runtime_data);
@@ -1266,8 +1267,11 @@ garbage_collect(const runtime::RuntimeData& runtime_data,
                 transport::Transport& storage,
                 std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                 GarbageCollectProgressCallback on_progress) {
-    return garbage_collect(
-        runtime_data, storage, key, GarbageCollectOptions{}, std::move(on_progress));
+    return garbage_collect(runtime_data,
+                           storage,
+                           key,
+                           GarbageCollectOptions{},
+                           std::move(on_progress));
 }
 
 std::expected<GarbageCollectResult, Error>

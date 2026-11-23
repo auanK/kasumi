@@ -26,12 +26,11 @@ make_observation_hints(state_storage::StoredState state,
     ObservationHints hints;
     if (use_frontier) {
         hints.frontier.emplace();
-        hints.frontier->anchors.push_back(
-            history_storage::KnownHistoryAnchor{
-                .commit_id = state.commit_id,
-                .height = state.height,
-                .tree = std::move(state.tree),
-                .storage = std::move(state.storage_manifest)});
+        hints.frontier->anchors.push_back(history_storage::KnownHistoryAnchor{
+            .commit_id = state.commit_id,
+            .height = state.height,
+            .tree = std::move(state.tree),
+            .storage = std::move(state.storage_manifest)});
         if (!state.epoch_id.empty()) {
             hints.frontier->accepted_epoch = history_storage::epoch::Reference{
                 .sequence = state.epoch_sequence,

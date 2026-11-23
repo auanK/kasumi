@@ -1050,7 +1050,8 @@ TEST(PrivateStorageTest, SecurityInspectionFailurePropagatesError) {
 }
 #endif
 
-TEST(ProfileLockTest, IsProfileLockHeldProbesNonBlockingWithoutCreatingLockFile) {
+TEST(ProfileLockTest,
+     IsProfileLockHeldProbesNonBlockingWithoutCreatingLockFile) {
     auto workspace =
         kasumi::test::make_temp_workspace("profile-lock-probe-nonblocking");
     const auto lock_path =

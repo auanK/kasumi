@@ -205,8 +205,8 @@ void count_tree_entries(const Snapshot& tree,
     }
 }
 
-std::string encode_machine_id_hex(
-    std::span<const std::uint8_t, 16> machine_id) {
+std::string
+encode_machine_id_hex(std::span<const std::uint8_t, 16> machine_id) {
     static constexpr char kHex[] = "0123456789abcdef";
     std::string out;
     out.reserve(32U);
@@ -256,14 +256,14 @@ make_head_info(std::string_view id,
     }
     const auto* match = observed->second;
     const auto& tree = match->commit.tree;
-    RemoteHeadInfo result{
-        .commit_id = match->id,
-        .height = match->commit.height,
-        .created_at = match->commit.created_at,
-        .parent_ids = match->commit.parents,
-        .root_hash = hash_hex(tree.rows.front().hash),
-        .total_bytes = tree.rows.front().size,
-        .authorship = make_remote_authorship(match->commit.authorship)};
+    RemoteHeadInfo result{.commit_id = match->id,
+                          .height = match->commit.height,
+                          .created_at = match->commit.created_at,
+                          .parent_ids = match->commit.parents,
+                          .root_hash = hash_hex(tree.rows.front().hash),
+                          .total_bytes = tree.rows.front().size,
+                          .authorship =
+                              make_remote_authorship(match->commit.authorship)};
     count_tree_entries(tree, result.directory_count, result.file_count);
     return result;
 }
@@ -602,12 +602,13 @@ download_remote_file(const InspectionRequest& request,
     const auto plaintext = context.workspace->root / "remote-content.plain";
     std::string content_id;
 
-    if (const auto* packed = history::find_packed_blob(
-            observed.storage_manifest, row->hash)) {
+    if (const auto* packed =
+            history::find_packed_blob(observed.storage_manifest, row->hash)) {
         content_id = crypto::pack_identifier(context.key, packed->pack_hash);
         const auto encrypted = context.workspace->root / "remote-pack.enc";
         const auto extract_dir = context.workspace->root / "pack-extract";
-        auto downloaded = transport::get(context.storage, content_id, encrypted);
+        auto downloaded =
+            transport::get(context.storage, content_id, encrypted);
         if (!downloaded) {
             const bool not_found =
                 downloaded.error().code == transport::ErrorCode::ObjectNotFound;
@@ -656,7 +657,8 @@ download_remote_file(const InspectionRequest& request,
         auto private_out =
             platform::private_storage::create_private_file(plaintext);
         if (!private_out) {
-            return dest_fail(operation, "failed to open temporary download file");
+            return dest_fail(operation,
+                             "failed to open temporary download file");
         }
         std::vector<std::uint8_t> copy_buf(256U * 1024U);
         crypto::secure_memory::WipeGuard copy_buf_guard{copy_buf};
@@ -928,7 +930,8 @@ inspect_contents(const observation::history::StorageView& observed,
     }
     std::size_t audit_index = 0;
     for (auto& [unused, content] : inventory) {
-        if (const auto found = paths.find(content.content_id); found != paths.end()) {
+        if (const auto found = paths.find(content.content_id);
+            found != paths.end()) {
             content.paths.assign(found->second.begin(), found->second.end());
             paths.erase(found);
         }
@@ -1140,8 +1143,13 @@ load_physical_inventories(transport::Transport& storage,
             "remote history is incomplete; inventory is inconclusive");
     }
     auto content_inventory = history_storage::inventory_content_reachability(
-        storage, key, identifiers, *history_inventory, workspace_root,
-        /*audit_payloads=*/false, /*include_references=*/false);
+        storage,
+        key,
+        identifiers,
+        *history_inventory,
+        workspace_root,
+        /*audit_payloads=*/false,
+        /*include_references=*/false);
     if (!content_inventory) {
         return std::unexpected(content_error);
     }
@@ -1688,11 +1696,11 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
         if (!writers) {
             return obs_fail(operation, "failed to observe remote writers");
         }
-        auto activities = history_storage::activity::load_all(
-            context.storage,
-            context.layout,
-            context.key,
-            context.workspace->root);
+        auto activities =
+            history_storage::activity::load_all(context.storage,
+                                                context.layout,
+                                                context.key,
+                                                context.workspace->root);
         if (!activities) {
             return obs_fail(operation,
                             "failed to observe remote operational activity");

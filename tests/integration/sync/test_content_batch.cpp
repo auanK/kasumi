@@ -43,7 +43,7 @@
 namespace kasumi::application::detail {
 std::expected<Response, Error> run_sync(OperationContext& context);
 std::expected<Response, Error> run_garbage_collect(OperationContext& context);
-}
+} // namespace kasumi::application::detail
 
 namespace {
 
@@ -525,16 +525,16 @@ kasumi::transport::RemovalResult recording_remove(void* context,
     return kasumi::transport::remove(*state.base, id);
 }
 
-kasumi::transport::ControlReadBatchResponse
-recording_control_read_batch(void* context,
-                             const kasumi::transport::ControlReadBatchRequest& request) {
+kasumi::transport::ControlReadBatchResponse recording_control_read_batch(
+    void* context, const kasumi::transport::ControlReadBatchRequest& request) {
     auto* state = recording_state(context);
     auto* probe = state->probe;
     if (probe != nullptr) {
         std::lock_guard lock(probe->mutex);
         const std::size_t call_ordinal = probe->control_read_batch_calls++;
-        probe->max_presence_batch_seen = std::max(
-            probe->max_presence_batch_seen, request.presence_identifiers.size());
+        probe->max_presence_batch_seen =
+            std::max(probe->max_presence_batch_seen,
+                     request.presence_identifiers.size());
         if (!probe->control_read_batch_supported) {
             return std::unexpected(kasumi::transport::Error{
                 .code = kasumi::transport::ErrorCode::Unsupported,
@@ -543,7 +543,8 @@ recording_control_read_batch(void* context,
         if (probe->fail_control_batch_on_call_ordinal &&
             call_ordinal == *probe->fail_control_batch_on_call_ordinal) {
             const auto trans = probe->profile / ".transactions";
-            if (std::filesystem::exists(trans) && !std::filesystem::is_empty(trans)) {
+            if (std::filesystem::exists(trans) &&
+                !std::filesystem::is_empty(trans)) {
                 probe->active_workspaces_at_failure = 1;
             }
             return std::unexpected(kasumi::transport::Error{
@@ -556,10 +557,12 @@ recording_control_read_batch(void* context,
                 .message = "injected control read batch failure"});
         }
         if (probe->fail_control_batch_if_oversized &&
-            request.presence_identifiers.size() > probe->max_allowed_presence_batch) {
+            request.presence_identifiers.size() >
+                probe->max_allowed_presence_batch) {
             return std::unexpected(kasumi::transport::Error{
                 .code = kasumi::transport::ErrorCode::Timeout,
-                .message = "batch request exceeds maximum batch size/deadline"});
+                .message =
+                    "batch request exceeds maximum batch size/deadline"});
         }
     } else {
         return std::unexpected(kasumi::transport::Error{
@@ -1155,8 +1158,8 @@ TEST(SyncContentBatchTest, RecoveryUsesSharedContentConcurrency) {
     ASSERT_TRUE(paths.has_value());
     ASSERT_TRUE(kasumi::application::sync::journal::save(
         *paths, *record, fixture->key));
-    auto transaction_workspace =
-        kasumi::application::sync::coordinator::detail::create_transaction_workspace(
+    auto transaction_workspace = kasumi::application::sync::coordinator::
+        detail::create_transaction_workspace(
             fixture->profile, record->operation_id, fixture->key);
     ASSERT_TRUE(transaction_workspace.has_value())
         << transaction_workspace.error().detail;
@@ -1215,8 +1218,8 @@ TEST(SyncContentBatchTest,
         kasumi::NodeRow{.path = "", .is_directory = true});
     for (std::size_t index = 0; index < 300; ++index) {
         const auto path = "blob-" + std::to_string(index) + ".txt";
-        const auto hash =
-            kasumi::hasher::hash_string("remote-payload-" + std::to_string(index));
+        const auto hash = kasumi::hasher::hash_string("remote-payload-" +
+                                                      std::to_string(index));
         input.storage.tree.rows.push_back(kasumi::NodeRow{
             .path = path,
             .hash = hash,
@@ -1287,7 +1290,8 @@ TEST(SyncContentBatchTest,
             *reconciled);
 
     ASSERT_TRUE(stabilized.has_value()) << stabilized.error().detail;
-    // Failed control_read_batch with Unsupported must cleanly fall back to individual presence
+    // Failed control_read_batch with Unsupported must cleanly fall back to
+    // individual presence
     EXPECT_EQ(probe.control_read_batch_calls, 1U);
     EXPECT_GT(probe.individual_presence_calls, 0U);
 }
@@ -1343,8 +1347,7 @@ TEST(SyncContentBatchTest,
     EXPECT_NE(stabilized.error().detail.find("timeout"), std::string::npos);
 }
 
-TEST(SyncContentBatchTest,
-     ContentPresenceFailureCleansUpTransactionWorkspace) {
+TEST(SyncContentBatchTest, ContentPresenceFailureCleansUpTransactionWorkspace) {
     auto fixture = make_fixture("presence-cleanup-workspace");
     add_content_files(*fixture, 1);
     const auto pub_input = publication_input(*fixture);
@@ -1352,16 +1355,17 @@ TEST(SyncContentBatchTest,
     ASSERT_TRUE(pub_result.has_value()) << pub_result.error().detail;
     ASSERT_TRUE(execute_with(*fixture, pub_input, *pub_result));
 
-    fixture->profile = kasumi::test::workspace_path(
-        fixture->workspace, "receiver-profile");
-    fixture->local = kasumi::test::workspace_path(
-        fixture->workspace, "receiver-local");
+    fixture->profile =
+        kasumi::test::workspace_path(fixture->workspace, "receiver-profile");
+    fixture->local =
+        kasumi::test::workspace_path(fixture->workspace, "receiver-local");
     ASSERT_TRUE(std::filesystem::create_directories(fixture->profile));
     ASSERT_TRUE(std::filesystem::create_directories(fixture->local));
 
     ContentWindowProbe probe;
     probe.control_read_batch_supported = true;
-    // Fail on the second call (reobservation attempt loop, after staging has created a workspace)
+    // Fail on the second call (reobservation attempt loop, after staging has
+    // created a workspace)
     probe.fail_control_batch_on_call_ordinal = 1;
     attach_probe(*fixture, probe);
 
@@ -1516,10 +1520,11 @@ TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
         fixture->local = second_local;
         probe.content_get_count = 0;
         const auto count_chunk_files = [](const std::filesystem::path& dir) {
-            return std::ranges::count_if(std::filesystem::directory_iterator(dir),
-                                         [](const auto& entry) {
-                                             return entry.is_regular_file();
-                                         });
+            return std::ranges::count_if(
+                std::filesystem::directory_iterator(dir),
+                [](const auto& entry) {
+                    return entry.is_regular_file();
+                });
         };
         bool chunks_checked = false;
         bool assembled_checked = false;
@@ -1528,8 +1533,8 @@ TEST(SyncContentBatchTest, FastCdcDownloadsReuseLocalChunks) {
         fault::set_hook([&](std::string_view point, const auto& path) {
             if (point == "fastcdc_chunks_ready") {
                 chunk_dl_dir = path;
-                EXPECT_FALSE(std::filesystem::exists(
-                    path.parent_path() / "chunk-plain"));
+                EXPECT_FALSE(std::filesystem::exists(path.parent_path() /
+                                                     "chunk-plain"));
                 EXPECT_EQ(count_chunk_files(path),
                           static_cast<std::ptrdiff_t>(needed_hashes.size()));
                 chunks_checked = true;
@@ -1774,9 +1779,11 @@ TEST(SyncContentBatchTest,
             chunk_dl_dir = path;
             EXPECT_FALSE(
                 std::filesystem::exists(path.parent_path() / "chunk-plain"));
-            const auto chunks = std::ranges::count_if(
-                std::filesystem::directory_iterator(path),
-                [](const auto& entry) { return entry.is_regular_file(); });
+            const auto chunks =
+                std::ranges::count_if(std::filesystem::directory_iterator(path),
+                                      [](const auto& entry) {
+                                          return entry.is_regular_file();
+                                      });
             EXPECT_LE(chunks, 64);
         } else if (point == "fastcdc_file_ready") {
             EXPECT_EQ(path.parent_path(), fixture->local);
@@ -1784,8 +1791,8 @@ TEST(SyncContentBatchTest,
                       std::string::npos);
             EXPECT_FALSE(chunk_dl_dir.empty());
             EXPECT_TRUE(std::filesystem::is_empty(chunk_dl_dir));
-            EXPECT_FALSE(std::filesystem::exists(
-                chunk_dl_dir.parent_path() / "chunk-plain"));
+            EXPECT_FALSE(std::filesystem::exists(chunk_dl_dir.parent_path() /
+                                                 "chunk-plain"));
         }
     });
     const auto downloaded = execute_with(*fixture, *input, *result);
@@ -2077,16 +2084,16 @@ TEST(SyncContentBatchTest,
     const std::vector<std::optional<sync::mutation::DestinationPrecondition>>
         destinations(record->plan.operations.size());
     constexpr std::array<std::size_t, 2> indices{0, 1};
-    const auto downloaded = sync::coordinator::detail::apply_packed_downloads(
-        manifest,
-        indices,
-        *record,
-        fixture->local,
-        fixture->storage,
-        fixture->key,
-        *workspace,
-        destinations,
-        2);
+    const auto downloaded =
+        sync::coordinator::detail::apply_packed_downloads(manifest,
+                                                          indices,
+                                                          *record,
+                                                          fixture->local,
+                                                          fixture->storage,
+                                                          fixture->key,
+                                                          *workspace,
+                                                          destinations,
+                                                          2);
     ASSERT_TRUE(downloaded) << downloaded.error().detail;
     ASSERT_FALSE(*downloaded) << (*downloaded)->detail;
     for (const auto& op : record->plan.operations) {
@@ -2104,16 +2111,16 @@ TEST(SyncContentBatchTest,
     ASSERT_TRUE(missing_record);
     prepare_recovery_record(*fixture, *missing_record, *workspace);
     ASSERT_TRUE(kasumi::transport::remove(fixture->base, last_identifier));
-    const auto missing = sync::coordinator::detail::apply_packed_downloads(
-        manifest,
-        indices,
-        *missing_record,
-        fixture->local,
-        fixture->storage,
-        fixture->key,
-        *workspace,
-        destinations,
-        2);
+    const auto missing =
+        sync::coordinator::detail::apply_packed_downloads(manifest,
+                                                          indices,
+                                                          *missing_record,
+                                                          fixture->local,
+                                                          fixture->storage,
+                                                          fixture->key,
+                                                          *workspace,
+                                                          destinations,
+                                                          2);
     ASSERT_TRUE(missing) << missing.error().detail;
     ASSERT_TRUE(missing->has_value());
     EXPECT_EQ((*missing)->code,
@@ -2130,8 +2137,8 @@ TEST(SyncContentBatchTest,
     ContentWindowProbe probe;
     attach_probe(*fixture, probe);
     fixture->storage.storage.get_batch =
-        [](void* context,
-           const kasumi::transport::GetBatch& batch) -> kasumi::transport::Result {
+        [](void* context, const kasumi::transport::GetBatch& batch)
+        -> kasumi::transport::Result {
         EXPECT_FALSE(std::filesystem::exists(
             batch.destination_root.parent_path() / "pack-extract"));
         EXPECT_TRUE(std::filesystem::is_empty(batch.destination_root));
@@ -2277,11 +2284,11 @@ void setup_repair_download_recovery(PreparedRepairDownloadRecovery& out,
     const auto prepared = sync::publication::prepare_commit(
         tree, false, 0, {}, 1, out.fixture->key, manifest);
     ASSERT_TRUE(prepared) << prepared.error().detail;
-    const auto remote = sync::publication::publish_commit(
-        out.fixture->base,
-        out.fixture->key,
-        *prepared,
-        out.fixture->workspace->root);
+    const auto remote =
+        sync::publication::publish_commit(out.fixture->base,
+                                          out.fixture->key,
+                                          *prepared,
+                                          out.fixture->workspace->root);
     ASSERT_TRUE(remote) << remote.error().detail;
     const auto height = prepared->commit.height;
     ASSERT_TRUE(kasumi::state_storage::initialize(out.runtime.database_path));
@@ -2301,11 +2308,11 @@ void setup_repair_download_recovery(PreparedRepairDownloadRecovery& out,
         kasumi::test::write_text(source, bytes);
         ASSERT_TRUE(
             kasumi::crypto::encrypt_file(source, encrypted, out.fixture->key));
-        ASSERT_TRUE(kasumi::transport::put(
-            out.fixture->base,
-            encrypted,
-            kasumi::crypto::content_identifier(out.fixture->key,
-                                               hash_string(bytes))));
+        ASSERT_TRUE(
+            kasumi::transport::put(out.fixture->base,
+                                   encrypted,
+                                   kasumi::crypto::content_identifier(
+                                       out.fixture->key, hash_string(bytes))));
         ASSERT_TRUE(std::filesystem::remove(encrypted));
     };
     ASSERT_NO_FATAL_FAILURE(seed("already uploaded"));

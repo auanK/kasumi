@@ -20,8 +20,10 @@
 namespace kasumi::crypto::pack {
 
 inline constexpr std::uint64_t MAX_MICRO_PACK_BLOB_SIZE = 256ULL * 1024ULL;
-inline constexpr std::uint64_t TARGET_MICRO_PACK_SIZE = 4ULL * 1024ULL * 1024ULL;
-inline constexpr std::uint64_t FASTCDC_FILE_THRESHOLD = 8ULL * 1024ULL * 1024ULL;
+inline constexpr std::uint64_t TARGET_MICRO_PACK_SIZE =
+    4ULL * 1024ULL * 1024ULL;
+inline constexpr std::uint64_t FASTCDC_FILE_THRESHOLD =
+    8ULL * 1024ULL * 1024ULL;
 inline constexpr std::uint32_t FASTCDC_MIN_CHUNK = 256U * 1024U;
 inline constexpr std::uint32_t FASTCDC_AVG_CHUNK = 1U * 1024U * 1024U;
 inline constexpr std::uint32_t FASTCDC_MAX_CHUNK = 32U * 1024U * 1024U;
@@ -112,8 +114,8 @@ struct FastCdcResult {
 };
 
 // Computes canonical pack hash from strictly sorted unique member descriptors.
-std::optional<Hash>
-compute_pack_hash(std::span<const PackMemberDescriptor> sorted_members) noexcept;
+std::optional<Hash> compute_pack_hash(
+    std::span<const PackMemberDescriptor> sorted_members) noexcept;
 
 // Bundles, verifies, encrypts (KPAK v1 + FilePurpose::Pack), and hashes a pack.
 std::expected<PackEncryptionResult, std::string>
@@ -159,8 +161,7 @@ struct VerifiedPack {
             return std::nullopt;
         }
         const auto index = static_cast<std::size_t>(it - members.begin());
-        if (index >= slices.size() ||
-            slices[index].offset > plaintext.size() ||
+        if (index >= slices.size() || slices[index].offset > plaintext.size() ||
             slices[index].size > plaintext.size() - slices[index].offset) {
             return std::nullopt;
         }
@@ -179,9 +180,9 @@ private:
 // Parses, validates, and verifies an authenticated KPAK v1 plaintext buffer
 // (magic, version, strict member hash ordering, bounds, pack_hash, and member
 // BLAKE3 digests), wiping the buffer on failure.
-std::expected<VerifiedPack, std::string>
-decode_verified_pack_plaintext(std::vector<std::uint8_t> plaintext,
-                               std::optional<Hash> expected_pack_hash = std::nullopt);
+std::expected<VerifiedPack, std::string> decode_verified_pack_plaintext(
+    std::vector<std::uint8_t> plaintext,
+    std::optional<Hash> expected_pack_hash = std::nullopt);
 
 // Decrypts and authenticates a KPAK v1 object in memory, verifying pack_hash
 // and every member's BLAKE3 digest.
@@ -199,22 +200,24 @@ decrypt_and_verify_pack(const std::filesystem::path& encrypted_path,
                         const std::filesystem::path* extract_dir = nullptr,
                         Hash* out_pack_hash = nullptr);
 
-// Splits a regular non-symlink file into deterministic FastCDC chunks in one pass.
+// Splits a regular non-symlink file into deterministic FastCDC chunks in one
+// pass.
 std::expected<FastCdcResult, std::string>
 chunk_file_fastcdc(const std::filesystem::path& path);
 
 std::expected<FastCdcResult, std::string>
 chunk_file_fastcdc(const std::filesystem::path& path, FastCdcProfile profile);
 
-// Encrypts a verified file slice [offset, offset + length) using FilePurpose::Content.
-std::optional<EncryptionResult>
-encrypt_file_slice_with_hashes(const std::filesystem::path& input_path,
-                               std::uint64_t offset,
-                               std::uint32_t length,
-                               const Hash& expected_slice_hash,
-                               const std::filesystem::path& output_path,
-                               std::span<const std::uint8_t, KEY_SIZE> master_key,
-                               std::string* error_detail = nullptr);
+// Encrypts a verified file slice [offset, offset + length) using
+// FilePurpose::Content.
+std::optional<EncryptionResult> encrypt_file_slice_with_hashes(
+    const std::filesystem::path& input_path,
+    std::uint64_t offset,
+    std::uint32_t length,
+    const Hash& expected_slice_hash,
+    const std::filesystem::path& output_path,
+    std::span<const std::uint8_t, KEY_SIZE> master_key,
+    std::string* error_detail = nullptr);
 
 } // namespace kasumi::crypto::pack
 

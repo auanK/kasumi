@@ -54,8 +54,8 @@ std::expected<void, std::string> validate_policy(const Policy& policy) {
     return {};
 }
 
-std::expected<void, std::string>
-checked_add_u64(std::uint64_t& sum, std::uint64_t delta) {
+std::expected<void, std::string> checked_add_u64(std::uint64_t& sum,
+                                                 std::uint64_t delta) {
     if (delta > std::numeric_limits<std::uint64_t>::max() - sum) {
         return std::unexpected("byte total overflows 64-bit unsigned limit");
     }
@@ -149,8 +149,8 @@ PlanResult plan(const Snapshot& live_tree,
         if (entry.size <= policy.max_blob_size) {
             ++packed_small_count;
         }
-        auto [it, inserted] =
-            pack_map.try_emplace(entry.pack_hash, ExistingPack{.pack_hash = entry.pack_hash});
+        auto [it, inserted] = pack_map.try_emplace(
+            entry.pack_hash, ExistingPack{.pack_hash = entry.pack_hash});
         static_cast<void>(inserted);
         if (auto ok = checked_add_u64(it->second.live_bytes, entry.size); !ok) {
             return std::unexpected(ok.error());
@@ -220,7 +220,8 @@ PlanResult plan(const Snapshot& live_tree,
             });
         }
     }
-    std::ranges::sort(loose_small, {}, &crypto::pack::PackMemberDescriptor::hash);
+    std::ranges::sort(
+        loose_small, {}, &crypto::pack::PackMemberDescriptor::hash);
 
     result.loose_small_blobs_detected = loose_small.size();
     result.live_small_blobs = loose_small.size() + packed_small_count;
@@ -285,11 +286,11 @@ PlanResult plan(const Snapshot& live_tree,
     candidates.insert(candidates.end(),
                       selected_loose_blobs.begin(),
                       selected_loose_blobs.end());
-    std::ranges::sort(candidates, {}, &crypto::pack::PackMemberDescriptor::hash);
+    std::ranges::sort(
+        candidates, {}, &crypto::pack::PackMemberDescriptor::hash);
 
-    if (candidates.empty() ||
-        (selected_dirty_indices.empty() &&
-         candidates.size() < policy.min_pack_members)) {
+    if (candidates.empty() || (selected_dirty_indices.empty() &&
+                               candidates.size() < policy.min_pack_members)) {
         return make_noop();
     }
 
@@ -319,8 +320,8 @@ PlanResult plan(const Snapshot& live_tree,
         }
     }
 
-    std::unordered_map<Hash, std::size_t, decltype(&hash_key)> clean_pack_by_hash{
-        0, hash_key};
+    std::unordered_map<Hash, std::size_t, decltype(&hash_key)>
+        clean_pack_by_hash{0, hash_key};
     clean_pack_by_hash.reserve(selected_clean_indices.size());
     for (const auto idx : selected_clean_indices) {
         clean_pack_by_hash.emplace(packs[idx].pack_hash, idx);
@@ -350,8 +351,8 @@ PlanResult plan(const Snapshot& live_tree,
     }
 
     const std::size_t replaced_source_objects = selected_loose_blobs.size() +
-                                              selected_clean_indices.size() +
-                                              selected_dirty_indices.size();
+                                                selected_clean_indices.size() +
+                                                selected_dirty_indices.size();
     const bool beneficial = !formed_packs.empty() &&
                             (!selected_dirty_indices.empty() ||
                              formed_packs.size() < replaced_source_objects);
@@ -388,9 +389,8 @@ PlanResult plan(const Snapshot& live_tree,
         return std::unexpected(
             "repacked storage manifest exceeds packed blob entry limit");
     }
-    std::ranges::sort(target_manifest.packed_blobs,
-                      {},
-                      &history::PackedBlobEntry::blob_hash);
+    std::ranges::sort(
+        target_manifest.packed_blobs, {}, &history::PackedBlobEntry::blob_hash);
 
     std::vector<Hash> replaced_hashes;
     replaced_hashes.reserve(selected_dirty_indices.size() +

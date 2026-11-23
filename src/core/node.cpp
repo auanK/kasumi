@@ -210,7 +210,8 @@ std::string make_conflict_path(std::string_view original_path,
                           ? std::string_view(candidate_name)
                           : std::string_view(candidate_name).substr(0, dot);
     if (is_windows_reserved_device_name(base)) {
-        const std::size_t max_with_prefix = maximum_logical_component_length - 1;
+        const std::size_t max_with_prefix =
+            maximum_logical_component_length - 1;
         suffix_part =
             truncate_utf8(suffix, std::min(suffix.size(), max_with_prefix));
         const std::size_t safe_max_orig_len =

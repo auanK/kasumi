@@ -147,7 +147,8 @@ TEST(ReobservationSafeguardTest,
     kasumi::test::write_text(local_file, "AAAA");
     ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(
         local_file,
-        std::filesystem::file_time_type::clock::now() - std::chrono::seconds{1}));
+        std::filesystem::file_time_type::clock::now() -
+            std::chrono::seconds{1}));
     const auto initial_scan =
         kasumi::application::observation::scanner::scan_result(
             local,
@@ -296,7 +297,8 @@ TEST(ReobservationSafeguardTest,
     kasumi::test::write_text(local_file, "AAAA");
     ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(
         local_file,
-        std::filesystem::file_time_type::clock::now() - std::chrono::seconds{1}));
+        std::filesystem::file_time_type::clock::now() -
+            std::chrono::seconds{1}));
     const auto initial_scan =
         kasumi::application::observation::scanner::scan_result(
             local,

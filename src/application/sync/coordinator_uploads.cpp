@@ -1,8 +1,7 @@
-#include "application/sync/coordinator.hpp"
-
 #include "application/concurrency.hpp"
 #include "application/history_storage/content_reachability.hpp"
 #include "application/progress.hpp"
+#include "application/sync/coordinator.hpp"
 #include "application/sync/mutation.hpp"
 #include "application/sync/mutation_batch.hpp"
 #include "application/sync/mutation_detail.hpp"
@@ -37,13 +36,13 @@
 namespace kasumi::application::sync::coordinator {
 namespace {
 
+using detail::mutation_error;
+using detail::next_chunk_window;
+using detail::pack_upload_window_size;
 using detail::PlannedChunkUpload;
 using detail::PlannedPack;
 using detail::PlannedSmallUpload;
 using detail::UploadLayoutPlan;
-using detail::mutation_error;
-using detail::next_chunk_window;
-using detail::pack_upload_window_size;
 
 std::filesystem::path
 resolve_pre_mutation_source_path(const std::filesystem::path& local_root,
@@ -51,8 +50,8 @@ resolve_pre_mutation_source_path(const std::filesystem::path& local_root,
                                  const Hash& expected_hash,
                                  const Snapshot& observed_local_tree,
                                  std::size_t op_index) {
-    auto resolved =
-        mutation::detail::resolve_local_path(local_root, operation.path, op_index);
+    auto resolved = mutation::detail::resolve_local_path(
+        local_root, operation.path, op_index);
     if (resolved) {
         std::error_code ec;
         const auto status = std::filesystem::symlink_status(*resolved, ec);
@@ -168,7 +167,8 @@ plan_manifest_repairs(UploadLayoutPlan& layout,
 
 } // namespace
 
-std::expected<void, detail::UploadBatchError> detail::transfer_and_verify_upload_batch(
+std::expected<void, detail::UploadBatchError>
+detail::transfer_and_verify_upload_batch(
     const mutation::StagedUploadBatch& batch,
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
@@ -217,15 +217,15 @@ std::expected<void, detail::UploadBatchError> detail::transfer_and_verify_upload
     return {};
 }
 
-std::expected<bool, Error>
-detail::verify_existing_content(transport::Transport& storage,
-                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                        std::string_view identifier,
-                        std::string_view plaintext_hash,
-                        std::optional<std::uint64_t> size,
-                        const platform::Workspace& workspace,
-                        std::size_t operation_index,
-                        bool is_pack) {
+std::expected<bool, Error> detail::verify_existing_content(
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    std::string_view identifier,
+    std::string_view plaintext_hash,
+    std::optional<std::uint64_t> size,
+    const platform::Workspace& workspace,
+    std::size_t operation_index,
+    bool is_pack) {
     const auto checked = history_storage::audit_content_object(storage,
                                                                key,
                                                                identifier,
@@ -237,22 +237,22 @@ detail::verify_existing_content(transport::Transport& storage,
     if (!checked) {
         return std::unexpected(
             detail::make_error(ErrorCode::ObservationFailure,
-                       "could not authenticate existing content: " +
-                           checked.error().detail,
-                       operation_index));
+                               "could not authenticate existing content: " +
+                                   checked.error().detail,
+                               operation_index));
     }
     return checked->state == history_storage::ContentObjectState::Present;
 }
 
-std::expected<UploadLayoutPlan, Error>
-detail::build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
-                         const transport::Transport& storage,
-                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                         const reconciliation::Input& observed_input,
-                         const reconciliation::Result& reconciliation_result,
-                         const transaction::Record& record,
-                         const std::vector<bool>& content_upload_required,
-                         bool enable_micro_packs) {
+std::expected<UploadLayoutPlan, Error> detail::build_upload_layout_plan(
+    const runtime::RuntimeData& runtime_data,
+    const transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const reconciliation::Input& observed_input,
+    const reconciliation::Result& reconciliation_result,
+    const transaction::Record& record,
+    const std::vector<bool>& content_upload_required,
+    bool enable_micro_packs) {
     UploadLayoutPlan layout;
 
     const auto& observed_manifest = observed_input.storage.storage_manifest;
@@ -285,17 +285,19 @@ detail::build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
             if (record.publication_required &&
                 history::find_packed_blob(observed_manifest, row.hash) &&
                 !repair_ops_by_hash.contains(row.hash)) {
-                return std::unexpected(detail::make_error(
-                    ErrorCode::MutationFailure,
-                    "cannot replace an absent pack without a local source for " +
-                        row.path));
+                return std::unexpected(
+                    detail::make_error(ErrorCode::MutationFailure,
+                                       "cannot replace an absent pack without "
+                                       "a local source for " +
+                                           row.path));
             }
         } else if (row.path != ".kasumiignore") {
             live_files.emplace(row.hash, row.size);
         }
     }
 
-    for (const auto& entry : observed_input.storage.storage_manifest.packed_blobs) {
+    for (const auto& entry :
+         observed_input.storage.storage_manifest.packed_blobs) {
         const auto found = live_files.find(entry.blob_hash);
         if (found != live_files.end() && found->second == entry.size) {
             layout.target_manifest.packed_blobs.push_back(entry);
@@ -315,7 +317,8 @@ detail::build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
         for (std::size_t index = 0; index < record.plan.operations.size();
              ++index) {
             const auto& op = record.plan.operations[index];
-            if (op.action != Action::Upload || !content_upload_required[index] ||
+            if (op.action != Action::Upload ||
+                !content_upload_required[index] ||
                 platform::path::to_logical_utf8(op.path) == ".kasumiignore") {
                 continue;
             }
@@ -464,8 +467,9 @@ detail::build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
         }
     }
 
-    std::ranges::sort(
-        layout.target_manifest.packed_blobs, {}, &history::PackedBlobEntry::blob_hash);
+    std::ranges::sort(layout.target_manifest.packed_blobs,
+                      {},
+                      &history::PackedBlobEntry::blob_hash);
     std::ranges::sort(layout.target_manifest.chunked_files,
                       {},
                       &history::ChunkedFileEntry::file_hash);
@@ -485,14 +489,15 @@ detail::build_upload_layout_plan(const runtime::RuntimeData& runtime_data,
 }
 
 std::expected<void, detail::UploadBatchError>
-detail::execute_packed_upload_batch(std::span<const PlannedPack* const> packs,
-                            const transaction::Record& record,
-                            const std::filesystem::path& local_root,
-                            transport::Transport& storage,
-                            std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                            const platform::Workspace& workspace,
-                            std::size_t parallelism,
-                            ProgressMeter* meter) {
+detail::execute_packed_upload_batch(
+    std::span<const PlannedPack* const> packs,
+    const transaction::Record& record,
+    const std::filesystem::path& local_root,
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const platform::Workspace& workspace,
+    std::size_t parallelism,
+    ProgressMeter* meter) {
     if (packs.empty()) {
         return {};
     }
@@ -540,12 +545,12 @@ detail::execute_packed_upload_batch(std::span<const PlannedPack* const> packs,
                 });
             }
             const auto dest = batch.root / pack.pack_identifier;
-            auto res =
-                crypto::pack::write_encrypted_pack(sources, dest, key);
+            auto res = crypto::pack::write_encrypted_pack(sources, dest, key);
             if (!res || res->pack_hash != pack.pack_hash) {
                 stage_errors[i] = mutation::MutationError{
                     .code = mutation::MutationErrorCode::IntegrityMismatch,
-                    .detail = res ? "staged pack identifier mismatch" : res.error(),
+                    .detail =
+                        res ? "staged pack identifier mismatch" : res.error(),
                     .path = local_root,
                     .operation_index = pack.operation_indices.front(),
                 };
@@ -566,8 +571,8 @@ detail::execute_packed_upload_batch(std::span<const PlannedPack* const> packs,
 
     std::optional<mutation::MutationError> lowest_err;
     for (const auto& err : stage_errors) {
-        if (err &&
-            (!lowest_err || err->operation_index < lowest_err->operation_index)) {
+        if (err && (!lowest_err ||
+                    err->operation_index < lowest_err->operation_index)) {
             lowest_err = *err;
         }
     }
@@ -593,7 +598,8 @@ detail::execute_packed_upload_batch(std::span<const PlannedPack* const> packs,
     return {};
 }
 
-std::expected<void, detail::UploadBatchError> detail::execute_chunked_upload_batch(
+std::expected<void, detail::UploadBatchError>
+detail::execute_chunked_upload_batch(
     std::span<const PlannedChunkUpload* const> uploads,
     const transaction::Record& record,
     const history::StorageManifest& live_manifest,
@@ -813,10 +819,9 @@ std::expected<void, detail::UploadBatchError> detail::execute_chunked_upload_bat
                 if (!enc) {
                     stage_errors[i] = mutation::MutationError{
                         .code = mutation::MutationErrorCode::IntegrityMismatch,
-                        .detail =
-                            detail_err.empty()
-                                ? "failed to encrypt FastCDC chunk slice"
-                                : std::move(detail_err),
+                        .detail = detail_err.empty()
+                                      ? "failed to encrypt FastCDC chunk slice"
+                                      : std::move(detail_err),
                         .path = chunk.source_path,
                         .operation_index = chunk.operation_index,
                     };
@@ -837,9 +842,8 @@ std::expected<void, detail::UploadBatchError> detail::execute_chunked_upload_bat
 
         std::optional<mutation::MutationError> lowest_err;
         for (const auto& err : stage_errors) {
-            if (err &&
-                (!lowest_err ||
-                 err->operation_index < lowest_err->operation_index)) {
+            if (err && (!lowest_err ||
+                        err->operation_index < lowest_err->operation_index)) {
                 lowest_err = *err;
             }
         }

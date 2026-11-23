@@ -45,8 +45,11 @@ GlobalPaths default_global_paths() {
         std::vector<char> buffer(static_cast<std::size_t>(size));
         struct passwd pwd{};
         struct passwd* result = nullptr;
-        if (::getpwuid_r(::geteuid(), &pwd, buffer.data(), buffer.size(), &result) == 0 &&
-            result != nullptr && pwd.pw_dir != nullptr && pwd.pw_dir[0] == '/') {
+        if (::getpwuid_r(
+                ::geteuid(), &pwd, buffer.data(), buffer.size(), &result) ==
+                0 &&
+            result != nullptr && pwd.pw_dir != nullptr &&
+            pwd.pw_dir[0] == '/') {
             app_dir = std::filesystem::path{pwd.pw_dir} / ".config" / "kasumi";
         }
     }

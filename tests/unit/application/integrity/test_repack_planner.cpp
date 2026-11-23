@@ -1,5 +1,4 @@
 #include "application/integrity/repack_planner.hpp"
-
 #include "core/hasher.hpp"
 #include "core/history.hpp"
 #include "core/node.hpp"
@@ -78,8 +77,7 @@ kasumi::Hash canonical_pack_hash(const std::vector<FileSpec>& members) {
             .size = static_cast<std::uint32_t>(member.size),
         });
     }
-    std::ranges::sort(
-        descriptors, {}, &pack::PackMemberDescriptor::hash);
+    std::ranges::sort(descriptors, {}, &pack::PackMemberDescriptor::hash);
     const auto computed = pack::compute_pack_hash(descriptors);
     EXPECT_TRUE(computed.has_value());
     return computed.value_or(kasumi::Hash{});
@@ -98,17 +96,16 @@ void append_pack_to_manifest(history::StorageManifest& manifest,
 }
 
 void finalize_manifest(history::StorageManifest& manifest) {
-    std::ranges::sort(manifest.packed_blobs,
-                      {},
-                      &history::PackedBlobEntry::blob_hash);
-    std::ranges::sort(manifest.chunked_files,
-                      {},
-                      &history::ChunkedFileEntry::file_hash);
+    std::ranges::sort(
+        manifest.packed_blobs, {}, &history::PackedBlobEntry::blob_hash);
+    std::ranges::sort(
+        manifest.chunked_files, {}, &history::ChunkedFileEntry::file_hash);
 }
 
 TEST(RepackPlannerTest, EmptyOrAllHealthyVaultIsNoOp) {
     const auto empty_tree = build_snapshot({});
-    const auto empty_plan = repack::plan(empty_tree, history::StorageManifest{});
+    const auto empty_plan =
+        repack::plan(empty_tree, history::StorageManifest{});
     ASSERT_TRUE(empty_plan.has_value()) << empty_plan.error();
     EXPECT_FALSE(empty_plan->actionable);
     EXPECT_EQ(empty_plan->existing_packs, 0U);
@@ -200,13 +197,22 @@ TEST(RepackPlannerTest, SingleLooseSmallBlobIsNoOp) {
 }
 
 TEST(RepackPlannerTest, ConsolidatesMultipleLooseSmallBlobsIntoMicroPacks) {
-    const FileSpec small_a{.path = "a.txt", .hash = make_ordered_hash(0x01, "a"), .size = 1000};
-    const FileSpec small_b{.path = "b.txt", .hash = make_ordered_hash(0x02, "b"), .size = 2000};
-    const FileSpec small_a_dup{.path = "dup_a.txt", .hash = small_a.hash, .size = 1000};
-    const FileSpec ignore_file{.path = ".kasumiignore", .hash = make_ordered_hash(0x03, "ig"), .size = 120};
-    const FileSpec medium_file{.path = "medium.dat", .hash = make_ordered_hash(0x04, "med"), .size = 300ULL * 1024ULL};
+    const FileSpec small_a{
+        .path = "a.txt", .hash = make_ordered_hash(0x01, "a"), .size = 1000};
+    const FileSpec small_b{
+        .path = "b.txt", .hash = make_ordered_hash(0x02, "b"), .size = 2000};
+    const FileSpec small_a_dup{
+        .path = "dup_a.txt", .hash = small_a.hash, .size = 1000};
+    const FileSpec ignore_file{.path = ".kasumiignore",
+                               .hash = make_ordered_hash(0x03, "ig"),
+                               .size = 120};
+    const FileSpec medium_file{.path = "medium.dat",
+                               .hash = make_ordered_hash(0x04, "med"),
+                               .size = 300ULL * 1024ULL};
     const std::uint64_t large_size = 9ULL * 1024ULL * 1024ULL;
-    const FileSpec large_file{.path = "large.dat", .hash = make_ordered_hash(0x05, "big"), .size = large_size};
+    const FileSpec large_file{.path = "large.dat",
+                              .hash = make_ordered_hash(0x05, "big"),
+                              .size = large_size};
 
     const auto tree = build_snapshot(
         {small_a, small_b, small_a_dup, ignore_file, medium_file, large_file});
@@ -235,11 +241,19 @@ TEST(RepackPlannerTest, ConsolidatesMultipleLooseSmallBlobsIntoMicroPacks) {
     ASSERT_EQ(first->new_packs.size(), 1U);
     EXPECT_EQ(first->new_packs[0].members.size(), 2U);
     EXPECT_TRUE(history::valid_storage_manifest(first->target_manifest, tree));
-    EXPECT_NE(history::find_packed_blob(first->target_manifest, small_a.hash), nullptr);
-    EXPECT_NE(history::find_packed_blob(first->target_manifest, small_b.hash), nullptr);
-    EXPECT_EQ(history::find_packed_blob(first->target_manifest, ignore_file.hash), nullptr);
-    EXPECT_EQ(history::find_packed_blob(first->target_manifest, medium_file.hash), nullptr);
-    EXPECT_NE(history::find_chunked_file(first->target_manifest, large_file.hash), nullptr);
+    EXPECT_NE(history::find_packed_blob(first->target_manifest, small_a.hash),
+              nullptr);
+    EXPECT_NE(history::find_packed_blob(first->target_manifest, small_b.hash),
+              nullptr);
+    EXPECT_EQ(
+        history::find_packed_blob(first->target_manifest, ignore_file.hash),
+        nullptr);
+    EXPECT_EQ(
+        history::find_packed_blob(first->target_manifest, medium_file.hash),
+        nullptr);
+    EXPECT_NE(
+        history::find_chunked_file(first->target_manifest, large_file.hash),
+        nullptr);
 
     // Second pass against target_manifest must be idempotent (no-op).
     const auto second = repack::plan(tree, first->target_manifest);
@@ -262,16 +276,28 @@ TEST(RepackPlannerTest, ConsolidatesMultipleCleanUnderfilledPacksIntoOne) {
 
     // Three clean underfilled packs (each < 2 MiB, combined ~1.0 MiB).
     const std::vector<FileSpec> pack1{
-        {.path = "p1/a", .hash = make_ordered_hash(0x20, "p1a"), .size = 150U * 1024U},
-        {.path = "p1/b", .hash = make_ordered_hash(0x21, "p1b"), .size = 200U * 1024U},
+        {.path = "p1/a",
+         .hash = make_ordered_hash(0x20, "p1a"),
+         .size = 150U * 1024U},
+        {.path = "p1/b",
+         .hash = make_ordered_hash(0x21, "p1b"),
+         .size = 200U * 1024U},
     };
     const std::vector<FileSpec> pack2{
-        {.path = "p2/a", .hash = make_ordered_hash(0x22, "p2a"), .size = 150U * 1024U},
-        {.path = "p2/b", .hash = make_ordered_hash(0x23, "p2b"), .size = 200U * 1024U},
+        {.path = "p2/a",
+         .hash = make_ordered_hash(0x22, "p2a"),
+         .size = 150U * 1024U},
+        {.path = "p2/b",
+         .hash = make_ordered_hash(0x23, "p2b"),
+         .size = 200U * 1024U},
     };
     const std::vector<FileSpec> pack3{
-        {.path = "p3/a", .hash = make_ordered_hash(0x24, "p3a"), .size = 150U * 1024U},
-        {.path = "p3/b", .hash = make_ordered_hash(0x25, "p3b"), .size = 200U * 1024U},
+        {.path = "p3/a",
+         .hash = make_ordered_hash(0x24, "p3a"),
+         .size = 150U * 1024U},
+        {.path = "p3/b",
+         .hash = make_ordered_hash(0x25, "p3b"),
+         .size = 200U * 1024U},
     };
 
     const auto p1_hash = canonical_pack_hash(pack1);
@@ -319,9 +345,15 @@ TEST(RepackPlannerTest, ConsolidatesMultipleCleanUnderfilledPacksIntoOne) {
 }
 
 TEST(RepackPlannerTest, ReclaimsDirtyPackProvenByPackHashMismatch) {
-    const FileSpec survivor{.path = "alive.txt", .hash = make_ordered_hash(0x30, "alive"), .size = 4096};
-    const FileSpec dead_b{.path = "dead_b.txt", .hash = make_ordered_hash(0x31, "dead_b"), .size = 8192};
-    const FileSpec dead_c{.path = "dead_c.txt", .hash = make_ordered_hash(0x32, "dead_c"), .size = 16384};
+    const FileSpec survivor{.path = "alive.txt",
+                            .hash = make_ordered_hash(0x30, "alive"),
+                            .size = 4096};
+    const FileSpec dead_b{.path = "dead_b.txt",
+                          .hash = make_ordered_hash(0x31, "dead_b"),
+                          .size = 8192};
+    const FileSpec dead_c{.path = "dead_c.txt",
+                          .hash = make_ordered_hash(0x32, "dead_c"),
+                          .size = 16384};
     const auto old_pack_hash = canonical_pack_hash({survivor, dead_b, dead_c});
 
     const auto tree = build_snapshot({survivor});
@@ -342,14 +374,16 @@ TEST(RepackPlannerTest, ReclaimsDirtyPackProvenByPackHashMismatch) {
     EXPECT_EQ(result->replaced_pack_hashes, std::vector{old_pack_hash});
     EXPECT_TRUE(history::valid_storage_manifest(result->target_manifest, tree));
 
-    // Re-running on target_manifest has no dead blobs and only 1 clean pack -> no-op.
+    // Re-running on target_manifest has no dead blobs and only 1 clean pack ->
+    // no-op.
     const auto second = repack::plan(tree, result->target_manifest);
     ASSERT_TRUE(second.has_value()) << second.error();
     EXPECT_FALSE(second->actionable);
     EXPECT_EQ(second->dirty_packs_detected, 0U);
 }
 
-TEST(RepackPlannerTest, SkipsLargeDirtyPackByDefaultAndReclaimsWhenPolicyEnablesIt) {
+TEST(RepackPlannerTest,
+     SkipsLargeDirtyPackByDefaultAndReclaimsWhenPolicyEnablesIt) {
     // 10 live blobs totaling 2.5 MiB (>= 2 MiB threshold), plus 1 dead blob
     // included in the original pack hash.
     std::vector<FileSpec> large_dirty_live;
@@ -368,11 +402,15 @@ TEST(RepackPlannerTest, SkipsLargeDirtyPackByDefaultAndReclaimsWhenPolicyEnables
     });
     const auto large_dirty_hash = canonical_pack_hash(original_members);
 
-    // One unrelated clean underfilled pack that must NOT be needlessly rewritten
-    // when object count would not decrease.
+    // One unrelated clean underfilled pack that must NOT be needlessly
+    // rewritten when object count would not decrease.
     const std::vector<FileSpec> clean_small{
-        {.path = "clean/one", .hash = make_ordered_hash(0x80, "c1"), .size = 1024},
-        {.path = "clean/two", .hash = make_ordered_hash(0x81, "c2"), .size = 1024},
+        {.path = "clean/one",
+         .hash = make_ordered_hash(0x80, "c1"),
+         .size = 1024},
+        {.path = "clean/two",
+         .hash = make_ordered_hash(0x81, "c2"),
+         .size = 1024},
     };
     const auto clean_small_hash = canonical_pack_hash(clean_small);
 
@@ -402,10 +440,11 @@ TEST(RepackPlannerTest, SkipsLargeDirtyPackByDefaultAndReclaimsWhenPolicyEnables
     EXPECT_EQ(reclaim_plan->source_dirty_packs, 1U);
     EXPECT_EQ(reclaim_plan->source_clean_packs, 0U);
     EXPECT_EQ(reclaim_plan->healthy_packs_kept, 1U);
-    EXPECT_EQ(reclaim_plan->replaced_pack_hashes, std::vector{large_dirty_hash});
+    EXPECT_EQ(reclaim_plan->replaced_pack_hashes,
+              std::vector{large_dirty_hash});
     EXPECT_EQ(reclaim_plan->new_packs.size(), 1U);
-    const auto* clean_entry =
-        history::find_packed_blob(reclaim_plan->target_manifest, clean_small[0].hash);
+    const auto* clean_entry = history::find_packed_blob(
+        reclaim_plan->target_manifest, clean_small[0].hash);
     ASSERT_NE(clean_entry, nullptr);
     EXPECT_EQ(clean_entry->pack_hash, clean_small_hash);
 }
@@ -413,7 +452,8 @@ TEST(RepackPlannerTest, SkipsLargeDirtyPackByDefaultAndReclaimsWhenPolicyEnables
 TEST(RepackPlannerTest, MergesTrailingSingleBlobIntoPreviousPack) {
     // target_pack_size = 4 MiB. 16 blobs * 256 KiB = 4 MiB fill the first bin,
     // leaving 1 trailing 256 KiB blob that must merge into bin 0 (4.25 MiB <=
-    // MAXIMUM_PACK_PLAINTEXT_SIZE of 16 MiB) instead of leaving a 1-member pack.
+    // MAXIMUM_PACK_PLAINTEXT_SIZE of 16 MiB) instead of leaving a 1-member
+    // pack.
     std::vector<FileSpec> files;
     files.reserve(17);
     for (int i = 0; i < 17; ++i) {
@@ -440,12 +480,20 @@ TEST(RepackPlannerTest, NonReducingCleanPacksAreNoOp) {
     // target_pack_size: bin-packing produces 2 new packs of 300 KiB each with
     // zero dirty packs reclaimed, so object count is not reduced -> no-op.
     const std::vector<FileSpec> pack1{
-        {.path = "p1/a", .hash = make_ordered_hash(0x01, "nr1a"), .size = 150U * 1024U},
-        {.path = "p1/b", .hash = make_ordered_hash(0x03, "nr1b"), .size = 150U * 1024U},
+        {.path = "p1/a",
+         .hash = make_ordered_hash(0x01, "nr1a"),
+         .size = 150U * 1024U},
+        {.path = "p1/b",
+         .hash = make_ordered_hash(0x03, "nr1b"),
+         .size = 150U * 1024U},
     };
     const std::vector<FileSpec> pack2{
-        {.path = "p2/a", .hash = make_ordered_hash(0x02, "nr2a"), .size = 150U * 1024U},
-        {.path = "p2/b", .hash = make_ordered_hash(0x04, "nr2b"), .size = 150U * 1024U},
+        {.path = "p2/a",
+         .hash = make_ordered_hash(0x02, "nr2a"),
+         .size = 150U * 1024U},
+        {.path = "p2/b",
+         .hash = make_ordered_hash(0x04, "nr2b"),
+         .size = 150U * 1024U},
     };
 
     const auto p1_hash = canonical_pack_hash(pack1);
@@ -536,7 +584,9 @@ TEST(RepackPlannerTest, RejectsInvalidInputs) {
         {.blob_hash = h1, .size = 10, .pack_hash = make_hash("p")},
     };
     overlap_manifest.chunked_files = {
-        {.file_hash = h1, .file_size = 10, .chunks = {{.hash = h2, .size = 10}}},
+        {.file_hash = h1,
+         .file_size = 10,
+         .chunks = {{.hash = h2, .size = 10}}},
     };
     EXPECT_FALSE(repack::plan(valid_tree, overlap_manifest).has_value());
 }
@@ -581,8 +631,8 @@ TEST(RepackPlannerTest, PreservesZeroByteSmallFilesAndOversizedPackedBlobs) {
     EXPECT_EQ(result->new_packs[0].members.size(), 2U);
 
     // The oversized packed entry must remain untouched in its original pack.
-    const auto* retained_oversized =
-        history::find_packed_blob(result->target_manifest, oversized_packed.hash);
+    const auto* retained_oversized = history::find_packed_blob(
+        result->target_manifest, oversized_packed.hash);
     ASSERT_NE(retained_oversized, nullptr);
     EXPECT_EQ(retained_oversized->pack_hash, oversized_pack_hash);
 

@@ -274,17 +274,17 @@ std::string format_compact_summary(const application::Response& response) {
                     parts.push_back("conflicts");
                 }
                 if (!payload.pending_paths.empty()) {
-                    parts.push_back(std::format(
-                        "{} pending", payload.pending_paths.size()));
+                    parts.push_back(std::format("{} pending",
+                                                payload.pending_paths.size()));
                 }
                 return join_summary_parts(parts);
             } else if constexpr (std::is_same_v<T,
-                                                 application::FsckCompleted>) {
+                                                application::FsckCompleted>) {
                 std::string summary =
                     payload.checked_objects == 1
                         ? "1 object verified"
-                        : std::format(
-                              "{} objects verified", payload.checked_objects);
+                        : std::format("{} objects verified",
+                                      payload.checked_objects);
                 if (payload.checked_plaintext_bytes) {
                     summary += std::format(
                         " ({})", format_size(*payload.checked_plaintext_bytes));
@@ -320,11 +320,10 @@ std::string format_compact_summary(const application::Response& response) {
                 } else if (payload.removed_objects == 0) {
                     summary = "no eligible objects removed";
                 } else {
-                    summary =
-                        payload.removed_objects == 1
-                            ? "1 object removed"
-                            : std::format("{} objects removed",
-                                          payload.removed_objects);
+                    summary = payload.removed_objects == 1
+                                  ? "1 object removed"
+                                  : std::format("{} objects removed",
+                                                payload.removed_objects);
                     if (payload.removed_bytes > 0) {
                         summary += std::format(
                             " ({})", format_size(payload.removed_bytes));
@@ -335,9 +334,8 @@ std::string format_compact_summary(const application::Response& response) {
                                            payload.deferred_recent_objects);
                 }
                 return summary;
-            } else if constexpr (std::is_same_v<
-                                     T,
-                                     application::RepackCompleted>) {
+            } else if constexpr (std::is_same_v<T,
+                                                application::RepackCompleted>) {
                 if (!payload.actionable) {
                     return "nothing to repack";
                 }
@@ -361,17 +359,15 @@ std::string format_compact_summary(const application::Response& response) {
                         payload.resolved_paths.size(),
                         payload.resolved_paths.size() == 1 ? "path" : "paths");
                 }
-                return std::format(
-                    "{} missing {} resolved",
-                    payload.resolved_count,
-                    payload.resolved_count == 1 ? "path" : "paths");
-            } else if constexpr (std::is_same_v<
-                                     T,
-                                     application::ManualWriterRemovalCompleted>) {
+                return std::format("{} missing {} resolved",
+                                   payload.resolved_count,
+                                   payload.resolved_count == 1 ? "path"
+                                                               : "paths");
+            } else if constexpr (
+                std::is_same_v<T, application::ManualWriterRemovalCompleted>) {
                 return "writer removed";
-            } else if constexpr (std::is_same_v<
-                                     T,
-                                     application::ManualBarrierRemovalCompleted>) {
+            } else if constexpr (
+                std::is_same_v<T, application::ManualBarrierRemovalCompleted>) {
                 return payload.outcome ==
                                application::BarrierRemovalOutcome::Removed
                            ? "barrier removed"
@@ -387,10 +383,10 @@ std::string
 format_compact_summary(const application::DiagnosticsReport& report) {
     const std::size_t n = report.profiles.size();
     const std::string_view rclone_state =
-        report.rclone.found
-            ? (report.rclone.version.empty() ? std::string_view{"found"}
-                                             : std::string_view{report.rclone.version})
-            : std::string_view{"missing"};
+        report.rclone.found ? (report.rclone.version.empty()
+                                   ? std::string_view{"found"}
+                                   : std::string_view{report.rclone.version})
+                            : std::string_view{"missing"};
     return std::format("{} {}, overall={}, rclone={}",
                        n,
                        n == 1 ? "profile" : "profiles",
@@ -673,7 +669,8 @@ void present_activity_item(const Item& item,
         const auto dur =
             format_duration(std::chrono::milliseconds(item.duration_ms));
         if (extra.empty()) {
-            std::println("  {} | {:<17} | {} | {} | {}", ts, op, outcome, dur, machine);
+            std::println(
+                "  {} | {:<17} | {} | {} | {}", ts, op, outcome, dur, machine);
         } else {
             std::println("  {} | {:<17} | {} | {} | {} ({})",
                          ts,
@@ -2275,31 +2272,31 @@ std::string format_machine_label(std::string_view name,
 std::string_view commit_origin_label(std::uint8_t origin_op) {
     using O = application::RemoteCommitOrigin;
     switch (static_cast<O>(origin_op)) {
-    case O::Sync:
-        return "sync";
-    case O::Repack:
-        return "repack";
-    case O::ResolveMissing:
-        return "resolve-missing";
-    case O::Unknown:
-    default:
-        return i18n::tr(i18n::Key::LabelUnknown);
+        case O::Sync:
+            return "sync";
+        case O::Repack:
+            return "repack";
+        case O::ResolveMissing:
+            return "resolve-missing";
+        case O::Unknown:
+        default:
+            return i18n::tr(i18n::Key::LabelUnknown);
     }
 }
 
 std::string_view activity_operation_label(std::uint8_t op) {
     using O = application::RemoteActivityOperation;
     switch (static_cast<O>(op)) {
-    case O::Fsck:
-        return "fsck";
-    case O::GarbageCollect:
-        return "gc";
-    case O::RemoveWriter:
-        return "gc remove-writer";
-    case O::RemoveBarrier:
-        return "gc remove-barrier";
-    default:
-        return i18n::tr(i18n::Key::LabelUnknown);
+        case O::Fsck:
+            return "fsck";
+        case O::GarbageCollect:
+            return "gc";
+        case O::RemoveWriter:
+            return "gc remove-writer";
+        case O::RemoveBarrier:
+            return "gc remove-barrier";
+        default:
+            return i18n::tr(i18n::Key::LabelUnknown);
     }
 }
 
@@ -2323,25 +2320,27 @@ std::string format_activity_metrics(std::uint8_t op,
                                     std::uint32_t flags) {
     using O = application::RemoteActivityOperation;
     switch (static_cast<O>(op)) {
-    case O::Fsck:
-        if (primary > 0 || bytes > 0) {
-            return i18n::format(
-                i18n::Key::LabelMetricFsck, primary, format_size(bytes));
-        }
-        return {};
-    case O::GarbageCollect:
-        if ((flags & application::remote_activity_flag_analysis_only) != 0U) {
-            return i18n::format(i18n::Key::LabelMetricGcCandidates, secondary);
-        }
-        if (primary > 0 || secondary > 0) {
-            return i18n::format(
-                i18n::Key::LabelMetricGcRemoved, primary, secondary);
-        }
-        return {};
-    case O::RemoveWriter:
-    case O::RemoveBarrier:
-    default:
-        return {};
+        case O::Fsck:
+            if (primary > 0 || bytes > 0) {
+                return i18n::format(
+                    i18n::Key::LabelMetricFsck, primary, format_size(bytes));
+            }
+            return {};
+        case O::GarbageCollect:
+            if ((flags & application::remote_activity_flag_analysis_only) !=
+                0U) {
+                return i18n::format(i18n::Key::LabelMetricGcCandidates,
+                                    secondary);
+            }
+            if (primary > 0 || secondary > 0) {
+                return i18n::format(
+                    i18n::Key::LabelMetricGcRemoved, primary, secondary);
+            }
+            return {};
+        case O::RemoveWriter:
+        case O::RemoveBarrier:
+        default:
+            return {};
     }
 }
 
@@ -2371,7 +2370,7 @@ std::string format_activity_flags(std::uint32_t flags) {
 }
 
 int present_remote_dispatch(const application::RemoteSummaryReport& report,
-                          bool full) {
+                            bool full) {
     return present_remote_report(report, full);
 }
 
@@ -2392,7 +2391,8 @@ int response_exit_code(const application::Response& response) noexcept {
         }
         return code;
     }
-    if (const auto* plan = std::get_if<application::PlanReport>(&response.data)) {
+    if (const auto* plan =
+            std::get_if<application::PlanReport>(&response.data)) {
         return plan->pending_paths.empty() ? 0 : 2;
     }
     return 0;
@@ -2532,8 +2532,8 @@ int present(const application::Response& response, bool full, bool quiet) {
                         return;
                     }
                     if (count == 1) {
-                        i18n::println(
-                            i18n::Key::GcDeferredRecentSingular, hours);
+                        i18n::println(i18n::Key::GcDeferredRecentSingular,
+                                      hours);
                     } else {
                         i18n::println(
                             i18n::Key::GcDeferredRecentPlural, hours, count);
@@ -2690,12 +2690,11 @@ int present(const application::Response& response, bool full, bool quiet) {
                               data.source_clean_packs,
                               data.source_dirty_packs);
                 if (data.wire_upload_bytes || data.physical_objects_uploaded) {
-                    i18n::println(
-                        i18n::Key::RepackWireSummary,
-                        format_size(data.wire_upload_bytes),
-                        format_plural(data.physical_objects_uploaded,
-                                      i18n::Key::ProgressObject,
-                                      i18n::Key::ProgressObjects));
+                    i18n::println(i18n::Key::RepackWireSummary,
+                                  format_size(data.wire_upload_bytes),
+                                  format_plural(data.physical_objects_uploaded,
+                                                i18n::Key::ProgressObject,
+                                                i18n::Key::ProgressObjects));
                 }
                 print_inventory();
                 if (full && !data.published_commit_id.empty()) {
@@ -2882,9 +2881,9 @@ int present(const application::DiagnosticsReport& report,
         i18n::println(i18n::Key::DiagnosticsVersion, version);
         i18n::println(i18n::Key::DiagnosticsOs,
                       sanitize_terminal_text(report.os_name));
-        i18n::println(
-            i18n::Key::DiagnosticsAppData,
-            sanitize_terminal_text(platform::path::to_utf8(report.app_data_dir)));
+        i18n::println(i18n::Key::DiagnosticsAppData,
+                      sanitize_terminal_text(
+                          platform::path::to_utf8(report.app_data_dir)));
         if (report.app_data_free_bytes) {
             i18n::println(i18n::Key::DiagnosticsFreeSpace,
                           format_size(*report.app_data_free_bytes));
@@ -2897,13 +2896,14 @@ int present(const application::DiagnosticsReport& report,
 
         i18n::println(i18n::Key::DiagnosticsRcloneHeader);
         if (report.rclone.found) {
-            i18n::println(i18n::Key::DiagnosticsRcloneFound,
-                          sanitize_terminal_text(
-                              platform::path::to_utf8(report.rclone.executable)),
-                          report.rclone.version.empty()
-                              ? std::string{i18n::tr(i18n::Key::LabelUnknown)}
-                              : sanitize_terminal_text(report.rclone.version),
-                          sanitize_terminal_text(report.rclone.minimum_version));
+            i18n::println(
+                i18n::Key::DiagnosticsRcloneFound,
+                sanitize_terminal_text(
+                    platform::path::to_utf8(report.rclone.executable)),
+                report.rclone.version.empty()
+                    ? std::string{i18n::tr(i18n::Key::LabelUnknown)}
+                    : sanitize_terminal_text(report.rclone.version),
+                sanitize_terminal_text(report.rclone.minimum_version));
             if (!report.rclone.meets_minimum &&
                 !report.rclone.version.empty()) {
                 i18n::println(
@@ -2922,8 +2922,9 @@ int present(const application::DiagnosticsReport& report,
             for (const auto& entry : report.profiles) {
                 i18n::println(i18n::Key::DiagnosticsProfileHeader,
                               sanitize_terminal_text(entry.profile.name),
-                              entry.healthy ? i18n::tr(i18n::Key::LabelOk)
-                                            : i18n::tr(i18n::Key::LabelWarning));
+                              entry.healthy
+                                  ? i18n::tr(i18n::Key::LabelOk)
+                                  : i18n::tr(i18n::Key::LabelWarning));
                 std::string state_label{
                     application::to_string(entry.local_state)};
                 if (entry.local_state ==
@@ -2935,8 +2936,8 @@ int present(const application::DiagnosticsReport& report,
                     }
                 }
                 std::println("  {} -> {} ({})",
-                             sanitize_terminal_text(
-                                 platform::path::to_utf8(entry.profile.local_dir)),
+                             sanitize_terminal_text(platform::path::to_utf8(
+                                 entry.profile.local_dir)),
                              sanitize_terminal_text(entry.profile.remote_dir),
                              state_label);
                 if (entry.local_free_bytes) {

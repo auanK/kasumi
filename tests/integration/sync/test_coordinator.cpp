@@ -5076,7 +5076,8 @@ TEST(ReobservationTest,
     kasumi::test::write_text(local_file, "AAAA");
     ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(
         local_file,
-        std::filesystem::file_time_type::clock::now() - std::chrono::seconds{1}));
+        std::filesystem::file_time_type::clock::now() -
+            std::chrono::seconds{1}));
     const auto initial_scan = app_obs::scanner::scan_result(
         local, {}, app_obs::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(initial_scan.has_value());
@@ -5208,7 +5209,8 @@ TEST(ReobservationTest,
     kasumi::test::write_text(local_file, "AAAA");
     ASSERT_TRUE(kasumi::platform::metadata::set_last_write_time(
         local_file,
-        std::filesystem::file_time_type::clock::now() - std::chrono::seconds{1}));
+        std::filesystem::file_time_type::clock::now() -
+            std::chrono::seconds{1}));
     const auto initial_scan = app_obs::scanner::scan_result(
         local, {}, app_obs::scanner::ScanPolicy::ReuseStrongFingerprint);
     ASSERT_TRUE(initial_scan.has_value());
@@ -12891,9 +12893,22 @@ TEST(SyncCoordinatorTest,
     ASSERT_TRUE(kasumi::state_storage::initialize(runtime_data.database_path));
 
     const kasumi::Snapshot tree{.rows = {dir_row("")}};
-    const std::array<std::uint8_t, 16> author_id{
-        0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80,
-        0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0, 0x01};
+    const std::array<std::uint8_t, 16> author_id{0x10,
+                                                 0x20,
+                                                 0x30,
+                                                 0x40,
+                                                 0x50,
+                                                 0x60,
+                                                 0x70,
+                                                 0x80,
+                                                 0x90,
+                                                 0xa0,
+                                                 0xb0,
+                                                 0xc0,
+                                                 0xd0,
+                                                 0xe0,
+                                                 0xf0,
+                                                 0x01};
     const kasumi::history::CommitAuthorship authorship{
         .operation = kasumi::history::CommitOriginOperation::Sync,
         .machine_id = author_id,

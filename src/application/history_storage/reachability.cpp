@@ -199,8 +199,10 @@ ReachabilityResult inventory_impl(
             auto prefetched = transport::get_batch(storage, epoch_batch);
             if (!prefetched &&
                 prefetched.error().code != transport::ErrorCode::Unsupported &&
-                prefetched.error().code != transport::ErrorCode::ObjectNotFound) {
-                return std::unexpected(detail::transport_error(prefetched.error()));
+                prefetched.error().code !=
+                    transport::ErrorCode::ObjectNotFound) {
+                return std::unexpected(
+                    detail::transport_error(prefetched.error()));
             }
         }
     }
@@ -251,7 +253,8 @@ ReachabilityResult inventory_impl(
             std::error_code fs_err;
             const auto prefetched_epoch =
                 identifier.starts_with(layout.epochs_prefix)
-                    ? epochs_dir / identifier.substr(layout.epochs_prefix.size())
+                    ? epochs_dir /
+                          identifier.substr(layout.epochs_prefix.size())
                     : std::filesystem::path{};
             const bool has_prefetched =
                 !prefetched_epoch.empty() &&
@@ -314,7 +317,8 @@ ReachabilityResult inventory_impl(
             ErrorCode::LimitExceeded, "history contains too many commits"));
     }
 
-    const auto markers_dir = (*temporary)->workspace.root / "prefetched-markers";
+    const auto markers_dir =
+        (*temporary)->workspace.root / "prefetched-markers";
     if (storage.storage.get_batch != nullptr) {
         transport::GetBatch marker_batch{
             .source_prefix =
@@ -344,8 +348,10 @@ ReachabilityResult inventory_impl(
             auto prefetched = transport::get_batch(storage, marker_batch);
             if (!prefetched &&
                 prefetched.error().code != transport::ErrorCode::Unsupported &&
-                prefetched.error().code != transport::ErrorCode::ObjectNotFound) {
-                return std::unexpected(detail::transport_error(prefetched.error()));
+                prefetched.error().code !=
+                    transport::ErrorCode::ObjectNotFound) {
+                return std::unexpected(
+                    detail::transport_error(prefetched.error()));
             }
         }
     }
@@ -366,7 +372,8 @@ ReachabilityResult inventory_impl(
             std::filesystem::is_regular_file(prefetched_marker, fs_err) &&
             !std::filesystem::is_symlink(prefetched_marker, fs_err);
         if (has_prefetched_marker) {
-            auto bytes = detail::read_file(prefetched_marker, detail::marker_size);
+            auto bytes =
+                detail::read_file(prefetched_marker, detail::marker_size);
             detail::remove_file(prefetched_marker);
             if (!bytes) {
                 if (bytes.error().code == ErrorCode::LimitExceeded) {

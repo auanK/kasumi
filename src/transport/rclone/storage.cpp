@@ -986,7 +986,8 @@ Result rclone_get_batch(void* context, const GetBatch& batch) {
         {"srcFs",
          batch.source_prefix.empty()
              ? rooted_remote_fs(**state)
-             : join_remote_path(rooted_remote_fs(**state), batch.source_prefix)},
+             : join_remote_path(rooted_remote_fs(**state),
+                                batch.source_prefix)},
         {"dstFs", platform::path::to_utf8(*absolute_destination)},
         {"createEmptySrcDirs", false},
         {"_filter", {{"FilesFromRaw", {platform::path::to_utf8(files)}}}},
@@ -1057,17 +1058,16 @@ parse_rfc3339_utc_seconds(std::string_view text) noexcept {
     const auto second = parse_fixed_uint(text, 17, 2);
     if (!year || !month || !day || !hour || !minute || !second ||
         *year < 1970 || *year > 9999 || *month < 1 || *month > 12 ||
-        *hour < 0 || *hour > 23 || *minute < 0 || *minute > 59 ||
-        *second < 0 || *second > 59) {
+        *hour < 0 || *hour > 23 || *minute < 0 || *minute > 59 || *second < 0 ||
+        *second > 59) {
         return std::nullopt;
     }
     static constexpr std::array<int, 12> days_per_month{
         31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
     const bool is_leap =
         (*year % 4 == 0) && (*year % 100 != 0 || *year % 400 == 0);
-    const int max_day =
-        days_per_month[static_cast<std::size_t>(*month - 1)] +
-        ((*month == 2 && is_leap) ? 1 : 0);
+    const int max_day = days_per_month[static_cast<std::size_t>(*month - 1)] +
+                        ((*month == 2 && is_leap) ? 1 : 0);
     if (*day < 1 || *day > max_day) {
         return std::nullopt;
     }
@@ -1121,8 +1121,8 @@ parse_rfc3339_utc_seconds(std::string_view text) noexcept {
         (civil_year >= 0 ? civil_year : civil_year - 399) / 400;
     const auto yoe = static_cast<unsigned>(civil_year - era * 400);
     const unsigned doy =
-        (153U * (m + (m > 2 ? static_cast<unsigned>(-3) : 9U)) + 2U) / 5U +
-        d - 1U;
+        (153U * (m + (m > 2 ? static_cast<unsigned>(-3) : 9U)) + 2U) / 5U + d -
+        1U;
     const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
     const std::int64_t days =
         era * 146097LL + static_cast<std::int64_t>(doe) - 719468LL;
@@ -1134,10 +1134,10 @@ parse_rfc3339_utc_seconds(std::string_view text) noexcept {
 }
 
 template <typename Fn>
-std::expected<void, Error> parse_list_entries_json(
-    const nlohmann::json& response,
-    std::string_view remote_prefix,
-    Fn&& on_entry) {
+std::expected<void, Error>
+parse_list_entries_json(const nlohmann::json& response,
+                        std::string_view remote_prefix,
+                        Fn&& on_entry) {
     if (!response.is_object() || !response.contains("list") ||
         !response["list"].is_array()) {
         return std::unexpected(make_error(ErrorCode::ProtocolFailure,
@@ -1255,12 +1255,11 @@ fetch_remote_listing_json(void* context,
     if (effective_prefix.empty()) {
         list_request["_config"] = {{"FastList", true}};
     }
-    const auto response =
-        request_read_json(**state,
-                          "operations/list",
-                          list_request,
-                          maximum_list_response_size,
-                          control_read_deadline);
+    const auto response = request_read_json(**state,
+                                            "operations/list",
+                                            list_request,
+                                            maximum_list_response_size,
+                                            control_read_deadline);
     if (!response) {
         if (not_found(response.error())) {
             return std::unexpected(
@@ -1288,7 +1287,8 @@ ListingResult rclone_list(void* context) {
 }
 
 MetadataListingResult rclone_list_metadata(void* context) {
-    const auto response = fetch_remote_listing_json(context, std::nullopt, true);
+    const auto response =
+        fetch_remote_listing_json(context, std::nullopt, true);
     if (!response) {
         return std::unexpected(response.error());
     }
@@ -1934,8 +1934,7 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
             std::size_t target_index = chunk_begin + local_idx;
             if (result.contains("input")) {
                 const auto& input_echo = result.at("input");
-                if (!input_echo.is_object() ||
-                    !input_echo.contains("remote") ||
+                if (!input_echo.is_object() || !input_echo.contains("remote") ||
                     !input_echo.at("remote").is_string()) {
                     return uncertain_report(
                         "remove job/batch result input does not match request");
@@ -2032,12 +2031,11 @@ ListingResult parse_list_response(std::string_view response_body) {
 
 MetadataListingResult
 parse_list_metadata_response(std::string_view response_body) {
-    return parse_json_response(
-        response_body,
-        "invalid operations/list metadata response",
-        [](const auto& j) {
-            return parse_list_metadata_response_json(j);
-        });
+    return parse_json_response(response_body,
+                               "invalid operations/list metadata response",
+                               [](const auto& j) {
+                                   return parse_list_metadata_response_json(j);
+                               });
 }
 
 StorageOperations make_storage_operations() noexcept {

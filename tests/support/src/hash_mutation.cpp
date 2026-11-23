@@ -148,12 +148,13 @@ Hash independent_file_hash(const std::filesystem::path& path) {
 
 void print_file_evidence(const char* label, const std::filesystem::path& path) {
     const auto fingerprint = platform::regular_file_fingerprint(path);
-    std::cout
-        << label << " size=" << std::filesystem::file_size(path)
-        << " mtime_ticks="
-        << static_cast<long long>(
-               std::filesystem::last_write_time(path).time_since_epoch().count())
-        << " hash=" << hash_hex(independent_file_hash(path)) << " fingerprint=";
+    std::cout << label << " size=" << std::filesystem::file_size(path)
+              << " mtime_ticks="
+              << static_cast<long long>(std::filesystem::last_write_time(path)
+                                            .time_since_epoch()
+                                            .count())
+              << " hash=" << hash_hex(independent_file_hash(path))
+              << " fingerprint=";
     if (!fingerprint)
         std::cout << "error:" << fingerprint.error();
     else if (!*fingerprint)

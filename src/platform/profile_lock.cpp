@@ -35,14 +35,14 @@ bool is_profile_lock_held(const std::filesystem::path& lock_path) noexcept {
         return false;
     }
 #ifdef _WIN32
-    const auto handle = CreateFileW(
-        lock_path.c_str(),
-        GENERIC_READ,
-        0,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-        nullptr);
+    const auto handle =
+        CreateFileW(lock_path.c_str(),
+                    GENERIC_READ,
+                    0,
+                    nullptr,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                    nullptr);
     if (handle != INVALID_HANDLE_VALUE) {
         CloseHandle(handle);
         return false;

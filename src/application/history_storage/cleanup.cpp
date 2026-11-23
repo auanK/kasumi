@@ -70,8 +70,8 @@ RemoveMarkersResult remove_marker_variants_impl(
             };
             batch.items.reserve(count);
             for (std::size_t i = 0; i < count; ++i) {
-                batch.items.push_back(
-                    transport::RemoveBatchItem{.identifier = markers[offset + i]});
+                batch.items.push_back(transport::RemoveBatchItem{
+                    .identifier = markers[offset + i]});
             }
             auto removed_batch = transport::remove_batch(storage, batch);
             if (!removed_batch) {

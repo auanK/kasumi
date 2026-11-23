@@ -85,26 +85,25 @@ bool read_tty_line(std::string& value) {
 }
 #endif
 
-std::string_view
-profile_operation_label(application::ProfileOperationKind op) {
+std::string_view profile_operation_label(application::ProfileOperationKind op) {
     using K = application::ProfileOperationKind;
     switch (op) {
-    case K::Sync:
-        return "sync";
-    case K::Fsck:
-        return "fsck";
-    case K::GarbageCollect:
-        return "gc";
-    case K::Repack:
-        return "repack";
-    case K::ResolveMissing:
-        return "resolve-missing";
-    case K::RemoveWriter:
-        return "gc remove-writer";
-    case K::RemoveBarrier:
-        return "gc remove-barrier";
-    default:
-        return i18n::tr(i18n::Key::LabelUnknown);
+        case K::Sync:
+            return "sync";
+        case K::Fsck:
+            return "fsck";
+        case K::GarbageCollect:
+            return "gc";
+        case K::Repack:
+            return "repack";
+        case K::ResolveMissing:
+            return "resolve-missing";
+        case K::RemoveWriter:
+            return "gc remove-writer";
+        case K::RemoveBarrier:
+            return "gc remove-barrier";
+        default:
+            return i18n::tr(i18n::Key::LabelUnknown);
     }
 }
 
@@ -132,65 +131,73 @@ execution_status_label(application::ProfileExecutionStatus status) {
     return i18n::tr(i18n::Key::LabelUnknown);
 }
 
-std::string format_execution_metrics(const application::ProfileExecutionSummary& e) {
+std::string
+format_execution_metrics(const application::ProfileExecutionSummary& e) {
     using K = application::ProfileOperationKind;
     switch (e.operation) {
-    case K::Sync:
-        if (e.summary_a > 0 && e.summary_c > 0) {
-            return i18n::format(i18n::Key::LabelMetricSyncChanged, e.summary_a) +
-                   ", " +
-                   i18n::format(i18n::Key::LabelMetricSyncPending, e.summary_c);
-        }
-        if (e.summary_a > 0) {
-            return i18n::format(i18n::Key::LabelMetricSyncChanged, e.summary_a);
-        }
-        if (e.summary_c > 0) {
-            return i18n::format(i18n::Key::LabelMetricSyncPending, e.summary_c);
-        }
-        return {};
-    case K::Fsck:
-        if (e.summary_a > 0 || e.summary_bytes > 0) {
-            return format_activity_metrics(
-                static_cast<std::uint8_t>(application::RemoteActivityOperation::Fsck),
-                e.summary_a,
-                e.summary_b,
-                e.summary_bytes,
-                e.flags);
-        }
-        return {};
-    case K::GarbageCollect:
-        if (e.summary_a > 0 || e.summary_b > 0 ||
-            (e.flags & application::remote_activity_flag_analysis_only) != 0U) {
-            return format_activity_metrics(
-                static_cast<std::uint8_t>(
-                    application::RemoteActivityOperation::GarbageCollect),
-                e.summary_a,
-                e.summary_b,
-                e.summary_bytes,
-                e.flags);
-        }
-        return {};
-    case K::Repack:
-        if (e.summary_a > 0 || e.summary_b > 0) {
-            return i18n::format(i18n::Key::LabelMetricRepack,
-                                e.summary_a,
-                                e.summary_b,
-                                format_size(e.summary_bytes));
-        }
-        return {};
-    case K::ResolveMissing:
-        if (e.summary_a > 0) {
-            return i18n::format(i18n::Key::LabelMetricResolveMissing,
-                                e.summary_a);
-        }
-        return {};
-    default:
-        return {};
+        case K::Sync:
+            if (e.summary_a > 0 && e.summary_c > 0) {
+                return i18n::format(i18n::Key::LabelMetricSyncChanged,
+                                    e.summary_a) +
+                       ", " +
+                       i18n::format(i18n::Key::LabelMetricSyncPending,
+                                    e.summary_c);
+            }
+            if (e.summary_a > 0) {
+                return i18n::format(i18n::Key::LabelMetricSyncChanged,
+                                    e.summary_a);
+            }
+            if (e.summary_c > 0) {
+                return i18n::format(i18n::Key::LabelMetricSyncPending,
+                                    e.summary_c);
+            }
+            return {};
+        case K::Fsck:
+            if (e.summary_a > 0 || e.summary_bytes > 0) {
+                return format_activity_metrics(
+                    static_cast<std::uint8_t>(
+                        application::RemoteActivityOperation::Fsck),
+                    e.summary_a,
+                    e.summary_b,
+                    e.summary_bytes,
+                    e.flags);
+            }
+            return {};
+        case K::GarbageCollect:
+            if (e.summary_a > 0 || e.summary_b > 0 ||
+                (e.flags & application::remote_activity_flag_analysis_only) !=
+                    0U) {
+                return format_activity_metrics(
+                    static_cast<std::uint8_t>(
+                        application::RemoteActivityOperation::GarbageCollect),
+                    e.summary_a,
+                    e.summary_b,
+                    e.summary_bytes,
+                    e.flags);
+            }
+            return {};
+        case K::Repack:
+            if (e.summary_a > 0 || e.summary_b > 0) {
+                return i18n::format(i18n::Key::LabelMetricRepack,
+                                    e.summary_a,
+                                    e.summary_b,
+                                    format_size(e.summary_bytes));
+            }
+            return {};
+        case K::ResolveMissing:
+            if (e.summary_a > 0) {
+                return i18n::format(i18n::Key::LabelMetricResolveMissing,
+                                    e.summary_a);
+            }
+            return {};
+        default:
+            return {};
     }
 }
 
-std::string format_execution_extra(const application::ProfileExecutionSummary& e,
-                                   bool include_stage) {
+std::string
+format_execution_extra(const application::ProfileExecutionSummary& e,
+                       bool include_stage) {
     std::string extra = format_execution_metrics(e);
     const auto append = [&](std::string_view part) {
         if (part.empty()) {
@@ -204,11 +211,12 @@ std::string format_execution_extra(const application::ProfileExecutionSummary& e
     if (e.recovered) {
         append(i18n::tr(i18n::Key::LabelFlagRecovered));
     }
-    if ((e.flags & application::profile_execution_flag_audit_failed_after_sync) !=
-        0U) {
+    if ((e.flags &
+         application::profile_execution_flag_audit_failed_after_sync) != 0U) {
         append(i18n::tr(i18n::Key::LabelFlagAuditFailedAfterSync));
     }
-    if (e.remote_publish_state == application::ProfileRemotePublishState::Pending) {
+    if (e.remote_publish_state ==
+        application::ProfileRemotePublishState::Pending) {
         append(i18n::tr(i18n::Key::LabelFlagRemotePublishPending));
     }
     append(format_activity_flags(e.flags));
@@ -218,9 +226,9 @@ std::string format_execution_extra(const application::ProfileExecutionSummary& e
     return extra;
 }
 
-std::string format_local_state_label(
-    application::ProfileLocalState state,
-    const application::ProfileActivityReport& activity) {
+std::string
+format_local_state_label(application::ProfileLocalState state,
+                         const application::ProfileActivityReport& activity) {
     if (state == application::ProfileLocalState::Running) {
         if (const auto op = application::active_profile_operation(activity)) {
             return std::format("Running ({})", *op);
@@ -304,7 +312,8 @@ void present_profile_activity(std::string_view profile_name,
             format_machine_label(a.machine_name, a.machine_id_hex, full, full));
         const bool is_ok =
             a.status == application::ProfileExecutionStatus::Succeeded ||
-            a.status == application::ProfileExecutionStatus::SucceededNoChanges ||
+            a.status ==
+                application::ProfileExecutionStatus::SucceededNoChanges ||
             a.status ==
                 application::ProfileExecutionStatus::SucceededDownloadedOnly;
         if (!a.stage.empty() && (!is_ok || full)) {
@@ -390,7 +399,8 @@ void present_profile_activity(std::string_view profile_name,
             std::set<application::ProfileOperationKind> seen_ops;
             std::vector<const application::ProfileExecutionSummary*> maint;
             for (const auto* item : sorted) {
-                if (item->operation != application::ProfileOperationKind::Sync &&
+                if (item->operation !=
+                        application::ProfileOperationKind::Sync &&
                     seen_ops.insert(item->operation).second) {
                     maint.push_back(item);
                 }
@@ -456,11 +466,12 @@ void present_profile_activity(std::string_view profile_name,
                 platform::clock::format_local_timestamp(item->finished_at);
             const auto op = activity_operation_label(item->operation);
             const auto outcome = activity_outcome_label(item->outcome);
-            const bool collide =
-                ids_by_name.contains(item->machine_name) &&
-                ids_by_name.at(item->machine_name).size() > 1;
-            const auto machine = format_machine_label(
-                item->machine_name, item->machine_id_hex, full || collide, full);
+            const bool collide = ids_by_name.contains(item->machine_name) &&
+                                 ids_by_name.at(item->machine_name).size() > 1;
+            const auto machine = format_machine_label(item->machine_name,
+                                                      item->machine_id_hex,
+                                                      full || collide,
+                                                      full);
             const auto metrics = format_activity_metrics(item->operation,
                                                          item->metric_primary,
                                                          item->metric_secondary,
@@ -535,8 +546,7 @@ bool prompt_line(std::string_view label, std::string& value) {
         return false;
     }
 #if !defined(_WIN32)
-    if (std::cin.rdbuf() == default_cin_buffer &&
-        ::isatty(STDIN_FILENO) != 0) {
+    if (std::cin.rdbuf() == default_cin_buffer && ::isatty(STDIN_FILENO) != 0) {
         return read_tty_line(value);
     }
 #endif
@@ -578,9 +588,8 @@ int apply_profile_key_update(
     application::wipe_credentials(attempt);
     if (!res &&
         res.error().code == application::ProfileErrorCode::AlreadyExists) {
-        if (!confirm_change(
-                i18n::format(i18n::Key::WizardConfirmReplaceKey,
-                             profile_name))) {
+        if (!confirm_change(i18n::format(i18n::Key::WizardConfirmReplaceKey,
+                                         profile_name))) {
             if (platform::cancellation::requested()) {
                 return 130;
             }
@@ -619,10 +628,10 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
     auto profiles = application::list_profiles(environment);
     if (!profiles) {
         if (json) {
-            return present_json_profile_error(
-                profile_name.empty() ? "list" : "show",
-                profile_name,
-                profiles.error());
+            return present_json_profile_error(profile_name.empty() ? "list"
+                                                                   : "show",
+                                              profile_name,
+                                              profiles.error());
         }
         return fail_query(profiles.error().detail);
     }
@@ -672,9 +681,9 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
                     i18n::Key::WizardProblemReason,
                     i18n::tr(problem_keys[static_cast<std::size_t>(problem)]));
             }
-                if (activity.database_present) {
-                    present_profile_activity(profile.name, activity, full);
-                }
+            if (activity.database_present) {
+                present_profile_activity(profile.name, activity, full);
+            }
             return 0;
         }
     }

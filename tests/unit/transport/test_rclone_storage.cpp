@@ -70,8 +70,8 @@ TEST(RcloneStorageTest, RejectsUnsafeAndDuplicatePaths) {
 }
 
 TEST(RcloneStorageTest, ParsesRfc3339TimestampsAccurately) {
-    const auto parse_time = [](std::string_view mod_time)
-        -> std::optional<std::int64_t> {
+    const auto parse_time =
+        [](std::string_view mod_time) -> std::optional<std::int64_t> {
         const auto json =
             std::string{R"({"list":[{"Path":"obj","Size":1,"ModTime":")"} +
             std::string{mod_time} + "\"}]}";
@@ -131,8 +131,7 @@ TEST(RcloneStorageTest, ParsesListMetadataWithSizesAndTimestamps) {
     const auto dup = rclone_detail::parse_list_metadata_response(
         R"({"list":[{"Path":"a","Size":1},{"Path":"a","Size":2}]})");
     ASSERT_FALSE(dup.has_value());
-    EXPECT_EQ(dup.error().code,
-              kasumi::transport::ErrorCode::ProtocolFailure);
+    EXPECT_EQ(dup.error().code, kasumi::transport::ErrorCode::ProtocolFailure);
 
     const auto traversal = rclone_detail::parse_list_metadata_response(
         R"({"list":[{"Path":"../a","Size":1}]})");
@@ -167,8 +166,8 @@ TEST(RcloneSessionTest, RemovesKasumiSecretsFromChildEnvironment) {
         "RCLONE_RC_PASS", "inherited-rc-secret");
     auto ambient_rclone_secret = kasumi::test::scoped_environment_variable(
         "RCLONE_DRIVE_TOKEN", "ambient-drive-token");
-    auto ambient_rc_no_auth = kasumi::test::scoped_environment_variable(
-        "RCLONE_RC_NO_AUTH", "true");
+    auto ambient_rc_no_auth =
+        kasumi::test::scoped_environment_variable("RCLONE_RC_NO_AUTH", "true");
     auto ambient_config = kasumi::test::scoped_environment_variable(
         "RCLONE_CONFIG", "/tmp/allowed-ambient.conf");
 
@@ -1157,11 +1156,11 @@ TEST(RcloneStorageTest, DownloadsExactBatchWithOneSequentialCopy) {
         "/rc/sync/copy",
         [&](const httplib::Request& input, httplib::Response& response) {
             request_body = nlohmann::json::parse(input.body);
-            files_from_path = kasumi::platform::path::from_utf8(
-                request_body.at("_filter")
-                    .at("FilesFromRaw")
-                    .at(0)
-                    .get<std::string>());
+            files_from_path =
+                kasumi::platform::path::from_utf8(request_body.at("_filter")
+                                                      .at("FilesFromRaw")
+                                                      .at(0)
+                                                      .get<std::string>());
             files_from_contents = kasumi::test::read_text(files_from_path);
             const auto destination = kasumi::platform::path::from_utf8(
                 request_body.at("dstFs").get<std::string>());
@@ -2837,8 +2836,10 @@ TEST(RcloneStorageTest, ConcurrentlyExecutesBatchAndIndividualCopyfileReads) {
 }
 
 TEST(RcloneSessionTest, RejectsUnsafeRemoteNamesBeforeSpawningProcess) {
-    for (const std::string_view bad :
-         {"-leading-dash:root", ".dotstart:root", "bad space:root", "a$b:root"}) {
+    for (const std::string_view bad : {"-leading-dash:root",
+                                       ".dotstart:root",
+                                       "bad space:root",
+                                       "a$b:root"}) {
         const auto opened = kasumi::transport::open_transport(bad);
         ASSERT_FALSE(opened.has_value()) << bad;
         EXPECT_EQ(opened.error().code,
@@ -2866,7 +2867,8 @@ TEST(RcloneSessionTest, ParsesAndValidatesMinimumRcloneVersion) {
     EXPECT_FALSE(kasumi::transport::meets_minimum_rclone_version(*too_old));
 
     EXPECT_FALSE(kasumi::transport::parse_rclone_version("").has_value());
-    EXPECT_FALSE(kasumi::transport::parse_rclone_version("not-a-ver").has_value());
+    EXPECT_FALSE(
+        kasumi::transport::parse_rclone_version("not-a-ver").has_value());
 }
 
 TEST(RcloneRcClientTest, RejectsUnsupportedRcloneVersionDuringHandshake) {
@@ -2875,9 +2877,8 @@ TEST(RcloneRcClientTest, RejectsUnsupportedRcloneVersionDuringHandshake) {
         response.set_content(R"({"pid":4242})", "application/json");
     });
     remote.server.Post("/rc/core/version", [](const auto&, auto& response) {
-        response.set_content(
-            R"({"version":"v1.59.2","decomposed":[1,59,2]})",
-            "application/json");
+        response.set_content(R"({"version":"v1.59.2","decomposed":[1,59,2]})",
+                             "application/json");
     });
     start_rc_server(remote);
     configure_state(remote.client, remote.port);
@@ -2900,9 +2901,8 @@ TEST(RcloneRcClientTest, AcceptsSupportedRcloneVersionDuringHandshake) {
         response.set_content(R"({"pid":4242})", "application/json");
     });
     remote.server.Post("/rc/core/version", [](const auto&, auto& response) {
-        response.set_content(
-            R"({"version":"v1.60.0","decomposed":[1,60,0]})",
-            "application/json");
+        response.set_content(R"({"version":"v1.60.0","decomposed":[1,60,0]})",
+                             "application/json");
     });
     start_rc_server(remote);
     configure_state(remote.client, remote.port);

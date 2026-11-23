@@ -5,8 +5,8 @@
 #include "platform/cancellation.hpp"
 
 #include <chrono>
-#include <csignal>
 #include <cmath>
+#include <csignal>
 #include <gtest/gtest.h>
 #include <regex>
 #include <string>

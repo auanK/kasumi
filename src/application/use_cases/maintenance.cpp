@@ -67,9 +67,8 @@ run_with_recovery(OperationContext& context,
         context.maintenance_failure_detail =
             "complete the interrupted upload with sync before garbage "
             "collection";
-        return fail_app(context,
-                        failure_code,
-                        context.maintenance_failure_detail);
+        return fail_app(
+            context, failure_code, context.maintenance_failure_detail);
     }
     auto res = fn(std::move(callback));
     if (!res) {
@@ -116,9 +115,9 @@ run_with_recovery(OperationContext& context,
             using IE = integrity::ErrorCode;
             using AO = history_storage::activity::ActivityOutcome;
             const auto& gc = err.garbage_collection;
-            context.remote_observed =
-                gc.has_value() || err.code == IE::ConcurrentChange ||
-                err.code == IE::IntegrityFailure;
+            context.remote_observed = gc.has_value() ||
+                                      err.code == IE::ConcurrentChange ||
+                                      err.code == IE::IntegrityFailure;
             if (gc.has_value()) {
                 context.maintenance_metric_primary = gc->candidate_objects;
                 context.maintenance_metric_secondary = gc->confirmed_removed;
@@ -278,7 +277,8 @@ std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
                  (collected.error().garbage_collection->mutation_state !=
                       GarbageCollectMutationState::Uncertain &&
                   !collected.error()
-                       .garbage_collection->barrier_cleanup_error.has_value()))) {
+                       .garbage_collection->barrier_cleanup_error
+                       .has_value()))) {
                 error.remote_busy = true;
             }
             return std::unexpected(std::move(error));
@@ -398,19 +398,17 @@ std::expected<Response, Error> run_remove_writer(OperationContext& context) {
         using P = history_storage::maintenance_protocol::ErrorCode;
         using AO = history_storage::activity::ActivityOutcome;
         const auto& err = removed.error();
-        context.remote_observed =
-            err.code != P::WorkspaceFailure &&
-            !(err.code == P::InvalidInput &&
-              !history_storage::valid_writer_identifier(
-                  layout, context.writer_identifier));
+        context.remote_observed = err.code != P::WorkspaceFailure &&
+                                  !(err.code == P::InvalidInput &&
+                                    !history_storage::valid_writer_identifier(
+                                        layout, context.writer_identifier));
         context.maintenance_failure_stage = "removing-writer";
         context.maintenance_failure_detail = err.detail;
         context.maintenance_failure_outcome =
             platform::cancellation::requested() ? AO::Cancelled
             : err.code == P::Blocked            ? AO::Blocked
                                                 : AO::Failed;
-        return fail_app(
-            context, ErrorCode::WriterRemovalFailure, err.detail);
+        return fail_app(context, ErrorCode::WriterRemovalFailure, err.detail);
     }
     context.remote_observed = true;
     return make_response(
@@ -432,8 +430,9 @@ std::expected<Response, Error> run_repack(OperationContext& context) {
     auto res = integrity::repack::execute(
         context.runtime, context.storage, context.key, options, &meter);
     if (!res) {
-        return fail_app(
-            context, ErrorCode::RepackFailure, integrity::describe(res.error()));
+        return fail_app(context,
+                        ErrorCode::RepackFailure,
+                        integrity::describe(res.error()));
     }
     return make_response(
         context,

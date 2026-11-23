@@ -17,8 +17,9 @@ namespace kasumi::runtime {
 namespace {
 
 bool is_zero_id(const std::array<std::uint8_t, MACHINE_ID_BYTES>& id) noexcept {
-    return std::ranges::all_of(
-        id, [](std::uint8_t byte) { return byte == 0; });
+    return std::ranges::all_of(id, [](std::uint8_t byte) {
+        return byte == 0;
+    });
 }
 
 std::optional<std::uint8_t> hex_nibble(char ch) noexcept {
@@ -31,7 +32,8 @@ std::optional<std::uint8_t> hex_nibble(char ch) noexcept {
     return std::nullopt;
 }
 
-std::string encode_hex(const std::array<std::uint8_t, MACHINE_ID_BYTES>& bytes) {
+std::string
+encode_hex(const std::array<std::uint8_t, MACHINE_ID_BYTES>& bytes) {
     static constexpr char digits[] = "0123456789abcdef";
     std::string output;
     output.reserve(MACHINE_ID_HEX_LENGTH);
@@ -42,7 +44,10 @@ std::string encode_hex(const std::array<std::uint8_t, MACHINE_ID_BYTES>& bytes) 
     return output;
 }
 
-std::expected<std::optional<std::pair<std::array<std::uint8_t, MACHINE_ID_BYTES>, std::string>>, Error>
+std::expected<
+    std::optional<
+        std::pair<std::array<std::uint8_t, MACHINE_ID_BYTES>, std::string>>,
+    Error>
 read_machine_id_file(const std::filesystem::path& id_path) {
     if (platform::private_storage::is_reparse_or_symlink(id_path)) {
         return fail(ErrorCode::PathEscape,
@@ -135,7 +140,8 @@ std::expected<MachineIdentity, Error>
 resolve_machine_identity(const std::filesystem::path& app_data_dir,
                          bool allow_create) {
     if (app_data_dir.empty()) {
-        return fail(ErrorCode::IoFailure, "application data directory is empty");
+        return fail(ErrorCode::IoFailure,
+                    "application data directory is empty");
     }
 
     const std::string machine_name = platform::machine::host_name();
@@ -229,9 +235,8 @@ resolve_machine_identity(const std::filesystem::path& app_data_dir,
     }
     if (lock_guard.handle == platform::invalid_profile_lock) {
         return fail(ErrorCode::IoFailure,
-                    lock_error.empty()
-                        ? "could not lock machine identity file"
-                        : lock_error);
+                    lock_error.empty() ? "could not lock machine identity file"
+                                       : lock_error);
     }
 
     auto existing = read_machine_id_file(id_path);

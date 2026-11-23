@@ -531,12 +531,12 @@ prepare_download_candidate(const Operation& operation,
             std::error_code error;
             const auto size = std::filesystem::file_size(destination, error);
             if (error || size != operation.size) {
-                return std::unexpected(make_error(
-                    MutationErrorCode::IntegrityMismatch,
-                    error ? error.message()
-                          : "file size does not match expected size",
-                    destination,
-                    operation_index));
+                return std::unexpected(
+                    make_error(MutationErrorCode::IntegrityMismatch,
+                               error ? error.message()
+                                     : "file size does not match expected size",
+                               destination,
+                               operation_index));
             }
             return PreparedDownloadCandidate{.already_applied = true};
         }
@@ -574,15 +574,15 @@ prepare_download_candidate(const Operation& operation,
     };
 }
 
-MutationResult install_download_candidate(
-    const Operation& operation,
-    std::size_t operation_index,
-    const std::filesystem::path& destination,
-    const platform::Workspace& workspace,
-    const transaction::OperationProgress& progress,
-    std::string_view prepared_hash,
-    const std::filesystem::path& candidate,
-    const DestinationPrecondition* condition) {
+MutationResult
+install_download_candidate(const Operation& operation,
+                           std::size_t operation_index,
+                           const std::filesystem::path& destination,
+                           const platform::Workspace& workspace,
+                           const transaction::OperationProgress& progress,
+                           std::string_view prepared_hash,
+                           const std::filesystem::path& candidate,
+                           const DestinationPrecondition* condition) {
     using platform::private_storage::PrivateOutputFile;
     struct CandidateGuard {
         PrivateOutputFile file;
@@ -655,8 +655,12 @@ apply_download(const Operation& operation,
     const auto remote_identifier =
         crypto::content_identifier(key, *expected_hash);
 
-    auto prep = prepare_download_candidate(
-        operation, operation_index, destination, workspace, progress, condition);
+    auto prep = prepare_download_candidate(operation,
+                                           operation_index,
+                                           destination,
+                                           workspace,
+                                           progress,
+                                           condition);
     if (!prep) {
         return std::unexpected(prep.error());
     }
@@ -762,13 +766,13 @@ apply_download(const Operation& operation,
             if (fetched.error().code ==
                     MutationErrorCode::RemoteContentMissing ||
                 fetched.error().code == MutationErrorCode::TransportFailure) {
-                auto prepared = detail::validate_prepared_destination(
-                    operation,
-                    operation_index,
-                    destination,
-                    workspace,
-                    progress,
-                    condition);
+                auto prepared =
+                    detail::validate_prepared_destination(operation,
+                                                          operation_index,
+                                                          destination,
+                                                          workspace,
+                                                          progress,
+                                                          condition);
                 if (!prepared) {
                     return prepared;
                 }
@@ -1477,27 +1481,27 @@ apply_operation(const Operation& operation,
                                       operation_index));
 }
 
-MutationResult apply_streamed_download(
-    const Operation& operation,
-    std::size_t operation_index,
-    const std::filesystem::path& local_root,
-    const platform::Workspace& workspace,
-    const transaction::OperationProgress& progress,
-    const DestinationPrecondition* destination_condition,
-    const DownloadCandidatePopulator& populate) {
+MutationResult
+apply_streamed_download(const Operation& operation,
+                        std::size_t operation_index,
+                        const std::filesystem::path& local_root,
+                        const platform::Workspace& workspace,
+                        const transaction::OperationProgress& progress,
+                        const DestinationPrecondition* destination_condition,
+                        const DownloadCandidatePopulator& populate) {
     if (operation.action != Action::Download) {
-        return std::unexpected(make_error(
-            MutationErrorCode::InvalidOperation,
-            "streamed download requires a download operation",
-            operation.path,
-            operation_index));
+        return std::unexpected(
+            make_error(MutationErrorCode::InvalidOperation,
+                       "streamed download requires a download operation",
+                       operation.path,
+                       operation_index));
     }
     if (!populate) {
-        return std::unexpected(make_error(
-            MutationErrorCode::InvalidOperation,
-            "streamed download requires a candidate populator",
-            operation.path,
-            operation_index));
+        return std::unexpected(
+            make_error(MutationErrorCode::InvalidOperation,
+                       "streamed download requires a candidate populator",
+                       operation.path,
+                       operation_index));
     }
     auto destination =
         resolve_local_path(local_root, operation.path, operation_index);
@@ -1520,13 +1524,12 @@ MutationResult apply_streamed_download(
     std::filesystem::path backup_file;
     if (progress.had_original &&
         progress.backup_slot != (std::numeric_limits<std::uint32_t>::max)()) {
-        backup_file =
-            platform::workspace_file(workspace, progress.backup_slot, ".backup");
+        backup_file = platform::workspace_file(
+            workspace, progress.backup_slot, ".backup");
     }
-    if (auto populated = populate(
-            prep->candidate,
-            *destination,
-            backup_file.empty() ? nullptr : &backup_file);
+    if (auto populated = populate(prep->candidate,
+                                  *destination,
+                                  backup_file.empty() ? nullptr : &backup_file);
         !populated) {
         remove_temporary_file(prep->candidate);
         return populated;
@@ -1569,12 +1572,12 @@ MutationResult apply_preverified_bytes_download(
             auto private_out =
                 platform::private_storage::create_private_file(candidate_path);
             if (!private_out) {
-                return std::unexpected(make_error(
-                    MutationErrorCode::LocalIo,
-                    "failed to create staged download file: " +
-                        private_out.error().message,
-                    candidate_path,
-                    operation_index));
+                return std::unexpected(
+                    make_error(MutationErrorCode::LocalIo,
+                               "failed to create staged download file: " +
+                                   private_out.error().message,
+                               candidate_path,
+                               operation_index));
             }
             if (auto written = platform::private_storage::write_private_file(
                     *private_out,
@@ -1584,12 +1587,12 @@ MutationResult apply_preverified_bytes_download(
                 static_cast<void>(
                     platform::private_storage::remove_private_file_if_owned(
                         *private_out));
-                return std::unexpected(make_error(
-                    MutationErrorCode::LocalIo,
-                    "failed to write verified download bytes: " +
-                        written.error(),
-                    candidate_path,
-                    operation_index));
+                return std::unexpected(
+                    make_error(MutationErrorCode::LocalIo,
+                               "failed to write verified download bytes: " +
+                                   written.error(),
+                               candidate_path,
+                               operation_index));
             }
             platform::private_storage::close_private_file(*private_out);
             return {};

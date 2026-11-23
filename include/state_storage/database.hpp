@@ -93,8 +93,7 @@ struct LocalExecutionRecord {
     std::uint64_t summary_c = 0;
     std::uint64_t summary_bytes = 0;
     std::uint32_t flags = 0;
-    RemotePublishState remote_publish_state =
-        RemotePublishState::NotApplicable;
+    RemotePublishState remote_publish_state = RemotePublishState::NotApplicable;
 
     bool operator==(const LocalExecutionRecord&) const = default;
 };
@@ -185,9 +184,8 @@ bool save_accepted_commit_meta(const std::filesystem::path& database_path,
                                const AcceptedCommitMeta& meta);
 
 // Replaces the cached snapshot of remote operational activity records.
-bool save_remote_activity_cache(
-    const std::filesystem::path& database_path,
-    std::span<const CachedRemoteActivity> entries);
+bool save_remote_activity_cache(const std::filesystem::path& database_path,
+                                std::span<const CachedRemoteActivity> entries);
 
 // Loads auxiliary local execution history, accepted commit authorship, and
 // cached remote activities read-only (returns empty when DB is absent).
