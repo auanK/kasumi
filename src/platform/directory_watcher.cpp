@@ -565,7 +565,8 @@ void stop_watcher_state(DirectoryWatcherState& state) noexcept {
 #else
     if (state.stop_fd >= 0) {
         const std::uint64_t one = 1;
-        static_cast<void>(::write(state.stop_fd, &one, sizeof(one)));
+        if (::write(state.stop_fd, &one, sizeof(one)) < 0) {
+        }
     }
 #endif
     if (state.worker.joinable()) {

@@ -1,4 +1,5 @@
 #include "application/daemon.hpp"
+#include "application/daemon/error_classification.hpp"
 #include "application/daemon/fast_poll.hpp"
 #include "application/daemon/ipc_security.hpp"
 #include "application/detail.hpp"
@@ -195,6 +196,20 @@ bool contains_case_insensitive(std::string_view haystack,
     return !it.empty();
 }
 
+} // namespace
+
+namespace daemon_detail {
+
+bool is_concurrent_local_mutation_error(const Error& error) noexcept {
+    return contains_case_insensitive(error.detail, "concurrent_modification") ||
+           contains_case_insensitive(
+               error.detail,
+               "materialized tree does not match reconciled candidate tree") ||
+           contains_case_insensitive(
+               error.detail,
+               "local materialization diverges from observed head");
+}
+
 bool is_transient_sync_error(const Error& error) noexcept {
     if (error.lock_busy || error.remote_busy) {
         return true;
@@ -208,6 +223,9 @@ bool is_transient_sync_error(const Error& error) noexcept {
         error.code == ErrorCode::ProfileNotFound) {
         return false;
     }
+    if (is_concurrent_local_mutation_error(error)) {
+        return true;
+    }
     if (contains_case_insensitive(error.detail, "remote_busy") ||
         contains_case_insensitive(error.detail, "blocked by active") ||
         contains_case_insensitive(error.detail, "another execution") ||
@@ -220,10 +238,12 @@ bool is_transient_sync_error(const Error& error) noexcept {
         contains_case_insensitive(error.detail, "network")) {
         return true;
     }
-    if (contains_case_insensitive(error.detail, "initial sync") ||
+    if (contains_case_insensitive(error.detail, "composition_mismatch") ||
+        contains_case_insensitive(error.detail, "initial sync") ||
         contains_case_insensitive(error.detail, "unauthenticated") ||
         contains_case_insensitive(error.detail, "corrupt") ||
         contains_case_insensitive(error.detail, "does not match") ||
+        contains_case_insensitive(error.detail, "do not match") ||
         contains_case_insensitive(error.detail, "regression") ||
         contains_case_insensitive(error.detail,
                                   "requires absent local state")) {
@@ -232,6 +252,10 @@ bool is_transient_sync_error(const Error& error) noexcept {
     return error.code == ErrorCode::SynchronizationFailure ||
            error.code == ErrorCode::PlanFailure;
 }
+
+} // namespace daemon_detail
+
+namespace {
 
 std::uint32_t
 compute_jittered_backoff_seconds(std::uint32_t consecutive_failures) noexcept {
@@ -2310,11 +2334,14 @@ void run_profile_task(DaemonSessionState& state,
         return;
     }
 
-    if (borrowed_owner && (is_transient_sync_error(err) ||
+    const bool local_mutation_race =
+        daemon_detail::is_concurrent_local_mutation_error(err);
+    if (borrowed_owner && ((!local_mutation_race &&
+                            daemon_detail::is_transient_sync_error(err)) ||
                            !transport::check_health(*borrowed_owner))) {
         borrowed_owner.reset();
     }
-    const bool transient = is_transient_sync_error(err);
+    const bool transient = daemon_detail::is_transient_sync_error(err);
     const bool lock_only = ((err.code == ErrorCode::CredentialFailure ||
                              err.code == ErrorCode::CredentialsRequired) &&
                             cfg.key_storage == runtime::KeyStorage::Memory);
@@ -5013,7 +5040,8 @@ spawn_background_daemon(const ExecutionEnvironment& environment,
         if (grand > 0) {
             ::_exit(0);
         }
-        static_cast<void>(::chdir("/"));
+        if (::chdir("/") != 0) {
+        }
         static_cast<void>(::unsetenv("KASUMI_MASTER_KEY"));
         static_cast<void>(::unsetenv("KASUMI_PASSWORD"));
         static_cast<void>(::unsetenv("KASUMI_PASSWORD2"));
