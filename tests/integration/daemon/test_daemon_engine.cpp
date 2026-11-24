@@ -253,19 +253,19 @@ TEST(DaemonEngineTest, FastNoopPollIncrementsWithoutExtraSyncRuns) {
     auto session = app::start_daemon_session(env, opts);
     ASSERT_TRUE(session.has_value()) << session.error().detail;
 
-    // Wait for initial check (runs=1) and subsequent periodic 10s fast no-op
-    // poll.
+    // Wait for initial check (runs=1) and at least 3 consecutive 10s periodic
+    // fast no-op polls without falling back to an extra full sync run.
     ASSERT_TRUE(wait_until(
         [&] {
             const auto st = app::query_daemon_session_status(*session, "main");
             return st && st->profiles[0].sync_runs >= 1U &&
-                   st->profiles[0].fast_noop_polls >= 1U;
+                   st->profiles[0].fast_noop_polls >= 3U;
         },
-        18s));
+        45s));
     const auto st = app::query_daemon_session_status(*session, "main");
     ASSERT_TRUE(st.has_value());
     EXPECT_EQ(st->profiles[0].sync_runs, 1U);
-    EXPECT_GE(st->profiles[0].fast_noop_polls, 1U);
+    EXPECT_GE(st->profiles[0].fast_noop_polls, 3U);
     EXPECT_TRUE(st->profiles[0].warm_transport_active);
 
     app::stop_daemon_session(*session);
@@ -353,18 +353,15 @@ TEST(DaemonEngineTest,
     app::stop_daemon_session(*session);
 }
 
-TEST(DaemonEngineTest,
-     DefaultGcDisabledPauseDuringLockAndDaemonLogsCancelWork) {
+TEST(DaemonEngineTest, PauseDuringLockAndDaemonLogsCancelWork) {
     auto setup =
         TwoPeerSetup::create("kasumi-daemon-p0p1-", app::KeyStorage::File, 0U);
     const auto profiles = app::list_profiles(setup.env);
     ASSERT_TRUE(profiles && profiles->size() == 2U);
-    for (const auto& p : *profiles) {
-        EXPECT_FALSE(p.gc_interval_hours.has_value());
-    }
 
     app::DaemonOptions opts;
     opts.watch_debounce = 100ms;
+    opts.startup_stagger = 0ms;
     auto session = app::start_daemon_session(setup.env, opts);
     ASSERT_TRUE(session.has_value()) << session.error().detail;
 
@@ -373,8 +370,6 @@ TEST(DaemonEngineTest,
     EXPECT_GE(init_st->api_version, 1U);
     EXPECT_FALSE(init_st->kasumi_version.empty());
     ASSERT_EQ(init_st->profiles.size(), 1U);
-    EXPECT_EQ(init_st->profiles[0].gc_interval_hours, 0U);
-    EXPECT_FALSE(init_st->profiles[0].next_gc_at.has_value());
     EXPECT_FALSE(init_st->profiles[0].local_dir.empty());
     EXPECT_FALSE(init_st->profiles[0].remote_dir.empty());
 
@@ -1056,5 +1051,48 @@ TEST(DaemonEngineTest,
     static_cast<void>(app::delete_profile(env, "vault_auto"));
 }
 #endif
+
+TEST(DaemonEngineTest,
+     ExtractsRcloneRemoteRateLimitsTransientlyAndStaggersStartup) {
+    using app::Error;
+    using app::ErrorCode;
+    namespace dd = app::daemon_detail;
+
+    EXPECT_EQ(dd::extract_rclone_remote_name("kasumi:kasumi/Pictures"),
+              std::optional<std::string_view>{"kasumi"});
+    EXPECT_EQ(dd::extract_rclone_remote_name("gdrive:notes"),
+              std::optional<std::string_view>{"gdrive"});
+    EXPECT_FALSE(dd::extract_rclone_remote_name("D:\\Pictures").has_value());
+    EXPECT_FALSE(dd::extract_rclone_remote_name("C:/work/notes").has_value());
+    EXPECT_FALSE(dd::extract_rclone_remote_name("/tmp/local_dir").has_value());
+    EXPECT_FALSE(dd::extract_rclone_remote_name("/tmp/with:colon").has_value());
+
+    EXPECT_TRUE(dd::is_transient_sync_error(Error{
+        .code = ErrorCode::SynchronizationFailure,
+        .detail = "googleapi: Error 403: userRateLimitExceeded",
+    }));
+    EXPECT_TRUE(dd::is_transient_sync_error(Error{
+        .code = ErrorCode::PlanFailure,
+        .detail = "HTTP 429 Too Many Requests; throttled by remote",
+    }));
+
+    auto setup = TwoPeerSetup::create(
+        "kasumi-daemon-stagger-", app::KeyStorage::File, 300U);
+    app::DaemonOptions opts;
+    opts.watch_debounce = 100ms;
+    opts.startup_stagger = 6s;
+    auto session = app::start_daemon_session(setup.env, opts);
+    ASSERT_TRUE(session.has_value()) << session.error().detail;
+
+    const auto st = app::query_daemon_session_status(*session);
+    ASSERT_TRUE(st.has_value());
+    ASSERT_EQ(st->profiles.size(), 2U);
+    ASSERT_TRUE(st->profiles[0].next_sync_at.has_value());
+    ASSERT_TRUE(st->profiles[1].next_sync_at.has_value());
+    EXPECT_GE(*st->profiles[1].next_sync_at - *st->profiles[0].next_sync_at,
+              4);
+
+    app::stop_daemon_session(*session);
+}
 
 } // namespace

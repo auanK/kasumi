@@ -9,7 +9,7 @@
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "long_path_aware.manifest"
 
 #define VER_COMPANYNAME_STR         "auanK\0"
-#define VER_FILEDESCRIPTION_STR     "Kasumi - Multi-device bidirectional file synchronization with client-side encryption over any cloud storage, without a dedicated server.\0"
+#define VER_FILEDESCRIPTION_STR     "Kasumi - Client-side encrypted, multi-master bidirectional file synchronization over local paths, network shares, or rclone-compatible storage, without a dedicated server.\0"
 #define VER_INTERNALNAME_STR        "kasumi\0"
 #define VER_LEGALCOPYRIGHT_STR      "Copyright (C) 2026 auanK\0"
 #define VER_ORIGINALFILENAME_STR    "kasumi.exe\0"

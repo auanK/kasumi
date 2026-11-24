@@ -335,6 +335,27 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
     if (argc == 2 && (command == "--help" || command == "-h")) {
         return HelpInvocation{};
     }
+    if (command == "help") {
+        if (argc == 2) {
+            return HelpInvocation{};
+        }
+        if (argc == 3) {
+            const std::string_view second{argv[2]};
+            if (second == "--all" || second == "all") {
+                return HelpInvocation{.topic = {}, .all = true};
+            }
+        }
+        const auto topic = help_topic(argc - 1, argv + 1);
+        if (topic.empty()) {
+            return std::unexpected(ParseError{});
+        }
+        const int topic_arguments =
+            topic.find(' ') == std::string::npos ? 1 : 2;
+        if (argc == topic_arguments + 2) {
+            return HelpInvocation{topic};
+        }
+        return std::unexpected(ParseError{});
+    }
     if (argc == 3 && argv[2] != nullptr) {
         const std::string_view second{argv[2]};
         if (((command == "--help" || command == "-h") && second == "--all") ||
@@ -784,32 +805,6 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                         return std::unexpected(ParseError{});
                     }
                     inv.clear_sync_interval_seconds = true;
-                } else if (arg == "--gc-interval" ||
-                           arg.starts_with("--gc-interval=")) {
-                    if (inv.gc_interval_hours.has_value() ||
-                        inv.clear_gc_interval_hours) {
-                        return std::unexpected(ParseError{});
-                    }
-                    const auto val =
-                        read_flag_value(i, argc, argv, "--gc-interval");
-                    if (!val) {
-                        return std::unexpected(ParseError{});
-                    }
-                    const auto parsed_hrs =
-                        parse_bounded_u32(val->value, 0U, 8760U);
-                    if (!parsed_hrs) {
-                        return std::unexpected(ParseError{});
-                    }
-                    inv.gc_interval_hours = *parsed_hrs;
-                    if (val->consumed_next) {
-                        ++i;
-                    }
-                } else if (!is_create && arg == "--clear-gc-interval") {
-                    if (inv.gc_interval_hours.has_value() ||
-                        inv.clear_gc_interval_hours) {
-                        return std::unexpected(ParseError{});
-                    }
-                    inv.clear_gc_interval_hours = true;
                 } else if (arg == "--paused" || arg.starts_with("--paused=")) {
                     if (inv.paused.has_value()) {
                         return std::unexpected(ParseError{});
@@ -850,8 +845,7 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 !inv.rclone_config && !inv.clear_rclone_config &&
                 !inv.watch_enabled && !inv.clear_watch_enabled &&
                 !inv.sync_interval_seconds &&
-                !inv.clear_sync_interval_seconds && !inv.gc_interval_hours &&
-                !inv.clear_gc_interval_hours && !inv.paused) {
+                !inv.clear_sync_interval_seconds && !inv.paused) {
                 return std::unexpected(ParseError{});
             }
             return inv;
@@ -1080,9 +1074,6 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         return std::unexpected(ParseError{});
     }
     if (command == "status") {
-        if (argc == 2) {
-            return OverviewInvocation{};
-        }
         return request(application::Operation::Status, argc, argv);
     }
     if (command == "fsck") {

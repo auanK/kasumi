@@ -98,7 +98,7 @@ FastPollReport try_fast_remote_noop_poll(
     const runtime::RuntimeData& runtime_data,
     transport::Transport& borrowed_transport,
     std::span<const std::uint8_t, 32> master_key,
-    const observation::LocalObservationSession& warm_observation,
+    observation::LocalObservationSession& warm_observation,
     bool ignore_file_present,
     const observation::DatabaseMetadataStamp& expected_ignore_stamp) {
     if (!transport::valid(borrowed_transport)) {
@@ -146,6 +146,11 @@ FastPollReport try_fast_remote_noop_poll(
         return {.verdict = FastPollVerdict::FullSyncRequired,
                 .reason = "no accepted local commit yet"};
     }
+    // validate() may open READWRITE to clear stale WAL recovery state on a
+    // quiescent DB; refresh our warm DB stamp under the profile lock so the
+    // next fast poll does not mistake our own read for external modification.
+    observation::refresh_warm_session_db_stamp(warm_observation,
+                                               runtime_data.database_path);
     const auto& state = **persisted;
     if (state.commit_id.empty() || state.ciphertext_id.empty() ||
         !state.pending_materializations.empty()) {

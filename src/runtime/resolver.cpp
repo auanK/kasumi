@@ -75,7 +75,6 @@ resolve(const std::filesystem::path& app_data_dir,
         .rclone_config = profile->rclone_config,
         .watch_enabled = profile->watch_enabled,
         .sync_interval_seconds = profile->sync_interval_seconds,
-        .gc_interval_hours = profile->gc_interval_hours,
         .paused = profile->paused,
     };
 }

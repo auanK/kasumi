@@ -319,19 +319,8 @@ load_profiles(const std::filesystem::path& config_path) {
             }
             pd.sync_interval_seconds = static_cast<std::uint32_t>(*sec);
         }
-        if (const auto gc_int_field = (*prof)["gc_interval_hours"]) {
-            if (!gc_int_field.is_integer()) {
-                return fail(ErrorCode::ProfileInvalid,
-                            "gc_interval_hours must be an integer");
-            }
-            const auto hrs = gc_int_field.value_exact<std::int64_t>();
-            if (!hrs || (*hrs != 0 && (*hrs < 1 || *hrs > 8760))) {
-                return fail(
-                    ErrorCode::ProfileInvalid,
-                    "gc_interval_hours must be 0 or between 1 and 8760");
-            }
-            pd.gc_interval_hours = static_cast<std::uint32_t>(*hrs);
-        }
+        // Legacy v0.28 config files may contain gc_interval_hours; ignore it
+        // because automated daemon GC was removed.
         if (const auto paused_field = (*prof)["paused"]) {
             if (!paused_field.is_boolean()) {
                 return fail(ErrorCode::ProfileInvalid,
@@ -398,12 +387,6 @@ save_profiles(const std::filesystem::path& config_path,
                 ErrorCode::ProfileInvalid,
                 "sync_interval_seconds must be 0 or between 10 and 86400");
         }
-        if (prof.gc_interval_hours && (*prof.gc_interval_hours != 0U &&
-                                       (*prof.gc_interval_hours < 1U ||
-                                        *prof.gc_interval_hours > 8760U))) {
-            return fail(ErrorCode::ProfileInvalid,
-                        "gc_interval_hours must be 0 or between 1 and 8760");
-        }
     }
     toml::table config;
     toml::table profiles_table;
@@ -431,9 +414,6 @@ save_profiles(const std::filesystem::path& config_path,
         if (prof.sync_interval_seconds) {
             prof_data.insert("sync_interval_seconds",
                              *prof.sync_interval_seconds);
-        }
-        if (prof.gc_interval_hours) {
-            prof_data.insert("gc_interval_hours", *prof.gc_interval_hours);
         }
         if (prof.paused) {
             prof_data.insert("paused", true);

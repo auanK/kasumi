@@ -220,6 +220,9 @@ std::string format_compact_summary(const application::SyncCompleted& sync) {
     if (sync.renamed > 0) {
         parts.push_back(std::format("→ {}", sync.renamed));
     }
+    if (sync.copied > 0) {
+        parts.push_back(std::format("cp {}", sync.copied));
+    }
     if (sync.created_dirs > 0) {
         parts.push_back(sync.created_dirs == 1
                             ? "+1 dir"
@@ -1410,6 +1413,9 @@ void render_sync_summary(const application::SyncCompleted& summary) {
     }
     if (summary.renamed > 0) {
         parts.push_back(std::format("→ {}", summary.renamed));
+    }
+    if (summary.copied > 0) {
+        parts.push_back(std::format("cp {}", summary.copied));
     }
     push_count(summary.created_dirs,
                i18n::Key::SyncCreatedDirSingular,
@@ -3394,28 +3400,28 @@ format_compact_summary(const application::DaemonAutostartStatus& status) {
                        status.method);
 }
 
-std::string format_relative_time(std::int64_t unix_timestamp) {
-    if (unix_timestamp <= 0) {
-        return "-";
+std::string_view
+execution_status_label(application::ProfileExecutionStatus status) {
+    using S = application::ProfileExecutionStatus;
+    static constexpr std::array<std::pair<S, i18n::Key>, 11> kTable{{
+        {S::InProgress, i18n::Key::LabelStatusInProgress},
+        {S::Succeeded, i18n::Key::LabelStatusOk},
+        {S::SucceededNoChanges, i18n::Key::LabelStatusNoChanges},
+        {S::SucceededDownloadedOnly, i18n::Key::LabelStatusDownloadedOnly},
+        {S::SucceededPartial, i18n::Key::LabelStatusPartial},
+        {S::IssuesFound, i18n::Key::LabelStatusIssuesFound},
+        {S::Blocked, i18n::Key::LabelStatusBlocked},
+        {S::Cancelled, i18n::Key::LabelStatusCancelled},
+        {S::Failed, i18n::Key::LabelStatusFailed},
+        {S::Uncertain, i18n::Key::LabelStatusUncertain},
+        {S::Interrupted, i18n::Key::LabelStatusInterrupted},
+    }};
+    for (const auto& [candidate, key] : kTable) {
+        if (candidate == status) {
+            return i18n::tr(key);
+        }
     }
-    const auto now = platform::clock::unix_seconds();
-    if (!now || *now < unix_timestamp) {
-        return platform::clock::format_local_timestamp(unix_timestamp, false);
-    }
-    const std::int64_t diff = *now - unix_timestamp;
-    if (diff < 5) {
-        return std::string{i18n::tr(i18n::Key::OverviewTimeJustNow)};
-    }
-    if (diff < 60) {
-        return i18n::format(i18n::Key::OverviewTimeSecondsAgo, diff);
-    }
-    if (diff < 3600) {
-        return i18n::format(i18n::Key::OverviewTimeMinutesAgo, diff / 60);
-    }
-    if (diff < 86400) {
-        return i18n::format(i18n::Key::OverviewTimeHoursAgo, diff / 3600);
-    }
-    return i18n::format(i18n::Key::OverviewTimeDaysAgo, diff / 86400);
+    return i18n::tr(i18n::Key::LabelUnknown);
 }
 
 std::string_view
@@ -3443,69 +3449,136 @@ overview_problem_message(application::ProfileLocalProblem problem) {
 
 namespace {
 
+std::string format_sync_interval_label(std::uint32_t seconds) {
+    if (seconds == 0U) {
+        return std::string{i18n::tr(i18n::Key::LabelDisabled)};
+    }
+    if (seconds % 60U == 0U) {
+        return std::format("{}m", seconds / 60U);
+    }
+    return std::format("{}s", seconds);
+}
+
+std::string format_watch_label(const application::DaemonProfileStatus& p) {
+    if (!p.watch_enabled) {
+        return std::string{i18n::tr(i18n::Key::LabelNo)};
+    }
+    if (p.watcher_active) {
+        return "active";
+    }
+    return p.watcher_degraded ? "degraded" : "inactive";
+}
+
 std::string format_active_stage_progress(
-    const application::DaemonProfileStatus& p) {
+    const application::DaemonProfileStatus& p,
+    bool include_bytes) {
     if (p.active_stage.empty()) {
         return std::string{i18n::tr(i18n::Key::OverviewDetailSyncing)};
     }
+    std::string detail;
     if (p.active_total_objects.has_value()) {
-        return std::format("{} ({}/{} objects)",
-                           sanitize_terminal_text(p.active_stage),
-                           p.active_objects,
-                           *p.active_total_objects);
+        detail = std::format("{}/{} objects",
+                             p.active_objects,
+                             *p.active_total_objects);
+    } else if (p.active_objects > 0) {
+        detail = std::format("{} objects", p.active_objects);
     }
-    if (p.active_objects > 0) {
-        return std::format("{} ({} objects)",
-                           sanitize_terminal_text(p.active_stage),
-                           p.active_objects);
+    if (include_bytes) {
+        if (p.active_total_bytes.has_value()) {
+            if (!detail.empty()) {
+                detail += ", ";
+            }
+            detail += std::format("{}/{}",
+                                  format_size(p.active_bytes),
+                                  format_size(*p.active_total_bytes));
+        } else if (p.active_bytes > 0) {
+            if (!detail.empty()) {
+                detail += ", ";
+            }
+            detail += format_size(p.active_bytes);
+        }
     }
-    return std::format("{}...", sanitize_terminal_text(p.active_stage));
+    if (detail.empty()) {
+        return std::format("{}...", sanitize_terminal_text(p.active_stage));
+    }
+    return std::format(
+        "{} ({})", sanitize_terminal_text(p.active_stage), detail);
 }
 
-std::string format_last_sync_human(const OverviewProfileRow& row) {
-    std::optional<std::int64_t> local_sync_ts;
-    if (row.activity.last_complete_sync) {
-        local_sync_ts = row.activity.last_complete_sync->finished_at.value_or(
-            row.activity.last_complete_sync->started_at);
-    }
-    if (row.daemon_profile && row.daemon_profile->last_sync_finished_at) {
-        const auto d_ts = *row.daemon_profile->last_sync_finished_at;
-        if (!local_sync_ts || d_ts > *local_sync_ts) {
-            local_sync_ts = d_ts;
-        }
-    }
-
-    std::string sync_part;
-    if (local_sync_ts) {
-        sync_part = i18n::format(i18n::Key::OverviewDetailLocalSync,
-                                 format_relative_time(*local_sync_ts));
+std::string format_overview_last_sync(const OverviewProfileRow& row) {
+    const application::ProfileExecutionSummary* chosen = nullptr;
+    if (row.activity.last_attempt &&
+        row.activity.last_attempt->operation ==
+            application::ProfileOperationKind::Sync &&
+        (!row.activity.last_complete_sync ||
+         row.activity.last_attempt->started_at >
+             row.activity.last_complete_sync->started_at)) {
+        chosen = &*row.activity.last_attempt;
+    } else if (row.activity.last_complete_sync) {
+        chosen = &*row.activity.last_complete_sync;
     }
 
-    std::string change_part;
-    if (row.activity.accepted_commit) {
-        const auto& c = *row.activity.accepted_commit;
-        const std::int64_t commit_ts =
-            c.created_at > 0 ? c.created_at : c.accepted_at;
-        const auto rel = format_relative_time(commit_ts);
-        std::string author = sanitize_terminal_text(c.machine_name);
-        if (author.empty() && !c.machine_id_hex.empty()) {
-            author = sanitize_terminal_text(c.machine_id_hex.substr(0, 8));
-        }
-        if (!author.empty()) {
-            change_part = i18n::format(
-                i18n::Key::OverviewDetailLastChangeBy, rel, author);
-        } else {
-            change_part = i18n::format(i18n::Key::OverviewDetailLastChange, rel);
+    std::optional<std::int64_t> sync_ts;
+    std::string status_text;
+    if (chosen != nullptr) {
+        sync_ts = chosen->finished_at.value_or(chosen->started_at);
+        status_text = std::string{execution_status_label(chosen->status)};
+    }
+    if (row.daemon_profile && row.daemon_profile->last_sync_finished_at &&
+        (!sync_ts || *row.daemon_profile->last_sync_finished_at > *sync_ts)) {
+        sync_ts = *row.daemon_profile->last_sync_finished_at;
+        if (!row.daemon_profile->last_outcome.empty()) {
+            status_text =
+                sanitize_terminal_text(row.daemon_profile->last_outcome);
+        } else if (status_text.empty()) {
+            status_text =
+                std::string{i18n::tr(i18n::Key::LabelStatusOk)};
         }
     }
+    if (!sync_ts) {
+        return {};
+    }
+    return std::format(
+        "{} ({})",
+        platform::clock::format_local_timestamp(*sync_ts, false),
+        status_text);
+}
 
-    if (!sync_part.empty() && !change_part.empty()) {
-        return std::format("{} | {}", sync_part, change_part);
+std::string format_overview_last_change(const OverviewProfileRow& row) {
+    if (!row.activity.accepted_commit) {
+        return {};
     }
-    if (!sync_part.empty()) {
-        return sync_part;
+    const auto& c = *row.activity.accepted_commit;
+    const std::int64_t commit_ts =
+        c.created_at > 0 ? c.created_at : c.accepted_at;
+    const auto ts_str = platform::clock::format_local_timestamp(commit_ts, false);
+    std::string author = sanitize_terminal_text(c.machine_name);
+    if (author.empty() && !c.machine_id_hex.empty()) {
+        author = sanitize_terminal_text(c.machine_id_hex.substr(0, 8));
     }
-    return change_part;
+    if (!author.empty()) {
+        return i18n::format(i18n::Key::OverviewLastChangeBy, ts_str, author);
+    }
+    return ts_str;
+}
+
+void print_profile_block_header(std::string_view name,
+                                std::string_view state_label,
+                                std::string_view tag,
+                                bool use_color,
+                                std::string_view color) {
+    const std::string inner =
+        tag.empty() ? std::string{state_label}
+                    : std::format("{}, {}", state_label, tag);
+    if (use_color && !color.empty()) {
+        std::println("{} {}[{}]{}",
+                     sanitize_terminal_text(name),
+                     color,
+                     inner,
+                     style::reset);
+    } else {
+        std::println("{} [{}]", sanitize_terminal_text(name), inner);
+    }
 }
 
 } // namespace
@@ -3542,29 +3615,34 @@ int present_overview(const application::DaemonStatusReport& daemon,
     std::println("");
 
     const bool use_color = platform::stdout_terminal().ansi;
-    for (const auto& row : rows) {
+    for (std::size_t idx = 0; idx < rows.size(); ++idx) {
+        if (idx > 0U) {
+            std::println("");
+        }
+        const auto& row = rows[idx];
         const auto& name = row.profile.name;
-        std::string_view badge;
-        std::string_view color = style::green;
-        std::string detail;
+        std::string_view badge = i18n::tr(i18n::Key::OverviewBadgeReady);
+        std::string_view color;
+        std::optional<i18n::Key> alert_key;
+        std::string alert_value;
 
         const bool daemon_syncing =
             daemon.running && row.daemon_profile &&
-            (row.daemon_profile->state ==
-                 application::DaemonProfileState::RunningSync ||
-             row.daemon_profile->state ==
-                 application::DaemonProfileState::RunningGc);
+            row.daemon_profile->state ==
+                application::DaemonProfileState::RunningSync;
 
         if (daemon_syncing) {
             badge = i18n::tr(i18n::Key::OverviewBadgeSyncing);
             color = style::cyan;
-            detail = format_active_stage_progress(*row.daemon_profile);
+            alert_key = i18n::Key::OverviewLineStage;
+            alert_value = format_active_stage_progress(*row.daemon_profile, full);
         } else if (row.conflict_count > 0) {
             badge = i18n::tr(i18n::Key::OverviewBadgeConflict);
             color = style::yellow;
-            detail = i18n::format(i18n::Key::OverviewDetailConflicts,
-                                  row.conflict_count,
-                                  sanitize_terminal_text(name));
+            alert_key = i18n::Key::OverviewLineConflicts;
+            alert_value = i18n::format(i18n::Key::OverviewDetailConflicts,
+                                       row.conflict_count,
+                                       sanitize_terminal_text(name));
         } else if (daemon.running && row.daemon_profile) {
             using S = application::DaemonProfileState;
             switch (row.daemon_profile->state) {
@@ -3575,56 +3653,52 @@ int present_overview(const application::DaemonStatusReport& daemon,
                 case S::Locked:
                     badge = i18n::tr(i18n::Key::OverviewBadgeLocked);
                     color = style::yellow;
-                    detail = i18n::format(i18n::Key::OverviewDetailUnlockHint,
-                                          sanitize_terminal_text(name));
+                    alert_key = i18n::Key::OverviewLineAction;
+                    alert_value = i18n::format(
+                        i18n::Key::OverviewDetailUnlockHint,
+                        sanitize_terminal_text(name));
                     break;
                 case S::NeedsAttention:
                     badge = i18n::tr(i18n::Key::OverviewBadgeError);
                     color = style::red;
-                    detail = row.daemon_profile->last_error.empty()
-                                 ? std::string{overview_problem_message(
-                                       row.local_problem)}
-                                 : sanitize_terminal_text(
-                                       row.daemon_profile->last_error);
+                    alert_key = i18n::Key::OverviewLineError;
+                    alert_value = row.daemon_profile->last_error.empty()
+                                      ? std::string{overview_problem_message(
+                                            row.local_problem)}
+                                      : sanitize_terminal_text(
+                                            row.daemon_profile->last_error);
                     break;
                 case S::Backoff:
                     badge = i18n::tr(i18n::Key::OverviewBadgeRetrying);
                     color = style::yellow;
-                    detail = sanitize_terminal_text(
+                    alert_key = i18n::Key::OverviewLineError;
+                    alert_value = sanitize_terminal_text(
                         row.daemon_profile->last_error);
                     break;
                 case S::PendingDebounce:
                     badge = i18n::tr(i18n::Key::OverviewBadgePending);
                     color = style::cyan;
-                    detail = i18n::format(
+                    alert_key = i18n::Key::OverviewLinePending;
+                    alert_value = i18n::format(
                         i18n::Key::OverviewDetailLocalChanges,
                         (std::max)(row.daemon_profile->dirty_paths_count,
                                    std::size_t{1}));
                     break;
                 case S::RunningSync:
-                case S::RunningGc:
                     badge = i18n::tr(i18n::Key::OverviewBadgeSyncing);
                     color = style::cyan;
-                    detail = format_active_stage_progress(*row.daemon_profile);
+                    alert_key = i18n::Key::OverviewLineStage;
+                    alert_value =
+                        format_active_stage_progress(*row.daemon_profile, full);
                     break;
                 case S::Idle:
                     if (row.local_state ==
                         application::ProfileLocalState::Problem) {
                         badge = i18n::tr(i18n::Key::OverviewBadgeError);
                         color = style::red;
-                        detail = std::string{
+                        alert_key = i18n::Key::OverviewLineError;
+                        alert_value = std::string{
                             overview_problem_message(row.local_problem)};
-                    } else {
-                        detail = format_last_sync_human(row);
-                        if (!detail.empty()) {
-                            badge = i18n::tr(i18n::Key::OverviewBadgeOk);
-                            color = style::green;
-                        } else {
-                            badge = i18n::tr(i18n::Key::OverviewBadgeReady);
-                            color = style::green;
-                            detail = std::string{i18n::tr(
-                                i18n::Key::OverviewDetailNeverSynced)};
-                        }
                     }
                     break;
             }
@@ -3636,24 +3710,14 @@ int present_overview(const application::DaemonStatusReport& daemon,
                        application::ProfileLocalState::Problem) {
                 badge = i18n::tr(i18n::Key::OverviewBadgeError);
                 color = style::red;
-                detail =
+                alert_key = i18n::Key::OverviewLineError;
+                alert_value =
                     std::string{overview_problem_message(row.local_problem)};
             } else if (!row.activity.database_present) {
                 badge = i18n::tr(i18n::Key::OverviewBadgeReady);
-                color = style::yellow;
-                detail = i18n::format(i18n::Key::OverviewDetailNeedsInitial,
-                                      sanitize_terminal_text(name));
-            } else {
-                detail = format_last_sync_human(row);
-                if (!detail.empty()) {
-                    badge = i18n::tr(i18n::Key::OverviewBadgeOk);
-                    color = style::green;
-                } else {
-                    badge = i18n::tr(i18n::Key::OverviewBadgeReady);
-                    color = style::green;
-                    detail = std::string{
-                        i18n::tr(i18n::Key::OverviewDetailNeverSynced)};
-                }
+                alert_key = i18n::Key::OverviewLineAction;
+                alert_value = i18n::format(i18n::Key::OverviewDetailNeedsInitial,
+                                           sanitize_terminal_text(name));
             }
         }
 
@@ -3664,6 +3728,7 @@ int present_overview(const application::DaemonStatusReport& daemon,
         const bool is_locked =
             daemon.running && row.daemon_profile &&
             row.daemon_profile->state == application::DaemonProfileState::Locked;
+        std::string_view tag;
         if (!is_paused && !is_locked) {
             const bool watch_off =
                 row.daemon_profile ? !row.daemon_profile->watch_enabled
@@ -3673,57 +3738,52 @@ int present_overview(const application::DaemonStatusReport& daemon,
                     ? row.daemon_profile->sync_interval_seconds
                     : row.profile.sync_interval_seconds.value_or(300U);
             if (watch_off) {
-                const auto tag =
-                    sync_interval == 0U
-                        ? i18n::tr(i18n::Key::OverviewTagManualOnly)
-                        : i18n::tr(i18n::Key::OverviewTagWatchOff);
-                if (detail.empty()) {
-                    detail = std::string{tag};
-                } else {
-                    detail += " ";
-                    detail += tag;
-                }
+                tag = sync_interval == 0U
+                          ? i18n::tr(i18n::Key::OverviewTagManualOnly)
+                          : i18n::tr(i18n::Key::OverviewTagWatchOff);
             }
         }
 
-        const std::string colored_badge =
-            use_color ? std::format("{}{:<13}{}", color, badge, style::reset)
-                      : std::format("{:<13}", badge);
-        if (detail.empty()) {
-            std::println("  {:<20} {}", sanitize_terminal_text(name), badge);
-        } else {
-            std::println("  {:<20} {} {}",
-                         sanitize_terminal_text(name),
-                         colored_badge,
-                         detail);
-        }
+        print_profile_block_header(name, badge, tag, use_color, color);
+
         if (full) {
+            i18n::println(i18n::Key::OverviewLineLocal,
+                          sanitize_terminal_text(
+                              platform::path::to_utf8(row.profile.local_dir)));
+            i18n::println(i18n::Key::OverviewLineRemote,
+                          sanitize_terminal_text(row.profile.remote_dir));
+        }
+        if (alert_key.has_value() && !alert_value.empty()) {
+            i18n::println(*alert_key, alert_value);
+        }
+        const auto last_sync = format_overview_last_sync(row);
+        if (!last_sync.empty()) {
+            i18n::println(i18n::Key::OverviewLineLastSync, last_sync);
+        } else if (!alert_key.has_value()) {
+            i18n::println(i18n::Key::OverviewLineLastSync,
+                          i18n::tr(i18n::Key::OverviewDetailNeverSynced));
+        }
+        const auto last_change = format_overview_last_change(row);
+        if (!last_change.empty()) {
+            i18n::println(i18n::Key::OverviewLineLastChange, last_change);
+        }
+        if (full && row.daemon_profile) {
+            const auto& p = *row.daemon_profile;
             i18n::println(
-                i18n::Key::DaemonStatusProfilePaths,
-                sanitize_terminal_text(
-                    platform::path::to_utf8(row.profile.local_dir)),
-                sanitize_terminal_text(row.profile.remote_dir),
-                row.daemon_profile ? row.daemon_profile->dirty_paths_count
-                                   : std::size_t{0});
-            if (row.daemon_profile) {
-                const auto& p = *row.daemon_profile;
-                const std::string interval_str =
-                    p.sync_interval_seconds == 0
-                        ? std::string{i18n::tr(i18n::Key::LabelDisabled)}
-                        : std::format("{}s", p.sync_interval_seconds);
-                const std::string gc_str =
-                    p.gc_interval_hours == 0
-                        ? std::string{i18n::tr(i18n::Key::LabelDisabled)}
-                        : std::format("{}h", p.gc_interval_hours);
-                i18n::println(i18n::Key::DaemonStatusProfileTiming,
-                              interval_str,
-                              gc_str,
-                              p.consecutive_failures,
-                              p.backoff_seconds,
-                              p.last_outcome.empty()
-                                  ? std::string{"-"}
-                                  : sanitize_terminal_text(p.last_outcome));
-            }
+                i18n::Key::OverviewLineDaemon,
+                std::format("{} | watch: {} | interval: {} | dirty: {}",
+                            application::to_string(p.state),
+                            format_watch_label(p),
+                            format_sync_interval_label(p.sync_interval_seconds),
+                            p.dirty_paths_count));
+            i18n::println(
+                i18n::Key::OverviewLineResult,
+                std::format("{} (failures: {}, backoff: {}s)",
+                            p.last_outcome.empty()
+                                ? std::string{"-"}
+                                : sanitize_terminal_text(p.last_outcome),
+                            p.consecutive_failures,
+                            p.backoff_seconds));
         }
     }
     if (!full) {
@@ -3739,6 +3799,10 @@ int present(const application::DaemonStatusReport& report,
     if (quiet) {
         return 0;
     }
+    const auto yes_no_str = [](bool v) {
+        return v ? i18n::tr(i18n::Key::LabelYes)
+                 : i18n::tr(i18n::Key::LabelNo);
+    };
     if (report.running) {
         i18n::println(i18n::Key::DaemonStatusHeader);
         if (full) {
@@ -3747,120 +3811,94 @@ int present(const application::DaemonStatusReport& report,
         }
         i18n::println(i18n::Key::DaemonStatusUptime, report.uptime_seconds);
         if (full) {
-            std::println("  version={} api=v{} pinned_ram={}",
-                         report.kasumi_version.empty()
-                             ? std::string{"-"}
-                             : sanitize_terminal_text(report.kasumi_version),
-                         report.api_version,
-                         report.secure_pages_locked
-                             ? i18n::tr(i18n::Key::LabelYes)
-                             : i18n::tr(i18n::Key::LabelNo));
+            i18n::println(i18n::Key::DaemonStatusVersion,
+                          report.kasumi_version.empty()
+                              ? std::string{"-"}
+                              : sanitize_terminal_text(report.kasumi_version),
+                          report.api_version,
+                          yes_no_str(report.secure_pages_locked));
         }
     } else {
         i18n::println(i18n::Key::DaemonStatusOffline);
     }
     if (report.autostart.supported) {
-        i18n::println(i18n::Key::DaemonAutostartHeader,
-                      report.autostart.installed ? i18n::tr(i18n::Key::LabelYes)
-                                                 : i18n::tr(i18n::Key::LabelNo),
+        i18n::println(i18n::Key::DaemonStatusAutostart,
+                      yes_no_str(report.autostart.installed),
                       sanitize_terminal_text(report.autostart.method));
     }
     if (report.profiles.empty()) {
         i18n::println(i18n::Key::DaemonStatusProfilesNone);
         return 0;
     }
-    for (const auto& p : report.profiles) {
-        if (!full) {
-            std::string summary{application::to_string(p.state)};
-            if (!p.active_stage.empty()) {
-                summary += " (" + format_active_stage_progress(p) + ")";
-            } else if (!p.last_error.empty()) {
-                summary += " - " + sanitize_terminal_text(p.last_error);
-            } else {
-                std::string meta;
-                if (!p.paused && !p.watch_enabled) {
-                    meta = p.sync_interval_seconds == 0U
-                               ? "watch off, timer off"
-                               : "watch off";
-                }
-                if (p.last_sync_finished_at.has_value()) {
-                    if (!meta.empty()) {
-                        meta += ", ";
-                    }
-                    meta += format_relative_time(*p.last_sync_finished_at);
-                }
-                if (!meta.empty()) {
-                    summary += " (" + meta + ")";
-                }
-            }
-            i18n::println(i18n::Key::DaemonStatusProfileSummary,
-                          sanitize_terminal_text(p.name),
-                          summary);
-            continue;
+
+    std::println("");
+    for (std::size_t idx = 0; idx < report.profiles.size(); ++idx) {
+        if (idx > 0U) {
+            std::println("");
         }
-        const auto yes_no_str = [](bool v) {
-            return v ? i18n::tr(i18n::Key::LabelYes)
-                     : i18n::tr(i18n::Key::LabelNo);
-        };
-        const std::string watch_label =
-            !p.watch_enabled
-                ? std::string{i18n::tr(i18n::Key::LabelNo)}
-                : (p.watcher_active
-                       ? "active"
-                       : (p.watcher_degraded ? "degraded" : "inactive"));
+        const auto& p = report.profiles[idx];
         i18n::println(i18n::Key::DaemonStatusProfileEntry,
                       sanitize_terminal_text(p.name),
-                      application::to_string(p.state),
-                      watch_label,
+                      application::to_string(p.state));
+        if (!full) {
+            if (!p.active_stage.empty()) {
+                i18n::println(i18n::Key::OverviewLineStage,
+                              format_active_stage_progress(p, true));
+            }
+            if (!p.last_error.empty()) {
+                i18n::println(i18n::Key::DaemonStatusProfileError,
+                              sanitize_terminal_text(p.last_error));
+            }
+            if (p.last_sync_finished_at.has_value()) {
+                const auto ts_str = platform::clock::format_local_timestamp(
+                    *p.last_sync_finished_at, false);
+                const auto val =
+                    p.last_outcome.empty()
+                        ? ts_str
+                        : std::format("{} ({})",
+                                      ts_str,
+                                      sanitize_terminal_text(p.last_outcome));
+                i18n::println(i18n::Key::OverviewLineLastSync, val);
+            } else if (p.active_stage.empty() && p.last_error.empty()) {
+                i18n::println(i18n::Key::OverviewLineLastSync,
+                              i18n::tr(i18n::Key::OverviewDetailNeverSynced));
+            }
+            continue;
+        }
+
+        i18n::println(i18n::Key::OverviewLineLocal,
+                      sanitize_terminal_text(p.local_dir));
+        i18n::println(i18n::Key::OverviewLineRemote,
+                      sanitize_terminal_text(p.remote_dir));
+        i18n::println(i18n::Key::DaemonStatusProfileWatch,
+                      format_watch_label(p),
+                      format_sync_interval_label(p.sync_interval_seconds),
+                      p.dirty_paths_count);
+        i18n::println(i18n::Key::DaemonStatusProfileSession,
                       yes_no_str(p.warm_transport_active),
-                      p.warm_cache_entries,
+                      p.warm_cache_entries);
+        i18n::println(i18n::Key::DaemonStatusProfileCounters,
                       p.sync_runs,
                       p.fast_noop_polls,
-                      p.gc_runs);
+                      p.consecutive_failures,
+                      p.backoff_seconds);
+        if (p.last_sync_finished_at.has_value() || !p.last_outcome.empty()) {
+            const std::string ts_str =
+                p.last_sync_finished_at.has_value()
+                    ? platform::clock::format_local_timestamp(
+                          *p.last_sync_finished_at, false)
+                    : std::string{"-"};
+            const std::string val =
+                p.last_outcome.empty()
+                    ? ts_str
+                    : std::format("{} ({})",
+                                  ts_str,
+                                  sanitize_terminal_text(p.last_outcome));
+            i18n::println(i18n::Key::OverviewLineLastSync, val);
+        }
         if (!p.active_stage.empty()) {
-            std::string progress_detail =
-                p.active_total_objects.has_value()
-                    ? std::format("{}/{} objects",
-                                  p.active_objects,
-                                  *p.active_total_objects)
-                    : std::format("{} objects", p.active_objects);
-            if (p.active_total_bytes.has_value()) {
-                progress_detail +=
-                    std::format(", {}/{}",
-                                format_size(p.active_bytes),
-                                format_size(*p.active_total_bytes));
-            } else if (p.active_bytes > 0) {
-                progress_detail +=
-                    std::format(", {}", format_size(p.active_bytes));
-            }
-            i18n::println(i18n::Key::DaemonStatusProfileActive,
-                          sanitize_terminal_text(p.active_stage),
-                          progress_detail);
-        }
-        if (full || p.dirty_paths_count > 0) {
-            i18n::println(i18n::Key::DaemonStatusProfilePaths,
-                          sanitize_terminal_text(p.local_dir),
-                          sanitize_terminal_text(p.remote_dir),
-                          p.dirty_paths_count);
-        }
-        if (full || !p.last_outcome.empty() || p.backoff_seconds > 0 ||
-            p.consecutive_failures > 0) {
-            const std::string interval_str =
-                p.sync_interval_seconds == 0
-                    ? std::string{i18n::tr(i18n::Key::LabelDisabled)}
-                    : std::format("{}s", p.sync_interval_seconds);
-            const std::string gc_str =
-                p.gc_interval_hours == 0
-                    ? std::string{i18n::tr(i18n::Key::LabelDisabled)}
-                    : std::format("{}h", p.gc_interval_hours);
-            i18n::println(i18n::Key::DaemonStatusProfileTiming,
-                          interval_str,
-                          gc_str,
-                          p.consecutive_failures,
-                          p.backoff_seconds,
-                          p.last_outcome.empty()
-                              ? std::string{"-"}
-                              : sanitize_terminal_text(p.last_outcome));
+            i18n::println(i18n::Key::OverviewLineStage,
+                          format_active_stage_progress(p, true));
         }
         if (!p.last_error.empty()) {
             i18n::println(i18n::Key::DaemonStatusProfileError,

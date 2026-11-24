@@ -193,7 +193,6 @@ int run(int argc, char* argv[]) {
     const bool has_profile_arg = sanitized.size() > 2 &&
                                  !sanitized[2].empty() &&
                                  sanitized[2].front() != '-';
-    const bool is_bare_status = cmd == "status" && !has_profile_arg;
     const bool is_logs_cmd = cmd == "logs";
     const bool is_start_cmd = cmd == "start";
     const bool is_stop_cmd = cmd == "stop";
@@ -242,8 +241,7 @@ int run(int argc, char* argv[]) {
         (has_profile_arg &&
          (cmd == "sync" || cmd == "status" || cmd == "repack" ||
           cmd == "show")) ||
-        cmd == "list" || is_bare_overview || is_bare_status || is_logs_cmd ||
-        is_start_cmd;
+        cmd == "list" || is_bare_overview || is_logs_cmd || is_start_cmd;
     const bool supports_remote_full =
         is_remote_sub && (sanitized[2] == "summary" || sanitized[2] == "log");
     const bool supports_full =
@@ -251,15 +249,13 @@ int run(int argc, char* argv[]) {
     const std::size_t full_start_index =
         is_bare_overview
             ? 1U
-            : ((cmd == "list" || is_bare_status || is_logs_cmd ||
-                is_start_cmd)
+            : ((cmd == "list" || is_logs_cmd || is_start_cmd)
                    ? 2U
                    : (supports_remote_full ? 4U : 3U));
 
     const bool supports_quiet =
-        is_bare_overview || is_bare_status || is_logs_cmd || is_start_cmd ||
-        is_stop_cmd || is_toggle_cmd || cmd == "list" ||
-        cmd == "diagnostics" ||
+        is_bare_overview || is_logs_cmd || is_start_cmd || is_stop_cmd ||
+        is_toggle_cmd || cmd == "list" || cmd == "diagnostics" ||
         (has_profile_arg &&
          (cmd == "show" || cmd == "key" || cmd == "sync" || cmd == "status" ||
           cmd == "fsck" || cmd == "repack" || cmd == "resolve-missing" ||
@@ -271,7 +267,7 @@ int run(int argc, char* argv[]) {
         is_bare_overview
             ? 1U
             : ((cmd == "list" || (cmd == "diagnostics" && !has_profile_arg) ||
-                is_bare_status || is_logs_cmd || is_start_cmd || is_stop_cmd)
+                is_logs_cmd || is_start_cmd || is_stop_cmd)
                    ? 2U
                    : ((is_gc_subcommand || is_profile_subcommand ||
                        is_ignore_subcommand || is_conflicts_subcommand ||
@@ -288,9 +284,8 @@ int run(int argc, char* argv[]) {
         is_gc_subcommand && sanitized[2] == "remove-barrier";
 
     const bool supports_json =
-        is_bare_overview || is_bare_status || is_logs_cmd || is_start_cmd ||
-        is_stop_cmd || is_toggle_cmd || cmd == "list" ||
-        cmd == "diagnostics" ||
+        is_bare_overview || is_logs_cmd || is_start_cmd || is_stop_cmd ||
+        is_toggle_cmd || cmd == "list" || cmd == "diagnostics" ||
         (has_profile_arg &&
          (cmd == "show" || cmd == "key" || cmd == "sync" || cmd == "status" ||
           cmd == "fsck" || cmd == "repack" || cmd == "resolve-missing" ||
@@ -303,7 +298,7 @@ int run(int argc, char* argv[]) {
         is_bare_overview
             ? 1U
             : ((cmd == "list" || (cmd == "diagnostics" && !has_profile_arg) ||
-                is_bare_status || is_logs_cmd || is_start_cmd || is_stop_cmd)
+                is_logs_cmd || is_start_cmd || is_stop_cmd)
                    ? 2U
                    : ((is_profile_subcommand || is_ignore_subcommand ||
                        is_conflicts_subcommand ||
@@ -410,7 +405,8 @@ int run(int argc, char* argv[]) {
         effective_argc == 2 && effective_argv != nullptr &&
         effective_argv[1] != nullptr &&
         (std::string_view{effective_argv[1]} == "--version" ||
-         std::string_view{effective_argv[1]} == "-v");
+         std::string_view{effective_argv[1]} == "-v" ||
+         std::string_view{effective_argv[1]} == "version");
 
     if (is_version) {
         std::print("kasumi version {}\n", KASUMI_VERSION);
@@ -527,7 +523,7 @@ int run(int argc, char* argv[]) {
         return json ? code
                     : log_text_entry(
                           {.status = code == 0 ? "OK" : "ERROR",
-                           .command = "status",
+                           .command = "overview",
                            .summary = code == 0 ? "completed" : "failed"},
                           code);
     }

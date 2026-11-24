@@ -35,7 +35,7 @@ FastPollReport try_fast_remote_noop_poll(
     const runtime::RuntimeData& runtime_data,
     transport::Transport& borrowed_transport,
     std::span<const std::uint8_t, 32> master_key,
-    const observation::LocalObservationSession& warm_observation,
+    observation::LocalObservationSession& warm_observation,
     bool ignore_file_present,
     const observation::DatabaseMetadataStamp& expected_ignore_stamp);
 

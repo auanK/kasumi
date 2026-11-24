@@ -13,6 +13,7 @@
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/metadata.hpp"
+#include "platform/path.hpp"
 #include "platform/profile_lock.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
@@ -1823,6 +1824,88 @@ TEST(ApplicationExecuteTest,
     ASSERT_NE(rec_gc, nullptr);
     EXPECT_EQ(rec_gc->removed_objects, 1U);
     EXPECT_GT(rec_gc->removed_bytes, 0U);
+}
+
+TEST(ApplicationExecuteTest, SyncCopyLocalCountsAndRecordsNonNoopStatus) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("application-copy-local-summary");
+    const auto local_a = kasumi::test::workspace_path(workspace, "local_a");
+    const auto local_b = kasumi::test::workspace_path(workspace, "local_b");
+    const auto remote = kasumi::test::workspace_path(workspace, "remote");
+    std::filesystem::create_directories(local_a);
+    std::filesystem::create_directories(local_b);
+    std::filesystem::create_directories(remote);
+
+    const ExecutionEnvironment env_a{
+        kasumi::test::workspace_path(workspace, "app_a")};
+    const ExecutionEnvironment env_b{
+        kasumi::test::workspace_path(workspace, "app_b")};
+    const auto remote_utf8 = kasumi::platform::path::to_utf8(remote);
+
+    ASSERT_TRUE(kasumi::application::create_profile(
+                    env_a,
+                    Profile{
+                        .name = "peer_a",
+                        .local_dir = local_a,
+                        .remote_dir = remote_utf8,
+                        .key_storage = kasumi::application::KeyStorage::File,
+                    },
+                    key())
+                    .has_value());
+    ASSERT_TRUE(kasumi::application::create_profile(
+                    env_b,
+                    Profile{
+                        .name = "peer_b",
+                        .local_dir = local_b,
+                        .remote_dir = remote_utf8,
+                        .key_storage = kasumi::application::KeyStorage::File,
+                    },
+                    key())
+                    .has_value());
+
+    kasumi::test::write_text(local_a / "seed.txt",
+                             "shared-copy-local-content-v1");
+    ASSERT_TRUE(kasumi::application::execute(
+                    {Request{.operation = Operation::Sync,
+                             .profile_name = "peer_a"},
+                     Credentials{NoCredentials{}},
+                     env_a})
+                    .has_value());
+    ASSERT_TRUE(kasumi::application::execute(
+                    {Request{.operation = Operation::Sync,
+                             .profile_name = "peer_b"},
+                     Credentials{NoCredentials{}},
+                     env_b})
+                    .has_value());
+
+    kasumi::test::write_text(local_a / "duplicate.txt",
+                             "shared-copy-local-content-v1");
+    ASSERT_TRUE(kasumi::application::execute(
+                    {Request{.operation = Operation::Sync,
+                             .profile_name = "peer_a"},
+                     Credentials{NoCredentials{}},
+                     env_a})
+                    .has_value());
+
+    const auto sync_b = kasumi::application::execute(
+        {Request{.operation = Operation::Sync, .profile_name = "peer_b"},
+         Credentials{NoCredentials{}},
+         env_b});
+    ASSERT_TRUE(sync_b.has_value()) << sync_b.error().detail;
+    const auto* sc = std::get_if<SyncCompleted>(&sync_b->data);
+    ASSERT_NE(sc, nullptr);
+    EXPECT_EQ(sc->copied, 1U);
+    EXPECT_EQ(sc->downloaded, 0U);
+    EXPECT_TRUE(std::filesystem::exists(local_b / "duplicate.txt"));
+
+    const auto activity =
+        kasumi::application::inspect_profile_activity(env_b, "peer_b");
+    ASSERT_TRUE(activity.last_complete_sync.has_value());
+    EXPECT_NE(activity.last_complete_sync->status,
+              kasumi::application::ProfileExecutionStatus::SucceededNoChanges);
+    EXPECT_EQ(
+        activity.last_complete_sync->status,
+        kasumi::application::ProfileExecutionStatus::SucceededDownloadedOnly);
 }
 
 } // namespace

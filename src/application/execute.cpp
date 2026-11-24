@@ -455,8 +455,8 @@ std::expected<Response, Error> execute_warm(ExecutionInput input,
                             const bool had_changes =
                                 sc->published || sc->uploaded > 0 ||
                                 sc->downloaded > 0 || sc->removed > 0 ||
-                                sc->renamed > 0 || sc->created_dirs > 0 ||
-                                sc->removed_dirs > 0;
+                                sc->renamed > 0 || sc->copied > 0 ||
+                                sc->created_dirs > 0 || sc->removed_dirs > 0;
                             record.status =
                                 sc->partial
                                     ? LS::Partial

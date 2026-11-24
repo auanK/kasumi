@@ -24,7 +24,6 @@ enum class DaemonProfileState : std::uint8_t {
     Idle,
     PendingDebounce,
     RunningSync,
-    RunningGc,
     Paused,
     Locked,
     Backoff,
@@ -68,7 +67,9 @@ struct DaemonOptions {
     std::chrono::milliseconds full_scan_verification_interval{
         std::chrono::minutes{30}};
     std::chrono::milliseconds config_poll_interval{std::chrono::seconds{2}};
+    std::chrono::milliseconds startup_stagger{std::chrono::seconds{3}};
     std::size_t max_parallel_profiles = 4;
+    std::size_t max_parallel_per_remote = 2;
     bool enable_ipc_server = true;
     DaemonEventCallback on_event{};
 };
@@ -95,7 +96,6 @@ struct DaemonProfileStatus {
     bool warm_transport_active = false;
     std::size_t warm_cache_entries = 0;
     std::uint32_t sync_interval_seconds = 300;
-    std::uint32_t gc_interval_hours = 0;
     std::string local_dir;
     std::string remote_dir;
     std::size_t dirty_paths_count = 0;
@@ -108,13 +108,11 @@ struct DaemonProfileStatus {
     std::optional<std::int64_t> last_sync_finished_at = std::nullopt;
     std::optional<std::int64_t> last_checked_at = std::nullopt;
     std::optional<std::int64_t> next_sync_at = std::nullopt;
-    std::optional<std::int64_t> next_gc_at = std::nullopt;
     std::optional<std::int64_t> backoff_until_unix = std::nullopt;
     std::uint32_t backoff_seconds = 0;
     std::uint32_t consecutive_failures = 0;
     std::uint64_t sync_runs = 0;
     std::uint64_t fast_noop_polls = 0;
-    std::uint64_t gc_runs = 0;
     std::string last_outcome;
     std::string last_error;
 };

@@ -32,7 +32,33 @@ namespace {
 constexpr std::size_t maximum_response_size = 64 * 1024;
 constexpr auto default_read_timeout = std::chrono::seconds{5};
 constexpr auto read_retry_delay = std::chrono::milliseconds{75};
+constexpr auto rate_limit_base_delay = std::chrono::milliseconds{250};
 constexpr int maximum_read_attempts = 2;
+constexpr int maximum_rate_limit_read_attempts = 4;
+
+bool is_rate_limit_detail(std::string_view detail) noexcept {
+    const auto contains_ci = [&](std::string_view needle) {
+        return std::ranges::search(
+                   detail,
+                   needle,
+                   [](char a, char b) {
+                       const auto fold = [](unsigned char c) {
+                           return (c >= 'A' && c <= 'Z')
+                                      ? static_cast<unsigned char>(c +
+                                                                   ('a' - 'A'))
+                                      : c;
+                       };
+                       return fold(static_cast<unsigned char>(a)) ==
+                              fold(static_cast<unsigned char>(b));
+                   })
+                   .begin() != detail.end();
+    };
+    return contains_ci("ratelimit") || contains_ci("rate limit") ||
+           contains_ci("rate_limit") || contains_ci("too many requests") ||
+           contains_ci("quota exceeded") || contains_ci("throttl") ||
+           contains_ci("http 429") || contains_ci("error 429") ||
+           contains_ci("status 429");
+}
 
 std::chrono::milliseconds artificial_latency() noexcept {
     static const auto value = [] {
@@ -383,7 +409,7 @@ post_rc_impl(State& state,
     if (!server_closed) {
         release_client(runtime, std::move(client));
     }
-    if (response->status == 401 || response->status == 403) {
+    if (response->status == 401) {
         return std::unexpected(make_error(ErrorCode::PermissionDenied,
                                           "RC authentication rejected",
                                           response->status));
@@ -398,7 +424,17 @@ post_rc_impl(State& state,
             }
         } catch (...) {
         }
-        const auto code = response->status >= 500 && response->status <= 599
+        const bool rate_limited =
+            response->status == 429 ||
+            ((response->status == 403 || response->status >= 500) &&
+             is_rate_limit_detail(detail));
+        if (response->status == 403 && !rate_limited) {
+            return std::unexpected(make_error(ErrorCode::PermissionDenied,
+                                              "RC authentication rejected",
+                                              response->status));
+        }
+        const auto code = (rate_limited || (response->status >= 500 &&
+                                            response->status <= 599))
                               ? ErrorCode::BackendUnavailable
                               : ErrorCode::ProtocolFailure;
         return std::unexpected(
@@ -407,11 +443,17 @@ post_rc_impl(State& state,
     return body;
 }
 
+bool is_rate_limit_error(const Error& error) noexcept {
+    return error.code == ErrorCode::BackendUnavailable &&
+           (error.native_code == 429 || is_rate_limit_detail(error.message));
+}
+
 bool transient_read_failure(const Error& error) noexcept {
     return error.code == ErrorCode::Io || error.code == ErrorCode::Timeout ||
            (error.code == ErrorCode::BackendUnavailable &&
-            (error.native_code == 502 || error.native_code == 503 ||
-             error.native_code == 504));
+            (error.native_code == 429 || error.native_code == 502 ||
+             error.native_code == 503 || error.native_code == 504 ||
+             is_rate_limit_detail(error.message)));
 }
 
 std::expected<void, Error>
@@ -506,14 +548,15 @@ post_rc_read_only(State& state,
     const auto started = std::chrono::steady_clock::now();
     const auto expires_at = std::chrono::steady_clock::now() + deadline;
     Error last_error;
-    for (int attempt = 0; attempt < maximum_read_attempts; ++attempt) {
+    int max_attempts = maximum_read_attempts;
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
         const auto contextualize = [&](Error err) {
             return with_request_context(state,
                                         std::move(err),
                                         endpoint,
                                         started,
                                         attempt + 1,
-                                        maximum_read_attempts);
+                                        max_attempts);
         };
         if (platform::cancellation::requested()) {
             return std::unexpected(contextualize(make_error(
@@ -534,7 +577,7 @@ post_rc_read_only(State& state,
                                    response_limit,
                                    remaining,
                                    attempt + 1,
-                                   maximum_read_attempts);
+                                   max_attempts);
         if (!result) {
             result = std::unexpected(contextualize(std::move(result.error())));
         }
@@ -542,18 +585,45 @@ post_rc_read_only(State& state,
             return result;
         }
         last_error = std::move(result.error());
-        if (attempt + 1 == maximum_read_attempts) {
+        const bool rate_limited = is_rate_limit_error(last_error);
+        if (rate_limited) {
+            max_attempts = maximum_rate_limit_read_attempts;
+        }
+        if (attempt + 1 >= max_attempts) {
             break;
         }
+        const auto retry_delay =
+            rate_limited
+                ? std::chrono::milliseconds{rate_limit_base_delay.count() *
+                                            (std::int64_t{1} << attempt)}
+                : read_retry_delay;
         const auto retry_at = std::chrono::steady_clock::now();
-        if (retry_at + read_retry_delay >= expires_at) {
+        if (retry_at + retry_delay >= expires_at) {
             if (last_error.code == ErrorCode::BackendUnavailable) {
                 return std::unexpected(std::move(last_error));
             }
             return std::unexpected(contextualize(
                 make_error(ErrorCode::Timeout, "RC read deadline exceeded")));
         }
-        std::this_thread::sleep_for(read_retry_delay);
+        const auto sleep_until = retry_at + retry_delay;
+        while (true) {
+            const auto now_sleep = std::chrono::steady_clock::now();
+            if (now_sleep >= sleep_until) {
+                break;
+            }
+            if (platform::cancellation::requested()) {
+                return std::unexpected(contextualize(make_error(
+                    ErrorCode::Cancelled, "operation cancelled by user")));
+            }
+            const auto rem_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    sleep_until - now_sleep);
+            const auto slice =
+                (std::min)(std::chrono::milliseconds{25}, rem_ms);
+            if (slice.count() > 0) {
+                std::this_thread::sleep_for(slice);
+            }
+        }
     }
     return std::unexpected(std::move(last_error));
 }

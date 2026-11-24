@@ -40,7 +40,6 @@ struct ProfileData {
     // Optional per-profile background daemon automation settings.
     std::optional<bool> watch_enabled = std::nullopt;
     std::optional<std::uint32_t> sync_interval_seconds = std::nullopt;
-    std::optional<std::uint32_t> gc_interval_hours = std::nullopt;
     bool paused = false;
 };
 

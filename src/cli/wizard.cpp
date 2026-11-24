@@ -110,30 +110,6 @@ std::string_view profile_operation_label(application::ProfileOperationKind op) {
     }
 }
 
-std::string_view
-execution_status_label(application::ProfileExecutionStatus status) {
-    using S = application::ProfileExecutionStatus;
-    static constexpr std::array<std::pair<S, i18n::Key>, 11> kTable{{
-        {S::InProgress, i18n::Key::LabelStatusInProgress},
-        {S::Succeeded, i18n::Key::LabelStatusOk},
-        {S::SucceededNoChanges, i18n::Key::LabelStatusNoChanges},
-        {S::SucceededDownloadedOnly, i18n::Key::LabelStatusDownloadedOnly},
-        {S::SucceededPartial, i18n::Key::LabelStatusPartial},
-        {S::IssuesFound, i18n::Key::LabelStatusIssuesFound},
-        {S::Blocked, i18n::Key::LabelStatusBlocked},
-        {S::Cancelled, i18n::Key::LabelStatusCancelled},
-        {S::Failed, i18n::Key::LabelStatusFailed},
-        {S::Uncertain, i18n::Key::LabelStatusUncertain},
-        {S::Interrupted, i18n::Key::LabelStatusInterrupted},
-    }};
-    for (const auto& [candidate, key] : kTable) {
-        if (candidate == status) {
-            return i18n::tr(key);
-        }
-    }
-    return i18n::tr(i18n::Key::LabelUnknown);
-}
-
 std::string
 format_execution_metrics(const application::ProfileExecutionSummary& e) {
     using K = application::ProfileOperationKind;
@@ -291,12 +267,8 @@ std::string format_compact_automation(const application::Profile& profile) {
     } else {
         sync_str = std::format("{}s", sync_sec);
     }
-    const std::uint32_t gc_hrs = profile.gc_interval_hours.value_or(0U);
-    const std::string gc_str =
-        gc_hrs == 0U ? std::string{i18n::tr(i18n::Key::LabelDisabled)}
-                     : std::format("{}h", gc_hrs);
     std::string line =
-        i18n::format(i18n::Key::WizardShowAutomationLine, watch_str, sync_str, gc_str);
+        i18n::format(i18n::Key::WizardShowAutomationLine, watch_str, sync_str);
     if (profile.paused) {
         line += " [";
         line += i18n::tr(i18n::Key::OverviewBadgePaused);
@@ -842,7 +814,6 @@ int run_profile_command(const application::ExecutionEnvironment& environment,
                         : std::nullopt,
                 .watch_enabled = invocation.watch_enabled,
                 .sync_interval_seconds = invocation.sync_interval_seconds,
-                .gc_interval_hours = invocation.gc_interval_hours,
                 .paused = invocation.paused.value_or(false),
             };
             application::Credentials verify_creds{application::NoCredentials{}};
@@ -946,11 +917,6 @@ int run_profile_command(const application::ExecutionEnvironment& environment,
                     *invocation.sync_interval_seconds;
             } else if (invocation.clear_sync_interval_seconds) {
                 updated.sync_interval_seconds.reset();
-            }
-            if (invocation.gc_interval_hours.has_value()) {
-                updated.gc_interval_hours = *invocation.gc_interval_hours;
-            } else if (invocation.clear_gc_interval_hours) {
-                updated.gc_interval_hours.reset();
             }
             if (invocation.paused.has_value()) {
                 updated.paused = *invocation.paused;
@@ -1219,20 +1185,33 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
         return present_json_list(*profiles);
     }
     if (profile_name.empty() && full) {
-        i18n::println(i18n::Key::WizardProfileListHeader);
-        for (const auto& prof : *profiles) {
+        if (profiles->empty()) {
+            i18n::println(i18n::Key::WizardNoProfiles);
+            return 0;
+        }
+        for (std::size_t idx = 0; idx < profiles->size(); ++idx) {
+            const auto& prof = (*profiles)[idx];
             const auto state = application::inspect_profile_local_state(
                 environment, prof.name);
             const auto activity =
                 application::inspect_profile_activity(environment, prof.name);
-            i18n::println(i18n::Key::WizardProfileListEntry,
-                          prof.name,
-                          format_local_state_label(state, activity),
-                          format_config_last_sync(activity));
-            std::println("  {} -> {}",
-                         sanitize_terminal_text(
-                             platform::path::to_utf8(prof.local_dir)),
-                         sanitize_terminal_text(prof.remote_dir));
+            if (idx > 0U) {
+                std::println("");
+            }
+            std::println("{} [{}]",
+                         sanitize_terminal_text(prof.name),
+                         format_local_state_label(state, activity));
+            i18n::println(i18n::Key::OverviewLineLocal,
+                          sanitize_terminal_text(
+                              platform::path::to_utf8(prof.local_dir)));
+            i18n::println(i18n::Key::OverviewLineRemote,
+                          sanitize_terminal_text(prof.remote_dir));
+            const auto last_sync = format_config_last_sync(activity);
+            i18n::println(
+                i18n::Key::OverviewLineLastSync,
+                last_sync == "-"
+                    ? std::string{i18n::tr(i18n::Key::OverviewDetailNeverSynced)}
+                    : last_sync);
         }
         return 0;
     }
@@ -1388,14 +1367,6 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
                 } else {
                     i18n::println(i18n::Key::WizardShowSyncInterval,
                                   *profile.sync_interval_seconds);
-                }
-            }
-            if (profile.gc_interval_hours.has_value()) {
-                if (*profile.gc_interval_hours == 0) {
-                    i18n::println(i18n::Key::WizardShowGcIntervalDisabled);
-                } else {
-                    i18n::println(i18n::Key::WizardShowGcInterval,
-                                  *profile.gc_interval_hours);
                 }
             }
             if (profile.paused) {
@@ -1924,43 +1895,12 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                     }
                 }
 
-                const std::uint32_t cur_gc =
-                    updated.gc_interval_hours.value_or(0U);
-                std::string gc_val;
-                if (!prompt_form_line(
-                        i18n::format(i18n::Key::WizardAutoPromptGcInterval,
-                                     cur_gc),
-                        gc_val)) {
-                    continue;
-                }
-                if (!gc_val.empty()) {
-                    try {
-                        const auto parsed = std::stoul(gc_val);
-                        if (parsed > 8760UL) {
-                            print_error_line(i18n::format(
-                                i18n::Key::WizardAutoInvalidInterval,
-                                1U,
-                                8760U));
-                            continue;
-                        }
-                        updated.gc_interval_hours =
-                            static_cast<std::uint32_t>(parsed);
-                    } catch (...) {
-                        print_error_line(i18n::format(
-                            i18n::Key::WizardAutoInvalidInterval,
-                            1U,
-                            8760U));
-                        continue;
-                    }
-                }
-
                 const bool paths_changed = updated.local_dir != it->local_dir ||
                                            updated.remote_dir != it->remote_dir;
                 const bool auto_changed =
                     updated.watch_enabled != it->watch_enabled ||
                     updated.sync_interval_seconds !=
-                        it->sync_interval_seconds ||
-                    updated.gc_interval_hours != it->gc_interval_hours;
+                        it->sync_interval_seconds;
                 if (!paths_changed && !auto_changed) {
                     continue;
                 }

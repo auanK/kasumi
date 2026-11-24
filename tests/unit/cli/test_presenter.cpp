@@ -2692,9 +2692,10 @@ TEST(CliPresenterTest, CompactSummariesStayLanguageIndependentAndDescriptive) {
     changed.downloaded = 1;
     changed.download_bytes = 512;
     changed.removed = 1;
+    changed.copied = 2;
     changed.repaired = 1;
     EXPECT_EQ(kasumi::cli::format_compact_summary(changed),
-              "3 changes | ↑ 2 (2 KB) | ↓ 1 (512 bytes) | - 1 | 1 repaired");
+              "3 changes | ↑ 2 (2 KB) | ↓ 1 (512 bytes) | - 1 | cp 2 | 1 repaired");
 
     PlanReport plan;
     plan.items.push_back(PlanItem{});
@@ -3114,18 +3115,20 @@ TEST(CliPresenterTest, PresentsV026JsonDiagnosticsIgnoreProfileTestAndKey) {
             dp.watcher_degraded = false;
             dp.dirty_paths_count = 0U;
             dp.sync_interval_seconds = 0U;
-            dp.gc_interval_hours = 0U;
             dp.active_stage = "Uploading";
             dp.active_objects = 2U;
             dp.active_total_objects = 5U;
             st.profiles.push_back(std::move(dp));
             EXPECT_EQ(kasumi::cli::present(st, true, false), 0);
         });
-        EXPECT_NE(daemon_status_text.find("watch=inactive"), std::string::npos);
-        EXPECT_EQ(daemon_status_text.find("watch=degraded"), std::string::npos);
-        EXPECT_NE(daemon_status_text.find("interval=disabled gc=disabled"),
+        EXPECT_NE(daemon_status_text.find("inactive_prof [idle]"),
                   std::string::npos);
-        EXPECT_NE(daemon_status_text.find("active=Uploading"),
+        EXPECT_NE(daemon_status_text.find(
+                      "Watch:       inactive | Interval: disabled | Dirty: 0"),
+                  std::string::npos);
+        EXPECT_EQ(daemon_status_text.find("degraded"), std::string::npos);
+        EXPECT_EQ(daemon_status_text.find("gc="), std::string::npos);
+        EXPECT_NE(daemon_status_text.find("Stage:       Uploading (2/5 objects)"),
                   std::string::npos);
     }
 

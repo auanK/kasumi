@@ -196,8 +196,7 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
                         input.environment, input.request.profile_name);
                     st && st->running && !st->profiles.empty()) {
                     const auto& dp = st->profiles.front();
-                    if (dp.state == DaemonProfileState::RunningSync ||
-                        dp.state == DaemonProfileState::RunningGc) {
+                    if (dp.state == DaemonProfileState::RunningSync) {
                         enriched_by_daemon = true;
                         if (!dp.active_stage.empty()) {
                             lock_detail =

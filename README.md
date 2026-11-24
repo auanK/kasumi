@@ -44,7 +44,7 @@ Machine C ───┘
 - **Multi-master sync & conflict tooling**: Independent clients reconcile via an immutable Commit DAG without a central server or global sync lock; conflicting edits are preserved, listed via `kasumi conflicts`, and resolved in-place via `kasumi conflicts resolve`, while older retained versions can be queried with `kasumi remote log` and restored individually or in bulk via `kasumi remote get/restore --commit <id>`.
 - **Adaptive encrypted storage**: Combines loose objects, `KPAK\x01` Micro-Packs (`<= 256 KiB`), and FastCDC chunking (`> 8 MiB`) with Zstandard compression, **XChaCha20-Poly1305** AEAD, Argon2id key derivation, and a persistent BLAKE3 hash cache.
 - **Flexible key storage (`vault`, `file`, `memory`)**: Persist derived keys in Windows Credential Manager / Linux Secret Service & KWallet, local `key.bin`, or stateless RAM-only derivation (kept pinned in non-swappable OS memory pages while unlocked in `kasumi daemon`).
-- **Continuous multi-profile daemon (`kasumi daemon`)**: Native file watchers (`ReadDirectoryChangesW` / `inotify`) with debounce and self-mutation suppression, warm `rclone` transport sessions, zero-walk remote fast polling, scheduled GC, user-session autostart, and authenticated loopback IPC.
+- **Continuous multi-profile daemon (`kasumi daemon`)**: Native file watchers (`ReadDirectoryChangesW` / `inotify`) with debounce and self-mutation suppression, warm `rclone` transport sessions, staggered startup and per-remote concurrency limits, zero-walk remote fast polling, user-session autostart, and authenticated loopback IPC.
 - **Crash-resilient & auditable**: Encrypted local transaction journals safely recover interrupted runs; built-in `diagnostics`, `sync --repair`, `fsck`, `repack`, `resolve-missing`, and hardened `gc` (6h remote-clock-clamped grace period, `remote_busy` backoff, multi-barrier checks, periodic mid-`Apply` revalidation) keep vaults healthy.
 - **Automation-ready CLI**: Non-interactive `kasumi profile ...` lifecycle commands, `kasumi daemon ...` service controls, `kasumi completion <shell>`, live terminal progress, `--json` (`schema_version: 1` with stable `error.code`), `--quiet`, `--log-file <path>` (text or NDJSON), and `--full`.
 
@@ -69,9 +69,13 @@ kasumi logs -f
 
 ```text
 $ kasumi
-Kasumi Daemon: running | Autostart: installed
-Profiles (1):
-  work            ok (2m ago by desktop-1)
+Daemon: running (autostart on)
+
+work [Ready]
+  Last sync:   2026-11-24 19:21 -03:00 (no changes)
+  Last change: 2026-11-24 18:56 -03:00 by desktop-1
+
+Run 'kasumi --full' for detailed daemon metrics and paths.
 ```
 
 On a second machine, run `kasumi config` with the same shared storage and **exact same Password and Password Salt**, then run `kasumi start --autostart` (or run a one-shot `kasumi sync work`). See [Getting Started](docs/getting-started.md) for the complete two-machine walkthrough and download verification steps.
@@ -103,14 +107,14 @@ cmake --preset default && cmake --build --preset default
 
 | Command | Purpose |
 |---|---|
-| `kasumi` / `kasumi status` | Show unified overview of daemon, profiles, last sync, and problems (`--full` expands details) |
+| `kasumi [--full]` | Show unified local overview of daemon, profiles, last sync, and problems (`--full` expands details) |
 | `kasumi start [--autostart]` | Start the background daemon in one command (optionally install login autostart) |
 | `kasumi stop` | Stop the background daemon |
 | `kasumi logs [<profile>] [-f]` | Show recent daemon logs (or stream live updates with `-f` / `--follow`) |
 | `kasumi pause <profile \| --all>` | Pause automatic daemon sync for one profile or all profiles |
 | `kasumi resume <profile \| --all>` | Resume automatic daemon sync for one profile or all profiles |
 | `kasumi sync <profile> [--repair]` | Run manual bidirectional sync (or re-upload missing remote objects) |
-| `kasumi status <profile>` | Preview synchronization changes read-only (`sync --dry-run`) |
+| `kasumi status <profile>` | Preview synchronization changes against remote storage read-only |
 | `kasumi show <profile> [--full]` | Inspect profile settings, last complete sync, and recent history (`--full` expands details) |
 | `kasumi config` | Interactive profile wizard (`rclone` remote hints, paths, keys, and sync schedule) |
 | `kasumi conflicts <profile>` | Scan local folder read-only or `resolve <profile> <path>` preserved conflicts |
