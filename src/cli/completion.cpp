@@ -16,7 +16,7 @@ _kasumi() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    local top_commands="config list show diagnostics key profile ignore sync status fsck gc repack resolve-missing conflicts remote daemon completion"
+    local top_commands="status show logs start stop pause resume sync conflicts config list diagnostics key profile daemon ignore fsck gc repack resolve-missing remote completion"
     local profile_cmds="create edit clone storage rename delete test"
     local daemon_cmds="run stop status sync pause resume unlock lock reload logs autostart"
     local autostart_cmds="install uninstall status"
@@ -100,7 +100,7 @@ _kasumi() {
                         COMPREPLY=( $(compgen -W "--wait --quiet --json --log-file --help" -- "${cur}") )
                         ;;
                     logs)
-                        COMPREPLY=( $(compgen -W "--lines --quiet --json --log-file --help" -- "${cur}") )
+                        COMPREPLY=( $(compgen -W "--lines --follow -f --full --quiet --json --log-file --help" -- "${cur}") )
                         ;;
                     *)
                         COMPREPLY=( $(compgen -W "--quiet --json --log-file --help" -- "${cur}") )
@@ -149,11 +149,32 @@ _kasumi() {
                 COMPREPLY=( $(compgen -W "${shells}" -- "${cur}") )
             fi
             ;;
-        show|diagnostics|key|sync|status|fsck|repack|resolve-missing)
+        show|diagnostics|key|sync|status|fsck|repack|resolve-missing|logs|start|stop|pause|resume)
             if [[ ${COMP_CWORD} -eq 2 && ${cur} != -* ]]; then
-                COMPREPLY=( $(compgen -W "$(_kasumi_profiles)" -- "${cur}") )
+                case "${cmd}" in
+                    pause|resume)
+                        COMPREPLY=( $(compgen -W "--all $(_kasumi_profiles)" -- "${cur}") )
+                        ;;
+                    start|stop)
+                        ;;
+                    *)
+                        COMPREPLY=( $(compgen -W "$(_kasumi_profiles)" -- "${cur}") )
+                        ;;
+                esac
             elif [[ ${cur} == -* ]]; then
                 case "${cmd}" in
+                    logs)
+                        COMPREPLY=( $(compgen -W "--follow -f --lines --full --quiet --json --log-file --help" -- "${cur}") )
+                        ;;
+                    start)
+                        COMPREPLY=( $(compgen -W "--autostart --full --quiet --json --log-file --help" -- "${cur}") )
+                        ;;
+                    stop)
+                        COMPREPLY=( $(compgen -W "--quiet --json --log-file --help" -- "${cur}") )
+                        ;;
+                    pause|resume)
+                        COMPREPLY=( $(compgen -W "--all --quiet --json --log-file --help" -- "${cur}") )
+                        ;;
                     key)
                         COMPREPLY=( $(compgen -W "--replace --quiet --json --log-file --help" -- "${cur}") )
                         ;;
@@ -197,21 +218,26 @@ _kasumi_profiles() {
 _kasumi() {
     local -a top_commands profile_cmds daemon_cmds autostart_cmds ignore_cmds remote_cmds gc_cmds shells
     top_commands=(
-        'config:Interactive profile wizard'
+        'status:Show overview or pending synchronization changes'
+        'show:Show profile summary and local traceability'
+        'logs:Show or follow daemon logs'
+        'start:Start the continuous background sync daemon'
+        'stop:Stop the background sync daemon'
+        'pause:Pause automated daemon sync for a profile or --all'
+        'resume:Resume automated daemon sync for a profile or --all'
+        'sync:Synchronize with shared storage'
+        'conflicts:List or resolve preserved conflict artifacts'
+        'config:Interactive profile and daemon wizard'
         'list:List configured profile names'
-        'show:Show profile details and local traceability'
         'diagnostics:Inspect local environment and profile health'
         'key:Re-enter and save profile key'
         'profile:Manage profiles non-interactively'
-        'daemon:Run or control continuous background sync daemon'
+        'daemon:Full daemon subcommands'
         'ignore:Inspect or initialize .kasumiignore rules'
-        'sync:Synchronize with shared storage'
-        'status:Show pending synchronization changes'
         'fsck:Audit remote integrity'
         'gc:Reclaim eligible remote storage'
         'repack:Consolidate fragmented Micro-Packs'
         'resolve-missing:Resolve missing content as logical deletions'
-        'conflicts:List preserved conflict artifacts'
         'remote:Read-only remote vault inspection'
         'completion:Output shell completion script'
     )
@@ -293,12 +319,16 @@ _kasumi() {
         completion)
             (( CURRENT == 3 )) && compadd -- $shells
             ;;
-        show|diagnostics|key|sync|status|fsck|repack|resolve-missing)
+        show|diagnostics|key|sync|status|fsck|repack|resolve-missing|logs|pause|resume)
             if (( CURRENT == 3 )); then
+                [[ "${words[2]}" == (pause|resume) ]] && compadd -- --all
                 _kasumi_profiles
             else
-                compadd -- --replace --dry-run --initial --audit-inventory --repair --allow-empty-local --bwlimit --concurrency --reclaim-dirty --confirm --full --quiet --json --log-file --help
+                compadd -- --follow -f --lines --autostart --all --replace --dry-run --initial --audit-inventory --repair --allow-empty-local --bwlimit --concurrency --reclaim-dirty --confirm --full --quiet --json --log-file --help
             fi
+            ;;
+        start|stop)
+            compadd -- --autostart --full --quiet --json --log-file --help
             ;;
     esac
 }
@@ -312,17 +342,22 @@ function __kasumi_profiles
     command kasumi list 2>/dev/null
 end
 
-set -l top_cmds config list show diagnostics key profile daemon ignore sync status fsck gc repack resolve-missing conflicts remote completion
-complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "config" -d "Interactive profile wizard"
-complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "list" -d "List profile names"
+set -l top_cmds status show logs start stop pause resume sync conflicts config list diagnostics key profile daemon ignore fsck gc repack resolve-missing remote completion
+complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "status" -d "Show overview or pending changes"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "show" -d "Show profile details"
+complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "logs" -d "Show or follow daemon logs"
+complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "start" -d "Start continuous background sync daemon"
+complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "stop" -d "Stop background sync daemon"
+complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "pause" -d "Pause automated daemon sync"
+complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "resume" -d "Resume automated daemon sync"
+complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "config" -d "Interactive profile and daemon wizard"
+complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "list" -d "List profile names"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "diagnostics" -d "Inspect environment and profile health"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "key" -d "Save or replace profile key"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "profile" -d "Manage profiles non-interactively"
-complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "daemon" -d "Run or control continuous background sync daemon"
+complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "daemon" -d "Full daemon control subcommands"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "ignore" -d "Inspect or initialize .kasumiignore rules"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "sync" -d "Synchronize with shared storage"
-complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "status" -d "Show pending changes"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "fsck" -d "Audit remote integrity"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "gc" -d "Run garbage collection"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "repack" -d "Consolidate Micro-Packs"
@@ -331,7 +366,11 @@ complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "conflic
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "remote" -d "Read-only remote inspection"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "completion" -d "Output shell completion script"
 
-complete -c kasumi -f -n "__fish_seen_subcommand_from show diagnostics key sync status fsck repack resolve-missing" -a "(__kasumi_profiles)"
+complete -c kasumi -f -n "__fish_seen_subcommand_from show diagnostics key sync status fsck repack resolve-missing logs pause resume" -a "(__kasumi_profiles)"
+complete -c kasumi -f -n "__fish_seen_subcommand_from pause resume" -a "--all" -d "Target all profiles"
+complete -c kasumi -l follow -s f -d "Follow daemon logs live"
+complete -c kasumi -l autostart -d "Install user-session autostart on start"
+complete -c kasumi -l all -d "Show all commands or target all profiles"
 complete -c kasumi -f -n "__fish_seen_subcommand_from conflicts" -a "resolve (__kasumi_profiles)"
 complete -c kasumi -f -n "__fish_seen_subcommand_from profile; and not __fish_seen_subcommand_from create edit clone storage rename delete test" -a "create edit clone storage rename delete test"
 complete -c kasumi -f -n "__fish_seen_subcommand_from profile; and __fish_seen_subcommand_from edit clone storage rename delete test" -a "(__kasumi_profiles)"
@@ -385,7 +424,7 @@ Register-ArgumentCompleter -Native -CommandName kasumi -ScriptBlock {
     $count = $tokens.Count
     if ($wordToComplete -eq '') { $count++ }
 
-    $topCommands = @('config', 'list', 'show', 'diagnostics', 'key', 'profile', 'daemon', 'ignore', 'sync', 'status', 'fsck', 'gc', 'repack', 'resolve-missing', 'conflicts', 'remote', 'completion')
+    $topCommands = @('status', 'show', 'logs', 'start', 'stop', 'pause', 'resume', 'sync', 'conflicts', 'config', 'list', 'diagnostics', 'key', 'profile', 'daemon', 'ignore', 'fsck', 'gc', 'repack', 'resolve-missing', 'remote', 'completion')
     $profileSubs = @('create', 'edit', 'clone', 'storage', 'rename', 'delete', 'test')
     $daemonSubs = @('run', 'stop', 'status', 'sync', 'pause', 'resume', 'unlock', 'lock', 'reload', 'logs', 'autostart')
     $autostartSubs = @('install', 'uninstall', 'status')
@@ -471,10 +510,11 @@ Register-ArgumentCompleter -Native -CommandName kasumi -ScriptBlock {
                 if ($count -eq 3) { $candidates = $shells }
             }
             default {
-                if ($count -eq 3 -and $cmd -in @('show', 'diagnostics', 'key', 'sync', 'status', 'fsck', 'repack', 'resolve-missing')) {
+                if ($count -eq 3 -and $cmd -in @('show', 'diagnostics', 'key', 'sync', 'status', 'fsck', 'repack', 'resolve-missing', 'logs', 'pause', 'resume')) {
                     $candidates = & $getProfiles
+                    if ($cmd -in @('pause', 'resume')) { $candidates += '--all' }
                 } elseif ($wordToComplete -like '-*') {
-                    $candidates = @('--replace', '--dry-run', '--initial', '--audit-inventory', '--repair', '--allow-empty-local', '--bwlimit', '--concurrency', '--reclaim-dirty', '--confirm', '--full', '--quiet', '--json', '--log-file', '--help')
+                    $candidates = @('--follow', '-f', '--lines', '--autostart', '--all', '--replace', '--dry-run', '--initial', '--audit-inventory', '--repair', '--allow-empty-local', '--bwlimit', '--concurrency', '--reclaim-dirty', '--confirm', '--full', '--quiet', '--json', '--log-file', '--help')
                 }
             }
         }

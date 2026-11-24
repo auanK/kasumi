@@ -277,6 +277,34 @@ format_config_last_sync(const application::ProfileActivityReport& activity) {
     return std::format("{} ({})", ts, execution_status_label(chosen->status));
 }
 
+std::string format_compact_automation(const application::Profile& profile) {
+    const bool watch_on = profile.watch_enabled.value_or(true);
+    const std::string_view watch_str =
+        watch_on ? i18n::tr(i18n::Key::LabelYes)
+                 : i18n::tr(i18n::Key::LabelNo);
+    const std::uint32_t sync_sec = profile.sync_interval_seconds.value_or(300U);
+    std::string sync_str;
+    if (sync_sec == 0U) {
+        sync_str = std::string{i18n::tr(i18n::Key::LabelDisabled)};
+    } else if (sync_sec % 60U == 0U) {
+        sync_str = std::format("{}m", sync_sec / 60U);
+    } else {
+        sync_str = std::format("{}s", sync_sec);
+    }
+    const std::uint32_t gc_hrs = profile.gc_interval_hours.value_or(0U);
+    const std::string gc_str =
+        gc_hrs == 0U ? std::string{i18n::tr(i18n::Key::LabelDisabled)}
+                     : std::format("{}h", gc_hrs);
+    std::string line =
+        i18n::format(i18n::Key::WizardShowAutomationLine, watch_str, sync_str, gc_str);
+    if (profile.paused) {
+        line += " [";
+        line += i18n::tr(i18n::Key::OverviewBadgePaused);
+        line += "]";
+    }
+    return line;
+}
+
 void present_profile_activity(std::string_view profile_name,
                               const application::ProfileActivityReport& report,
                               bool full) {
@@ -1190,6 +1218,24 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
     if (json && profile_name.empty()) {
         return present_json_list(*profiles);
     }
+    if (profile_name.empty() && full) {
+        i18n::println(i18n::Key::WizardProfileListHeader);
+        for (const auto& prof : *profiles) {
+            const auto state = application::inspect_profile_local_state(
+                environment, prof.name);
+            const auto activity =
+                application::inspect_profile_activity(environment, prof.name);
+            i18n::println(i18n::Key::WizardProfileListEntry,
+                          prof.name,
+                          format_local_state_label(state, activity),
+                          format_config_last_sync(activity));
+            std::println("  {} -> {}",
+                         sanitize_terminal_text(
+                             platform::path::to_utf8(prof.local_dir)),
+                         sanitize_terminal_text(prof.remote_dir));
+        }
+        return 0;
+    }
     for (const auto& profile : *profiles) {
         if (profile_name.empty()) {
             std::println("{}", profile.name);
@@ -1215,6 +1261,88 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
             if (json) {
                 return present_json_show(
                     profile, state, problem, activity, full, daemon_prof);
+            }
+            if (!full) {
+                i18n::println(
+                    i18n::Key::WizardShowProfileCompact,
+                    profile.name,
+                    sanitize_terminal_text(
+                        platform::path::to_utf8(profile.local_dir)),
+                    sanitize_terminal_text(profile.remote_dir),
+                    format_local_state_label(state, activity));
+                std::println("{}", format_compact_automation(profile));
+                if (daemon_prof.has_value()) {
+                    i18n::println(i18n::Key::WizardShowDaemonStatus,
+                                  sanitize_terminal_text(
+                                      application::to_string(daemon_prof->state)));
+                    if (!daemon_prof->active_stage.empty()) {
+                        i18n::println(
+                            i18n::Key::WizardShowDaemonStage,
+                            sanitize_terminal_text(daemon_prof->active_stage));
+                    }
+                    if (daemon_prof->dirty_paths_count > 0) {
+                        i18n::println(i18n::Key::WizardShowDaemonDirty,
+                                      daemon_prof->dirty_paths_count);
+                    }
+                    if (!daemon_prof->last_error.empty()) {
+                        i18n::println(
+                            i18n::Key::DaemonStatusProfileError,
+                            sanitize_terminal_text(daemon_prof->last_error));
+                    }
+                }
+                if (state == application::ProfileLocalState::Problem) {
+                    i18n::println(i18n::Key::WizardProblemReason,
+                                  overview_problem_message(problem));
+                }
+                if (const auto conflicts = application::list_local_conflicts(
+                        environment, profile.name);
+                    conflicts && conflicts->total_artifacts > 0) {
+                    i18n::println(i18n::Key::WizardShowConflictsCount,
+                                  conflicts->total_artifacts,
+                                  sanitize_terminal_text(profile.name));
+                }
+                if (activity.database_present) {
+                    if (activity.last_complete_sync) {
+                        const auto& s = *activity.last_complete_sync;
+                        const auto ts = platform::clock::format_local_timestamp(
+                            s.finished_at.value_or(s.started_at));
+                        const auto status = execution_status_label(s.status);
+                        const auto machine = format_machine_label(
+                            s.machine_name, s.machine_id_hex, false, false);
+                        i18n::println(i18n::Key::WizardShowLastCompleteSync,
+                                      ts,
+                                      status,
+                                      machine);
+                    } else {
+                        i18n::println(i18n::Key::WizardShowNoCompleteSync);
+                    }
+                }
+                if (const auto logs = application::query_daemon_events(
+                        environment,
+                        application::DaemonLogQuery{
+                            .profile_name = profile.name,
+                            .max_lines = 30U,
+                        });
+                    logs && !logs->events.empty()) {
+                    std::vector<const application::DaemonEvent*> recent;
+                    for (const auto& ev : logs->events) {
+                        if (!is_noisy_daemon_event(ev)) {
+                            recent.push_back(&ev);
+                        }
+                    }
+                    if (!recent.empty()) {
+                        i18n::println(i18n::Key::WizardShowRecentEventsHeader);
+                        const std::size_t start =
+                            recent.size() > 5U ? recent.size() - 5U : 0U;
+                        for (std::size_t idx = start; idx < recent.size();
+                             ++idx) {
+                            print_daemon_event_line(*recent[idx]);
+                        }
+                    }
+                }
+                i18n::println(i18n::Key::WizardShowFullHint,
+                              sanitize_terminal_text(profile.name));
+                return 0;
             }
             i18n::println(i18n::Key::WizardProfileDetails,
                           profile.name,
@@ -1517,7 +1645,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         const auto menu = profiles.empty() ? i18n::Key::WizardMenuEmpty
                                            : i18n::Key::WizardMenu;
         const auto valid_choice = [&](std::string_view value) {
-            if (value == "q" || value == "n") {
+            if (value == "q" || value == "n" || value == "a") {
                 return true;
             }
             return !profiles.empty() &&
@@ -1817,11 +1945,361 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             report_result(
                 application::rename_profile(environment, target, new_name),
                 i18n::format(i18n::Key::WizardProfileRenamed, new_name));
+        } else if (choice == "a") {
+            while (!platform::cancellation::requested()) {
+                i18n::print(i18n::Key::WizardAutoHeader);
+                const bool running =
+                    application::is_daemon_running(environment);
+                const auto autostart = application::query_daemon_autostart();
+                std::println("  daemon: {}{}",
+                             running ? i18n::tr(i18n::Key::OverviewBadgeOk)
+                                     : "stopped",
+                             autostart && autostart->supported
+                                 ? std::format(" | autostart: {}",
+                                               autostart->installed ? "on"
+                                                                    : "off")
+                                 : std::string{});
+                std::string sub_choice;
+                if (!prompt_line(i18n::tr(i18n::Key::WizardAutoMenu),
+                                 sub_choice)) {
+                    break;
+                }
+                if (sub_choice == "b" || sub_choice == "B" ||
+                    sub_choice == "q" || sub_choice == "Q") {
+                    break;
+                }
+                if (sub_choice == "1") {
+                    if (running) {
+                        const auto stopped =
+                            application::stop_running_daemon(environment);
+                        if (stopped) {
+                            print_ok_line(i18n::tr(i18n::Key::DaemonStopped));
+                        } else {
+                            print_error_line(stopped.error().detail);
+                        }
+                    } else {
+                        const auto started =
+                            application::spawn_background_daemon(environment);
+                        if (started) {
+                            print_ok_line(
+                                i18n::tr(i18n::Key::DaemonStartedCompact));
+                        } else {
+                            print_error_line(started.error().detail);
+                        }
+                    }
+                } else if (sub_choice == "2") {
+                    if (autostart && autostart->installed) {
+                        const auto res =
+                            application::uninstall_daemon_autostart();
+                        if (res) {
+                            print_ok_line(i18n::format(
+                                i18n::Key::DaemonAutostartUninstalled,
+                                sanitize_terminal_text(res->method)));
+                        } else {
+                            print_error_line(res.error().detail);
+                        }
+                    } else {
+                        const auto res =
+                            application::install_daemon_autostart();
+                        if (res) {
+                            print_ok_line(i18n::format(
+                                i18n::Key::DaemonAutostartInstalled,
+                                sanitize_terminal_text(res->method),
+                                sanitize_terminal_text(res->location)));
+                        } else {
+                            print_error_line(res.error().detail);
+                        }
+                    }
+                } else if (sub_choice == "3") {
+                    if (profiles.empty()) {
+                        i18n::println(i18n::Key::WizardNoProfiles);
+                        continue;
+                    }
+                    const bool all_paused =
+                        std::ranges::all_of(profiles, &application::Profile::paused);
+                    const bool target_pause = !all_paused;
+                    for (const auto& p : profiles) {
+                        const auto res =
+                            target_pause
+                                ? application::pause_daemon_profile(environment,
+                                                                    p.name)
+                                : application::resume_daemon_profile(
+                                      environment, p.name);
+                        if (!res) {
+                            print_error_line(res.error().detail);
+                        }
+                    }
+                    print_ok_line(i18n::format(
+                        target_pause ? i18n::Key::DaemonAllPaused
+                                     : i18n::Key::DaemonAllResumed,
+                        profiles.size()));
+                    if (auto refreshed = application::list_profiles(environment)) {
+                        profiles = std::move(*refreshed);
+                    }
+                } else if (sub_choice == "4") {
+                    std::string target;
+                    if (!prompt_existing(i18n::Key::WizardPromptProfileToEdit,
+                                         target)) {
+                        continue;
+                    }
+                    auto it = std::ranges::find(
+                        profiles, target, &application::Profile::name);
+                    if (it == profiles.end()) {
+                        continue;
+                    }
+                    application::Profile updated = *it;
+                    const std::string cur_watch =
+                        updated.watch_enabled.value_or(true) ? "on" : "off";
+                    std::string watch_val;
+                    if (!prompt_form_line(
+                            i18n::format(i18n::Key::WizardAutoPromptWatch,
+                                         cur_watch),
+                            watch_val)) {
+                        continue;
+                    }
+                    if (!watch_val.empty()) {
+                        if (watch_val == "on" || watch_val == "true" ||
+                            watch_val == "1") {
+                            updated.watch_enabled = true;
+                        } else if (watch_val == "off" || watch_val == "false" ||
+                                   watch_val == "0") {
+                            updated.watch_enabled = false;
+                        } else {
+                            print_error_line(
+                                i18n::tr(i18n::Key::WizardInvalidOption));
+                            continue;
+                        }
+                    }
+                    const std::uint32_t cur_sync =
+                        updated.sync_interval_seconds.value_or(300U);
+                    std::string sync_val;
+                    if (!prompt_form_line(
+                            i18n::format(
+                                i18n::Key::WizardAutoPromptSyncInterval,
+                                cur_sync),
+                            sync_val)) {
+                        continue;
+                    }
+                    if (!sync_val.empty()) {
+                        try {
+                            const auto parsed = std::stoul(sync_val);
+                            if (parsed > 86400UL ||
+                                (parsed != 0UL && parsed < 10UL)) {
+                                print_error_line(i18n::format(
+                                    i18n::Key::WizardAutoInvalidInterval,
+                                    10U,
+                                    86400U));
+                                continue;
+                            }
+                            updated.sync_interval_seconds =
+                                static_cast<std::uint32_t>(parsed);
+                        } catch (...) {
+                            print_error_line(i18n::format(
+                                i18n::Key::WizardAutoInvalidInterval,
+                                10U,
+                                86400U));
+                            continue;
+                        }
+                    }
+                    const std::uint32_t cur_gc =
+                        updated.gc_interval_hours.value_or(0U);
+                    std::string gc_val;
+                    if (!prompt_form_line(
+                            i18n::format(i18n::Key::WizardAutoPromptGcInterval,
+                                         cur_gc),
+                            gc_val)) {
+                        continue;
+                    }
+                    if (!gc_val.empty()) {
+                        try {
+                            const auto parsed = std::stoul(gc_val);
+                            if (parsed > 8760UL) {
+                                print_error_line(i18n::format(
+                                    i18n::Key::WizardAutoInvalidInterval,
+                                    1U,
+                                    8760U));
+                                continue;
+                            }
+                            updated.gc_interval_hours =
+                                static_cast<std::uint32_t>(parsed);
+                        } catch (...) {
+                            print_error_line(i18n::format(
+                                i18n::Key::WizardAutoInvalidInterval,
+                                1U,
+                                8760U));
+                            continue;
+                        }
+                    }
+                    report_result(
+                        application::update_profile(environment, updated, true),
+                        i18n::format(i18n::Key::WizardAutoScheduleUpdated,
+                                     updated.name));
+                    if (auto refreshed = application::list_profiles(environment)) {
+                        profiles = std::move(*refreshed);
+                    }
+                } else {
+                    print_error_line(i18n::tr(i18n::Key::WizardInvalidOption));
+                }
+            }
         } else {
             print_error_line(i18n::tr(i18n::Key::WizardInvalidOption));
         }
     }
     return platform::cancellation::requested() ? 130 : 0;
+}
+
+int run_overview_command(const application::ExecutionEnvironment& environment,
+                         bool full,
+                         bool quiet,
+                         bool json) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto elapsed = [&] {
+        return std::chrono::steady_clock::now() - started;
+    };
+    auto profiles = application::list_profiles(environment);
+    if (!profiles) {
+        if (json) {
+            return present_json_profile_error(
+                "status", {}, profiles.error(), elapsed());
+        }
+        print_error_line(profiles.error().detail);
+        return 1;
+    }
+
+    application::DaemonStatusReport daemon_report;
+    if (const auto ds = application::query_daemon_status(environment)) {
+        daemon_report = *ds;
+    }
+
+    std::vector<OverviewProfileRow> rows;
+    rows.reserve(profiles->size());
+    for (const auto& profile : *profiles) {
+        OverviewProfileRow row{.profile = profile};
+        row.local_state = application::inspect_profile_local_state(
+            environment, profile.name, &row.local_problem);
+        row.activity =
+            application::inspect_profile_activity(environment, profile.name);
+        if (const auto conflicts =
+                application::list_local_conflicts(environment, profile.name)) {
+            row.conflict_count = conflicts->total_artifacts;
+        }
+        if (daemon_report.running) {
+            for (const auto& dp : daemon_report.profiles) {
+                if (dp.name == profile.name) {
+                    row.daemon_profile = dp;
+                    break;
+                }
+            }
+        }
+        rows.push_back(std::move(row));
+    }
+
+    if (json) {
+        return present_json_overview(daemon_report, rows, elapsed(), full);
+    }
+    return present_overview(daemon_report, rows, full, quiet);
+}
+
+int run_profile_toggle_command(
+    const application::ExecutionEnvironment& environment,
+    const ProfileToggleInvocation& invocation,
+    bool quiet,
+    bool json,
+    std::string* log_summary) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto elapsed = [&] {
+        return std::chrono::steady_clock::now() - started;
+    };
+    const std::string_view cmd = invocation.pause ? "pause" : "resume";
+    const std::string target_label =
+        invocation.all ? std::string{"--all"}
+                       : invocation.profile_name.value_or("");
+
+    const auto fail_daemon = [&](const application::DaemonError& err) -> int {
+        if (log_summary != nullptr) {
+            *log_summary = std::format(
+                "[{}] {}", json_error_code(err.code), err.detail);
+        }
+        if (json) {
+            return present_json_daemon_error(
+                cmd, target_label, err, elapsed());
+        }
+        return present(err);
+    };
+
+    auto profiles = application::list_profiles(environment);
+    if (!profiles) {
+        const application::DaemonError err{
+            .code = application::DaemonErrorCode::ConfigFailure,
+            .detail = profiles.error().detail,
+        };
+        return fail_daemon(err);
+    }
+    if (profiles->empty()) {
+        return fail_daemon(application::DaemonError{
+            .code = application::DaemonErrorCode::ProfileNotFound,
+            .detail = std::string{i18n::tr(i18n::Key::WizardNoProfiles)},
+        });
+    }
+
+    std::vector<std::string> targets;
+    if (invocation.all) {
+        targets.reserve(profiles->size());
+        for (const auto& p : *profiles) {
+            targets.push_back(p.name);
+        }
+    } else {
+        const std::string target = invocation.profile_name.value_or("");
+        const auto it = std::ranges::find(
+            *profiles, target, &application::Profile::name);
+        if (it == profiles->end()) {
+            return fail_daemon(application::DaemonError{
+                .code = application::DaemonErrorCode::ProfileNotFound,
+                .detail =
+                    std::string{i18n::tr(i18n::Key::WizardProfileNotFound)},
+            });
+        }
+        targets.push_back(target);
+    }
+
+    for (const auto& name : targets) {
+        const auto res =
+            invocation.pause
+                ? application::pause_daemon_profile(environment, name)
+                : application::resume_daemon_profile(environment, name);
+        if (!res) {
+            return fail_daemon(res.error());
+        }
+    }
+
+    const std::string summary =
+        invocation.all
+            ? std::format("{} {} profile(s)",
+                          invocation.pause ? "paused" : "resumed",
+                          targets.size())
+            : std::format("{} profile '{}'",
+                          invocation.pause ? "paused" : "resumed",
+                          targets.front());
+    if (log_summary != nullptr) {
+        *log_summary = summary;
+    }
+    if (json) {
+        return present_json_daemon_action(cmd, target_label, summary, elapsed());
+    }
+    if (!quiet) {
+        if (invocation.all) {
+            print_ok_line(i18n::format(invocation.pause
+                                           ? i18n::Key::DaemonAllPaused
+                                           : i18n::Key::DaemonAllResumed,
+                                       targets.size()));
+        } else {
+            print_ok_line(i18n::format(invocation.pause
+                                           ? i18n::Key::DaemonProfilePaused
+                                           : i18n::Key::DaemonProfileResumed,
+                                       sanitize_terminal_text(targets.front())));
+        }
+    }
+    return 0;
 }
 
 } // namespace kasumi::cli

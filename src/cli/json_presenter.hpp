@@ -5,6 +5,7 @@
 #include "application/inspection/result.hpp"
 #include "application/profile.hpp"
 #include "application/result.hpp"
+#include "cli/presenter.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -140,9 +141,19 @@ int present_json_daemon_action(std::string_view command,
                                std::string_view summary,
                                std::chrono::nanoseconds duration);
 
-int present_json_daemon_logs(const application::DaemonLogsReport& report,
-                             std::optional<std::string_view> profile_name,
-                             std::chrono::nanoseconds duration);
+int present_json_daemon_logs(
+    const application::DaemonLogsReport& report,
+    std::optional<std::string_view> profile_name,
+    std::chrono::nanoseconds duration,
+    std::string_view command = "daemon logs",
+    bool full = true);
+
+void present_json_daemon_stream_event(const application::DaemonEvent& event);
+
+int present_json_overview(const application::DaemonStatusReport& daemon,
+                          const std::vector<OverviewProfileRow>& rows,
+                          std::chrono::nanoseconds duration,
+                          bool full = false);
 
 void append_json_daemon_event(const std::filesystem::path& path,
                               const application::DaemonEvent& event);

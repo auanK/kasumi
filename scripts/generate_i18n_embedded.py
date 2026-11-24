@@ -13,6 +13,7 @@ from pathlib import Path
 EXCEPTIONS = {
     "OperationDuration": "labels.duration",
     "HelpText": "help_text",
+    "HelpTextAll": "help_text_all",
     "HelpGcRemoveWriter": "command_help.gc_remove-writer",
     "HelpGcRemoveBarrier": "command_help.gc_remove-barrier",
     "HelpResolveMissing": "command_help.resolve-missing",
@@ -57,6 +58,7 @@ PREFIXES = sorted(
         ("HealthState", "health_states."),
         ("Wizard", "wizard."),
         ("Daemon", "daemon."),
+        ("Overview", "overview."),
     ],
     key=lambda item: -len(item[0]),
 )

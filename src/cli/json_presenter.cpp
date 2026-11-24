@@ -1698,14 +1698,19 @@ int present_json_daemon_action(std::string_view command,
 
 int present_json_daemon_logs(const application::DaemonLogsReport& report,
                              std::optional<std::string_view> profile_name,
-                             std::chrono::nanoseconds duration) {
-    auto doc = make_envelope("daemon logs",
+                             std::chrono::nanoseconds duration,
+                             std::string_view command,
+                             bool full) {
+    auto doc = make_envelope(command,
                              profile_name.value_or(std::string_view{}),
                              true,
                              0,
                              duration);
     json events = json::array();
     for (const auto& ev : report.events) {
+        if (!full && is_noisy_daemon_event(ev)) {
+            continue;
+        }
         events.push_back(json{
             {"seq", ev.seq},
             {"timestamp_unix", ev.timestamp_unix},
@@ -1714,14 +1719,123 @@ int present_json_daemon_logs(const application::DaemonLogsReport& report,
             {"detail", ev.detail},
         });
     }
+    const std::size_t event_count = events.size();
     doc["data"] = json{
         {"summary",
          std::format("events={}, latest_seq={}",
-                     report.events.size(),
+                     event_count,
                      report.latest_seq)},
         {"log_path", report.log_path},
         {"latest_seq", report.latest_seq},
         {"events", std::move(events)},
+    };
+    emit_json(doc);
+    return 0;
+}
+
+void present_json_daemon_stream_event(const application::DaemonEvent& ev) {
+    json doc{
+        {"schema_version", 1},
+        {"command", "logs"},
+        {"event",
+         json{
+             {"seq", ev.seq},
+             {"timestamp_unix", ev.timestamp_unix},
+             {"profile", ev.profile_name},
+             {"kind", ev.kind},
+             {"detail", ev.detail},
+         }},
+    };
+    emit_json(doc);
+}
+
+int present_json_overview(const application::DaemonStatusReport& daemon,
+                          const std::vector<OverviewProfileRow>& rows,
+                          std::chrono::nanoseconds duration,
+                          bool full) {
+    auto doc = make_envelope("status", {}, true, 0, duration);
+    json profiles = json::array();
+    for (const auto& row : rows) {
+        const application::ProfileExecutionSummary* chosen =
+            row.activity.last_complete_sync ? &*row.activity.last_complete_sync
+                                            : (row.activity.last_attempt
+                                                   ? &*row.activity.last_attempt
+                                                   : nullptr);
+        std::string last_machine =
+            chosen ? chosen->machine_name
+                   : (row.activity.accepted_commit
+                          ? row.activity.accepted_commit->machine_name
+                          : std::string{});
+        std::optional<std::int64_t> last_sync_at;
+        if (chosen) {
+            last_sync_at = chosen->finished_at.value_or(chosen->started_at);
+        } else if (row.activity.accepted_commit) {
+            last_sync_at = row.activity.accepted_commit->accepted_at;
+        }
+        json entry{
+            {"name", row.profile.name},
+            {"local_state", profile_local_state_name(row.local_state)},
+            {"paused", row.profile.paused},
+            {"conflicts", row.conflict_count},
+            {"daemon_state",
+             row.daemon_profile
+                 ? json(application::to_string(row.daemon_profile->state))
+                 : json(nullptr)},
+            {"active_stage",
+             row.daemon_profile ? json(row.daemon_profile->active_stage)
+                                : json(nullptr)},
+            {"dirty_paths_count",
+             row.daemon_profile ? row.daemon_profile->dirty_paths_count
+                                : std::size_t{0}},
+            {"last_sync_at",
+             last_sync_at ? json(*last_sync_at) : json(nullptr)},
+            {"last_sync_status",
+             chosen ? json(profile_status_name(chosen->status))
+                    : json(nullptr)},
+            {"last_sync_machine",
+             last_machine.empty() ? json(nullptr) : json(last_machine)},
+            {"last_error",
+             row.daemon_profile && !row.daemon_profile->last_error.empty()
+                 ? json(row.daemon_profile->last_error)
+                 : json(nullptr)},
+        };
+        if (full) {
+            entry["local_dir"] =
+                platform::path::to_utf8(row.profile.local_dir);
+            entry["remote_dir"] = row.profile.remote_dir;
+            entry["watch_enabled"] = row.profile.watch_enabled.value_or(true);
+            entry["sync_interval_seconds"] =
+                row.profile.sync_interval_seconds.value_or(300U);
+            entry["gc_interval_hours"] =
+                row.profile.gc_interval_hours.value_or(0U);
+            if (row.daemon_profile) {
+                entry["sync_runs"] = row.daemon_profile->sync_runs;
+                entry["fast_noop_polls"] = row.daemon_profile->fast_noop_polls;
+                entry["warm_transport_active"] =
+                    row.daemon_profile->warm_transport_active;
+            }
+        }
+        profiles.push_back(std::move(entry));
+    }
+    json daemon_json{
+        {"running", daemon.running},
+        {"uptime_seconds", daemon.uptime_seconds},
+        {"autostart_supported", daemon.autostart.supported},
+        {"autostart_installed", daemon.autostart.installed},
+    };
+    if (full) {
+        daemon_json["pid"] = daemon.pid;
+        daemon_json["ipc_port"] = daemon.ipc_port;
+        daemon_json["kasumi_version"] = daemon.kasumi_version;
+        daemon_json["api_version"] = daemon.api_version;
+    }
+    doc["data"] = json{
+        {"summary",
+         std::format("running={}, profiles={}",
+                     daemon.running ? "yes" : "no",
+                     rows.size())},
+        {"daemon", std::move(daemon_json)},
+        {"profiles", std::move(profiles)},
     };
     emit_json(doc);
     return 0;

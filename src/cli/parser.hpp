@@ -17,9 +17,24 @@ namespace kasumi::cli {
 
 // Requests opening the interactive configuration wizard.
 struct ConfigureInvocation {};
+struct OverviewInvocation {};
 struct ListInvocation {};
 struct ShowInvocation {
     std::string profile_name;
+};
+struct LogsInvocation {
+    std::optional<std::string> profile_name;
+    std::size_t log_lines = 50;
+    bool follow = false;
+};
+struct StartInvocation {
+    bool autostart = false;
+};
+struct StopInvocation {};
+struct ProfileToggleInvocation {
+    bool pause = true;
+    bool all = false;
+    std::optional<std::string> profile_name;
 };
 struct DiagnosticsInvocation {
     std::string profile_name;
@@ -95,6 +110,7 @@ struct DaemonInvocation {
     std::optional<std::string> profile_name;
     bool background = false;
     bool wait = false;
+    bool follow = false;
     std::size_t log_lines = 50;
 };
 enum class IgnoreAction {
@@ -111,14 +127,20 @@ struct IgnoreInvocation {
 };
 struct HelpInvocation {
     std::string topic;
+    bool all = false;
 };
 
 // Valid command-line parsing result.
 using Invocation = std::variant<application::Request,
                                 application::InspectionRequest,
+                                OverviewInvocation,
                                 ConfigureInvocation,
                                 ListInvocation,
                                 ShowInvocation,
+                                LogsInvocation,
+                                StartInvocation,
+                                StopInvocation,
+                                ProfileToggleInvocation,
                                 DiagnosticsInvocation,
                                 KeyInvocation,
                                 ConflictsInvocation,

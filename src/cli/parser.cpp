@@ -245,6 +245,48 @@ request(application::Operation operation, int argc, char* argv[]) {
                                 .transfer_concurrency = transfer_concurrency};
 }
 
+bool parse_logs_args(int start_index,
+                     int argc,
+                     char* argv[],
+                     std::optional<std::string>& profile_name,
+                     std::size_t& log_lines,
+                     bool& follow) {
+    bool saw_lines = false;
+    bool saw_follow = false;
+    for (int i = start_index; i < argc; ++i) {
+        const std::string_view arg{argv[i]};
+        if (arg == "--lines" || arg.starts_with("--lines=")) {
+            if (saw_lines) {
+                return false;
+            }
+            const auto val = read_flag_value(i, argc, argv, "--lines");
+            if (!val) {
+                return false;
+            }
+            const auto parsed = parse_bounded_u32(val->value, 1U, 1000U);
+            if (!parsed) {
+                return false;
+            }
+            log_lines = *parsed;
+            saw_lines = true;
+            if (val->consumed_next) {
+                ++i;
+            }
+        } else if (arg == "--follow" || arg == "-f") {
+            if (saw_follow) {
+                return false;
+            }
+            saw_follow = true;
+            follow = true;
+        } else if (operand(argv[i]) && !profile_name.has_value()) {
+            profile_name = std::string{arg};
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
 constexpr std::
     array<std::pair<std::string_view, application::InspectionOperation>, 11>
         simple_remote_inspections{
@@ -292,6 +334,13 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
     const std::string_view command{argv[1]};
     if (argc == 2 && (command == "--help" || command == "-h")) {
         return HelpInvocation{};
+    }
+    if (argc == 3 && argv[2] != nullptr) {
+        const std::string_view second{argv[2]};
+        if (((command == "--help" || command == "-h") && second == "--all") ||
+            (command == "--all" && (second == "--help" || second == "-h"))) {
+            return HelpInvocation{.topic = {}, .all = true};
+        }
     }
     bool has_delimiter = false;
     for (int index = 1; index < argc - 1; ++index) {
@@ -506,32 +555,13 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         }
         if (sub == "logs") {
             DaemonInvocation inv{.action = DaemonAction::Logs};
-            bool saw_lines = false;
-            for (int i = 3; i < argc; ++i) {
-                const std::string_view arg{argv[i]};
-                if (arg == "--lines" || arg.starts_with("--lines=")) {
-                    if (saw_lines) {
-                        return std::unexpected(ParseError{});
-                    }
-                    const auto val = read_flag_value(i, argc, argv, "--lines");
-                    if (!val) {
-                        return std::unexpected(ParseError{});
-                    }
-                    const auto parsed =
-                        parse_bounded_u32(val->value, 1U, 1000U);
-                    if (!parsed) {
-                        return std::unexpected(ParseError{});
-                    }
-                    inv.log_lines = *parsed;
-                    saw_lines = true;
-                    if (val->consumed_next) {
-                        ++i;
-                    }
-                } else if (operand(argv[i]) && !inv.profile_name.has_value()) {
-                    inv.profile_name = std::string{arg};
-                } else {
-                    return std::unexpected(ParseError{});
-                }
+            if (!parse_logs_args(3,
+                                 argc,
+                                 argv,
+                                 inv.profile_name,
+                                 inv.log_lines,
+                                 inv.follow)) {
+                return std::unexpected(ParseError{});
             }
             return inv;
         }
@@ -1010,7 +1040,49 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
             .bandwidth_limit = std::move(bandwidth_limit),
             .transfer_concurrency = transfer_concurrency};
     }
+    if (command == "logs") {
+        LogsInvocation inv;
+        if (!parse_logs_args(
+                2, argc, argv, inv.profile_name, inv.log_lines, inv.follow)) {
+            return std::unexpected(ParseError{});
+        }
+        return inv;
+    }
+    if (command == "start") {
+        if (argc == 2) {
+            return StartInvocation{};
+        }
+        if (argc == 3 && std::string_view{argv[2]} == "--autostart") {
+            return StartInvocation{.autostart = true};
+        }
+        return std::unexpected(ParseError{});
+    }
+    if (command == "stop") {
+        return argc == 2 ? std::expected<Invocation, ParseError>{StopInvocation{}}
+                         : std::unexpected(ParseError{});
+    }
+    if (command == "pause" || command == "resume") {
+        if (argc != 3) {
+            return std::unexpected(ParseError{});
+        }
+        const bool is_pause = command == "pause";
+        const std::string_view target{argv[2]};
+        if (target == "--all") {
+            return ProfileToggleInvocation{.pause = is_pause, .all = true};
+        }
+        if (operand(argv[2])) {
+            return ProfileToggleInvocation{
+                .pause = is_pause,
+                .all = false,
+                .profile_name = std::string{target},
+            };
+        }
+        return std::unexpected(ParseError{});
+    }
     if (command == "status") {
+        if (argc == 2) {
+            return OverviewInvocation{};
+        }
         return request(application::Operation::Status, argc, argv);
     }
     if (command == "fsck") {
