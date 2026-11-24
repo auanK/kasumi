@@ -275,8 +275,7 @@ kasumi::transport::Transport make_fault_transport(FaultInjectorState& state) {
     };
 }
 
-class ClientNode {
-public:
+struct ClientNode {
     ClientNode(const std::filesystem::path& root,
                const std::filesystem::path& remote_dir,
                std::string_view name,
@@ -399,7 +398,6 @@ public:
                                 kasumi::platform::path::from_utf8(rel));
     }
 
-private:
     kasumi::transport::Transport open_fresh_storage() const {
         auto opened =
             kasumi::transport::open_transport(runtime_.storage_location);

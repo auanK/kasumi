@@ -815,7 +815,7 @@ void close_raw_handle(std::intptr_t handle) noexcept {
 }
 
 void close_private_file(PrivateOutputFile& file) noexcept {
-    file.handle.close();
+    close_private_handle(file.handle);
 }
 
 std::expected<void, std::string>
@@ -831,7 +831,7 @@ create_file(const std::filesystem::path& path) {
 std::expected<void, std::string> write_private_file(PrivateOutputFile& file,
                                                     const void* data,
                                                     std::size_t size) {
-    if (!file.is_open()) {
+    if (!is_private_file_open(file)) {
         return std::unexpected("private file is not open for writing");
     }
     if (size == 0) {
@@ -883,7 +883,7 @@ std::expected<void, std::string> write_private_file(PrivateOutputFile& file,
 
 std::expected<void, std::string>
 flush_and_close_private_file(PrivateOutputFile& file) {
-    if (!file.is_open()) {
+    if (!is_private_file_open(file)) {
         return {};
     }
 #if defined(_WIN32)
@@ -1002,7 +1002,7 @@ query_directory_identity(const std::filesystem::path& path) noexcept {
 std::expected<void, std::string>
 publish_private_file(PrivateOutputFile& file,
                      const std::filesystem::path& target_path) {
-    if (!file.is_open()) {
+    if (!is_private_file_open(file)) {
         return std::unexpected("private file is not open");
     }
     if (target_path.empty()) {
@@ -1084,7 +1084,7 @@ publish_private_file(PrivateOutputFile& file,
 }
 
 CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
-    if (file.is_published() || file.path.empty()) {
+    if (is_private_file_published(file) || file.path.empty()) {
         close_private_file(file);
         return CleanupResult::AlreadyAbsent;
     }
@@ -1100,7 +1100,7 @@ CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
         }
         return CleanupResult::FilesystemError;
     };
-    if (file.is_open()) {
+    if (is_private_file_open(file)) {
         HANDLE h = reinterpret_cast<HANDLE>(file.handle.value);
         FILE_DISPOSITION_INFO disp{TRUE};
         const BOOL disp_ok = SetFileInformationByHandle(
@@ -1163,7 +1163,7 @@ CleanupResult remove_private_file_if_owned(PrivateOutputFile& file) noexcept {
         return map_unlink_errno(err);
     }
     bool same = S_ISREG(st_path.st_mode);
-    if (file.is_open()) {
+    if (is_private_file_open(file)) {
         struct stat st_fd{};
         if (::fstat(static_cast<int>(file.handle), &st_fd) != 0) {
             close_private_file(file);
@@ -1320,30 +1320,32 @@ open_regular_file(const std::filesystem::path& path) {
     return RegularFileInput{std::move(guard), file_size};
 }
 
-bool RegularFileInput::seek(std::uint64_t offset) const noexcept {
-    if (offset > size) {
+bool seek_regular_file(const RegularFileInput& input,
+                       std::uint64_t offset) noexcept {
+    if (offset > input.size) {
         return false;
     }
 #if defined(_WIN32)
     LARGE_INTEGER position{};
     position.QuadPart = static_cast<LONGLONG>(offset);
-    return SetFilePointerEx(reinterpret_cast<HANDLE>(handle.value),
+    return SetFilePointerEx(reinterpret_cast<HANDLE>(input.handle.value),
                             position,
                             nullptr,
                             FILE_BEGIN) != 0;
 #else
-    return ::lseek(static_cast<int>(handle.value),
+    return ::lseek(static_cast<int>(input.handle.value),
                    static_cast<off_t>(offset),
                    SEEK_SET) >= 0;
 #endif
 }
 
 std::expected<std::size_t, StreamError>
-RegularFileInput::read(std::span<std::uint8_t> buffer) const {
+read_regular_file(const RegularFileInput& input,
+                  std::span<std::uint8_t> buffer) {
 #if defined(_WIN32)
     DWORD count = 0;
     const auto requested = std::min<std::size_t>(buffer.size(), MAXDWORD);
-    if (!ReadFile(reinterpret_cast<HANDLE>(handle.value),
+    if (!ReadFile(reinterpret_cast<HANDLE>(input.handle.value),
                   buffer.data(),
                   static_cast<DWORD>(requested),
                   &count,
@@ -1359,8 +1361,8 @@ RegularFileInput::read(std::span<std::uint8_t> buffer) const {
         buffer.size(), std::numeric_limits<ssize_t>::max());
     ssize_t count = 0;
     do {
-        count =
-            ::read(static_cast<int>(handle.value), buffer.data(), requested);
+        count = ::read(
+            static_cast<int>(input.handle.value), buffer.data(), requested);
     } while (count < 0 && errno == EINTR);
     if (count < 0) {
         const std::error_code error{errno, std::generic_category()};
@@ -1371,9 +1373,10 @@ RegularFileInput::read(std::span<std::uint8_t> buffer) const {
     return static_cast<std::size_t>(count);
 }
 
-bool RegularFileInput::read_exact(std::span<std::uint8_t> buffer) const {
+bool read_regular_file_exact(const RegularFileInput& input,
+                             std::span<std::uint8_t> buffer) {
     while (!buffer.empty()) {
-        const auto count = read(buffer);
+        const auto count = read_regular_file(input, buffer);
         if (!count || *count == 0) {
             return false;
         }
@@ -1408,7 +1411,7 @@ stream_regular_file_raw(const std::filesystem::path& path,
             return make_stream_error(StreamErrorKind::SizeMismatch,
                                      "slice exceeds file size");
         }
-        if (!input->seek(slice->offset)) {
+        if (!seek_regular_file(*input, slice->offset)) {
             return make_stream_error(StreamErrorKind::ReadFailed,
                                      "could not seek to file slice");
         }
@@ -1419,7 +1422,7 @@ stream_regular_file_raw(const std::filesystem::path& path,
             slice ? static_cast<std::size_t>(std::min<std::uint64_t>(
                         scratch.size(), slice->size - total_read))
                   : scratch.size();
-        const auto count = input->read(scratch.first(requested));
+        const auto count = read_regular_file(*input, scratch.first(requested));
         if (!count) {
             return std::unexpected(count.error());
         }

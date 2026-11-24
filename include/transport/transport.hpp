@@ -177,7 +177,11 @@ using RemoveBatchResult = std::expected<RemoveBatchReport, Error>;
 using RemoveBatchFunction = RemoveBatchResult (*)(void* context,
                                                   const RemoveBatch& batch);
 
-// Operations table; prefix listing, batches, and physical hash are optional.
+// Function signature for checking backend health without mutating state.
+using HealthCheckFunction = Result (*)(void* context);
+
+// Operations table; prefix listing, batches, physical hash, and health check
+// are optional.
 struct StorageOperations {
     InitializeFunction initialize = nullptr;
     PutFunction put = nullptr;
@@ -193,6 +197,7 @@ struct StorageOperations {
     ControlReadBatchFunction control_read_batch = nullptr;
     RemoveFunction remove = nullptr;
     RemoveBatchFunction remove_batch = nullptr;
+    HealthCheckFunction health_check = nullptr;
     std::size_t physical_hash_batch_min_objects = 0;
     Result (*put_with_progress)(void*,
                                 const std::filesystem::path&,
@@ -289,6 +294,15 @@ std::expected<Transport, Error> open_transport(std::string_view location,
 
 // Confirms that state and mandatory operations are available.
 bool valid(const Transport& transport) noexcept;
+
+// Checks whether an opened transport session is alive and responsive.
+Result check_health(Transport& transport);
+
+// Creates a non-owning view of an opened transport whose lifetime remains owned
+// by the caller (e.g. a daemon session pool). The caller must ensure owner
+// outlives the borrowed handle and is not used concurrently across threads
+// without external synchronization.
+Transport borrow_transport(Transport& owner) noexcept;
 
 // Initializes the opened storage.
 Result initialize(Transport& transport);

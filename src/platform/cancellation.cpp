@@ -29,11 +29,11 @@ std::stop_token current_stop_token() noexcept {
 }
 
 ScopedStopToken::ScopedStopToken(std::stop_token token) noexcept
-    : previous_(std::exchange(thread_stop_token, std::move(token))) {
+    : previous(std::exchange(thread_stop_token, std::move(token))) {
 }
 
 ScopedStopToken::~ScopedStopToken() noexcept {
-    thread_stop_token = std::move(previous_);
+    thread_stop_token = std::move(previous);
 }
 
 } // namespace kasumi::platform::cancellation

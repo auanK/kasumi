@@ -28,8 +28,9 @@ std::size_t content_concurrency() noexcept;
 
 std::optional<std::size_t> current_content_concurrency_override() noexcept;
 
-class ScopedContentConcurrency {
-public:
+struct ScopedContentConcurrency {
+    std::optional<std::size_t> previous{};
+
     explicit ScopedContentConcurrency(
         std::optional<std::size_t> override_value) noexcept;
     ~ScopedContentConcurrency() noexcept;
@@ -37,9 +38,6 @@ public:
     ScopedContentConcurrency(const ScopedContentConcurrency&) = delete;
     ScopedContentConcurrency&
     operator=(const ScopedContentConcurrency&) = delete;
-
-private:
-    std::optional<std::size_t> previous_;
 };
 
 template <typename Fn>

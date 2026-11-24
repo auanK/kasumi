@@ -963,7 +963,7 @@ load_state(const std::filesystem::path& database_path) {
             }
             auto parsed =
                 history::deserialize_storage_manifest(*decoded, *tree);
-            if (!parsed || parsed->empty()) {
+            if (!parsed || history::is_storage_manifest_empty(*parsed)) {
                 return std::unexpected("state.db storage_manifest is invalid");
             }
             manifest = std::move(*parsed);
@@ -1025,7 +1025,7 @@ bool save_state_impl(const std::filesystem::path& database_path,
         return false;
     }
     std::string encoded_manifest_hex;
-    if (!state.storage_manifest.empty()) {
+    if (!history::is_storage_manifest_empty(state.storage_manifest)) {
         auto encoded_manifest =
             history::serialize_storage_manifest(state.storage_manifest);
         if (!encoded_manifest) {

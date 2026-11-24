@@ -9,32 +9,29 @@ namespace kasumi::crypto::secure_memory {
 // Overwrites memory without allowing compiler dead-store elimination.
 void wipe(void* memory, std::size_t size) noexcept;
 
-template <typename T> class WipeGuard {
-public:
-    explicit WipeGuard(T& target, bool* skip = nullptr) noexcept
-        : target_(&target), skip_(skip) {
+template <typename T> struct WipeGuard {
+    T* target = nullptr;
+    bool* skip = nullptr;
+
+    explicit WipeGuard(T& target_ref, bool* skip_ptr = nullptr) noexcept
+        : target(&target_ref), skip(skip_ptr) {
     }
     WipeGuard(const WipeGuard&) = delete;
     WipeGuard& operator=(const WipeGuard&) = delete;
     ~WipeGuard() noexcept {
-        if (skip_ == nullptr || !*skip_) {
+        if ((skip == nullptr || !*skip) && target != nullptr) {
             if constexpr (requires {
-                              target_->data();
-                              target_->size();
+                              target->data();
+                              target->size();
                           }) {
-                if (!target_->empty()) {
-                    wipe(target_->data(),
-                         target_->size() * sizeof((*target_)[0]));
+                if (!target->empty()) {
+                    wipe(target->data(), target->size() * sizeof((*target)[0]));
                 }
             } else {
-                wipe(target_, sizeof(T));
+                wipe(target, sizeof(T));
             }
         }
     }
-
-private:
-    T* target_;
-    bool* skip_;
 };
 
 } // namespace kasumi::crypto::secure_memory

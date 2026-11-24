@@ -159,17 +159,10 @@ audit_physical_unit(transport::Transport& storage,
     return AuditState::Healthy;
 }
 
-std::expected<AuditState, Error>
-audit_object(transport::Transport& storage,
-             KeySpan key,
-             const kasumi::maintenance::ObjectReference& reference,
-             std::span<PhysicalAuditUnit* const> units,
-             std::span<const std::size_t> unit_sequences,
-             const history::ChunkedFileEntry* chunked,
-             const platform::Workspace& workspace) {
-    struct ReleaseChunks {
-        std::span<PhysicalAuditUnit* const> pending;
-        void release_one() {
+struct ReleaseChunks {
+    std::span<PhysicalAuditUnit* const> pending;
+    ~ReleaseChunks() {
+        while (!pending.empty()) {
             auto* unit = pending.front();
             pending = pending.subspan(1);
             if (!unit->retained_chunk.empty() &&
@@ -178,12 +171,28 @@ audit_object(transport::Transport& storage,
                 std::filesystem::remove(unit->retained_chunk, ignored);
             }
         }
-        ~ReleaseChunks() {
-            while (!pending.empty()) {
-                release_one();
-            }
-        }
-    } release{units};
+    }
+};
+
+void release_one_chunk(ReleaseChunks& state) {
+    auto* unit = state.pending.front();
+    state.pending = state.pending.subspan(1);
+    if (!unit->retained_chunk.empty() &&
+        unit->remaining_uses.fetch_sub(1) == 1) {
+        std::error_code ignored;
+        std::filesystem::remove(unit->retained_chunk, ignored);
+    }
+}
+
+std::expected<AuditState, Error>
+audit_object(transport::Transport& storage,
+             std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+             const kasumi::maintenance::ObjectReference& reference,
+             std::span<PhysicalAuditUnit* const> units,
+             std::span<const std::size_t> unit_sequences,
+             const history::ChunkedFileEntry* chunked,
+             const platform::Workspace& workspace) {
+    ReleaseChunks release{units};
 
     std::vector<std::uint8_t> buffer(chunked != nullptr ? 256U * 1024U : 0U);
     crypto::secure_memory::WipeGuard wipe_buffer{buffer};
@@ -231,7 +240,7 @@ audit_object(transport::Transport& storage,
             }
             size += *streamed;
         }
-        release.release_one();
+        release_one_chunk(release);
     }
     if (combined == AuditState::Healthy && chunked != nullptr) {
         Hash digest{};

@@ -197,36 +197,37 @@ struct ProgressState {
     std::size_t removed_objects = 0;
     std::uint64_t removed_bytes = 0;
     std::chrono::nanoseconds removal_elapsed{};
-
-    void emit(GarbageCollectStage stage,
-              GarbageCollectSubStage sub_stage) const noexcept {
-        if (!on_progress) {
-            return;
-        }
-        try {
-            on_progress(GarbageCollectProgress{
-                .stage = stage,
-                .sub_stage = sub_stage,
-                .candidate_count = candidate_count,
-                .removed_objects = removed_objects,
-                .removal_elapsed = removal_elapsed,
-                .listed_objects = listed_objects,
-                .commits_processed = commits_processed,
-                .commits_total = commits_total,
-                .candidate_content_objects = candidate_content_objects,
-                .candidate_commit_variants = candidate_commit_variants,
-                .candidate_expired_commits = candidate_expired_commits,
-                .candidate_activities = candidate_activities,
-                .deferred_recent_objects = deferred_recent_objects,
-                .candidate_bytes = candidate_bytes,
-                .removed_bytes = removed_bytes,
-                .min_age_hours = min_age_hours,
-            });
-        } catch (...) {
-            // Progress is observational and must not alter the operation.
-        }
-    }
 };
+
+void emit_gc_progress(const ProgressState& state,
+                      GarbageCollectStage stage,
+                      GarbageCollectSubStage sub_stage) noexcept {
+    if (!state.on_progress) {
+        return;
+    }
+    try {
+        state.on_progress(GarbageCollectProgress{
+            .stage = stage,
+            .sub_stage = sub_stage,
+            .candidate_count = state.candidate_count,
+            .removed_objects = state.removed_objects,
+            .removal_elapsed = state.removal_elapsed,
+            .listed_objects = state.listed_objects,
+            .commits_processed = state.commits_processed,
+            .commits_total = state.commits_total,
+            .candidate_content_objects = state.candidate_content_objects,
+            .candidate_commit_variants = state.candidate_commit_variants,
+            .candidate_expired_commits = state.candidate_expired_commits,
+            .candidate_activities = state.candidate_activities,
+            .deferred_recent_objects = state.deferred_recent_objects,
+            .candidate_bytes = state.candidate_bytes,
+            .removed_bytes = state.removed_bytes,
+            .min_age_hours = state.min_age_hours,
+        });
+    } catch (...) {
+        // Progress is observational and must not alter the operation.
+    }
+}
 
 std::optional<Error> cancellation_error() {
     if (!platform::cancellation::requested()) {
@@ -366,8 +367,9 @@ observe(transport::Transport& storage,
         std::optional<std::string_view> barrier_identifier,
         const std::filesystem::path& workspace_root,
         ProgressState& progress) {
-    progress.emit(GarbageCollectStage::Analyzing,
-                  GarbageCollectSubStage::ListingRemote);
+    emit_gc_progress(progress,
+                     GarbageCollectStage::Analyzing,
+                     GarbageCollectSubStage::ListingRemote);
 
     std::vector<std::string> listing;
     std::vector<transport::ObjectMetadata> metadata_entries;
@@ -399,8 +401,9 @@ observe(transport::Transport& storage,
     std::ranges::sort(
         metadata_entries, {}, &transport::ObjectMetadata::identifier);
     progress.listed_objects = listing.size();
-    progress.emit(GarbageCollectStage::Analyzing,
-                  GarbageCollectSubStage::AuthenticatingHistory);
+    emit_gc_progress(progress,
+                     GarbageCollectStage::Analyzing,
+                     GarbageCollectSubStage::AuthenticatingHistory);
 
     const auto find_metadata =
         [&](std::string_view identifier) -> const transport::ObjectMetadata* {
@@ -424,8 +427,9 @@ observe(transport::Transport& storage,
         [&](std::size_t done, std::size_t total) {
             progress.commits_processed = done;
             progress.commits_total = total;
-            progress.emit(GarbageCollectStage::Analyzing,
-                          GarbageCollectSubStage::AuthenticatingHistory);
+            emit_gc_progress(progress,
+                             GarbageCollectStage::Analyzing,
+                             GarbageCollectSubStage::AuthenticatingHistory);
         });
     if (!history) {
         return std::unexpected(history_error(history.error()));
@@ -434,8 +438,9 @@ observe(transport::Transport& storage,
         return std::unexpected(valid.error());
     }
 
-    progress.emit(GarbageCollectStage::Analyzing,
-                  GarbageCollectSubStage::AnalyzingReachability);
+    emit_gc_progress(progress,
+                     GarbageCollectStage::Analyzing,
+                     GarbageCollectSubStage::AnalyzingReachability);
     auto content = history_storage::inventory_content_reachability(
         storage,
         key,
@@ -451,8 +456,9 @@ observe(transport::Transport& storage,
         return std::unexpected(valid.error());
     }
 
-    progress.emit(GarbageCollectStage::Analyzing,
-                  GarbageCollectSubStage::LoadingActivities);
+    emit_gc_progress(progress,
+                     GarbageCollectStage::Analyzing,
+                     GarbageCollectSubStage::LoadingActivities);
     auto activities = history_storage::activity::load_all(
         storage, layout, key, workspace_root, listing);
     if (!activities) {
@@ -821,14 +827,16 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
         .on_progress = on_progress,
         .min_age_hours = effective_min_age_hours,
     };
-    progress.emit(GarbageCollectStage::Preparing, GarbageCollectSubStage::None);
+    emit_gc_progress(
+        progress, GarbageCollectStage::Preparing, GarbageCollectSubStage::None);
     if (auto cancelled = cancellation_error(); cancelled.has_value()) {
         return std::unexpected(std::move(*cancelled));
     }
 
     const auto layout = history_storage::derive_remote_layout(key);
-    progress.emit(GarbageCollectStage::Preparing,
-                  GarbageCollectSubStage::CheckingControls);
+    emit_gc_progress(progress,
+                     GarbageCollectStage::Preparing,
+                     GarbageCollectSubStage::CheckingControls);
     if (auto controls = check_pre_barrier_controls(storage, layout);
         !controls) {
         auto err = controls.error();
@@ -876,12 +884,14 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
         progress.deferred_recent_objects =
             observed_plan->deferred_recent_objects;
         progress.candidate_bytes = observed_plan->candidate_bytes;
-        progress.emit(GarbageCollectStage::Analyzing,
-                      GarbageCollectSubStage::None);
+        emit_gc_progress(progress,
+                         GarbageCollectStage::Analyzing,
+                         GarbageCollectSubStage::None);
 
         failure_diagnostic.stage = GarbageCollectStage::Finalizing;
-        progress.emit(GarbageCollectStage::Finalizing,
-                      GarbageCollectSubStage::None);
+        emit_gc_progress(progress,
+                         GarbageCollectStage::Finalizing,
+                         GarbageCollectSubStage::None);
         return GarbageCollectResult{
             .candidate_objects = candidate_count,
             .removed_objects = 0,
@@ -903,8 +913,9 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
         };
     }
 
-    progress.emit(GarbageCollectStage::Preparing,
-                  GarbageCollectSubStage::EstablishingBarrier);
+    emit_gc_progress(progress,
+                     GarbageCollectStage::Preparing,
+                     GarbageCollectSubStage::EstablishingBarrier);
     protocol::BarrierOptions barrier_options{
         .settle_delay = options.barrier_settle_delay,
     };
@@ -1025,15 +1036,17 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
         progress.deferred_recent_objects =
             observed_plan->deferred_recent_objects;
         progress.candidate_bytes = observed_plan->candidate_bytes;
-        progress.emit(GarbageCollectStage::Analyzing,
-                      GarbageCollectSubStage::None);
+        emit_gc_progress(progress,
+                         GarbageCollectStage::Analyzing,
+                         GarbageCollectSubStage::None);
 
         if (candidates.empty()) {
             failure_diagnostic.stage = GarbageCollectStage::Finalizing;
             failure_diagnostic.mutation_state =
                 GarbageCollectMutationState::NotAttempted;
-            progress.emit(GarbageCollectStage::Finalizing,
-                          GarbageCollectSubStage::ReleasingBarrier);
+            emit_gc_progress(progress,
+                             GarbageCollectStage::Finalizing,
+                             GarbageCollectSubStage::ReleasingBarrier);
             return finish(GarbageCollectResult{
                 .candidate_objects = 0,
                 .removed_objects = 0,
@@ -1056,8 +1069,9 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             });
         }
 
-        progress.emit(GarbageCollectStage::Analyzing,
-                      GarbageCollectSubStage::ProbingConsistency);
+        emit_gc_progress(progress,
+                         GarbageCollectStage::Analyzing,
+                         GarbageCollectSubStage::ProbingConsistency);
         auto online = protocol::supports_online_collection(
             storage, layout, workspace_root);
         if (!online) {
@@ -1066,8 +1080,9 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
 
         if (!*online) {
             failure_diagnostic.stage = GarbageCollectStage::Finalizing;
-            progress.emit(GarbageCollectStage::Finalizing,
-                          GarbageCollectSubStage::ReleasingBarrier);
+            emit_gc_progress(progress,
+                             GarbageCollectStage::Finalizing,
+                             GarbageCollectSubStage::ReleasingBarrier);
             return finish(GarbageCollectResult{
                 .candidate_objects = candidate_count,
                 .removed_objects = 0,
@@ -1092,8 +1107,9 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
 
         failure_diagnostic.stage = GarbageCollectStage::Applying;
         const auto removal_started = std::chrono::steady_clock::now();
-        progress.emit(GarbageCollectStage::Applying,
-                      GarbageCollectSubStage::RemovingObjects);
+        emit_gc_progress(progress,
+                         GarbageCollectStage::Applying,
+                         GarbageCollectSubStage::RemovingObjects);
         auto apply = [&]() -> std::expected<std::size_t, Error> {
             auto verified =
                 require_barrier_exclusivity(cleanup.registration, layout);
@@ -1133,8 +1149,9 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                 progress.removed_bytes += bytes;
                 progress.removal_elapsed =
                     std::chrono::steady_clock::now() - removal_started;
-                progress.emit(GarbageCollectStage::Applying,
-                              GarbageCollectSubStage::RemovingObjects);
+                emit_gc_progress(progress,
+                                 GarbageCollectStage::Applying,
+                                 GarbageCollectSubStage::RemovingObjects);
             };
 
             while (chunk_start < total_candidates) {
@@ -1282,8 +1299,9 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                                  : GarbageCollectMutationState::Confirmed;
         progress.removed_objects = removed_objects;
         progress.removal_elapsed = removal_elapsed;
-        progress.emit(GarbageCollectStage::Finalizing,
-                      GarbageCollectSubStage::ReleasingBarrier);
+        emit_gc_progress(progress,
+                         GarbageCollectStage::Finalizing,
+                         GarbageCollectSubStage::ReleasingBarrier);
 
         return finish(GarbageCollectResult{
             .candidate_objects = candidate_count,

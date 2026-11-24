@@ -2958,4 +2958,27 @@ TEST(RcloneSessionTest, ValidatesBandwidthLimitAndTransportOptions) {
     EXPECT_FALSE(opened.has_value());
 }
 
+TEST(RcloneRcClientTest, CheckRcHealthDetectsHealthyAndStoppedSessions) {
+    RcServerState remote;
+    remote.server.Post("/rc/core/pid", [](const auto&, auto& response) {
+        response.set_content(R"({"pid":4242})", "application/json");
+    });
+    remote.server.Post("/rc/core/version", [](const auto&, auto& response) {
+        response.set_content(R"({"version":"v1.60.0","decomposed":[1,60,0]})",
+                             "application/json");
+    });
+    start_rc_server(remote);
+    configure_state(remote.client, remote.port);
+    remote.client.child_pid = 4242;
+    remote.client.process_started = true;
+    remote.client.ready = false;
+
+    ASSERT_TRUE(rclone_detail::establish_rc_connection(remote.client, 4242)
+                    .has_value());
+    EXPECT_TRUE(rclone_detail::check_rc_health(remote.client).has_value());
+
+    stop_rc_server(remote);
+    EXPECT_FALSE(rclone_detail::check_rc_health(remote.client).has_value());
+}
+
 } // namespace

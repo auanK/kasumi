@@ -200,9 +200,9 @@ try_reuse_cached_row(const ScanContext& context,
         return std::nullopt;
     }
     if (auto* progress = context.progress) {
-        ProgressMeter::add(progress->files_seen);
-        ProgressMeter::add(progress->files_bytes, current_meta.size);
-        ProgressMeter::add(progress->cache_hits);
+        progress_add(progress->files_seen);
+        progress_add(progress->files_bytes, current_meta.size);
+        progress_add(progress->cache_hits);
     }
     row.hash = cached_row.hash;
     platform::perf_trace::count("local hash cache hits");
@@ -234,8 +234,8 @@ process_file_entry(const std::filesystem::path& file_path,
     }
 
     if (auto* progress = context.progress) {
-        ProgressMeter::add(progress->files_seen);
-        ProgressMeter::add(progress->files_bytes, current_meta.size);
+        progress_add(progress->files_seen);
+        progress_add(progress->files_bytes, current_meta.size);
     }
     platform::perf_trace::count("local hash cache misses");
     std::expected<Hash, std::string> hash = std::unexpected("unhashed");
@@ -288,7 +288,7 @@ process_file_entry(const std::filesystem::path& file_path,
                                          "file changed while being read"});
     row.hash = *hash;
     if (auto* progress = context.progress) {
-        ProgressMeter::add(progress->files_hashed);
+        progress_add(progress->files_hashed);
     }
     std::optional<state_storage::FileCacheRow> cache_row;
     if (current_meta.is_valid && current_meta.identity.has_value()) {

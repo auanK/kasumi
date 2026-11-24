@@ -564,6 +564,7 @@ std::expected<void, Error> prepare_attempt(State& state) {
     if (!started) {
         return std::unexpected(started.error());
     }
+    state.child_pid = *started;
     const auto connected = establish_rc_connection(state, *started);
     if (!connected) {
         return std::unexpected(connected.error());

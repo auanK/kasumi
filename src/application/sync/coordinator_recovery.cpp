@@ -518,7 +518,7 @@ std::expected<void, Error> resume_pending_local_mutations(
             std::vector<std::size_t> loose_indices;
             for (std::size_t i = position; i < end; ++i) {
                 const auto op_idx = replay_order[i];
-                if (manifest.empty()) {
+                if (history::is_storage_manifest_empty(manifest)) {
                     loose_indices.push_back(op_idx);
                     continue;
                 }

@@ -48,7 +48,7 @@ struct SessionGuard {
     bool keep = false;
     ~SessionGuard() {
         if (!keep && session) {
-            session->invalidate();
+            invalidate_session(*session);
         }
     }
 };
@@ -1451,42 +1451,53 @@ std::expected<void, std::string> clear_locked(const Paths& paths,
     return platform::durability::sync_parent_directory(retired);
 }
 
+bool session_bound_to(const Session& session,
+                      const Paths& requested,
+                      const std::array<std::byte, 32>& key) noexcept {
+    return session.paths.final_path == requested.final_path &&
+           session.paths.temporary_path == requested.temporary_path &&
+           session.paths.log_path == requested.log_path &&
+           session.key_identity == key;
+}
+
+std::expected<void, std::string>
+refresh_session_cache(Session& session, const Paths& paths, const Tip& tip) {
+    auto snapshot = artifact_state(paths.final_path);
+    auto log = artifact_state(paths.log_path);
+    if (!snapshot || !log) {
+        return std::unexpected(!snapshot ? snapshot.error() : log.error());
+    }
+    session.tip_snapshot = tip.snapshot;
+    session.tip_bytes = tip.bytes;
+    session.tip_count = tip.count;
+    session.tip_chain = tip.chain;
+    session.snapshot_fingerprint = snapshot->fingerprint;
+    session.snapshot_bytes = snapshot->bytes;
+    session.log_fingerprint = log->fingerprint;
+    return {};
+}
+
+std::expected<void, std::string>
+bind_session_cache(Session* session,
+                   const Paths& paths,
+                   const kasumi::Hash& key_id,
+                   transaction::Record&& record,
+                   const Tip& tip) {
+    if (!session) {
+        return {};
+    }
+    if (auto ok = refresh_session_cache(*session, paths, tip); !ok) {
+        return ok;
+    }
+    session->paths = paths;
+    session->operation_id = record.operation_id;
+    session->key_identity = key_id;
+    session->confirmed_record.emplace(std::move(record));
+    session->state = SessionState::Confirmed;
+    return {};
+}
+
 } // namespace
-
-struct SessionAccess {
-    static std::expected<void, std::string>
-    refresh(Session& session, const Paths& paths, const Tip& tip) {
-        auto snapshot = artifact_state(paths.final_path);
-        auto log = artifact_state(paths.log_path);
-        if (!snapshot || !log)
-            return std::unexpected(!snapshot ? snapshot.error() : log.error());
-        session.tip_snapshot = tip.snapshot;
-        session.tip_bytes = tip.bytes;
-        session.tip_count = tip.count;
-        session.tip_chain = tip.chain;
-        session.snapshot_fingerprint = snapshot->fingerprint;
-        session.snapshot_bytes = snapshot->bytes;
-        session.log_fingerprint = log->fingerprint;
-        return {};
-    }
-
-    static std::expected<void, std::string> bind(Session* session,
-                                                 const Paths& paths,
-                                                 const kasumi::Hash& key_id,
-                                                 transaction::Record&& record,
-                                                 const Tip& tip) {
-        if (!session)
-            return {};
-        if (auto ok = refresh(*session, paths, tip); !ok)
-            return ok;
-        session->paths = paths;
-        session->operation_id = record.operation_id;
-        session->key_identity = key_id;
-        session->confirmed_record.emplace(std::move(record));
-        session->state = SessionState::Confirmed;
-        return {};
-    }
-};
 
 std::expected<void, std::string>
 save(const Paths& paths,
@@ -1505,11 +1516,12 @@ save(const Paths& paths,
         auto structural = validate_paths(paths);
         if (!structural)
             return structural;
-        if (session && session->confirmed() == &record)
+        if (session && confirmed_record(*session) == &record)
             return std::unexpected(
                 "requested record must be independent of the session cache");
         const auto key_id = journal_key_id(journal_key);
-        if (session && session->is_valid() && !session->bound_to(paths, key_id))
+        if (session && is_session_valid(*session) &&
+            !session_bound_to(*session, paths, key_id))
             return std::unexpected("active journal session paths/key changed");
         auto codec_validation = transaction::codec::validate(record);
         if (!codec_validation)
@@ -1533,10 +1545,10 @@ save(const Paths& paths,
                 return {};
             if (journal_fault_test::cleanup_fail("session-update"))
                 throw std::bad_alloc{};
-            return SessionAccess::bind(
+            return bind_session_cache(
                 session, paths, key_id, make_confirmed(), tip);
         };
-        if (session && session->is_valid()) {
+        if (session && is_session_valid(*session)) {
             // Check before private-storage validation updates ACL/ctime itself.
             auto snapshot = artifact_state(paths.final_path);
             auto log = artifact_state(paths.log_path);
@@ -1576,14 +1588,14 @@ save(const Paths& paths,
                 journal_fault_test::hit(
                     "before-session-update", &record, saved_tip->count);
                 if (auto refreshed =
-                        SessionAccess::refresh(*session, paths, *saved_tip);
+                        refresh_session_cache(*session, paths, *saved_tip);
                     !refreshed)
                     return refreshed;
                 assign_mutable_fields(*session->confirmed_record, record);
                 guard.keep = true;
                 return {};
             }
-            session->invalidate();
+            invalidate_session(*session);
         }
         auto outer =
             validate_parent_directory(paths.final_path.parent_path(), false);
@@ -1681,8 +1693,8 @@ load(const Paths& paths,
         if (!cleared)
             return std::unexpected(cleared.error());
         if (session) {
-            const bool bound = !session->operation().empty();
-            session->invalidate();
+            const bool bound = !session_operation(*session).empty();
+            invalidate_session(*session);
             session->state =
                 bound ? SessionState::Retired : SessionState::Uninitialized;
             guard.keep = true;
@@ -1693,8 +1705,8 @@ load(const Paths& paths,
         if (session && session->state == SessionState::Retired)
             return std::unexpected("journal session is retired");
         const auto key_id = journal_key_id(journal_key);
-        if (session && session->is_valid() &&
-            !session->bound_to(paths, key_id)) {
+        if (session && is_session_valid(*session) &&
+            !session_bound_to(*session, paths, key_id)) {
             return std::unexpected("active journal session paths/key changed");
         }
         auto structural = validate_paths(paths);
@@ -1717,7 +1729,7 @@ load(const Paths& paths,
             return std::unexpected(directory.error());
         if (missing(*directory)) {
             if (session) {
-                session->invalidate();
+                invalidate_session(*session);
                 session->state = SessionState::Uninitialized;
             }
             guard.keep = true;
@@ -1732,12 +1744,11 @@ load(const Paths& paths,
         if (!loaded)
             return std::unexpected(loaded.error());
         journal_fault_test::hit("loaded", &loaded->record);
-        if (auto bound =
-                SessionAccess::bind(session,
-                                    paths,
-                                    key_id,
-                                    transaction::Record{loaded->record},
-                                    loaded->tip);
+        if (auto bound = bind_session_cache(session,
+                                            paths,
+                                            key_id,
+                                            transaction::Record{loaded->record},
+                                            loaded->tip);
             !bound) {
             return std::unexpected(bound.error());
         }
@@ -1760,8 +1771,8 @@ clear(const Paths& paths,
     SessionGuard guard{session};
     try {
         const auto key_id = journal_key_id(journal_key);
-        if (session && session->is_valid() &&
-            !session->bound_to(paths, key_id)) {
+        if (session && is_session_valid(*session) &&
+            !session_bound_to(*session, paths, key_id)) {
             return std::unexpected("active journal session paths/key changed");
         }
         auto result = clear_locked(paths, journal_key.value);

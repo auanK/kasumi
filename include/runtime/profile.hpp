@@ -37,6 +37,11 @@ struct ProfileData {
     std::optional<std::string> bandwidth_limit = std::nullopt;
     std::optional<std::uint32_t> transfer_concurrency = std::nullopt;
     std::optional<std::filesystem::path> rclone_config = std::nullopt;
+    // Optional per-profile background daemon automation settings.
+    std::optional<bool> watch_enabled = std::nullopt;
+    std::optional<std::uint32_t> sync_interval_seconds = std::nullopt;
+    std::optional<std::uint32_t> gc_interval_hours = std::nullopt;
+    bool paused = false;
 };
 
 std::string_view to_string(KeyStorage storage) noexcept;

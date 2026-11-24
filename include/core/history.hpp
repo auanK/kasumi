@@ -86,12 +86,13 @@ struct StorageManifest {
     // Sorted strictly by file_hash without duplicates.
     std::vector<ChunkedFileEntry> chunked_files;
 
-    bool empty() const noexcept {
-        return packed_blobs.empty() && chunked_files.empty();
-    }
-
     bool operator==(const StorageManifest&) const noexcept = default;
 };
+
+[[nodiscard]] inline bool
+is_storage_manifest_empty(const StorageManifest& manifest) noexcept {
+    return manifest.packed_blobs.empty() && manifest.chunked_files.empty();
+}
 
 inline constexpr std::size_t maximum_packed_blob_entries = 262144;
 inline constexpr std::size_t maximum_chunked_file_entries = 65536;

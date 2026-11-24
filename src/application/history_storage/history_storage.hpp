@@ -27,10 +27,8 @@ struct HeadReference {
     // BLAKE3 of the encrypted object.
     std::string ciphertext_id;
 
-    friend bool operator==(const HeadReference&,
-                           const HeadReference&) noexcept = default;
-    friend auto operator<=>(const HeadReference&,
-                            const HeadReference&) noexcept = default;
+    bool operator==(const HeadReference&) const noexcept = default;
+    auto operator<=>(const HeadReference&) const noexcept = default;
 };
 
 // Validates both hexadecimal identifiers.

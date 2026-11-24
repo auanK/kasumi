@@ -21,8 +21,8 @@ namespace kasumi::application::detail {
 
 std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
     ProgressMeter meter(context.on_progress, context.storage);
-    meter.notify(SyncProgress{.stage = SyncStage::Observing});
-    meter.phase(Activity::Scanning);
+    notify_progress(meter, SyncProgress{.stage = SyncStage::Observing});
+    begin_progress_phase(meter, Activity::Scanning);
     if (context.dry_run) {
         const auto journal_paths = sync::journal::make_paths(
             context.runtime.database_path.parent_path());
@@ -82,8 +82,8 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
 
     collected->pending_deletion_authority = authority;
 
-    meter.notify(SyncProgress{.stage = SyncStage::Calculating});
-    meter.phase(Activity::ComparingSnapshots);
+    notify_progress(meter, SyncProgress{.stage = SyncStage::Calculating});
+    begin_progress_phase(meter, Activity::ComparingSnapshots);
     auto reconciled = reconciliation::reconcile(*collected);
     if (!reconciled) {
         return std::unexpected(
@@ -118,7 +118,7 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
         }
     } staged_guard{stable->staged, context.key};
 
-    meter.phase(Activity::PreparingPlan);
+    begin_progress_phase(meter, Activity::PreparingPlan);
     std::unordered_set<std::string> eligible_paths;
     for (const auto& auth_row : authority) {
         const auto pending =
@@ -199,7 +199,7 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
         }
     } writer_guard{writer};
     if (stable->result.requires_publication) {
-        meter.phase(Activity::PreparingRemote);
+        begin_progress_phase(meter, Activity::PreparingRemote);
         const auto layout = history_storage::derive_remote_layout(context.key);
         auto registered =
             history_storage::maintenance_protocol::register_writer(
@@ -214,11 +214,12 @@ std::expected<Response, Error> run_resolve_missing(OperationContext& context) {
         writer = std::move(*registered);
     }
 
-    meter.notify(SyncProgress{
-        .stage = SyncStage::Applying,
-        .total_items =
-            static_cast<std::uint32_t>(sync_plan_size(stable->result.plan)),
-    });
+    notify_progress(meter,
+                    SyncProgress{
+                        .stage = SyncStage::Applying,
+                        .total_items = static_cast<std::uint32_t>(
+                            sync_plan_size(stable->result.plan)),
+                    });
     history::CommitAuthorship authorship;
     if (context.machine_identity) {
         authorship = make_commit_authorship(

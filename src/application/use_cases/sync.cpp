@@ -94,9 +94,27 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
     context.recovered_transaction =
         (*recovery != sync::coordinator::RecoveryResult::NoJournal);
 
-    observation::LocalObservationSession observation_session;
-    observation_session.progress = &meter;
-    observation_session.database_path = context.runtime.database_path;
+    observation::LocalObservationSession local_session;
+    observation::LocalObservationSession* active_session = &local_session;
+    if (context.warm_observation != nullptr) {
+        active_session = context.warm_observation;
+        if (!observation::warm_session_db_matches(
+                *active_session, context.runtime.database_path)) {
+            *active_session = observation::LocalObservationSession{};
+            active_session->database_path = context.runtime.database_path;
+        }
+    } else {
+        local_session.database_path = context.runtime.database_path;
+    }
+    struct WarmSessionProgressGuard {
+        observation::LocalObservationSession* session;
+        ~WarmSessionProgressGuard() noexcept {
+            if (session != nullptr) {
+                session->progress = nullptr;
+            }
+        }
+    } session_progress_guard{active_session};
+    active_session->progress = &meter;
     std::optional<history_storage::maintenance_protocol::RegistrationResult>
         eager_writer;
     history_storage::maintenance_protocol::RegistrationState writer;
@@ -106,13 +124,14 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                                       std::nullopt,
                                   std::uint32_t total_items = 0) {
         current_stage = stage;
-        meter.notify(SyncProgress{
-            .stage = stage,
-            .summary = std::move(summary_arg),
-            .total_items = total_items,
-        });
+        notify_progress(meter,
+                        SyncProgress{
+                            .stage = stage,
+                            .summary = std::move(summary_arg),
+                            .total_items = total_items,
+                        });
         if (stage == SyncStage::Observing) {
-            meter.phase(Activity::Scanning);
+            begin_progress_phase(meter, Activity::Scanning);
         }
     };
     auto outcome = [&]() -> std::expected<Response, Error> {
@@ -137,10 +156,12 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             bool allow_unreferenced_content_reuse = false;
 
             const auto finish_summary = [&] {
-                if (observation_session.cache_dirty) {
-                    static_cast<void>(state_storage::save_file_cache_delta(
-                        context.runtime.database_path,
-                        observation_session.cache));
+                if (active_session->cache_dirty) {
+                    if (state_storage::save_file_cache_delta(
+                            context.runtime.database_path,
+                            active_session->cache)) {
+                        active_session->cache_dirty = false;
+                    }
                 }
                 summary.wire_upload_bytes = meter.wire.upload.bytes.load();
                 summary.wire_download_bytes = meter.wire.download.bytes.load();
@@ -177,7 +198,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     context.key,
                     false,
                     marked_heads,
-                    &observation_session,
+                    active_session,
                     initial_pass ? std::function<void()>{[&] {
                         eager_writer.emplace(
                             history_storage::maintenance_protocol::
@@ -210,7 +231,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                         confirmed_missing.begin(), confirmed_missing.end());
                 }
 
-                meter.phase(Activity::ComparingSnapshots);
+                begin_progress_phase(meter, Activity::ComparingSnapshots);
                 auto reconciled = reconciliation::reconcile(*collected);
                 if (!reconciled) {
                     return fail_app(
@@ -305,7 +326,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                         active_sync && !history_storage::maintenance_protocol::
                                            registration_active(writer);
                     if (initialize_storage || register_writer) {
-                        meter.phase(Activity::PreparingRemote);
+                        begin_progress_phase(meter, Activity::PreparingRemote);
                     }
                     if (initialize_storage) {
                         if (auto initialized =
@@ -351,7 +372,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     context.key,
                     std::move(*collected),
                     std::move(*reconciled),
-                    &observation_session,
+                    active_session,
                     confirmed_missing,
                     initial_pass,
                     allow_unreferenced_content_reuse,
@@ -393,7 +414,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             std::vector<Hash> confirmed_missing;
             std::expected<void, sync::coordinator::Error> synchronized;
             for (std::size_t attempt = 0; attempt < 3; ++attempt) {
-                meter.phase(Activity::PreparingRemote);
+                begin_progress_phase(meter, Activity::PreparingRemote);
                 auto admission = history_storage::maintenance_protocol::
                     verify_writer_admission(writer, layout);
                 if (!admission) {
@@ -427,7 +448,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     context.key,
                     stable->input,
                     stable->result,
-                    &observation_session,
+                    active_session,
                     stable->staged ? &*stable->staged : nullptr,
                     true,
                     std::move(authorship),
@@ -458,9 +479,10 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 }
                 confirmed_missing.push_back(*missing_hash);
                 notify_stage(SyncStage::Calculating);
-                meter.phase(Activity::Reobserving,
-                            std::nullopt,
-                            static_cast<unsigned>(attempt + 2));
+                begin_progress_phase(meter,
+                                     Activity::Reobserving,
+                                     std::nullopt,
+                                     static_cast<unsigned>(attempt + 2));
 
                 if (auto retry = prepare_pass(
                         false,
@@ -534,7 +556,7 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                             ErrorCode::InventoryAuditFailure,
                             "sync completed without a synchronization summary");
         }
-        meter.phase(Activity::Auditing);
+        begin_progress_phase(meter, Activity::Auditing);
         const auto audit = audit_remote_inventory(context.storage, context.key);
         if (!audit) {
             return std::unexpected(Error{

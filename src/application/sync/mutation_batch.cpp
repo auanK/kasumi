@@ -159,7 +159,7 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
     }
 
     if (meter)
-        meter->phase(Activity::Staging, plans.size());
+        begin_progress_phase(*meter, Activity::Staging, plans.size());
     const auto execute_plan = [&](const UniqueUploadPlan& plan)
         -> std::expected<StagedUploadObject, MutationError> {
         const auto& primary_op = record.plan.operations[plan.primary_index];
@@ -174,7 +174,7 @@ stage_upload_batch(std::span<const std::size_t> operation_indices,
             return std::unexpected(staged.error());
         }
         if (meter) {
-            meter->record_staged(destination, staged->plaintext_size);
+            record_progress_staged(*meter, destination, staged->plaintext_size);
         }
         for (const auto dup_index : plan.duplicate_indices) {
             const auto& dup_op = record.plan.operations[dup_index];
@@ -309,7 +309,7 @@ MutationResult verify_upload_batch_individually(
             if (!result) {
                 errors[index] = std::move(result.error());
             } else if (meter) {
-                ProgressMeter::add(meter->work);
+                progress_add(meter->work);
             }
         });
 
@@ -426,7 +426,7 @@ verify_upload_batch(const StagedUploadBatch& batch,
             return std::unexpected(*failure);
         }
         if (meter)
-            ProgressMeter::add(meter->work, batch.objects.size());
+            progress_add(meter->work, batch.objects.size());
         return {};
     }
     if (bulk.error().code != transport::ErrorCode::Unsupported) {

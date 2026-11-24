@@ -980,6 +980,30 @@ RemoveBatchResult remove_batch(Transport& transport, const RemoveBatch& batch) {
                          batch);
 }
 
+namespace {
+void noop_destroy_transport_state(void*) noexcept {
+}
+} // namespace
+
+Result check_health(Transport& transport) {
+    if (!valid(transport)) {
+        return std::unexpected(invalid_transport_error());
+    }
+    if (transport.storage.health_check != nullptr) {
+        return transport.storage.health_check(state_pointer(transport));
+    }
+    return {};
+}
+
+Transport borrow_transport(Transport& owner) noexcept {
+    return Transport{
+        .state = TransportStateHandle{owner.state.get(),
+                                      &noop_destroy_transport_state},
+        .storage = owner.storage,
+        .metrics = nullptr,
+    };
+}
+
 namespace detail {
 
 bool valid_relative_identifier(std::string_view identifier,

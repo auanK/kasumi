@@ -34,7 +34,7 @@
 #include <vector>
 
 namespace kasumi::application {
-class ProgressMeter;
+struct ProgressMeter;
 }
 
 namespace kasumi::application::sync::coordinator::detail {

@@ -435,4 +435,26 @@ TEST(LocalTransportTest,
     EXPECT_GT(*(*listed)[1].modified_at_unix, 1'000'000'000);
 }
 
+TEST(LocalTransportTest, HealthCheckAndNonOwningBorrowWork) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("transport-local-borrow");
+    const auto storage_root =
+        kasumi::test::workspace_path(workspace, "storage");
+    auto opened = kasumi::transport::open_transport(storage_root.string());
+    ASSERT_TRUE(opened.has_value());
+    ASSERT_TRUE(kasumi::transport::initialize(*opened));
+    EXPECT_TRUE(kasumi::transport::check_health(*opened).has_value());
+
+    const auto src = kasumi::test::workspace_path(workspace, "src");
+    kasumi::test::write_text(src, "borrowed-payload");
+    {
+        auto borrowed = kasumi::transport::borrow_transport(*opened);
+        EXPECT_TRUE(kasumi::transport::check_health(borrowed).has_value());
+        EXPECT_TRUE(kasumi::transport::put(borrowed, src, "obj-1").has_value());
+    }
+    EXPECT_TRUE(kasumi::transport::check_health(*opened).has_value());
+    EXPECT_EQ(kasumi::transport::presence(*opened, "obj-1").value(),
+              Presence::Present);
+}
+
 } // namespace

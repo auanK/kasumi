@@ -16,7 +16,7 @@
 #include <string>
 
 namespace kasumi::application {
-class ProgressMeter;
+struct ProgressMeter;
 }
 
 namespace kasumi::application::integrity::repack {

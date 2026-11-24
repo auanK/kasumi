@@ -932,8 +932,7 @@ std::expected<bool, DWORD> is_privilege_enabled(LPCWSTR privilege_name) {
 // access control tests using thread-scoped impersonation (Invariant E) to
 // strictly enforce DACLs even in elevated environments without mutating the
 // global process token.
-class ScopedDisableAllPrivileges {
-public:
+struct ScopedDisableAllPrivileges {
     explicit ScopedDisableAllPrivileges(PrivilegeWin32Api api = {})
         : api_(std::move(api)) {
         enter();
@@ -975,7 +974,6 @@ public:
         return restore_internal();
     }
 
-private:
     DWORD record_failure(const char* operation, DWORD error) {
         if (error == ERROR_SUCCESS)
             error = ERROR_GEN_FAILURE;

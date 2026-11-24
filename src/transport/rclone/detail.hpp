@@ -31,6 +31,7 @@ struct State {
     std::string password;
     std::string base_url;
     std::uint16_t port = 0;
+    int child_pid = 0;
     reproc::process process;
     std::mutex process_mutex;
     std::future<std::error_code> drain_future;
@@ -69,6 +70,9 @@ void destroy_state(void* state) noexcept;
 
 // Awaits and validates connection to the RC API.
 std::expected<void, Error> establish_rc_connection(State& state, int child_pid);
+
+// Verifies an existing RC session child process and HTTP endpoint are healthy.
+Result check_rc_health(State& state);
 
 // Requests shutdown and reports whether RC acknowledged the request.
 bool request_core_quit_best_effort(State& state) noexcept;
