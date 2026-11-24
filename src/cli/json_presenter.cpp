@@ -1787,6 +1787,13 @@ int present_json_overview(const application::DaemonStatusReport& daemon,
             {"dirty_paths_count",
              row.daemon_profile ? row.daemon_profile->dirty_paths_count
                                 : std::size_t{0}},
+            {"watch_enabled",
+             row.daemon_profile ? row.daemon_profile->watch_enabled
+                                : row.profile.watch_enabled.value_or(true)},
+            {"sync_interval_seconds",
+             row.daemon_profile
+                 ? row.daemon_profile->sync_interval_seconds
+                 : row.profile.sync_interval_seconds.value_or(300U)},
             {"last_sync_at",
              last_sync_at ? json(*last_sync_at) : json(nullptr)},
             {"last_sync_status",
@@ -1794,6 +1801,21 @@ int present_json_overview(const application::DaemonStatusReport& daemon,
                     : json(nullptr)},
             {"last_sync_machine",
              last_machine.empty() ? json(nullptr) : json(last_machine)},
+            {"head_commit_at",
+             row.activity.accepted_commit
+                 ? json(row.activity.accepted_commit->created_at > 0
+                            ? row.activity.accepted_commit->created_at
+                            : row.activity.accepted_commit->accepted_at)
+                 : json(nullptr)},
+            {"head_commit_machine",
+             row.activity.accepted_commit &&
+                     !row.activity.accepted_commit->machine_name.empty()
+                 ? json(row.activity.accepted_commit->machine_name)
+                 : json(nullptr)},
+            {"head_commit_height",
+             row.activity.accepted_commit
+                 ? json(row.activity.accepted_commit->height)
+                 : json(nullptr)},
             {"last_error",
              row.daemon_profile && !row.daemon_profile->last_error.empty()
                  ? json(row.daemon_profile->last_error)
@@ -1803,9 +1825,6 @@ int present_json_overview(const application::DaemonStatusReport& daemon,
             entry["local_dir"] =
                 platform::path::to_utf8(row.profile.local_dir);
             entry["remote_dir"] = row.profile.remote_dir;
-            entry["watch_enabled"] = row.profile.watch_enabled.value_or(true);
-            entry["sync_interval_seconds"] =
-                row.profile.sync_interval_seconds.value_or(300U);
             entry["gc_interval_hours"] =
                 row.profile.gc_interval_hours.value_or(0U);
             if (row.daemon_profile) {

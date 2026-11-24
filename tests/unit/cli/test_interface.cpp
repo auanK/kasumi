@@ -270,6 +270,7 @@ TEST_F(CliInterfaceTest, ShowOfflineRemoteSummaryAndConfigReflectTraceability) {
 
     EXPECT_EQ(shown.code, 0) << shown.err;
     EXPECT_NE(shown.out.find("Last complete sync:"), std::string::npos);
+    EXPECT_NE(shown.out.find("Last change (HEAD):"), std::string::npos);
     EXPECT_NE(shown.out.find("--full"), std::string::npos);
     EXPECT_EQ(shown.out.find("Accepted state:"), std::string::npos);
     EXPECT_EQ(shown.out.find("Recent local executions (2):"), std::string::npos);
@@ -1161,13 +1162,24 @@ TEST_F(CliInterfaceTest, ConfigAutomationSubmenuUpdatesProfileSchedule) {
     const auto profiles = kasumi::application::list_profiles(environment);
     ASSERT_TRUE(profiles.has_value());
     ASSERT_EQ(profiles->size(), 1U);
-    const auto& updated = profiles->front();
+    const auto updated = profiles->front();
     ASSERT_TRUE(updated.watch_enabled.has_value());
     EXPECT_FALSE(*updated.watch_enabled);
     ASSERT_TRUE(updated.sync_interval_seconds.has_value());
     EXPECT_EQ(*updated.sync_interval_seconds, 120U);
     ASSERT_TRUE(updated.gc_interval_hours.has_value());
     EXPECT_EQ(*updated.gc_interval_hours, 24U);
+
+    const auto watch_off_overview = run({"kasumi"});
+    EXPECT_EQ(watch_off_overview.code, 0);
+    EXPECT_NE(watch_off_overview.out.find("[watch off]"), std::string::npos);
+
+    const auto watch_off_json = run({"kasumi", "status", "--json"});
+    EXPECT_EQ(watch_off_json.code, 0);
+    EXPECT_NE(watch_off_json.out.find("\"watch_enabled\":false"),
+              std::string::npos);
+    EXPECT_NE(watch_off_json.out.find("\"head_commit_machine\":"),
+              std::string::npos);
 }
 
 } // namespace

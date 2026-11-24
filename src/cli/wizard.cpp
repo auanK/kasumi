@@ -1316,6 +1316,17 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
                     } else {
                         i18n::println(i18n::Key::WizardShowNoCompleteSync);
                     }
+                    if (activity.accepted_commit) {
+                        const auto& c = *activity.accepted_commit;
+                        const auto ts = platform::clock::format_local_timestamp(
+                            c.created_at > 0 ? c.created_at : c.accepted_at);
+                        const auto machine = format_machine_label(
+                            c.machine_name, c.machine_id_hex, false, false);
+                        i18n::println(i18n::Key::WizardShowLastChangeHead,
+                                      ts,
+                                      machine,
+                                      c.height);
+                    }
                 }
                 if (const auto logs = application::query_daemon_events(
                         environment,

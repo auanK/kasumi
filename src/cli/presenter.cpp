@@ -3463,36 +3463,49 @@ std::string format_active_stage_progress(
 }
 
 std::string format_last_sync_human(const OverviewProfileRow& row) {
-    const application::ProfileExecutionSummary* chosen = nullptr;
-    if (row.activity.last_attempt &&
-        row.activity.last_attempt->operation ==
-            application::ProfileOperationKind::Sync &&
-        (!row.activity.last_complete_sync ||
-         row.activity.last_attempt->started_at >
-             row.activity.last_complete_sync->started_at)) {
-        chosen = &*row.activity.last_attempt;
-    } else if (row.activity.last_complete_sync) {
-        chosen = &*row.activity.last_complete_sync;
+    std::optional<std::int64_t> local_sync_ts;
+    if (row.activity.last_complete_sync) {
+        local_sync_ts = row.activity.last_complete_sync->finished_at.value_or(
+            row.activity.last_complete_sync->started_at);
     }
-    if (chosen != nullptr) {
-        const auto ts = chosen->finished_at.value_or(chosen->started_at);
-        const auto rel = format_relative_time(ts);
-        if (!chosen->machine_name.empty()) {
-            return std::format(
-                "{} ({})", rel, sanitize_terminal_text(chosen->machine_name));
+    if (row.daemon_profile && row.daemon_profile->last_sync_finished_at) {
+        const auto d_ts = *row.daemon_profile->last_sync_finished_at;
+        if (!local_sync_ts || d_ts > *local_sync_ts) {
+            local_sync_ts = d_ts;
         }
-        return rel;
     }
+
+    std::string sync_part;
+    if (local_sync_ts) {
+        sync_part = i18n::format(i18n::Key::OverviewDetailLocalSync,
+                                 format_relative_time(*local_sync_ts));
+    }
+
+    std::string change_part;
     if (row.activity.accepted_commit) {
         const auto& c = *row.activity.accepted_commit;
-        const auto rel = format_relative_time(c.accepted_at);
-        if (!c.machine_name.empty()) {
-            return std::format(
-                "{} ({})", rel, sanitize_terminal_text(c.machine_name));
+        const std::int64_t commit_ts =
+            c.created_at > 0 ? c.created_at : c.accepted_at;
+        const auto rel = format_relative_time(commit_ts);
+        std::string author = sanitize_terminal_text(c.machine_name);
+        if (author.empty() && !c.machine_id_hex.empty()) {
+            author = sanitize_terminal_text(c.machine_id_hex.substr(0, 8));
         }
-        return rel;
+        if (!author.empty()) {
+            change_part = i18n::format(
+                i18n::Key::OverviewDetailLastChangeBy, rel, author);
+        } else {
+            change_part = i18n::format(i18n::Key::OverviewDetailLastChange, rel);
+        }
     }
-    return {};
+
+    if (!sync_part.empty() && !change_part.empty()) {
+        return std::format("{} | {}", sync_part, change_part);
+    }
+    if (!sync_part.empty()) {
+        return sync_part;
+    }
+    return change_part;
 }
 
 } // namespace
@@ -3644,6 +3657,35 @@ int present_overview(const application::DaemonStatusReport& daemon,
             }
         }
 
+        const bool is_paused =
+            (daemon.running && row.daemon_profile &&
+             row.daemon_profile->state == application::DaemonProfileState::Paused) ||
+            (!daemon.running && row.profile.paused);
+        const bool is_locked =
+            daemon.running && row.daemon_profile &&
+            row.daemon_profile->state == application::DaemonProfileState::Locked;
+        if (!is_paused && !is_locked) {
+            const bool watch_off =
+                row.daemon_profile ? !row.daemon_profile->watch_enabled
+                                   : !row.profile.watch_enabled.value_or(true);
+            const std::uint32_t sync_interval =
+                row.daemon_profile
+                    ? row.daemon_profile->sync_interval_seconds
+                    : row.profile.sync_interval_seconds.value_or(300U);
+            if (watch_off) {
+                const auto tag =
+                    sync_interval == 0U
+                        ? i18n::tr(i18n::Key::OverviewTagManualOnly)
+                        : i18n::tr(i18n::Key::OverviewTagWatchOff);
+                if (detail.empty()) {
+                    detail = std::string{tag};
+                } else {
+                    detail += " ";
+                    detail += tag;
+                }
+            }
+        }
+
         const std::string colored_badge =
             use_color ? std::format("{}{:<13}{}", color, badge, style::reset)
                       : std::format("{:<13}", badge);
@@ -3734,9 +3776,22 @@ int present(const application::DaemonStatusReport& report,
                 summary += " (" + format_active_stage_progress(p) + ")";
             } else if (!p.last_error.empty()) {
                 summary += " - " + sanitize_terminal_text(p.last_error);
-            } else if (p.last_sync_finished_at.has_value()) {
-                summary +=
-                    " (" + format_relative_time(*p.last_sync_finished_at) + ")";
+            } else {
+                std::string meta;
+                if (!p.paused && !p.watch_enabled) {
+                    meta = p.sync_interval_seconds == 0U
+                               ? "watch off, timer off"
+                               : "watch off";
+                }
+                if (p.last_sync_finished_at.has_value()) {
+                    if (!meta.empty()) {
+                        meta += ", ";
+                    }
+                    meta += format_relative_time(*p.last_sync_finished_at);
+                }
+                if (!meta.empty()) {
+                    summary += " (" + meta + ")";
+                }
             }
             i18n::println(i18n::Key::DaemonStatusProfileSummary,
                           sanitize_terminal_text(p.name),
