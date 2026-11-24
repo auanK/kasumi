@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.27.0]
+
+### Added
+
+- **Multi-Profile Continuous Sync Daemon (`kasumi daemon`)**:
+  - Added single-instance multi-profile background daemon (`daemon.lock`, `daemon.control.json`, and rotating `daemon.log`) maintaining warm `rclone rcd` transport sessions across cycles (with idle eviction) and validated SQLite `LocalObservationSession` state.
+  - Added native directory watching (`ReadDirectoryChangesW` on Windows, `inotify` on Linux) with quiet-window debouncing, cache-backed self-mutation suppression, non-recursive `config.toml` watching, and directory-identity restart handling.
+  - Added zero-walk remote fast polling (`fast_poll`) when local state is unchanged, automatic `config.toml` reload, exponential backoff, `needs_attention` circuit breakers (including `empty_local_blocked` protection), and opt-in scheduled cooperative GC (`gc_interval_hours`, default `0` / disabled).
+  - Added `kasumi daemon <run|stop|status|sync|pause|resume|unlock|lock|reload|logs|autostart>` CLI subcommands with `--foreground`, `--background`, `--wait`, `--full`, `--lines <1..1000>`, `--json`, `--quiet`, and `--log-file <path>` support, plus user-session autostart (`systemd` user units / XDG desktop entries on Linux, Registry Run key on Windows; `KASUMI_AUTOSTART_DIR` override).
+- **RAM-Pinned Session Key Arena & Hardened Loopback IPC**:
+  - Added OS-locked memory key arena (`VirtualAlloc` + `VirtualLock` on Windows; `mmap` + `mlock` + `madvise(MADV_DONTDUMP | MADV_WIPEONFORK)` on Linux) scrubbed with `crypto_wipe` on lock, unload, or shutdown, enabling `memory`-mode profiles to be unlocked in RAM via `kasumi daemon unlock <profile>` and wiped with `kasumi daemon lock <profile>`.
+  - Added authenticated `127.0.0.1` loopback HTTP IPC enforcing single-header `X-Kasumi-Daemon-Token` verification (`crypto_verify32`), browser-CSRF header rejection (`Origin`, `Referer`, `Sec-Fetch-*`, single loopback `Host`), XChaCha20-Poly1305 sealed `/v1/unlock` payloads bound to profile name, typed JSON error responses, `/v1/events`, and `/v1/cancel`.
+- **Profile Automation Controls, Live Traceability & Diagnostics**:
+  - Added optional per-profile daemon automation controls (`watch_enabled`, `sync_interval_seconds`, `gc_interval_hours`, `paused`) in `config.toml`, `kasumi profile create`, and `kasumi profile edit`.
+  - Integrated live daemon status into `kasumi show <profile>` (text and `--json`) and `kasumi diagnostics [<profile>]` (text and `--json`), added `"origin": "daemon" | "cli"` traceability on recorded executions, updated shell completions (`bash`, `zsh`, `fish`, `powershell`), and expanded English / Brazilian Portuguese i18n catalogs.
+
+### Changed
+
+- **Data-Oriented Design Refactoring**:
+  - Purged OOP classes across `core`, `crypto`, `platform`, `runtime`, `state_storage`, `transport`, `application`, and `cli` in favor of plain data structs, SoA scheduling tables, free functions, and minimal RAII guards, enforced permanently in CI via `kasumi_architecture_dag` (`assert_tree_no_oop`).
+
+### Documentation
+
+- Updated `README.md`, `docs/configuration-and-usage.md`, `docs/security.md`, and `docs/best-practices.md` for `kasumi daemon`, `daemon.log`, `gc_interval_hours` default `0`, `KASUMI_AUTOSTART_DIR`, RAM-pinned key storage, loopback IPC (`X-Kasumi-Daemon-Token`), and daemon JSON error codes.
+
+### Upgrade Notes
+
+- 100% compatible with existing `v0.19.x`–`v0.26.0` encrypted repositories and local state (`KCOM` v4, `KACT` v1, `KPAK\x01`, `state.db` v2, `transaction.bin.enc`, and `config.toml`). Existing standalone CLI workflows remain unchanged.
+
 ## [0.26.0]
 
 ### Added
