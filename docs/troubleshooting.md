@@ -285,7 +285,7 @@ Kasumi cannot establish a connection to the configured shared storage backend. T
 * The remote path syntax in `config.toml` is invalid.
 
 ### Safe Next Steps
-1. **Run Read-Only Local Diagnostics First**: Run `kasumi diagnostics <profile>` (or `kasumi diagnostics` across all profiles) to verify `rclone` binary discovery, version compatibility (`>= v1.60.0`), disk space, lock status, and key accessibility without modifying files.
+1. **Run Read-Only Local Diagnostics & Connection Test First**: Run `kasumi diagnostics <profile>` (or `kasumi diagnostics` across all profiles) to verify `rclone` binary discovery, version compatibility (`>= v1.60.0`), disk space, `.kasumiignore` syntax, lock status, and key accessibility locally, and run `kasumi profile test <profile>` to validate remote connectivity and vault key matching without modifying files.
 2. **Verify Rclone Installation**: Ensure `rclone` (`v1.60.0` or newer) is installed and reachable in your terminal:
    ```bash
    rclone version
@@ -454,6 +454,8 @@ The table below clarifies the purpose and operational behavior of Kasumi's diagn
 | `kasumi remote health <profile>` | Operational diagnostic | No | No | None | Point-in-time observation |
 | `kasumi remote contents <profile> --audit` | Audit all physical payloads | Yes (all present) | No | None | Point-in-time observation |
 | `kasumi remote summary <profile> [--full]` | Overview of vault state and shared operational activity | No | No | None | Point-in-time observation |
+| `kasumi profile test <profile>` | Validate credentials, transport reachability, and vault authentication | No | No | None | Read-only vault probe |
+| `kasumi ignore check <profile> <path...>` | Evaluate `.kasumiignore` and reserved path rules locally | No | No | None | None |
 
 The exclusive lock prevents another normal application command using the same profile on this machine from running concurrently. Remote inspection does not take that lock; it can observe changing remote state. Fsck, real `repack`, and GC run pending Sync transaction recovery first, which may change local files or complete remote publication (both `repack` and GC refuse a `ResumableTransaction` upload, and `repack --dry-run` only inspects the journal read-only). Manual writer or barrier removal takes the local lock but does not run recovery or acquire a remote barrier; the operator must verify that the associated process is inactive. Fsck's audit does not modify synced contents/commits, and all four maintenance commands (`fsck`, `gc`, `gc remove-writer`, `gc remove-barrier`) publish a best-effort `KACT` v1 operational record to the remote activity namespace without failing a completed operation if activity publication fails (`remote_publish_state` stays `Pending` in `db.sqlite` with a stderr warning). `repack` writes only new consolidated packs and a tree-preserving `KCOM` v4 Commit/HEAD without deleting old objects. GC modifies remote objects only after its barrier, probe, single authenticated observation, and global plan validation pass.
 

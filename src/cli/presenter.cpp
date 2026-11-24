@@ -3117,6 +3117,16 @@ int present(const application::DiagnosticsReport& report,
                     i18n::println(i18n::Key::DiagnosticsFreeSpace,
                                   format_size(*entry.local_free_bytes));
                 }
+                if (entry.ignore_file_present) {
+                    if (entry.ignore_file_valid) {
+                        i18n::println(i18n::Key::DiagnosticsIgnorePresent);
+                    } else {
+                        i18n::println(
+                            i18n::Key::DiagnosticsIgnoreInvalid,
+                            entry.ignore_error_line.value_or(0U),
+                            sanitize_terminal_text(entry.ignore_error_detail));
+                    }
+                }
                 if (!entry.healthy && !entry.detail.empty()) {
                     std::println("  {} {}",
                                  i18n::tr(i18n::Key::LabelWarning),
@@ -3215,6 +3225,66 @@ int present(const application::ResolveConflictReport& report, bool quiet) {
             sanitize_terminal_text(report.selected_artifact.value_or("")),
             report.removed_artifacts.size()));
     }
+    return 0;
+}
+
+int present(const application::IgnoreCheckReport& report, bool quiet) {
+    if (quiet) {
+        return 0;
+    }
+    i18n::println(i18n::Key::IgnoreCheckHeader,
+                  sanitize_terminal_text(report.profile_name));
+    for (const auto& item : report.items) {
+        std::string_view disposition;
+        switch (item.disposition) {
+            case application::IgnoreDispositionKind::Managed:
+                disposition = i18n::tr(i18n::Key::IgnoreDispositionManaged);
+                break;
+            case application::IgnoreDispositionKind::IgnoredProtected:
+                disposition = i18n::tr(i18n::Key::IgnoreDispositionProtected);
+                break;
+            case application::IgnoreDispositionKind::IgnoredDisposable:
+                disposition = i18n::tr(i18n::Key::IgnoreDispositionDisposable);
+                break;
+        }
+        std::string source;
+        if (item.reserved_internal) {
+            source = std::string{i18n::tr(i18n::Key::IgnoreSourceReserved)};
+        } else if (item.matched_rule) {
+            source = i18n::format(i18n::Key::IgnoreSourceRule,
+                                  item.rule_line,
+                                  sanitize_terminal_text(item.rule_text));
+        } else {
+            source = std::string{i18n::tr(i18n::Key::IgnoreSourceDefault)};
+        }
+        const std::string display_path =
+            item.is_directory ? item.logical_path + "/" : item.logical_path;
+        std::println("  {} -> {} ({})",
+                     sanitize_terminal_text(display_path),
+                     disposition,
+                     source);
+    }
+    return 0;
+}
+
+int present(const application::IgnoreInitReport& report, bool quiet) {
+    if (quiet) {
+        return 0;
+    }
+    const auto preset_name = application::to_string(report.preset);
+    if (report.dry_run) {
+        i18n::println(i18n::Key::IgnoreInitDryRunHeader, preset_name);
+        std::print("{}", report.content);
+        if (!report.content.empty() && report.content.back() != '\n') {
+            std::println("");
+        }
+        return 0;
+    }
+    print_ok_line(i18n::format(report.overwritten
+                                   ? i18n::Key::IgnoreInitOverwritten
+                                   : i18n::Key::IgnoreInitCreated,
+                               sanitize_terminal_text(report.profile_name),
+                               preset_name));
     return 0;
 }
 

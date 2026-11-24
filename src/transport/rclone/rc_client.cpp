@@ -99,6 +99,7 @@ struct InFlightRequest {
     int attempt = 1;
     int attempts = 1;
     std::function<void(std::string_view)> report_status;
+    std::stop_token stop_token{};
     bool reported = false;
 };
 
@@ -147,12 +148,17 @@ void watcher_loop(RcRuntime& runtime) {
             });
             continue;
         }
-        if (platform::cancellation::requested()) {
-            for (auto* request : runtime.active_requests) {
+        const bool global_cancel = platform::cancellation::requested();
+        bool any_cancelled = false;
+        for (auto* request : runtime.active_requests) {
+            if (global_cancel || request->stop_token.stop_requested()) {
+                any_cancelled = true;
                 if (request->client != nullptr) {
                     request->client->stop();
                 }
             }
+        }
+        if (any_cancelled) {
             runtime.watcher_cv.wait_for(lock, std::chrono::milliseconds{25});
             continue;
         }
@@ -306,6 +312,7 @@ post_rc_impl(State& state,
         .attempt = attempt,
         .attempts = attempts,
         .report_status = state.report_status,
+        .stop_token = platform::cancellation::current_stop_token(),
     };
     if (honour_cancellation) {
         std::lock_guard lock(runtime.watcher_mutex);

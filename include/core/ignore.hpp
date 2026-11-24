@@ -32,8 +32,23 @@ struct IgnoreRule {
     bool anchored = false;
     bool directory_only = false;
     bool disposable = false;
+    std::size_t line = 0;
+    std::string raw;
 
     bool operator==(const IgnoreRule&) const = default;
+};
+
+struct IgnoreMatch {
+    IgnoreDisposition disposition = IgnoreDisposition::Managed;
+    bool reserved_internal = false;
+    bool matched = false;
+    std::size_t line = 0;
+    std::string raw;
+    bool negated = false;
+    bool directory_only = false;
+    bool disposable = false;
+
+    bool operator==(const IgnoreMatch&) const = default;
 };
 
 struct IgnoreList {
@@ -64,6 +79,10 @@ bool is_ignored(std::string_view path,
 IgnoreDisposition classify_ignore(std::string_view logical_path,
                                   bool is_directory,
                                   const IgnoreList& rules);
+
+IgnoreMatch inspect_ignore(std::string_view logical_path,
+                           bool is_directory,
+                           const IgnoreList& rules);
 
 } // namespace kasumi::ignore
 

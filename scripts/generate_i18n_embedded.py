@@ -31,6 +31,7 @@ PREFIXES = sorted(
         ("Progress", "progress."),
         ("Diagnostics", "diagnostics."),
         ("Conflicts", "conflicts."),
+        ("Ignore", "ignore."),
         ("ResolveMissing", "resolve_missing."),
         ("Help", "command_help."),
         ("Error", "errors."),

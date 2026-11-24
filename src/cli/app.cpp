@@ -175,9 +175,16 @@ int run(int argc, char* argv[]) {
         cmd == "profile" && sanitized.size() > 2 &&
         (sanitized[2] == "create" || sanitized[2] == "edit" ||
          sanitized[2] == "clone" || sanitized[2] == "storage" ||
-         sanitized[2] == "rename" || sanitized[2] == "delete");
+         sanitized[2] == "rename" || sanitized[2] == "delete" ||
+         sanitized[2] == "test");
     const bool is_profile_subcommand =
         is_profile_sub_kw && sanitized.size() > 3 && !sanitized[3].empty() &&
+        sanitized[3].front() != '-';
+    const bool is_ignore_sub_kw =
+        cmd == "ignore" && sanitized.size() > 2 &&
+        (sanitized[2] == "check" || sanitized[2] == "init");
+    const bool is_ignore_subcommand =
+        is_ignore_sub_kw && sanitized.size() > 3 && !sanitized[3].empty() &&
         sanitized[3].front() != '-';
     const bool is_conflicts_sub_kw =
         cmd == "conflicts" && sanitized.size() > 2 && sanitized[2] == "resolve";
@@ -198,17 +205,18 @@ int run(int argc, char* argv[]) {
     const bool supports_quiet =
         cmd == "list" || cmd == "diagnostics" ||
         (has_profile_arg &&
-         (cmd == "show" || cmd == "sync" || cmd == "status" || cmd == "fsck" ||
-          cmd == "repack" || cmd == "resolve-missing" ||
+         (cmd == "show" || cmd == "key" || cmd == "sync" || cmd == "status" ||
+          cmd == "fsck" || cmd == "repack" || cmd == "resolve-missing" ||
           (cmd == "conflicts" && !is_conflicts_sub_kw) ||
           (cmd == "gc" && !is_gc_sub_kw))) ||
-        is_gc_subcommand || is_profile_subcommand || is_conflicts_subcommand ||
-        is_remote_sub;
+        is_gc_subcommand || is_profile_subcommand || is_ignore_subcommand ||
+        is_conflicts_subcommand || is_remote_sub;
     const std::size_t quiet_start_index =
         (cmd == "list" || (cmd == "diagnostics" && !has_profile_arg))
             ? 2U
             : ((is_gc_subcommand || is_profile_subcommand ||
-                is_conflicts_subcommand || is_remote_sub)
+                is_ignore_subcommand || is_conflicts_subcommand ||
+                is_remote_sub)
                    ? 4U
                    : 3U);
 
@@ -223,17 +231,18 @@ int run(int argc, char* argv[]) {
     const bool supports_json =
         cmd == "list" || cmd == "diagnostics" ||
         (has_profile_arg &&
-         (cmd == "show" || cmd == "sync" || cmd == "status" || cmd == "fsck" ||
-          cmd == "repack" || cmd == "resolve-missing" ||
+         (cmd == "show" || cmd == "key" || cmd == "sync" || cmd == "status" ||
+          cmd == "fsck" || cmd == "repack" || cmd == "resolve-missing" ||
           (cmd == "conflicts" && !is_conflicts_sub_kw) ||
           (cmd == "gc" && !is_gc_sub_kw))) ||
-        is_profile_subcommand || is_conflicts_subcommand ||
-        supports_remote_summary_or_writers || supports_gc_remove_barrier;
+        is_profile_subcommand || is_ignore_subcommand ||
+        is_conflicts_subcommand || supports_remote_summary_or_writers ||
+        supports_gc_remove_barrier;
     const std::size_t json_start_index =
         (cmd == "list" || (cmd == "diagnostics" && !has_profile_arg))
             ? 2U
-            : ((is_profile_subcommand || is_conflicts_subcommand ||
-                supports_remote_summary_or_writers ||
+            : ((is_profile_subcommand || is_ignore_subcommand ||
+                is_conflicts_subcommand || supports_remote_summary_or_writers ||
                 supports_gc_remove_barrier)
                    ? 4U
                    : 3U);
@@ -388,7 +397,8 @@ int run(int argc, char* argv[]) {
             if (json) {
                 const std::string_view err_profile =
                     (is_gc_subcommand || is_profile_subcommand ||
-                     is_conflicts_subcommand || is_remote_sub)
+                     is_ignore_subcommand || is_conflicts_subcommand ||
+                     is_remote_sub)
                         ? std::string_view{sanitized[3]}
                         : (has_profile_arg ? std::string_view{sanitized[2]}
                                            : std::string_view{});
@@ -503,29 +513,19 @@ int run(int argc, char* argv[]) {
                    ? present_cancellation(application::Operation::Preview)
                    : code;
     }
-    if (const auto* key_inv = std::get_if<KeyInvocation>(&*parse_result)) {
-        const int code = run_profile_key(environment, key_inv->profile_name);
-        return code == 130
-                   ? present_cancellation(application::Operation::Preview)
-                   : code;
-    }
-    if (const auto* prof_inv = std::get_if<ProfileInvocation>(&*parse_result)) {
-        std::string summary;
-        const int code =
-            run_profile_command(environment, *prof_inv, quiet, json, &summary);
-        const std::string prof_cmd =
-            is_profile_subcommand ? std::format("profile {}", sanitized[2])
-                                  : std::string{"profile"};
+    const auto complete_wizard_command = [&](std::string_view command_label,
+                                             std::string_view profile_name,
+                                             std::string_view summary,
+                                             int code) -> int {
         if (code == 130) {
             if (json) {
-                return present_json_cancellation(prof_cmd,
-                                                 prof_inv->profile_name);
+                return present_json_cancellation(command_label, profile_name);
             }
             const int exit_code =
                 finish(present_cancellation(application::Operation::Preview));
             return log_text_entry({.status = "CANCELLED",
-                                   .command = prof_cmd,
-                                   .profile = prof_inv->profile_name,
+                                   .command = command_label,
+                                   .profile = profile_name,
                                    .summary = "cancelled",
                                    .duration = elapsed()},
                                   exit_code);
@@ -536,13 +536,45 @@ int run(int argc, char* argv[]) {
         const int exit_code = finish(code);
         return log_text_entry(
             {.status = exit_code == 0 ? "OK" : "ERROR",
-             .command = prof_cmd,
-             .profile = prof_inv->profile_name,
+             .command = command_label,
+             .profile = profile_name,
              .summary = summary.empty()
                             ? (exit_code == 0 ? "completed" : "failed")
                             : summary,
              .duration = elapsed()},
             exit_code);
+    };
+
+    if (const auto* key_inv = std::get_if<KeyInvocation>(&*parse_result)) {
+        std::string summary;
+        const int code = run_profile_key(environment,
+                                         key_inv->profile_name,
+                                         key_inv->replace,
+                                         quiet,
+                                         json,
+                                         &summary);
+        return complete_wizard_command(
+            "key", key_inv->profile_name, summary, code);
+    }
+    if (const auto* prof_inv = std::get_if<ProfileInvocation>(&*parse_result)) {
+        std::string summary;
+        const int code =
+            run_profile_command(environment, *prof_inv, quiet, json, &summary);
+        const std::string prof_cmd =
+            is_profile_subcommand ? std::format("profile {}", sanitized[2])
+                                  : std::string{"profile"};
+        return complete_wizard_command(
+            prof_cmd, prof_inv->profile_name, summary, code);
+    }
+    if (const auto* ign_inv = std::get_if<IgnoreInvocation>(&*parse_result)) {
+        std::string summary;
+        const int code =
+            run_ignore_command(environment, *ign_inv, quiet, json, &summary);
+        const std::string ign_cmd = is_ignore_subcommand
+                                        ? std::format("ignore {}", sanitized[2])
+                                        : std::string{"ignore"};
+        return complete_wizard_command(
+            ign_cmd, ign_inv->profile_name, summary, code);
     }
     if (const auto* conflicts =
             std::get_if<ConflictsInvocation>(&*parse_result)) {

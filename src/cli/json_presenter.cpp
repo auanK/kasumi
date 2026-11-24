@@ -309,6 +309,9 @@ std::string_view error_code_string(const application::Error& error) noexcept {
     if (error.remote_busy) {
         return "remote_busy";
     }
+    if (error.empty_local_blocked) {
+        return "empty_local_blocked";
+    }
     if ((error.garbage_collection &&
          error.garbage_collection->transport_error) ||
         (error.barrier_removal && error.barrier_removal->transport_error)) {
@@ -394,6 +397,7 @@ profile_error_code_string(application::ProfileErrorCode code) noexcept {
         case C::CredentialFailure:
             return "auth_failed";
         case C::AlreadyExists:
+            return "already_exists";
         case C::ConfigFailure:
         case C::StorageFailure:
             return "config_error";
@@ -561,6 +565,16 @@ int present_json_show(const application::Profile& profile,
         {"key_storage", application::to_string(profile.key_storage)},
         {"min_history_depth", profile.min_history_depth},
         {"min_history_age_hours", profile.min_history_age_hours},
+        {"bandwidth_limit",
+         profile.bandwidth_limit ? json(*profile.bandwidth_limit)
+                                 : json(nullptr)},
+        {"transfer_concurrency",
+         profile.transfer_concurrency ? json(*profile.transfer_concurrency)
+                                      : json(nullptr)},
+        {"rclone_config",
+         profile.rclone_config
+             ? json(platform::path::to_utf8(*profile.rclone_config))
+             : json(nullptr)},
         {"database_present", activity.database_present},
     };
     if (activity.database_present) {
@@ -670,6 +684,14 @@ int present_json_diagnostics(const application::DiagnosticsReport& report,
             {"journal_present", item.journal_present},
             {"key_accessible", item.key_accessible},
             {"database_present", item.activity.database_present},
+            {"ignore_file_present", item.ignore_file_present},
+            {"ignore_file_valid", item.ignore_file_valid},
+            {"ignore_error_line",
+             item.ignore_error_line ? json(*item.ignore_error_line)
+                                    : json(nullptr)},
+            {"ignore_error_detail",
+             item.ignore_error_detail.empty() ? json(nullptr)
+                                              : json(item.ignore_error_detail)},
             {"healthy", item.healthy},
             {"detail", item.detail},
             {"last_attempt",
@@ -792,9 +814,153 @@ int present_json_profile_action(std::string_view command,
             {"key_storage", application::to_string(profile->key_storage)},
             {"min_history_depth", profile->min_history_depth},
             {"min_history_age_hours", profile->min_history_age_hours},
+            {"bandwidth_limit",
+             profile->bandwidth_limit ? json(*profile->bandwidth_limit)
+                                      : json(nullptr)},
+            {"transfer_concurrency",
+             profile->transfer_concurrency
+                 ? json(*profile->transfer_concurrency)
+                 : json(nullptr)},
+            {"rclone_config",
+             profile->rclone_config
+                 ? json(platform::path::to_utf8(*profile->rclone_config))
+                 : json(nullptr)},
         };
     }
     doc["data"] = std::move(data);
+    emit_json(doc);
+    return 0;
+}
+
+int present_json_key_updated(std::string_view profile_name,
+                             bool replaced,
+                             bool unchanged,
+                             std::chrono::nanoseconds duration) {
+    auto doc = make_envelope("key", profile_name, true, 0, duration);
+    const std::string_view summary =
+        unchanged ? "stored key unchanged"
+                  : (replaced ? "stored key replaced" : "stored key saved");
+    doc["data"] = json{
+        {"summary", summary},
+        {"replaced", replaced},
+        {"unchanged", unchanged},
+    };
+    emit_json(doc);
+    return 0;
+}
+
+int present_json_profile_test(
+    const application::ProfileConnectionReport& report,
+    std::chrono::nanoseconds duration) {
+    auto vault_state_name = [](application::RemoteVaultState state) {
+        using S = application::RemoteVaultState;
+        switch (state) {
+            case S::EmptyReadyForInit:
+                return "empty_ready_for_init";
+            case S::AuthenticatedVault:
+                return "authenticated_vault";
+            case S::KeyMismatchOrInvalidHistory:
+                return "key_mismatch_or_invalid_history";
+            case S::TransportFailure:
+                return "transport_failure";
+        }
+        return "transport_failure";
+    };
+    json payload{
+        {"remote_dir", report.remote_dir},
+        {"transport_ok", report.transport_ok},
+        {"ready", report.ready},
+        {"vault_state", vault_state_name(report.vault_state)},
+        {"head_count", report.head_count},
+        {"epoch_sequence",
+         report.epoch_sequence ? json(*report.epoch_sequence) : json(nullptr)},
+        {"epoch_id",
+         report.epoch_id.empty() ? json(nullptr) : json(report.epoch_id)},
+        {"detail", report.detail},
+    };
+    if (!report.ready) {
+        const std::string_view code =
+            report.vault_state ==
+                    application::RemoteVaultState::KeyMismatchOrInvalidHistory
+                ? "auth_failed"
+                : "remote_observation_failed";
+        return emit_json_error("profile test",
+                               report.profile_name,
+                               1,
+                               code,
+                               report.detail,
+                               duration,
+                               std::move(payload));
+    }
+    auto doc =
+        make_envelope("profile test", report.profile_name, true, 0, duration);
+    payload["summary"] = report.detail;
+    doc["data"] = std::move(payload);
+    emit_json(doc);
+    return 0;
+}
+
+int present_json_ignore_check(const application::IgnoreCheckReport& report,
+                              std::chrono::nanoseconds duration) {
+    auto disposition_name = [](application::IgnoreDispositionKind kind) {
+        using K = application::IgnoreDispositionKind;
+        switch (kind) {
+            case K::Managed:
+                return "managed";
+            case K::IgnoredProtected:
+                return "ignored_protected";
+            case K::IgnoredDisposable:
+                return "ignored_disposable";
+        }
+        return "managed";
+    };
+    json items = json::array();
+    for (const auto& item : report.items) {
+        items.push_back(json{
+            {"input_path", item.input_path},
+            {"logical_path", item.logical_path},
+            {"is_directory", item.is_directory},
+            {"disposition", disposition_name(item.disposition)},
+            {"reserved_internal", item.reserved_internal},
+            {"matched_rule", item.matched_rule},
+            {"rule_line",
+             item.matched_rule ? json(item.rule_line) : json(nullptr)},
+            {"rule_text",
+             item.matched_rule ? json(item.rule_text) : json(nullptr)},
+        });
+    }
+    auto doc =
+        make_envelope("ignore check", report.profile_name, true, 0, duration);
+    doc["data"] = json{
+        {"summary", std::format("evaluated {} path(s)", report.items.size())},
+        {"ignore_file", platform::path::to_utf8(report.ignore_file)},
+        {"ignore_file_present", report.ignore_file_present},
+        {"items", std::move(items)},
+    };
+    emit_json(doc);
+    return 0;
+}
+
+int present_json_ignore_init(const application::IgnoreInitReport& report,
+                             std::chrono::nanoseconds duration) {
+    const auto preset = application::to_string(report.preset);
+    auto doc =
+        make_envelope("ignore init", report.profile_name, true, 0, duration);
+    const std::string summary =
+        report.dry_run
+            ? std::format("previewed .kasumiignore (preset={})", preset)
+            : std::format("{} .kasumiignore (preset={})",
+                          report.overwritten ? "overwrote" : "created",
+                          preset);
+    doc["data"] = json{
+        {"summary", summary},
+        {"ignore_file", platform::path::to_utf8(report.ignore_file)},
+        {"preset", preset},
+        {"created", report.created},
+        {"overwritten", report.overwritten},
+        {"dry_run", report.dry_run},
+        {"content", report.content},
+    };
     emit_json(doc);
     return 0;
 }

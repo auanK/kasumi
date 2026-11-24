@@ -664,5 +664,117 @@ TEST(CliParserTest, ParsesProfileConflictsAndCompletionCommands) {
                         "--keep",
                         "local"})
                      .has_value());
+
+    // v0.26.0 flags and subcommands
+    const auto key_rep = parse({"key", "demo", "--replace"});
+    ASSERT_TRUE(key_rep.has_value());
+    EXPECT_TRUE(std::get<kasumi::cli::KeyInvocation>(*key_rep).replace);
+    EXPECT_FALSE(parse({"key", "demo", "--unknown"}).has_value());
+
+    const auto pcreate_net = parse({"profile",
+                                    "create",
+                                    "net",
+                                    "--local",
+                                    "/data/net",
+                                    "--remote",
+                                    "drive:net",
+                                    "--bwlimit",
+                                    "10M:5M",
+                                    "--concurrency=4",
+                                    "--rclone-config",
+                                    "/etc/rclone.conf",
+                                    "--verify"});
+    ASSERT_TRUE(pcreate_net.has_value());
+    const auto& pcreate_inv =
+        std::get<kasumi::cli::ProfileInvocation>(*pcreate_net);
+    EXPECT_EQ(pcreate_inv.bandwidth_limit, "10M:5M");
+    EXPECT_EQ(pcreate_inv.transfer_concurrency, 4U);
+    EXPECT_EQ(pcreate_inv.rclone_config, "/etc/rclone.conf");
+    EXPECT_TRUE(pcreate_inv.verify);
+    EXPECT_FALSE(parse({"profile",
+                        "create",
+                        "net",
+                        "--local",
+                        "/data/net",
+                        "--remote",
+                        "drive:net",
+                        "--clear-bwlimit"})
+                     .has_value());
+
+    const auto pedit_clear = parse({"profile",
+                                    "edit",
+                                    "net",
+                                    "--clear-bwlimit",
+                                    "--clear-concurrency",
+                                    "--clear-rclone-config",
+                                    "--allow-empty-local"});
+    ASSERT_TRUE(pedit_clear.has_value());
+    const auto& pedit_inv =
+        std::get<kasumi::cli::ProfileInvocation>(*pedit_clear);
+    EXPECT_TRUE(pedit_inv.clear_bandwidth_limit);
+    EXPECT_TRUE(pedit_inv.clear_transfer_concurrency);
+    EXPECT_TRUE(pedit_inv.clear_rclone_config);
+    EXPECT_TRUE(pedit_inv.allow_empty_local);
+    EXPECT_FALSE(
+        parse({"profile", "edit", "net", "--allow-empty-local"}).has_value());
+    EXPECT_FALSE(
+        parse({"profile", "edit", "net", "--bwlimit", "5M", "--clear-bwlimit"})
+            .has_value());
+
+    const auto ptest = parse({"profile", "test", "net"});
+    ASSERT_TRUE(ptest.has_value());
+    EXPECT_EQ(std::get<kasumi::cli::ProfileInvocation>(*ptest).action,
+              kasumi::cli::ProfileAction::Test);
+
+    const auto sync_net = parse({"sync",
+                                 "net",
+                                 "--allow-empty-local",
+                                 "--bwlimit",
+                                 "2M",
+                                 "--concurrency",
+                                 "12"});
+    ASSERT_TRUE(sync_net.has_value());
+    const auto& sync_req = std::get<kasumi::application::Request>(*sync_net);
+    EXPECT_TRUE(sync_req.allow_empty_local);
+    EXPECT_EQ(sync_req.bandwidth_limit, "2M");
+    EXPECT_EQ(sync_req.transfer_concurrency, 12U);
+    EXPECT_FALSE(parse({"sync", "net", "--concurrency", "0"}).has_value());
+    EXPECT_FALSE(parse({"sync", "net", "--concurrency", "17"}).has_value());
+
+    const auto remote_net = parse({"remote",
+                                   "stat",
+                                   "net",
+                                   "--bwlimit",
+                                   "4M",
+                                   "--concurrency",
+                                   "3",
+                                   "--",
+                                   "-leading-dash.txt"});
+    ASSERT_TRUE(remote_net.has_value());
+    const auto& rem_req =
+        std::get<kasumi::application::InspectionRequest>(*remote_net);
+    EXPECT_EQ(rem_req.bandwidth_limit, "4M");
+    EXPECT_EQ(rem_req.transfer_concurrency, 3U);
+    EXPECT_EQ(rem_req.logical_path, "-leading-dash.txt");
+
+    const auto ign_chk =
+        parse({"ignore", "check", "net", "build/app.o", "--", "-odd.log"});
+    ASSERT_TRUE(ign_chk.has_value());
+    const auto& ign_chk_inv = std::get<kasumi::cli::IgnoreInvocation>(*ign_chk);
+    EXPECT_EQ(ign_chk_inv.action, kasumi::cli::IgnoreAction::Check);
+    EXPECT_EQ(ign_chk_inv.paths.size(), 2U);
+    EXPECT_FALSE(parse({"ignore", "check", "net"}).has_value());
+
+    const auto ign_init = parse(
+        {"ignore", "init", "net", "--preset", "dev", "--force", "--dry-run"});
+    ASSERT_TRUE(ign_init.has_value());
+    const auto& ign_init_inv =
+        std::get<kasumi::cli::IgnoreInvocation>(*ign_init);
+    EXPECT_EQ(ign_init_inv.action, kasumi::cli::IgnoreAction::Init);
+    EXPECT_EQ(ign_init_inv.preset, kasumi::application::IgnorePreset::Dev);
+    EXPECT_TRUE(ign_init_inv.force);
+    EXPECT_TRUE(ign_init_inv.dry_run);
+    EXPECT_FALSE(
+        parse({"ignore", "init", "net", "--preset", "bogus"}).has_value());
 }
 } // namespace

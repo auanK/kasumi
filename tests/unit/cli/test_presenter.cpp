@@ -1,4 +1,5 @@
 #include "application/inspection/result.hpp"
+#include "cli/completion.hpp"
 #include "cli/i18n.hpp"
 #include "cli/json_presenter.hpp"
 #include "cli/presenter.hpp"
@@ -2875,4 +2876,172 @@ TEST(CliPresenterTest,
     EXPECT_NE(res_json.find("\"command\":\"conflicts resolve\""),
               std::string::npos);
     EXPECT_NE(res_json.find("\"removed_count\":1"), std::string::npos);
+}
+
+TEST(CliPresenterTest, PresentsV026JsonDiagnosticsIgnoreProfileTestAndKey) {
+    const ScopedLanguage en{Language::English};
+
+    // empty_local_blocked and already_exists error codes
+    Error empty_err{.operation = Operation::Sync,
+                    .detail = "empty local blocked",
+                    .empty_local_blocked = true};
+    EXPECT_EQ(kasumi::cli::json_error_code(empty_err), "empty_local_blocked");
+    EXPECT_EQ(kasumi::cli::json_error_code(ProfileErrorCode::AlreadyExists),
+              "already_exists");
+
+    // Diagnostics text and JSON include .kasumiignore status
+    Profile p{
+        .name = "work",
+        .local_dir = "/tmp/work",
+        .remote_dir = "drive:work",
+        .key_storage = KeyStorage::File,
+        .bandwidth_limit = std::string{"8M:4M"},
+        .transfer_concurrency = 4U,
+        .rclone_config = std::filesystem::path{"/etc/kasumi-rclone.conf"},
+    };
+    DiagnosticsReport diag{
+        .os_name = "linux",
+        .app_data_dir = "/tmp/appdata",
+        .config_path = "/tmp/appdata/config.toml",
+        .config_exists = true,
+        .profiles = {ProfileDiagnostic{
+            .profile = p,
+            .healthy = false,
+            .ignore_file_present = true,
+            .ignore_file_valid = false,
+            .ignore_error_line = 3U,
+            .ignore_error_detail = "trailing whitespace",
+        }},
+        .overall_ok = false,
+    };
+    const auto diag_text = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present(diag, "0.26.0", false), 0);
+    });
+    EXPECT_NE(
+        diag_text.find(
+            ".kasumiignore: invalid syntax (line 3: trailing whitespace)"),
+        std::string::npos);
+    const auto diag_json = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present_json_diagnostics(
+                      diag, "0.26.0", "work", std::chrono::milliseconds{2}),
+                  0);
+    });
+    EXPECT_NE(diag_json.find("\"ignore_file_valid\":false"), std::string::npos);
+    EXPECT_NE(diag_json.find("\"ignore_error_line\":3"), std::string::npos);
+
+    // present_json_show includes optional network fields
+    const auto show_json = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present_json_show(p,
+                                                 ProfileLocalState::Initialized,
+                                                 ProfileLocalProblem::None,
+                                                 ProfileActivityReport{},
+                                                 false),
+                  0);
+    });
+    EXPECT_NE(show_json.find("\"bandwidth_limit\":\"8M:4M\""),
+              std::string::npos);
+    EXPECT_NE(show_json.find("\"transfer_concurrency\":4"), std::string::npos);
+
+    // key updated + profile test JSON & error exit
+    const auto key_json = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present_json_key_updated(
+                      "work", true, false, std::chrono::milliseconds{1}),
+                  0);
+    });
+    EXPECT_NE(key_json.find("\"command\":\"key\""), std::string::npos);
+    EXPECT_NE(key_json.find("\"replaced\":true"), std::string::npos);
+
+    ProfileConnectionReport ready_conn{
+        .profile_name = "work",
+        .remote_dir = "drive:work",
+        .transport_ok = true,
+        .ready = true,
+        .vault_state = RemoteVaultState::AuthenticatedVault,
+        .head_count = 1U,
+        .epoch_sequence = 2U,
+        .epoch_id = std::string(64, 'c'),
+        .detail = "authenticated vault ok",
+    };
+    const auto test_ok_json = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present_json_profile_test(
+                      ready_conn, std::chrono::milliseconds{5}),
+                  0);
+    });
+    EXPECT_NE(test_ok_json.find("\"vault_state\":\"authenticated_vault\""),
+              std::string::npos);
+
+    ProfileConnectionReport bad_conn{
+        .profile_name = "work",
+        .remote_dir = "drive:work",
+        .transport_ok = true,
+        .ready = false,
+        .vault_state = RemoteVaultState::KeyMismatchOrInvalidHistory,
+        .detail = "wrong key",
+    };
+    const auto test_err_json = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present_json_profile_test(
+                      bad_conn, std::chrono::milliseconds{5}),
+                  1);
+    });
+    EXPECT_NE(test_err_json.find("\"code\":\"auth_failed\""),
+              std::string::npos);
+
+    // ignore check / init text + JSON
+    IgnoreCheckReport chk{
+        .profile_name = "work",
+        .ignore_file = "/tmp/work/.kasumiignore",
+        .ignore_file_present = true,
+        .items =
+            {
+                IgnoreCheckItem{
+                    .input_path = "build/a.o",
+                    .logical_path = "build/a.o",
+                    .is_directory = false,
+                    .disposition = IgnoreDispositionKind::IgnoredProtected,
+                    .matched_rule = true,
+                    .rule_line = 2U,
+                    .rule_text = "build/",
+                },
+                IgnoreCheckItem{
+                    .input_path = "src/a.cpp",
+                    .logical_path = "src/a.cpp",
+                    .disposition = IgnoreDispositionKind::Managed,
+                },
+            },
+    };
+    const auto chk_text = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present(chk, false), 0);
+    });
+    EXPECT_NE(chk_text.find("ignored (protected) (line 2: build/)"),
+              std::string::npos);
+    const auto chk_json = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present_json_ignore_check(
+                      chk, std::chrono::milliseconds{1}),
+                  0);
+    });
+    EXPECT_NE(chk_json.find("\"command\":\"ignore check\""), std::string::npos);
+
+    IgnoreInitReport init_rep{
+        .profile_name = "work",
+        .ignore_file = "/tmp/work/.kasumiignore",
+        .preset = IgnorePreset::Dev,
+        .created = true,
+        .content = "# dev rules\nbuild/\n",
+    };
+    const auto init_json = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present_json_ignore_init(
+                      init_rep, std::chrono::milliseconds{1}),
+                  0);
+    });
+    EXPECT_NE(init_json.find("\"preset\":\"dev\""), std::string::npos);
+
+    // Completions include ignore and profile test
+    for (auto sh : {kasumi::cli::CompletionShell::Bash,
+                    kasumi::cli::CompletionShell::Zsh,
+                    kasumi::cli::CompletionShell::Fish,
+                    kasumi::cli::CompletionShell::PowerShell}) {
+        const auto script = kasumi::cli::generate_completion_script(sh);
+        EXPECT_NE(script.find("ignore"), std::string::npos);
+        EXPECT_NE(script.find("test"), std::string::npos);
+    }
 }

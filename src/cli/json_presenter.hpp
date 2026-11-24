@@ -67,6 +67,21 @@ int present_json_profile_action(std::string_view command,
                                 bool needs_key,
                                 std::chrono::nanoseconds duration);
 
+int present_json_key_updated(std::string_view profile_name,
+                             bool replaced,
+                             bool unchanged,
+                             std::chrono::nanoseconds duration);
+
+int present_json_profile_test(
+    const application::ProfileConnectionReport& report,
+    std::chrono::nanoseconds duration);
+
+int present_json_ignore_check(const application::IgnoreCheckReport& report,
+                              std::chrono::nanoseconds duration);
+
+int present_json_ignore_init(const application::IgnoreInitReport& report,
+                             std::chrono::nanoseconds duration);
+
 int present_json_credentials_required(
     std::string_view command,
     std::string_view profile_name,

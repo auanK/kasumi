@@ -93,6 +93,10 @@ INSTANTIATE_TEST_SUITE_P(
         {"gc", "remove-barrier"},
         {"resolve-missing"},
         {"config"},
+        {"profile", "test"},
+        {"ignore"},
+        {"ignore", "check"},
+        {"ignore", "init"},
         {"remote"},
         {"remote", "heads"},
         {"remote", "tree"},
@@ -342,7 +346,7 @@ TEST_F(CliInterfaceTest,
     for (const auto& invalid_args : std::vector<std::vector<std::string>>{
              {"kasumi", "sync", "demo", "--quiet", "--quiet"},
              {"kasumi", "config", "--quiet"},
-             {"kasumi", "key", "demo", "--quiet"},
+             {"kasumi", "completion", "bash", "--quiet"},
              {"kasumi", "--quiet", "status", "demo"},
          }) {
         const auto bad = run(invalid_args);

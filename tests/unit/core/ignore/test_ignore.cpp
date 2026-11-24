@@ -327,5 +327,44 @@ TEST(IgnoreTest, DeepPathsBeyondStackBufferThreshold) {
     EXPECT_FALSE(is_ignored(path_deep + "deep/root.txt", list, false));
 }
 
+TEST(IgnoreTest, InspectIgnoreReportsWinningRuleLineRawTextAndReservedPaths) {
+    const auto list = parse_ignore_rules("# Comment line\n"
+                                         "\n"
+                                         "*.log\n"
+                                         "!important.log\n"
+                                         "!temp/\n"
+                                         "build/\n");
+
+    const auto managed = inspect_ignore("src/main.cpp", false, list);
+    EXPECT_EQ(managed.disposition, IgnoreDisposition::Managed);
+    EXPECT_FALSE(managed.reserved_internal);
+    EXPECT_FALSE(managed.matched);
+
+    const auto log_match = inspect_ignore("debug.log", false, list);
+    EXPECT_EQ(log_match.disposition, IgnoreDisposition::IgnoredProtected);
+    EXPECT_TRUE(log_match.matched);
+    EXPECT_EQ(log_match.line, 3U);
+    EXPECT_EQ(log_match.raw, "*.log");
+
+    // Negation re-includes when there is no disposable match.
+    const auto reincluded = inspect_ignore("important.log", false, list);
+    EXPECT_EQ(reincluded.disposition, IgnoreDisposition::Managed);
+    EXPECT_TRUE(reincluded.matched);
+    EXPECT_EQ(reincluded.line, 4U);
+    EXPECT_EQ(reincluded.raw, "!important.log");
+
+    const auto build_dir = inspect_ignore("build", true, list);
+    EXPECT_EQ(build_dir.disposition, IgnoreDisposition::IgnoredProtected);
+    EXPECT_TRUE(build_dir.matched);
+    EXPECT_EQ(build_dir.line, 6U);
+    EXPECT_EQ(build_dir.raw, "build/");
+
+    const auto reserved_internal = inspect_ignore("kasumi.db", false, list);
+    EXPECT_EQ(reserved_internal.disposition,
+              IgnoreDisposition::IgnoredProtected);
+    EXPECT_TRUE(reserved_internal.reserved_internal);
+    EXPECT_TRUE(reserved_internal.matched);
+}
+
 } // namespace
 } // namespace kasumi::ignore

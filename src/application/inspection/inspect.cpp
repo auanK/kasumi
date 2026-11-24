@@ -1,5 +1,6 @@
 #include "application/inspection/inspect.hpp"
 
+#include "application/concurrency.hpp"
 #include "application/detail.hpp"
 #include "application/history_storage/activity.hpp"
 #include "application/history_storage/content_reachability.hpp"
@@ -2363,6 +2364,19 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
           !epoch_sequence(*req.epoch_selector)))) {
         return invalid("requested Epoch ID or sequence is invalid");
     }
+    if (req.transfer_concurrency &&
+        (*req.transfer_concurrency < 1U ||
+         *req.transfer_concurrency >
+             maximum_experimental_content_concurrency)) {
+        return invalid("--concurrency must be between 1 and 16");
+    }
+    if (req.bandwidth_limit) {
+        if (const auto valid_bw =
+                transport::validate_bandwidth_limit(*req.bandwidth_limit);
+            !valid_bw) {
+            return invalid(valid_bw.error().message);
+        }
+    }
 
     auto runtime_data = runtime::resolve(input.environment.app_data_dir,
                                          input.request.profile_name,
@@ -2374,6 +2388,10 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     }
     context.runtime = *runtime_data;
 
+    const ScopedContentConcurrency concurrency_scope{
+        resolve_content_concurrency(req.transfer_concurrency,
+                                    context.runtime.transfer_concurrency)};
+
     auto key =
         resolve_key(input.credentials, context.runtime, context.key, operation);
     if (!key) {
@@ -2384,8 +2402,15 @@ run_inspection(InspectionInput& input, InspectionContext& context) {
     context.hints =
         make_observation_hints(context.runtime, operation, context.layout);
 
-    auto opened = transport::open_transport(context.runtime.storage_location,
-                                            context.runtime.local_dir);
+    auto opened = transport::open_transport(
+        context.runtime.storage_location,
+        transport::TransportOptions{
+            .forbidden_executable_root = context.runtime.local_dir,
+            .rclone_config = context.runtime.rclone_config,
+            .bandwidth_limit = req.bandwidth_limit
+                                   ? req.bandwidth_limit
+                                   : context.runtime.bandwidth_limit,
+        });
     if (!opened) {
         return fail(operation,
                     InspectionErrorCode::RuntimeFailure,
@@ -2650,6 +2675,7 @@ audit_remote_inventory(transport::Transport& storage,
 
 std::expected<InspectionResponse, InspectionError>
 inspect(InspectionInput input) {
+    const platform::cancellation::ScopedStopToken stop_scope{input.stop_token};
     platform::perf_trace::reset();
     const auto total_trace = platform::perf_trace::begin();
     InspectionContext context;

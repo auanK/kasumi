@@ -602,6 +602,7 @@ add_library(kasumi_application STATIC
     src/application/diagnostics.cpp
     src/application/environment.cpp
     src/application/execute.cpp
+    src/application/ignore_tools.cpp
     src/application/profile.cpp
     src/application/use_cases/context.cpp
     src/application/use_cases/maintenance.cpp

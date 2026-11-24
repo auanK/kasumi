@@ -323,4 +323,67 @@ TEST(RuntimePathsTest, EmptyAppDataFallsBackToCurrentPath) {
 }
 #endif
 
+TEST(RuntimeProfileTest, RoundTripsVersionAndOptionalNetworkSettings) {
+    auto workspace = kasumi::test::make_temp_workspace("runtime-v1-config");
+    const auto config =
+        kasumi::test::workspace_path(workspace, "kasumi/config.toml");
+    const auto local_dir = kasumi::test::workspace_path(workspace, "data");
+    const auto rclone_cfg =
+        kasumi::test::workspace_path(workspace, "custom-rclone.conf");
+    std::filesystem::create_directories(local_dir);
+
+    kasumi::runtime::ProfileData profile{
+        "net",
+        local_dir,
+        "drive:net",
+        8U,
+        12U,
+        kasumi::runtime::KeyStorage::File,
+    };
+    profile.bandwidth_limit = "5M:2M";
+    profile.transfer_concurrency = 4U;
+    profile.rclone_config = rclone_cfg;
+
+    const std::array<kasumi::runtime::ProfileData, 1> saved_profiles{profile};
+    ASSERT_TRUE(
+        kasumi::runtime::save_profiles(config, saved_profiles).has_value());
+    const auto saved_toml = kasumi::test::read_text(config);
+    EXPECT_NE(saved_toml.find("version = 1"), std::string::npos);
+
+    const auto loaded = kasumi::runtime::load_profiles(config);
+    ASSERT_TRUE(loaded.has_value()) << loaded.error().detail;
+    ASSERT_EQ(loaded->size(), 1U);
+    EXPECT_EQ((*loaded)[0].bandwidth_limit, "5M:2M");
+    EXPECT_EQ((*loaded)[0].transfer_concurrency, 4U);
+    EXPECT_EQ((*loaded)[0].rclone_config, rclone_cfg);
+
+    // Unsupported version fails closed.
+    kasumi::test::write_text(config, "version = 99\n");
+    const auto bad_ver = kasumi::runtime::load_profiles(config);
+    ASSERT_FALSE(bad_ver.has_value());
+
+    // Invalid concurrency and non-absolute rclone_config fail closed.
+    kasumi::test::write_text(config,
+                             "version = 1\n"
+                             "[profiles.net]\n"
+                             "local_dir = \"" +
+                                 kasumi::platform::path::to_utf8(local_dir) +
+                                 "\"\n"
+                                 "remote_dir = \"drive:net\"\n"
+                                 "key_storage = \"file\"\n"
+                                 "transfer_concurrency = 32\n");
+    EXPECT_FALSE(kasumi::runtime::load_profiles(config).has_value());
+
+    kasumi::test::write_text(config,
+                             "version = 1\n"
+                             "[profiles.net]\n"
+                             "local_dir = \"" +
+                                 kasumi::platform::path::to_utf8(local_dir) +
+                                 "\"\n"
+                                 "remote_dir = \"drive:net\"\n"
+                                 "key_storage = \"file\"\n"
+                                 "rclone_config = \"relative/rclone.conf\"\n");
+    EXPECT_FALSE(kasumi::runtime::load_profiles(config).has_value());
+}
+
 } // namespace

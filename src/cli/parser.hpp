@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <variant>
+#include <vector>
 
 namespace kasumi::cli {
 
@@ -25,6 +26,7 @@ struct DiagnosticsInvocation {
 };
 struct KeyInvocation {
     std::string profile_name;
+    bool replace = false;
 };
 struct ConflictsInvocation {
     std::string profile_name;
@@ -45,6 +47,7 @@ enum class ProfileAction {
     Storage,
     Rename,
     Delete,
+    Test,
 };
 struct ProfileInvocation {
     ProfileAction action = ProfileAction::Create;
@@ -55,7 +58,27 @@ struct ProfileInvocation {
     std::optional<application::KeyStorage> key_storage;
     std::optional<std::uint32_t> min_history_depth;
     std::optional<std::uint32_t> min_history_age_hours;
+    std::optional<std::string> bandwidth_limit;
+    bool clear_bandwidth_limit = false;
+    std::optional<std::uint32_t> transfer_concurrency;
+    bool clear_transfer_concurrency = false;
+    std::optional<std::string> rclone_config;
+    bool clear_rclone_config = false;
+    bool verify = false;
+    bool allow_empty_local = false;
     bool confirm = false;
+};
+enum class IgnoreAction {
+    Check,
+    Init,
+};
+struct IgnoreInvocation {
+    IgnoreAction action = IgnoreAction::Check;
+    std::string profile_name;
+    std::vector<std::string> paths;
+    application::IgnorePreset preset = application::IgnorePreset::Default;
+    bool force = false;
+    bool dry_run = false;
 };
 struct HelpInvocation {
     std::string topic;
@@ -72,6 +95,7 @@ using Invocation = std::variant<application::Request,
                                 ConflictsInvocation,
                                 CompletionInvocation,
                                 ProfileInvocation,
+                                IgnoreInvocation,
                                 HelpInvocation>;
 
 // Command-line argument parsing failure.

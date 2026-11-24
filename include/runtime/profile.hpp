@@ -30,8 +30,13 @@ struct ProfileData {
     // Retention policy.
     std::uint32_t min_history_depth = 5;
     std::uint32_t min_history_age_hours = 6;
-    // Where the derived master key is persisted (or Memory for prompt-only).
+    // Key storage mechanism.
     KeyStorage key_storage = KeyStorage::Vault;
+    // Optional per-profile network & transport settings (append-only for
+    // aggregate init compatibility).
+    std::optional<std::string> bandwidth_limit = std::nullopt;
+    std::optional<std::uint32_t> transfer_concurrency = std::nullopt;
+    std::optional<std::filesystem::path> rclone_config = std::nullopt;
 };
 
 std::string_view to_string(KeyStorage storage) noexcept;

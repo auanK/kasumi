@@ -1300,7 +1300,102 @@ class CliProcessTest(unittest.TestCase):
             self.assertEqual(comp.returncode, 0, comp.stderr)
             text = comp.stdout.decode("utf-8")
             self.assertIn("kasumi", text)
+            self.assertIn("ignore", text)
             self.assertNotIn("Duration:", text)
+
+    def test_v026_verify_test_key_ignore_and_empty_local_guard(self):
+        local = self.root / "v026-local"
+        remote = self.root / "v026-remote"
+        local.mkdir()
+
+        # profile create --verify fails closed and rolls back when remote path is a file
+        blocked_remote = self.root / "not-a-directory"
+        blocked_remote.write_text("file", encoding="utf-8")
+        verify_fail = self.invoke_raw(
+            "profile", "create", "bad",
+            "--local", str(local),
+            "--remote", str(blocked_remote),
+            "--key-storage", "file",
+            "--verify", "--json",
+        )
+        self.assertEqual(verify_fail.returncode, 1)
+        self.assertEqual(self.invoke_raw("list").stdout.decode("utf-8").strip(), "")
+
+        # profile create --verify with --bwlimit / --concurrency succeeds
+        verify_ok = self.invoke_raw(
+            "profile", "create", "v26",
+            "--local", str(local),
+            "--remote", str(remote),
+            "--key-storage", "file",
+            "--bwlimit", "10M:5M",
+            "--concurrency", "4",
+            "--verify", "--json",
+        )
+        self.assertEqual(verify_ok.returncode, 0, verify_ok.stdout + verify_ok.stderr)
+        created_doc = json.loads(verify_ok.stdout.decode("utf-8"))
+        self.assertEqual(created_doc["data"]["profile"]["bandwidth_limit"], "10M:5M")
+        self.assertEqual(created_doc["data"]["profile"]["transfer_concurrency"], 4)
+
+        # profile test reports empty_ready_for_init before sync
+        tested_empty = json.loads(
+            self.invoke_raw("profile", "test", "v26", "--json").stdout.decode("utf-8")
+        )
+        self.assertTrue(tested_empty["ok"])
+        self.assertEqual(tested_empty["data"]["vault_state"], "empty_ready_for_init")
+
+        # key without --replace rejects different key in --json mode, succeeds with --replace
+        alt_env = self.environment.copy()
+        alt_env["KASUMI_MASTER_KEY"] = "b" * 64
+        key_blocked = self.invoke_raw("key", "v26", "--json", environment=alt_env)
+        self.assertEqual(key_blocked.returncode, 1)
+        self.assertEqual(
+            json.loads(key_blocked.stdout.decode("utf-8"))["error"]["code"],
+            "already_exists",
+        )
+        key_ok = self.invoke_raw("key", "v26", "--replace", "--json", environment=alt_env)
+        self.assertEqual(key_ok.returncode, 0, key_ok.stdout + key_ok.stderr)
+        self.assertTrue(json.loads(key_ok.stdout.decode("utf-8"))["data"]["replaced"])
+        # Restore original key before sync
+        self.assertEqual(
+            self.invoke_raw("key", "v26", "--replace", "--json").returncode, 0
+        )
+
+        # ignore init & ignore check
+        init_res = json.loads(
+            self.invoke_raw("ignore", "init", "v26", "--preset", "dev", "--json").stdout.decode("utf-8")
+        )
+        self.assertTrue(init_res["data"]["created"])
+        chk_res = json.loads(
+            self.invoke_raw(
+                "ignore", "check", "v26", "build/app.exe", "docs/readme.txt", "--json"
+            ).stdout.decode("utf-8")
+        )
+        self.assertEqual(chk_res["data"]["items"][0]["disposition"], "ignored_protected")
+        self.assertEqual(chk_res["data"]["items"][1]["disposition"], "managed")
+
+        # Seed 6 files and sync, then remove local_dir -> blocked with empty_local_blocked
+        for i in range(6):
+            (local / f"file{i}.txt").write_text(f"data-{i}", encoding="utf-8")
+        self.invoke("sync", "v26")
+        tested_auth = json.loads(
+            self.invoke_raw("profile", "test", "v26", "--json").stdout.decode("utf-8")
+        )
+        self.assertEqual(tested_auth["data"]["vault_state"], "authenticated_vault")
+        self.assertGreaterEqual(tested_auth["data"]["head_count"], 1)
+
+        shutil.rmtree(local)
+        sync_blocked = self.invoke_raw("sync", "v26", "--json")
+        self.assertEqual(sync_blocked.returncode, 1)
+        self.assertEqual(
+            json.loads(sync_blocked.stdout.decode("utf-8"))["error"]["code"],
+            "empty_local_blocked",
+        )
+        self.assertFalse(local.exists())
+
+        # --allow-empty-local allows intentional empty sync
+        sync_override = self.invoke_raw("sync", "v26", "--allow-empty-local", "--json")
+        self.assertEqual(sync_override.returncode, 0, sync_override.stdout + sync_override.stderr)
+        self.assertTrue(local.exists())
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 #include "application/execute.hpp"
 
+#include "application/concurrency.hpp"
 #include "application/history_storage/activity.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/profile.hpp"
@@ -201,6 +202,7 @@ to_cached_activity(const history_storage::activity::ActivityRecord& record,
 } // namespace
 
 std::expected<Response, Error> execute(ExecutionInput input) {
+    const platform::cancellation::ScopedStopToken stop_scope{input.stop_token};
     platform::perf_trace::reset();
     const auto total_trace = platform::perf_trace::begin();
     detail::OperationContext context{};
@@ -216,12 +218,21 @@ std::expected<Response, Error> execute(ExecutionInput input) {
                               .code = ErrorCode::RuntimeFailure,
                               .detail = "uninitialized execution"});
     try {
+        std::optional<ScopedContentConcurrency> concurrency_scope;
         auto prepared = detail::prepare_operation(input, context);
         if (!prepared) {
             result = std::unexpected(prepared.error());
         } else if (!track_operation) {
+            concurrency_scope.emplace(
+                context.transfer_concurrency > 0
+                    ? std::optional<std::size_t>{context.transfer_concurrency}
+                    : std::nullopt);
             result = detail::dispatch(context);
         } else {
+            concurrency_scope.emplace(
+                context.transfer_concurrency > 0
+                    ? std::optional<std::size_t>{context.transfer_concurrency}
+                    : std::nullopt);
             const auto steady_started = std::chrono::steady_clock::now();
             const auto started_at = platform::clock::unix_seconds().value_or(0);
             auto eid = platform::random::hex_id(16);

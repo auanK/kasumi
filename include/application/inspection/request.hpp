@@ -6,6 +6,7 @@
 #include "application/execute.hpp"
 
 #include <optional>
+#include <stop_token>
 #include <string>
 
 namespace kasumi::application {
@@ -43,6 +44,8 @@ struct InspectionRequest {
     std::optional<std::string> epoch_selector;
     std::optional<std::string> content_id;
     bool dry_run = false;
+    std::optional<std::string> bandwidth_limit = std::nullopt;
+    std::optional<std::uint32_t> transfer_concurrency = std::nullopt;
 };
 
 struct InspectionInput {
@@ -50,6 +53,7 @@ struct InspectionInput {
     Credentials credentials;
     ExecutionEnvironment environment;
     ProgressCallback on_progress{};
+    std::stop_token stop_token{};
 };
 
 } // namespace kasumi::application

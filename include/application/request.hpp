@@ -45,6 +45,9 @@ struct Request {
     bool dry_run = false;
     bool reclaim_dirty = false;
     std::optional<std::uint32_t> gc_min_age_hours = std::nullopt;
+    bool allow_empty_local = false;
+    std::optional<std::string> bandwidth_limit = std::nullopt;
+    std::optional<std::uint32_t> transfer_concurrency = std::nullopt;
 };
 
 } // namespace kasumi::application

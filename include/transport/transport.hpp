@@ -222,6 +222,15 @@ struct Transport {
 // Validates only the storage location syntax.
 Result validate_transport_location(std::string_view location);
 
+// Validates a bandwidth limit specification passed to RCLONE_BWLIMIT.
+Result validate_bandwidth_limit(std::string_view spec);
+
+struct TransportOptions {
+    std::filesystem::path forbidden_executable_root;
+    std::optional<std::filesystem::path> rclone_config = std::nullopt;
+    std::optional<std::string> bandwidth_limit = std::nullopt;
+};
+
 struct RcloneVersion {
     int major = 0;
     int minor = 0;
@@ -267,12 +276,16 @@ std::vector<std::string> parse_rclone_listremotes(std::string_view text);
 // Lists locally configured rclone remote names without contacting any remote
 // backend.
 RcloneRemotesResult list_rclone_remotes(
-    const std::filesystem::path& forbidden_executable_root = {});
+    const std::filesystem::path& forbidden_executable_root = {},
+    const std::optional<std::filesystem::path>& rclone_config = std::nullopt);
 
 // Opens the implementation indicated by location.
 std::expected<Transport, Error>
 open_transport(std::string_view location,
                const std::filesystem::path& forbidden_executable_root = {});
+
+std::expected<Transport, Error> open_transport(std::string_view location,
+                                               const TransportOptions& options);
 
 // Confirms that state and mandatory operations are available.
 bool valid(const Transport& transport) noexcept;

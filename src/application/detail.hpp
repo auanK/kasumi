@@ -84,6 +84,10 @@ resolve_vault_key(const Credentials& credentials,
         candidate.data = *decoded;
         crypto::secure_memory::wipe(decoded->data(), decoded->size());
         has_master = true;
+    } else if (const auto* master_bytes =
+                   std::get_if<MasterKeyBytes>(&credentials)) {
+        candidate.data = master_bytes->bytes;
+        has_master = true;
     } else if (const auto* pair = std::get_if<PasswordPair>(&credentials)) {
         auto derived =
             runtime::vault::derive(pair->password, pair->salt_password);

@@ -184,6 +184,11 @@ ChildEnvironment controlled_environment(const State& state) {
             "RCLONE_CONFIG",
             platform::path::to_utf8(*state.configuration.config_path));
     }
+    if (state.configuration.bandwidth_limit &&
+        !state.configuration.bandwidth_limit->empty()) {
+        result.emplace_back("RCLONE_BWLIMIT",
+                            *state.configuration.bandwidth_limit);
+    }
     return result;
 }
 
@@ -799,14 +804,23 @@ void destroy_state(void* context) noexcept {
     delete state;
 }
 
-std::expected<std::string, std::string>
-run_rclone_readonly_cli(const std::filesystem::path& executable,
-                        std::string_view subcommand,
-                        std::size_t max_output_bytes = 65536U) {
-    auto environment = rclone_detail::build_sanitized_environment({});
+std::expected<std::string, std::string> run_rclone_readonly_cli(
+    const std::filesystem::path& executable,
+    std::string_view subcommand,
+    std::size_t max_output_bytes = 65536U,
+    const std::optional<std::filesystem::path>& rclone_config = std::nullopt) {
+    ChildEnvironment controlled;
+    if (rclone_config && !rclone_config->empty()) {
+        controlled.emplace_back("RCLONE_CONFIG",
+                                platform::path::to_utf8(*rclone_config));
+    }
+    auto environment = rclone_detail::build_sanitized_environment(controlled);
     if (!environment) {
         return std::unexpected(environment.error().message);
     }
+    environment->insert(environment->end(),
+                        std::make_move_iterator(controlled.begin()),
+                        std::make_move_iterator(controlled.end()));
 
     reproc::process proc;
     reproc::options options;
@@ -1016,13 +1030,14 @@ std::vector<std::string> parse_rclone_listremotes(std::string_view text) {
 }
 
 RcloneRemotesResult
-list_rclone_remotes(const std::filesystem::path& forbidden_executable_root) {
+list_rclone_remotes(const std::filesystem::path& forbidden_executable_root,
+                    const std::optional<std::filesystem::path>& rclone_config) {
     const auto probe = probe_rclone_installation(forbidden_executable_root);
     if (!probe.found || !probe.meets_minimum) {
         return RcloneRemotesResult{.available = false, .detail = probe.detail};
     }
-    const auto output =
-        rclone_detail::run_rclone_readonly_cli(probe.executable, "listremotes");
+    const auto output = rclone_detail::run_rclone_readonly_cli(
+        probe.executable, "listremotes", 65536U, rclone_config);
     if (!output) {
         return RcloneRemotesResult{
             .available = false,

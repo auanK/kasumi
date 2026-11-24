@@ -8,6 +8,8 @@
 #include <expected>
 #include <filesystem>
 #include <optional>
+#include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -32,6 +34,10 @@ struct Profile {
     std::uint32_t min_history_age_hours = 6;
     // Key storage mechanism.
     KeyStorage key_storage = KeyStorage::Vault;
+    // Optional per-profile network & transport settings.
+    std::optional<std::string> bandwidth_limit = std::nullopt;
+    std::optional<std::uint32_t> transfer_concurrency = std::nullopt;
+    std::optional<std::filesystem::path> rclone_config = std::nullopt;
 };
 
 std::string_view to_string(KeyStorage storage) noexcept;
@@ -57,7 +63,9 @@ struct ProfileError {
 enum class ProfileField {
     Name,
     LocalPath,
-    RemotePath
+    RemotePath,
+    BandwidthLimit,
+    RcloneConfig,
 };
 std::expected<void, ProfileError>
 validate_profile_field(ProfileField field, std::string_view value);
@@ -72,9 +80,11 @@ create_profile(const ExecutionEnvironment& environment,
                Profile profile,
                ProfileCredentials credentials);
 
-// Updates profile directories and retention policy.
+// Updates profile directories, retention policy, and optional settings.
 std::expected<void, ProfileError>
-update_profile(const ExecutionEnvironment& environment, Profile profile);
+update_profile(const ExecutionEnvironment& environment,
+               Profile profile,
+               bool allow_empty_local = false);
 
 // Derives or decodes credentials and saves them to the profile's key storage.
 // Succeeds without rewriting when the stored key already matches. If a
@@ -273,6 +283,10 @@ struct ProfileDiagnostic {
     bool healthy = false;
     std::string detail;
     ProfileActivityReport activity;
+    bool ignore_file_present = false;
+    bool ignore_file_valid = true;
+    std::optional<std::size_t> ignore_error_line;
+    std::string ignore_error_detail;
 };
 
 struct DiagnosticsReport {
@@ -366,6 +380,91 @@ struct ResolveConflictReport {
 std::expected<ResolveConflictReport, ProfileError>
 resolve_local_conflict(const ExecutionEnvironment& environment,
                        const ResolveConflictRequest& request);
+
+enum class RemoteVaultState : std::uint8_t {
+    EmptyReadyForInit,
+    AuthenticatedVault,
+    KeyMismatchOrInvalidHistory,
+    TransportFailure,
+};
+
+struct ProfileConnectionReport {
+    std::string profile_name;
+    std::string remote_dir;
+    bool transport_ok = false;
+    bool ready = false;
+    RemoteVaultState vault_state = RemoteVaultState::TransportFailure;
+    std::size_t head_count = 0;
+    std::optional<std::uint64_t> epoch_sequence;
+    std::string epoch_id;
+    std::string detail;
+};
+
+// Validates profile credentials and tests connectivity/authentication with the
+// remote storage without modifying local or remote state.
+std::expected<ProfileConnectionReport, ProfileError>
+test_profile_connection(const ExecutionEnvironment& environment,
+                        std::string_view profile_name,
+                        Credentials credentials = NoCredentials{},
+                        std::stop_token stop_token = {});
+
+enum class IgnoreDispositionKind : std::uint8_t {
+    Managed,
+    IgnoredProtected,
+    IgnoredDisposable,
+};
+
+struct IgnoreCheckItem {
+    std::string input_path;
+    std::string logical_path;
+    bool is_directory = false;
+    IgnoreDispositionKind disposition = IgnoreDispositionKind::Managed;
+    bool reserved_internal = false;
+    bool matched_rule = false;
+    std::size_t rule_line = 0;
+    std::string rule_text;
+};
+
+struct IgnoreCheckReport {
+    std::string profile_name;
+    std::filesystem::path ignore_file;
+    bool ignore_file_present = false;
+    std::vector<IgnoreCheckItem> items;
+};
+
+// Evaluates how each requested path is classified under the profile's
+// `.kasumiignore` and Kasumi's reserved internal exclusions.
+std::expected<IgnoreCheckReport, ProfileError>
+check_profile_ignore(const ExecutionEnvironment& environment,
+                     std::string_view profile_name,
+                     std::span<const std::string> paths);
+
+enum class IgnorePreset : std::uint8_t {
+    Default,
+    Dev,
+    Office,
+    Minimal,
+};
+
+std::string_view to_string(IgnorePreset preset) noexcept;
+
+struct IgnoreInitReport {
+    std::string profile_name;
+    std::filesystem::path ignore_file;
+    IgnorePreset preset = IgnorePreset::Default;
+    bool created = false;
+    bool overwritten = false;
+    bool dry_run = false;
+    std::string content;
+};
+
+// Generates or previews a `.kasumiignore` template in the profile's local root.
+std::expected<IgnoreInitReport, ProfileError>
+init_profile_ignore(const ExecutionEnvironment& environment,
+                    std::string_view profile_name,
+                    IgnorePreset preset = IgnorePreset::Default,
+                    bool force = false,
+                    bool dry_run = false);
 
 } // namespace kasumi::application
 

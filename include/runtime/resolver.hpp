@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -33,6 +34,10 @@ struct RuntimeData {
     std::uint32_t min_history_age_hours = 6;
     // Key storage mode. Defaults to File for direct fixture construction.
     KeyStorage key_storage = KeyStorage::File;
+    // Optional per-profile network & transport settings.
+    std::optional<std::string> bandwidth_limit = std::nullopt;
+    std::optional<std::uint32_t> transfer_concurrency = std::nullopt;
+    std::optional<std::filesystem::path> rclone_config = std::nullopt;
 };
 
 // Validates the profile and resolves its paths.

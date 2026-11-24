@@ -23,6 +23,7 @@
 #include <print>
 #include <set>
 #include <string>
+#include <variant>
 
 #if !defined(_WIN32)
 #include <cerrno>
@@ -655,6 +656,44 @@ void warn_if_unknown_rclone_remote(std::string_view destination,
     }
 }
 
+std::optional<application::ProfileCredentials> read_profile_env_credentials() {
+    if (const char* hex = std::getenv("KASUMI_MASTER_KEY");
+        hex != nullptr && hex[0] != '\0') {
+        return application::ProfileCredentials{
+            application::MasterKeyHex{std::string(hex)}};
+    }
+    const char* pw = std::getenv("KASUMI_PASSWORD");
+    const char* salt = std::getenv("KASUMI_PASSWORD2");
+    if (pw != nullptr && salt != nullptr) {
+        return application::ProfileCredentials{
+            application::PasswordPair{std::string(pw), std::string(salt)}};
+    }
+    return std::nullopt;
+}
+
+application::Credentials
+to_runtime_credentials(const application::ProfileCredentials& creds) {
+    return std::visit(
+        [](const auto& value) -> application::Credentials {
+            return application::Credentials{value};
+        },
+        creds);
+}
+
+struct ProfileCredsWipeGuard {
+    application::ProfileCredentials& value;
+    ~ProfileCredsWipeGuard() noexcept {
+        application::wipe_credentials(value);
+    }
+};
+
+struct CredsWipeGuard {
+    application::Credentials& value;
+    ~CredsWipeGuard() noexcept {
+        application::wipe_credentials(value);
+    }
+};
+
 } // namespace
 
 int run_profile_command(const application::ExecutionEnvironment& environment,
@@ -681,6 +720,8 @@ int run_profile_command(const application::ExecutionEnvironment& environment,
                 return "profile rename";
             case ProfileAction::Delete:
                 return "profile delete";
+            case ProfileAction::Test:
+                return "profile test";
         }
         return "profile";
     };
@@ -719,18 +760,7 @@ int run_profile_command(const application::ExecutionEnvironment& environment,
 
     switch (invocation.action) {
         case ProfileAction::Create: {
-            std::optional<application::ProfileCredentials> env_creds;
-            if (const char* hex = std::getenv("KASUMI_MASTER_KEY");
-                hex != nullptr && hex[0] != '\0') {
-                env_creds = application::MasterKeyHex{std::string(hex)};
-            } else {
-                const char* pw = std::getenv("KASUMI_PASSWORD");
-                const char* salt = std::getenv("KASUMI_PASSWORD2");
-                if (pw != nullptr && salt != nullptr) {
-                    env_creds = application::PasswordPair{std::string(pw),
-                                                          std::string(salt)};
-                }
-            }
+            const auto env_creds = read_profile_env_credentials();
             if (!env_creds.has_value() && json) {
                 const auto msg =
                     i18n::tr(i18n::Key::WizardProfileCredentialsRequired);
@@ -742,15 +772,10 @@ int run_profile_command(const application::ExecutionEnvironment& environment,
                     cmd, invocation.profile_name, msg, elapsed());
             }
             application::ProfileCredentials creds =
-                env_creds ? std::move(*env_creds)
+                env_creds ? *env_creds
                           : application::ProfileCredentials{
                                 credentials::read_password_pair()};
-            struct CredsGuard {
-                application::ProfileCredentials& value;
-                ~CredsGuard() noexcept {
-                    application::wipe_credentials(value);
-                }
-            } guard{creds};
+            ProfileCredsWipeGuard guard{creds};
             if (platform::cancellation::requested()) {
                 return 130;
             }
@@ -765,11 +790,55 @@ int run_profile_command(const application::ExecutionEnvironment& environment,
                     invocation.min_history_age_hours.value_or(6U),
                 .key_storage = invocation.key_storage.value_or(
                     application::KeyStorage::Vault),
+                .bandwidth_limit = invocation.bandwidth_limit,
+                .transfer_concurrency = invocation.transfer_concurrency,
+                .rclone_config =
+                    invocation.rclone_config
+                        ? std::optional<
+                              std::filesystem::path>{platform::path::from_utf8(
+                              *invocation.rclone_config)}
+                        : std::nullopt,
             };
+            application::Credentials verify_creds{application::NoCredentials{}};
+            CredsWipeGuard verify_guard{verify_creds};
+            if (invocation.verify &&
+                profile.key_storage == application::KeyStorage::Memory) {
+                verify_creds = to_runtime_credentials(creds);
+            }
             auto res = application::create_profile(
                 environment, profile, std::move(creds));
             if (!res) {
                 return fail_error(res.error());
+            }
+            if (invocation.verify) {
+                auto conn = application::test_profile_connection(
+                    environment, profile.name, std::move(verify_creds));
+                if (platform::cancellation::requested()) {
+                    (void)application::delete_profile(environment,
+                                                      profile.name);
+                    return 130;
+                }
+                if (!conn || !conn->ready) {
+                    (void)application::delete_profile(environment,
+                                                      profile.name);
+                    if (!json) {
+                        print_warning_line(i18n::format(
+                            i18n::Key::WizardProfileCreatedVerifyFailed,
+                            profile.name));
+                    }
+                    if (!conn) {
+                        return fail_error(conn.error());
+                    }
+                    const auto code =
+                        conn->vault_state == application::RemoteVaultState::
+                                                 KeyMismatchOrInvalidHistory
+                            ? application::ProfileErrorCode::CredentialFailure
+                            : application::ProfileErrorCode::StorageFailure;
+                    return fail_error(application::ProfileError{
+                        .code = code,
+                        .detail = conn->detail,
+                    });
+                }
             }
             return finish_success(
                 &profile,
@@ -805,7 +874,24 @@ int run_profile_command(const application::ExecutionEnvironment& environment,
                 updated.min_history_age_hours =
                     *invocation.min_history_age_hours;
             }
-            auto res = application::update_profile(environment, updated);
+            if (invocation.bandwidth_limit) {
+                updated.bandwidth_limit = *invocation.bandwidth_limit;
+            } else if (invocation.clear_bandwidth_limit) {
+                updated.bandwidth_limit.reset();
+            }
+            if (invocation.transfer_concurrency) {
+                updated.transfer_concurrency = *invocation.transfer_concurrency;
+            } else if (invocation.clear_transfer_concurrency) {
+                updated.transfer_concurrency.reset();
+            }
+            if (invocation.rclone_config) {
+                updated.rclone_config =
+                    platform::path::from_utf8(*invocation.rclone_config);
+            } else if (invocation.clear_rclone_config) {
+                updated.rclone_config.reset();
+            }
+            auto res = application::update_profile(
+                environment, updated, invocation.allow_empty_local);
             if (!res) {
                 return fail_error(res.error());
             }
@@ -916,8 +1002,130 @@ int run_profile_command(const application::ExecutionEnvironment& environment,
                              invocation.profile_name),
                 std::format("deleted profile '{}'", invocation.profile_name));
         }
+        case ProfileAction::Test: {
+            auto profiles = application::list_profiles(environment);
+            if (!profiles) {
+                return fail_error(profiles.error());
+            }
+            const auto it = std::ranges::find(*profiles,
+                                              invocation.profile_name,
+                                              &application::Profile::name);
+            if (it == profiles->end()) {
+                return fail_error(application::ProfileError{
+                    .code = application::ProfileErrorCode::NotFound,
+                    .detail = "profile not found"});
+            }
+            if (json && it->key_storage == application::KeyStorage::Memory &&
+                !read_profile_env_credentials().has_value()) {
+                const auto msg =
+                    i18n::tr(i18n::Key::WizardProfileCredentialsRequired);
+                if (log_summary != nullptr) {
+                    *log_summary =
+                        std::format("[credentials_required] {}", msg);
+                }
+                return present_json_credentials_required(
+                    cmd, invocation.profile_name, msg, elapsed());
+            }
+            auto creds =
+                credentials::for_profile(environment, invocation.profile_name);
+            CredsWipeGuard guard{creds};
+            if (platform::cancellation::requested()) {
+                return 130;
+            }
+            auto report = application::test_profile_connection(
+                environment, invocation.profile_name, std::move(creds));
+            if (platform::cancellation::requested()) {
+                return 130;
+            }
+            if (!report) {
+                return fail_error(report.error());
+            }
+            if (log_summary != nullptr) {
+                *log_summary = report->detail;
+            }
+            if (json) {
+                return present_json_profile_test(*report, elapsed());
+            }
+            if (report->ready) {
+                if (!quiet) {
+                    print_ok_line(i18n::format(
+                        i18n::Key::WizardProfileTestReady,
+                        sanitize_terminal_text(report->profile_name),
+                        sanitize_terminal_text(report->detail)));
+                }
+                return 0;
+            }
+            print_error_line(
+                i18n::format(i18n::Key::WizardProfileTestFailed,
+                             sanitize_terminal_text(report->profile_name),
+                             sanitize_terminal_text(report->detail)));
+            return 1;
+        }
     }
     return 1;
+}
+
+int run_ignore_command(const application::ExecutionEnvironment& environment,
+                       const IgnoreInvocation& invocation,
+                       bool quiet,
+                       bool json,
+                       std::string* log_summary) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto elapsed = [&] {
+        return std::chrono::steady_clock::now() - started;
+    };
+    const std::string_view cmd = invocation.action == IgnoreAction::Check
+                                     ? "ignore check"
+                                     : "ignore init";
+    const auto fail_error = [&](const application::ProfileError& err) -> int {
+        if (log_summary != nullptr) {
+            *log_summary =
+                std::format("[{}] {}", json_error_code(err.code), err.detail);
+        }
+        if (json) {
+            return present_json_profile_error(
+                cmd, invocation.profile_name, err, elapsed());
+        }
+        print_error_line(err.detail);
+        return 1;
+    };
+
+    if (invocation.action == IgnoreAction::Check) {
+        auto report = application::check_profile_ignore(
+            environment, invocation.profile_name, invocation.paths);
+        if (!report) {
+            return fail_error(report.error());
+        }
+        if (log_summary != nullptr) {
+            *log_summary =
+                std::format("evaluated {} path(s)", report->items.size());
+        }
+        if (json) {
+            return present_json_ignore_check(*report, elapsed());
+        }
+        return present(*report, quiet);
+    }
+
+    auto report = application::init_profile_ignore(environment,
+                                                   invocation.profile_name,
+                                                   invocation.preset,
+                                                   invocation.force,
+                                                   invocation.dry_run);
+    if (!report) {
+        return fail_error(report.error());
+    }
+    if (log_summary != nullptr) {
+        *log_summary = std::format(
+            "preset={}{}",
+            application::to_string(report->preset),
+            report->dry_run
+                ? " (dry-run)"
+                : (report->overwritten ? " (overwritten)" : " (created)"));
+    }
+    if (json) {
+        return present_json_ignore_init(*report, elapsed());
+    }
+    return present(*report, quiet);
 }
 
 bool prompt_confirmation(std::string_view message) {
@@ -966,6 +1174,19 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
                           application::to_string(profile.key_storage),
                           profile.min_history_depth,
                           profile.min_history_age_hours);
+            if (profile.bandwidth_limit) {
+                i18n::println(i18n::Key::WizardShowBandwidthLimit,
+                              sanitize_terminal_text(*profile.bandwidth_limit));
+            }
+            if (profile.transfer_concurrency) {
+                i18n::println(i18n::Key::WizardShowTransferConcurrency,
+                              *profile.transfer_concurrency);
+            }
+            if (profile.rclone_config) {
+                i18n::println(i18n::Key::WizardShowRcloneConfig,
+                              sanitize_terminal_text(platform::path::to_utf8(
+                                  *profile.rclone_config)));
+            }
             if (state == application::ProfileLocalState::Problem) {
                 static constexpr auto problem_keys = std::to_array<i18n::Key>({
                     i18n::Key::WizardProblemUnspecified,
@@ -1009,35 +1230,120 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
 }
 
 int run_profile_key(const application::ExecutionEnvironment& environment,
-                    std::string_view profile_name) {
+                    std::string_view profile_name,
+                    bool replace,
+                    bool quiet,
+                    bool json,
+                    std::string* log_summary) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto elapsed = [&] {
+        return std::chrono::steady_clock::now() - started;
+    };
+    const auto fail_error = [&](const application::ProfileError& err) -> int {
+        if (log_summary != nullptr) {
+            *log_summary =
+                std::format("[{}] {}", json_error_code(err.code), err.detail);
+        }
+        if (json) {
+            return present_json_profile_error(
+                "key", profile_name, err, elapsed());
+        }
+        print_error_line(err.detail);
+        return 1;
+    };
+
     auto profiles = application::list_profiles(environment);
     if (!profiles) {
-        print_error_line(profiles.error().detail);
-        return 1;
+        return fail_error(profiles.error());
     }
     const auto it =
         std::ranges::find(*profiles, profile_name, &application::Profile::name);
     if (it == profiles->end()) {
-        print_error_line(i18n::tr(i18n::Key::WizardProfileNotFound));
-        return 1;
+        return fail_error(application::ProfileError{
+            .code = application::ProfileErrorCode::NotFound,
+            .detail = std::string{i18n::tr(i18n::Key::WizardProfileNotFound)}});
     }
     if (it->key_storage == application::KeyStorage::Memory) {
-        print_error_line(i18n::format(
-            i18n::Key::WizardKeyStorageMemoryNoPersist, profile_name));
-        return 1;
+        return fail_error(application::ProfileError{
+            .code = application::ProfileErrorCode::ConfigFailure,
+            .detail = i18n::format(i18n::Key::WizardKeyStorageMemoryNoPersist,
+                                   profile_name)});
+    }
+    const auto env_creds = read_profile_env_credentials();
+    if (!env_creds.has_value() && json) {
+        const auto msg = i18n::tr(i18n::Key::WizardProfileCredentialsRequired);
+        if (log_summary != nullptr) {
+            *log_summary = std::format("[credentials_required] {}", msg);
+        }
+        return present_json_credentials_required(
+            "key", profile_name, msg, elapsed());
     }
     application::ProfileCredentials creds =
-        [&]() -> application::ProfileCredentials {
-        if (const char* env = std::getenv("KASUMI_MASTER_KEY")) {
-            return application::MasterKeyHex{std::string(env)};
-        }
-        return credentials::read_password_pair();
-    }();
+        env_creds ? *env_creds
+                  : application::ProfileCredentials{
+                        credentials::read_password_pair()};
+    ProfileCredsWipeGuard guard{creds};
     if (platform::cancellation::requested()) {
-        application::wipe_credentials(creds);
         return 130;
     }
-    return apply_profile_key_update(environment, profile_name, creds, true);
+
+    application::ProfileCredentials attempt = creds;
+    ProfileCredsWipeGuard attempt_guard{attempt};
+    auto res = application::set_profile_key(
+        environment, profile_name, std::move(attempt), false);
+    if (res) {
+        if (log_summary != nullptr) {
+            *log_summary = std::format("saved key for '{}'", profile_name);
+        }
+        if (json) {
+            return present_json_key_updated(
+                profile_name, false, false, elapsed());
+        }
+        if (!quiet) {
+            print_ok_line(
+                i18n::format(i18n::Key::WizardProfileKeyUpdated, profile_name));
+        }
+        return 0;
+    }
+    if (res.error().code != application::ProfileErrorCode::AlreadyExists) {
+        return fail_error(res.error());
+    }
+    if (!replace) {
+        if (json) {
+            return fail_error(application::ProfileError{
+                .code = application::ProfileErrorCode::AlreadyExists,
+                .detail = i18n::format(
+                    i18n::Key::WizardKeyDifferentNeedsReplace, profile_name)});
+        }
+        if (!confirm_change(i18n::format(i18n::Key::WizardConfirmReplaceKey,
+                                         profile_name))) {
+            if (platform::cancellation::requested()) {
+                return 130;
+            }
+            print_error_line(i18n::tr(i18n::Key::WizardKeyReplaceCancelled));
+            if (log_summary != nullptr) {
+                *log_summary = "key replacement declined";
+            }
+            return 1;
+        }
+    }
+    res = application::set_profile_key(
+        environment, profile_name, std::move(creds), true);
+    if (!res) {
+        return fail_error(res.error());
+    }
+    if (log_summary != nullptr) {
+        *log_summary = std::format("replaced key for '{}'", profile_name);
+    }
+    if (json) {
+        return present_json_key_updated(profile_name, true, false, elapsed());
+    }
+    if (!quiet) {
+        print_ok_line(i18n::format(replace ? i18n::Key::WizardKeyReplaced
+                                           : i18n::Key::WizardProfileKeyUpdated,
+                                   profile_name));
+    }
+    return 0;
 }
 
 int run_config_wizard(const application::ExecutionEnvironment& environment) {
@@ -1324,13 +1630,9 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 }
                 warn_if_unknown_rclone_remote(edit_remote, rclone_info);
 
-                application::Profile updated{
-                    target,
-                    platform::path::from_utf8(edit_local),
-                    edit_remote,
-                    it->min_history_depth,
-                    it->min_history_age_hours,
-                    it->key_storage};
+                application::Profile updated = *it;
+                updated.local_dir = platform::path::from_utf8(edit_local);
+                updated.remote_dir = edit_remote;
                 if (updated.local_dir == it->local_dir &&
                     updated.remote_dir == it->remote_dir) {
                     continue;
@@ -1344,8 +1646,10 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                                      edit_remote))) {
                     continue;
                 }
+                // WizardConfirmEdit already warns explicitly about empty local
+                // directories before asking for [y/N] confirmation.
                 report_result(
-                    application::update_profile(environment, updated),
+                    application::update_profile(environment, updated, true),
                     i18n::format(i18n::Key::WizardProfileEdited, target));
             } else {
                 print_error_line(i18n::tr(i18n::Key::WizardProfileNotFound));

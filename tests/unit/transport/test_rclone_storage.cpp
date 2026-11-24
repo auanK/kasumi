@@ -4,6 +4,7 @@
 #include "platform/cancellation.hpp"
 #include "platform/path.hpp"
 #include "transport/rclone/detail.hpp"
+#include "transport/transport.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2930,6 +2931,31 @@ TEST(RcloneSessionTest, ParsesListremotesOutputIntoSortedUniqueNames) {
         "s3:\r\n  gdrive:  \n\ninvalid_without_colon\ns3:\nbackup-1:\n");
     EXPECT_EQ(parsed, (std::vector<std::string>{"backup-1", "gdrive", "s3"}));
     EXPECT_TRUE(kasumi::transport::parse_rclone_listremotes("").empty());
+}
+
+TEST(RcloneSessionTest, ValidatesBandwidthLimitAndTransportOptions) {
+    for (const auto* valid :
+         {"off", "10M", "500K", "1.5G", "5M:2M", "off:10M", "10M:off"}) {
+        EXPECT_TRUE(
+            kasumi::transport::validate_bandwidth_limit(valid).has_value())
+            << valid;
+    }
+    for (const auto* invalid :
+         {"", "10M:2M:1M", "-5M", "abc", "10Z", "10M\n", "10M 2M"}) {
+        EXPECT_FALSE(
+            kasumi::transport::validate_bandwidth_limit(invalid).has_value())
+            << invalid;
+    }
+
+    auto workspace = kasumi::test::make_temp_workspace("transport-opts");
+    const auto remote_dir = kasumi::test::workspace_path(workspace, "remote");
+    std::filesystem::create_directories(remote_dir);
+    kasumi::transport::TransportOptions invalid_bw{
+        .bandwidth_limit = std::string{"not-a-rate"},
+    };
+    const auto opened = kasumi::transport::open_transport(
+        kasumi::platform::path::to_utf8(remote_dir), invalid_bw);
+    EXPECT_FALSE(opened.has_value());
 }
 
 } // namespace

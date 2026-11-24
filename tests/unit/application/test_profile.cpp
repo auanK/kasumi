@@ -1,3 +1,4 @@
+#include "application/execute.hpp"
 #include "application/profile.hpp"
 #include "application/profile_fault_test.hpp"
 #include "application/sync/journal.hpp"
@@ -3962,6 +3963,275 @@ TEST(ApplicationProfileTest,
               "branch-only");
     EXPECT_FALSE(std::filesystem::exists(
         local_dir / "sub" / "note.md.kasumiconflict_0123456789ab"));
+}
+
+TEST(ApplicationProfileTest, EmptyLocalGuardsProtectSyncAndProfileRelocation) {
+    auto workspace = kasumi::test::make_temp_workspace("app-empty-local-guard");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const kasumi::application::ExecutionEnvironment env{root / "kasumi"};
+    const auto local_dir = root / "local";
+    const auto remote_dir = root / "remote";
+    std::filesystem::create_directories(local_dir);
+    for (int i = 0; i < 6; ++i) {
+        kasumi::test::write_text(local_dir /
+                                     ("file" + std::to_string(i) + ".txt"),
+                                 "payload-" + std::to_string(i));
+    }
+
+    const kasumi::application::Profile profile{
+        .name = "guard",
+        .local_dir = local_dir,
+        .remote_dir = remote_dir.string(),
+        .key_storage = kasumi::application::KeyStorage::File,
+    };
+    const auto key = kasumi::application::MasterKeyHex{std::string(64, 'a')};
+    ASSERT_TRUE(
+        kasumi::application::create_profile(env, profile, key).has_value());
+
+    const auto synced = kasumi::application::execute({
+        .request = {.operation = kasumi::application::Operation::Sync,
+                    .profile_name = "guard"},
+        .credentials = kasumi::application::NoCredentials{},
+        .environment = env,
+    });
+    ASSERT_TRUE(synced.has_value()) << synced.error().detail;
+
+    // update_profile blocks relocating a populated profile to missing or empty
+    // local dir.
+    const auto alt_missing = root / "missing-reloc";
+    auto reloc_profile = profile;
+    reloc_profile.local_dir = alt_missing;
+    const auto reloc_blocked =
+        kasumi::application::update_profile(env, reloc_profile, false);
+    ASSERT_FALSE(reloc_blocked.has_value());
+    EXPECT_NE(reloc_blocked.error().detail.find("--allow-empty-local"),
+              std::string::npos);
+
+    const auto alt_empty = root / "empty-reloc";
+    std::filesystem::create_directories(alt_empty);
+    reloc_profile.local_dir = alt_empty;
+    ASSERT_FALSE(kasumi::application::update_profile(env, reloc_profile, false)
+                     .has_value());
+    ASSERT_TRUE(kasumi::application::update_profile(env, reloc_profile, true)
+                    .has_value());
+    ASSERT_TRUE(
+        kasumi::application::update_profile(env, profile, true).has_value());
+
+    // Guard B: emptying all files locally on a >5-entry populated tree blocks
+    // Sync.
+    for (int i = 0; i < 6; ++i) {
+        std::filesystem::remove(local_dir /
+                                ("file" + std::to_string(i) + ".txt"));
+    }
+    const auto guard_b = kasumi::application::execute({
+        .request = {.operation = kasumi::application::Operation::Sync,
+                    .profile_name = "guard"},
+        .credentials = kasumi::application::NoCredentials{},
+        .environment = env,
+    });
+    ASSERT_FALSE(guard_b.has_value());
+    EXPECT_TRUE(guard_b.error().empty_local_blocked);
+
+    // Guard A: removing local_dir completely blocks Sync without recreating
+    // local_dir.
+    std::filesystem::remove_all(local_dir);
+    const auto guard_a = kasumi::application::execute({
+        .request = {.operation = kasumi::application::Operation::Sync,
+                    .profile_name = "guard"},
+        .credentials = kasumi::application::NoCredentials{},
+        .environment = env,
+    });
+    ASSERT_FALSE(guard_a.has_value());
+    EXPECT_TRUE(guard_a.error().empty_local_blocked);
+    EXPECT_FALSE(std::filesystem::exists(local_dir));
+
+    // Explicit allow_empty_local permits sync and recreates local_dir cleanly.
+    const auto allowed = kasumi::application::execute({
+        .request = {.operation = kasumi::application::Operation::Sync,
+                    .profile_name = "guard",
+                    .allow_empty_local = true},
+        .credentials = kasumi::application::NoCredentials{},
+        .environment = env,
+    });
+    ASSERT_TRUE(allowed.has_value()) << allowed.error().detail;
+    EXPECT_TRUE(std::filesystem::exists(local_dir));
+}
+
+TEST(ApplicationProfileTest,
+     TestProfileConnectionCoversVaultStatesAndMasterKeyBytes) {
+    auto workspace = kasumi::test::make_temp_workspace("app-profile-test-conn");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const kasumi::application::ExecutionEnvironment env{root / "kasumi"};
+    const auto local_dir = root / "local";
+    const auto remote_dir = root / "remote";
+    std::filesystem::create_directories(local_dir);
+    kasumi::test::write_text(local_dir / "note.txt", "hello-vault");
+
+    const kasumi::application::Profile file_profile{
+        .name = "fileconn",
+        .local_dir = local_dir,
+        .remote_dir = remote_dir.string(),
+        .key_storage = kasumi::application::KeyStorage::File,
+    };
+    std::array<std::uint8_t, 32> raw_key{};
+    raw_key.fill(0xAAU);
+    ASSERT_TRUE(
+        kasumi::application::create_profile(
+            env, file_profile, kasumi::application::MasterKeyBytes{raw_key})
+            .has_value());
+
+    const auto empty_conn = kasumi::application::test_profile_connection(
+        env, "fileconn", kasumi::application::NoCredentials{});
+    ASSERT_TRUE(empty_conn.has_value()) << empty_conn.error().detail;
+    EXPECT_TRUE(empty_conn->ready);
+    EXPECT_TRUE(empty_conn->transport_ok);
+    EXPECT_EQ(empty_conn->vault_state,
+              kasumi::application::RemoteVaultState::EmptyReadyForInit);
+
+    const auto synced = kasumi::application::execute({
+        .request = {.operation = kasumi::application::Operation::Sync,
+                    .profile_name = "fileconn"},
+        .credentials = kasumi::application::NoCredentials{},
+        .environment = env,
+    });
+    ASSERT_TRUE(synced.has_value()) << synced.error().detail;
+
+    const auto auth_conn = kasumi::application::test_profile_connection(
+        env, "fileconn", kasumi::application::NoCredentials{});
+    ASSERT_TRUE(auth_conn.has_value()) << auth_conn.error().detail;
+    EXPECT_TRUE(auth_conn->ready);
+    EXPECT_EQ(auth_conn->vault_state,
+              kasumi::application::RemoteVaultState::AuthenticatedVault);
+    EXPECT_GE(auth_conn->head_count, 1U);
+    EXPECT_EQ(auth_conn->epoch_sequence, 0U);
+    EXPECT_EQ(auth_conn->epoch_id.size(), 64U);
+
+    // Memory profile authenticates with matching MasterKeyBytes and rejects
+    // wrong key.
+    const kasumi::application::Profile mem_profile{
+        .name = "memconn",
+        .local_dir = local_dir,
+        .remote_dir = remote_dir.string(),
+        .key_storage = kasumi::application::KeyStorage::Memory,
+    };
+    ASSERT_TRUE(
+        kasumi::application::create_profile(
+            env, mem_profile, kasumi::application::MasterKeyBytes{raw_key})
+            .has_value());
+    const auto mem_ok = kasumi::application::test_profile_connection(
+        env, "memconn", kasumi::application::MasterKeyBytes{raw_key});
+    ASSERT_TRUE(mem_ok.has_value()) << mem_ok.error().detail;
+    EXPECT_TRUE(mem_ok->ready);
+    EXPECT_EQ(mem_ok->vault_state,
+              kasumi::application::RemoteVaultState::AuthenticatedVault);
+
+    std::array<std::uint8_t, 32> wrong_key{};
+    wrong_key.fill(0x55U);
+    const auto mem_bad = kasumi::application::test_profile_connection(
+        env, "memconn", kasumi::application::MasterKeyBytes{wrong_key});
+    ASSERT_TRUE(mem_bad.has_value()) << mem_bad.error().detail;
+    EXPECT_FALSE(mem_bad->ready);
+    EXPECT_EQ(
+        mem_bad->vault_state,
+        kasumi::application::RemoteVaultState::KeyMismatchOrInvalidHistory);
+
+    // Regular file at remote_dir fails with TransportFailure.
+    const auto file_remote = root / "not-a-dir";
+    kasumi::test::write_text(file_remote, "not-a-dir");
+    const kasumi::application::Profile bad_transport_profile{
+        .name = "badconn",
+        .local_dir = local_dir,
+        .remote_dir = file_remote.string(),
+        .key_storage = kasumi::application::KeyStorage::File,
+    };
+    ASSERT_TRUE(kasumi::application::create_profile(
+                    env,
+                    bad_transport_profile,
+                    kasumi::application::MasterKeyBytes{raw_key})
+                    .has_value());
+    const auto bad_conn = kasumi::application::test_profile_connection(
+        env, "badconn", kasumi::application::NoCredentials{});
+    ASSERT_TRUE(bad_conn.has_value()) << bad_conn.error().detail;
+    EXPECT_FALSE(bad_conn->ready);
+    EXPECT_FALSE(bad_conn->transport_ok);
+    EXPECT_EQ(bad_conn->vault_state,
+              kasumi::application::RemoteVaultState::TransportFailure);
+}
+
+TEST(ApplicationProfileTest, IgnoreInitCheckAndDiagnosticsSyntaxValidation) {
+    auto workspace = kasumi::test::make_temp_workspace("app-ignore-tools");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const kasumi::application::ExecutionEnvironment env{root / "kasumi"};
+    const auto local_dir = root / "local";
+    const auto remote_dir = root / "remote";
+    std::filesystem::create_directories(local_dir);
+
+    const kasumi::application::Profile profile{
+        .name = "igntest",
+        .local_dir = local_dir,
+        .remote_dir = remote_dir.string(),
+        .key_storage = kasumi::application::KeyStorage::File,
+    };
+    ASSERT_TRUE(kasumi::application::create_profile(
+                    env,
+                    profile,
+                    kasumi::application::MasterKeyHex{std::string(64, 'c')})
+                    .has_value());
+
+    // Dry-run does not create .kasumiignore on disk.
+    const auto dry = kasumi::application::init_profile_ignore(
+        env, "igntest", kasumi::application::IgnorePreset::Dev, false, true);
+    ASSERT_TRUE(dry.has_value()) << dry.error().detail;
+    EXPECT_TRUE(dry->dry_run);
+    EXPECT_FALSE(dry->created);
+    EXPECT_FALSE(std::filesystem::exists(local_dir / ".kasumiignore"));
+
+    for (auto preset : {kasumi::application::IgnorePreset::Default,
+                        kasumi::application::IgnorePreset::Office,
+                        kasumi::application::IgnorePreset::Minimal,
+                        kasumi::application::IgnorePreset::Dev}) {
+        const auto res = kasumi::application::init_profile_ignore(
+            env, "igntest", preset, true, false);
+        ASSERT_TRUE(res.has_value()) << res.error().detail;
+    }
+
+    // Without force, overwriting an existing .kasumiignore fails with
+    // AlreadyExists.
+    const auto dup = kasumi::application::init_profile_ignore(
+        env, "igntest", kasumi::application::IgnorePreset::Dev, false, false);
+    ASSERT_FALSE(dup.has_value());
+    EXPECT_EQ(dup.error().code, ProfileErrorCode::AlreadyExists);
+
+    const std::vector<std::string> check_paths{
+        "build/app.o", "src/main.cpp", "kasumi.db"};
+    const auto checked =
+        kasumi::application::check_profile_ignore(env, "igntest", check_paths);
+    ASSERT_TRUE(checked.has_value()) << checked.error().detail;
+    EXPECT_TRUE(checked->ignore_file_present);
+    ASSERT_EQ(checked->items.size(), 3U);
+    EXPECT_EQ(checked->items[0].disposition,
+              kasumi::application::IgnoreDispositionKind::IgnoredProtected);
+    EXPECT_TRUE(checked->items[0].matched_rule);
+    EXPECT_GT(checked->items[0].rule_line, 0U);
+    EXPECT_EQ(checked->items[1].disposition,
+              kasumi::application::IgnoreDispositionKind::Managed);
+    EXPECT_EQ(checked->items[2].disposition,
+              kasumi::application::IgnoreDispositionKind::IgnoredProtected);
+    EXPECT_TRUE(checked->items[2].reserved_internal);
+
+    // Malformed .kasumiignore surfaces in collect_diagnostics.
+    kasumi::test::write_text(local_dir / ".kasumiignore",
+                             "valid/\n!(?d)*.tmp\n");
+    const auto diag = kasumi::application::collect_diagnostics(env, "igntest");
+    ASSERT_TRUE(diag.has_value()) << diag.error().detail;
+    ASSERT_EQ(diag->profiles.size(), 1U);
+    EXPECT_TRUE(diag->profiles[0].ignore_file_present);
+    EXPECT_FALSE(diag->profiles[0].ignore_file_valid);
+    EXPECT_EQ(diag->profiles[0].ignore_error_line,
+              std::optional<std::size_t>{2U});
+    EXPECT_FALSE(diag->profiles[0].ignore_error_detail.empty());
+    EXPECT_FALSE(diag->profiles[0].healthy);
+    EXPECT_FALSE(diag->overall_ok);
 }
 
 } // namespace

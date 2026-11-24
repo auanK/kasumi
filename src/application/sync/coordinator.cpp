@@ -399,6 +399,8 @@ struct ContentWindowState {
 };
 
 void run_content_worker(std::stop_token stop,
+                        std::stop_token op_stop,
+                        std::optional<std::size_t> concurrency_override,
                         std::size_t slot,
                         ContentWindowState& state,
                         const transaction::Record& record,
@@ -406,6 +408,9 @@ void run_content_worker(std::stop_token stop,
                         transport::Transport& storage,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                         const platform::Workspace& workspace) {
+    const platform::cancellation::ScopedStopToken stop_scope{op_stop};
+    const application::ScopedContentConcurrency concurrency_scope{
+        concurrency_override};
     while (!stop.stop_requested()) {
         ContentWorkItem task;
         {
@@ -478,11 +483,16 @@ run_content_window(
     ContentWindowState state;
     state.tasks.resize(worker_count);
     state.completions.resize(worker_count);
+    const auto op_stop = platform::cancellation::current_stop_token();
+    const auto concurrency_override =
+        application::current_content_concurrency_override();
     std::vector<std::jthread> workers;
     try {
         workers.reserve(worker_count);
         for (std::size_t slot = 0; slot < worker_count; ++slot) {
             workers.emplace_back(run_content_worker,
+                                 op_stop,
+                                 concurrency_override,
                                  slot,
                                  std::ref(state),
                                  std::cref(record),
@@ -1238,13 +1248,17 @@ execute(const runtime::RuntimeData& runtime_data,
         const auto publication_workspace =
             runtime_data.database_path.parent_path();
         try {
+            const auto op_stop = platform::cancellation::current_stop_token();
             commit_publication = std::async(
                 std::launch::async,
                 [&storage,
                  key,
                  layout = history_storage::derive_remote_layout(key),
                  publication_workspace,
+                 op_stop,
                  prepared = &*prepared_commit]() {
+                    const platform::cancellation::ScopedStopToken stop_scope{
+                        op_stop};
                     auto published = publication::publish_commit_object(
                         storage, layout, key, *prepared, publication_workspace);
                     if (!published)

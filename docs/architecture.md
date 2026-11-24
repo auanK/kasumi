@@ -36,8 +36,10 @@ CLI/profile → local observation + authenticated remote history + StoredState
 
 | Request | Local effects | Remote effects |
 |---|---|---|
-| `config` list/create/edit/rename/delete, `profile ...`, `key` | Reads or changes `config.toml`, private profile paths, and persisted keys in the OS vault or `key.bin`; delete preserves the synchronized directory | None |
-| `list`, `show`, `diagnostics`, `conflicts [<profile>]`, `completion` | `list`/`show`/`diagnostics`/`conflicts <profile>` inspect `config.toml`, local/SQLite traceability, or `.kasumiconflict_*` artifacts read-only without contacting remote storage or exposing secrets; `completion` prints shell completion scripts | None |
+| `config` list/create/edit/rename/delete, `profile <create\|edit\|clone\|storage\|rename\|delete>`, `key` | Reads or changes `config.toml`, private profile paths, and persisted keys in the OS vault or `key.bin`; delete preserves the synchronized directory | None (`profile create --verify` also runs a read-only `profile test` connection check and rolls back on failure) |
+| `profile test <profile>` | Validates credentials and opens transport read-only without changing local SQLite state | Lists/observes vault readiness (`empty_ready_for_init` or authenticated HEAD/Epoch probe) read-only |
+| `ignore check`, `ignore init` | `ignore check` evaluates `.kasumiignore` rules read-only; `ignore init` writes (or previews with `--dry-run`) `.kasumiignore` in `local_dir` | None |
+| `list`, `show`, `diagnostics`, `conflicts [<profile>]`, `completion` | `list`/`show`/`diagnostics`/`conflicts <profile>` inspect `config.toml`, `.kasumiignore` syntax, local/SQLite traceability, or `.kasumiconflict_*` artifacts read-only without contacting remote storage or exposing secrets; `completion` prints shell completion scripts | None |
 | `conflicts resolve` | Under `profile-<name>.lock` (skipped for `--dry-run`): optionally promotes the chosen `.kasumiconflict_*` file atomically over the canonical path, then deletes all conflict artifacts in that group | None |
 | Preview (`sync --dry-run`), Status | Reads local/SQLite state; profile lock and permission normalization are possible | Observation only; no recovery or publication |
 | Sync | May change synchronized files, file-hash cache, transaction journal, and accepted `StoredState` | May upload content and publish/prune history; registers a writer for active work |

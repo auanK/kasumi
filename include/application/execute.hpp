@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <functional>
 #include <optional>
+#include <stop_token>
 #include <variant>
 
 namespace kasumi::application {
@@ -148,6 +149,7 @@ struct ExecutionInput {
     Credentials credentials;
     ExecutionEnvironment environment;
     ProgressCallback on_progress{};
+    std::stop_token stop_token{};
 };
 
 // Executes the requested operation.
