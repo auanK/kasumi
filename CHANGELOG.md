@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.28.0]
+
+### Added
+
+- **Unified Overview Dashboard (`kasumi` & `kasumi status`)**:
+  - Running bare `kasumi` (or `kasumi status` without a profile) now displays a single consolidated overview: daemon running/stopped + autostart status and one compact line per profile showing status badge (`ok`, `syncing`, `paused`, `locked`, `retrying`, `pending`, `conflict`, `error`, `ready`), **both** the relative local sync time (`sync <rel>`) and the HEAD commit's last change timestamp + author machine (`last change <rel> by <machine>`), explicit `[watch off]` / `[manual only]` indicators when watching is disabled, and actionable conflict/error hints. If no profiles exist yet, it displays a numbered 3-step quickstart (`rclone config` -> `kasumi config` -> `kasumi start --autostart`).
+  - Pass `--full` to expand daemon PID/IPC port/uptime, local/remote paths, dirty path counts, timers, and last outcome; pass `--json` for full schema v1 machine-readable snapshots (including `watch_enabled`, `sync_interval_seconds`, `head_commit_at`, `head_commit_machine`, and `head_commit_height`); `--lang pt-BR` and `--quiet` work uniformly.
+- **Zero-Friction Daily Daemon Controls (`start`, `stop`, `pause`, `resume`, `logs`)**:
+  - Added top-level `kasumi start [--autostart]` (replaces multi-step daemon start + autostart setup), `kasumi stop` (idempotent graceful stop), `kasumi pause <profile | --all>`, and `kasumi resume <profile | --all>`.
+  - Added `kasumi logs [<profile>] [-f | --follow] [--lines <1..1000>] [--full]` (and `-f` / `--follow` on `kasumi daemon logs`), supporting cross-platform live streaming on Windows and Linux with clean Ctrl+C (`130`) exit handling, NDJSON streaming under `-f --json`, and automatic filtering of repetitive `fast_noop` and `warm_transport_*` events unless `--full` is passed.
+  - Added elapsed duration (`(X.X s)`) to daemon `sync_completed` events and integrated per-profile schedule editing (`watch`, `sync_interval_seconds`, `gc_interval_hours`) directly into `kasumi config` -> `[e] Edit`.
+
+### Changed
+
+- **Progressive Disclosure Across Help, `show`, `list`, and `daemon status`**:
+  - `kasumi --help` now presents a focused 1-screen daily command summary with `--help --all` expanding the full command reference (`en` and `pt-BR`).
+  - `kasumi show <profile>`, `kasumi list`, and `kasumi daemon status` default to concise human summaries (`show` displays essential state, automation settings, conflicts count, last local sync, last HEAD commit change & author machine, and up to 5 non-noisy daemon events; `daemon status` surfaces `watch off` / `timer off` alongside relative sync time) while `--full` expands technical paths, full IDs, and complete logs/histories; `--json` outputs retain all fields unchanged.
+  - Updated `bash`, `zsh`, `fish`, and `powershell` shell completions with the new daily commands and options.
+
+### Fixed
+
+- **Linux Reboot OS-Vault Recovery & `systemd --user` Ordering**:
+  - Added automatic unlocked-keyring recovery in the daemon scheduler loop (`engine.cpp`): locked `key_storage = "vault"` profiles now automatically re-check the OS vault on a fast `3s -> 5s -> 10s -> 15s -> 30s` schedule outside the daemon mutex and immediately unlock and resume syncing once Secret Service / KWallet opens after login (or when `kasumi key <profile>` stores the key), without requiring manual `kasumi daemon reload`.
+  - Added automatic `SecretService <-> KWallet` read fallback in Linux `read_vault` (`src/runtime/vault.cpp`) when `KASUMI_LINUX_VAULT_BACKEND` is unset/`auto` and the primary backend reports `KeyNotFound`.
+  - Added `graphical-session.target` alongside `network-online.target` in `kasumi-daemon.service` `After=` ordering (`src/platform/autostart.cpp`).
+
+### Documentation
+
+- Updated [README](README.md) Quick Start & Command Overview and [Configuration and Usage](docs/configuration-and-usage.md) with the v0.28.0 daily workflow, `--help --all`, `--full`, `--json`, `--quiet`, `--log-file`, and daemon watch debounce (`3 s`), max-wait (`30 s`), full-scan (`30 min`), and warm-transport idle (`15 min`) intervals.
+
+### Upgrade Notes
+
+- 100% compatible with `v0.19.x`–`v0.27.2` repositories, CLI commands, `--json` `schema_version: 1` outputs, `config.toml`, `state.db`, OS vaults, and remote formats (`KCOM` v4, `KACT` v1, `KPAK\x01`, `transaction.bin.enc`).
+- Existing Linux desktop users who already enabled autostart may run `kasumi start --autostart` once after upgrading to refresh `kasumi-daemon.service` with `graphical-session.target` ordering (automatic OS-vault unlock recovery activates on upgrade regardless).
+
 ## [0.27.2]
 
 ### Fixed
