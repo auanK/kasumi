@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.26.0]
+
+### Added
+
+- **Continuous-Process & Cancellation Foundation**:
+  - Added per-operation `std::stop_token` support on `application::ExecutionInput` and `application::InspectionInput` (`ScopedStopToken` propagated across worker threads, tasks, and rclone `RcClient` HTTP cancellation).
+  - Added raw 32-byte `application::MasterKeyBytes` credentials (zeroed on move and destruction) to `Credentials` and `ProfileCredentials`.
+  - Added thread-scoped `ScopedContentConcurrency` and priority resolution (`--concurrency` / request > per-profile `transfer_concurrency` > `KASUMI_CONTENT_CONCURRENCY` > default `8`).
+- **Profile Configuration Schema & Transport Controls**:
+  - Added optional `version = 1` schema versioning to `config.toml` while retaining full read compatibility with legacy unversioned configurations.
+  - Added per-profile optional `bandwidth_limit` (`RCLONE_BWLIMIT`), `transfer_concurrency` (`1..16`), and `rclone_config` (`RCLONE_CONFIG`) settings in `config.toml` and `kasumi profile create|edit`, plus per-invocation `--bwlimit` and `--concurrency` flags across `sync`, `status`, `fsck`, `gc`, `repack`, and `remote ...`.
+- **Empty-Local Data-Loss Guards**:
+  - Added Sync empty-root guards (`error.code = "empty_local_blocked"`) blocking execution before recreating a missing `local_dir` or mass-deleting a populated (`> 5`-entry) vault from an empty `local_dir`, plus an empty-local relocation guard on `profile edit` / `update_profile`, overridable with `--allow-empty-local`.
+- **Fast Connection Verification & Key Management**:
+  - Added `kasumi profile test <profile>` and `kasumi profile create ... --verify` (with automatic rollback on connection or key verification failure).
+  - Added `kasumi key <profile> [--replace] [--json] [--quiet]` for non-interactive key management (`error.code = "already_exists"` in `--json` mode when overwriting a different key without `--replace`).
+- **`.kasumiignore` Inspection, Presets & Diagnostics**:
+  - Added `kasumi ignore check <profile> <path...>` and `kasumi ignore init <profile> [--preset default|dev|office|minimal] [--force] [--dry-run]`, plus automatic `.kasumiignore` syntax validation in `kasumi diagnostics`.
+
+### Documentation
+
+- Updated `README.md`, `docs/getting-started.md`, `docs/configuration-and-usage.md`, `docs/best-practices.md`, `docs/troubleshooting.md`, `docs/architecture.md`, and `docs/architecture/*.md` for `profile test`, `profile create --verify`, `key --replace`, `ignore check|init`, `config.toml` `version = 1` transport controls, empty-local safety guards, and per-operation `std::stop_token` / `MasterKeyBytes`.
+
+### Upgrade Notes
+
+- 100% compatible with existing `v0.19.x`–`v0.25.0` encrypted repositories and local state (`KCOM` v4, `KACT` v1, `KPAK\x01`, `state.db` v2, `transaction.bin.enc`, and unversioned `config.toml`).
+
 ## [0.25.0]
 
 ### Added
