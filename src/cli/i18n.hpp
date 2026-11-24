@@ -648,13 +648,10 @@ enum class Key {
     WizardShowLastChangeHead,
     WizardShowRecentEventsHeader,
     WizardShowFullHint,
-    WizardAutoHeader,
-    WizardAutoMenu,
     WizardAutoPromptWatch,
     WizardAutoPromptSyncInterval,
     WizardAutoPromptGcInterval,
     WizardAutoInvalidInterval,
-    WizardAutoScheduleUpdated,
 
     // Overview
     OverviewQuickstartHeader,

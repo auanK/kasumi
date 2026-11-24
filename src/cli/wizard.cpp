@@ -1656,7 +1656,7 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         const auto menu = profiles.empty() ? i18n::Key::WizardMenuEmpty
                                            : i18n::Key::WizardMenu;
         const auto valid_choice = [&](std::string_view value) {
-            if (value == "q" || value == "n" || value == "a") {
+            if (value == "q" || value == "n") {
                 return true;
             }
             return !profiles.empty() &&
@@ -1862,11 +1862,110 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 application::Profile updated = *it;
                 updated.local_dir = platform::path::from_utf8(edit_local);
                 updated.remote_dir = edit_remote;
-                if (updated.local_dir == it->local_dir &&
-                    updated.remote_dir == it->remote_dir) {
+
+                const std::string cur_watch =
+                    updated.watch_enabled.value_or(true) ? "on" : "off";
+                std::string watch_val;
+                if (!prompt_form_line(
+                        i18n::format(i18n::Key::WizardAutoPromptWatch,
+                                     cur_watch),
+                        watch_val)) {
                     continue;
                 }
-                if (!confirm_change(
+                if (!watch_val.empty()) {
+                    std::ranges::transform(
+                        watch_val, watch_val.begin(), [](unsigned char c) {
+                            return static_cast<char>(std::tolower(c));
+                        });
+                    if (watch_val == "on" || watch_val == "true" ||
+                        watch_val == "1" || watch_val == "yes" ||
+                        watch_val == "y" || watch_val == "sim" ||
+                        watch_val == "s") {
+                        updated.watch_enabled = true;
+                    } else if (watch_val == "off" || watch_val == "false" ||
+                               watch_val == "0" || watch_val == "no" ||
+                               watch_val == "n" || watch_val == "nao") {
+                        updated.watch_enabled = false;
+                    } else {
+                        print_error_line(
+                            i18n::tr(i18n::Key::WizardInvalidOption));
+                        continue;
+                    }
+                }
+
+                const std::uint32_t cur_sync =
+                    updated.sync_interval_seconds.value_or(300U);
+                std::string sync_val;
+                if (!prompt_form_line(
+                        i18n::format(i18n::Key::WizardAutoPromptSyncInterval,
+                                     cur_sync),
+                        sync_val)) {
+                    continue;
+                }
+                if (!sync_val.empty()) {
+                    try {
+                        const auto parsed = std::stoul(sync_val);
+                        if (parsed > 86400UL ||
+                            (parsed != 0UL && parsed < 10UL)) {
+                            print_error_line(i18n::format(
+                                i18n::Key::WizardAutoInvalidInterval,
+                                10U,
+                                86400U));
+                            continue;
+                        }
+                        updated.sync_interval_seconds =
+                            static_cast<std::uint32_t>(parsed);
+                    } catch (...) {
+                        print_error_line(i18n::format(
+                            i18n::Key::WizardAutoInvalidInterval,
+                            10U,
+                            86400U));
+                        continue;
+                    }
+                }
+
+                const std::uint32_t cur_gc =
+                    updated.gc_interval_hours.value_or(0U);
+                std::string gc_val;
+                if (!prompt_form_line(
+                        i18n::format(i18n::Key::WizardAutoPromptGcInterval,
+                                     cur_gc),
+                        gc_val)) {
+                    continue;
+                }
+                if (!gc_val.empty()) {
+                    try {
+                        const auto parsed = std::stoul(gc_val);
+                        if (parsed > 8760UL) {
+                            print_error_line(i18n::format(
+                                i18n::Key::WizardAutoInvalidInterval,
+                                1U,
+                                8760U));
+                            continue;
+                        }
+                        updated.gc_interval_hours =
+                            static_cast<std::uint32_t>(parsed);
+                    } catch (...) {
+                        print_error_line(i18n::format(
+                            i18n::Key::WizardAutoInvalidInterval,
+                            1U,
+                            8760U));
+                        continue;
+                    }
+                }
+
+                const bool paths_changed = updated.local_dir != it->local_dir ||
+                                           updated.remote_dir != it->remote_dir;
+                const bool auto_changed =
+                    updated.watch_enabled != it->watch_enabled ||
+                    updated.sync_interval_seconds !=
+                        it->sync_interval_seconds ||
+                    updated.gc_interval_hours != it->gc_interval_hours;
+                if (!paths_changed && !auto_changed) {
+                    continue;
+                }
+                if (paths_changed &&
+                    !confirm_change(
                         i18n::format(i18n::Key::WizardConfirmEdit,
                                      target,
                                      platform::path::to_utf8(it->local_dir),
@@ -1956,202 +2055,6 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             report_result(
                 application::rename_profile(environment, target, new_name),
                 i18n::format(i18n::Key::WizardProfileRenamed, new_name));
-        } else if (choice == "a") {
-            while (!platform::cancellation::requested()) {
-                i18n::print(i18n::Key::WizardAutoHeader);
-                const bool running =
-                    application::is_daemon_running(environment);
-                const auto autostart = application::query_daemon_autostart();
-                std::println("  daemon: {}{}",
-                             running ? i18n::tr(i18n::Key::OverviewBadgeOk)
-                                     : "stopped",
-                             autostart && autostart->supported
-                                 ? std::format(" | autostart: {}",
-                                               autostart->installed ? "on"
-                                                                    : "off")
-                                 : std::string{});
-                std::string sub_choice;
-                if (!prompt_line(i18n::tr(i18n::Key::WizardAutoMenu),
-                                 sub_choice)) {
-                    break;
-                }
-                if (sub_choice == "b" || sub_choice == "B" ||
-                    sub_choice == "q" || sub_choice == "Q") {
-                    break;
-                }
-                if (sub_choice == "1") {
-                    if (running) {
-                        const auto stopped =
-                            application::stop_running_daemon(environment);
-                        if (stopped) {
-                            print_ok_line(i18n::tr(i18n::Key::DaemonStopped));
-                        } else {
-                            print_error_line(stopped.error().detail);
-                        }
-                    } else {
-                        const auto started =
-                            application::spawn_background_daemon(environment);
-                        if (started) {
-                            print_ok_line(
-                                i18n::tr(i18n::Key::DaemonStartedCompact));
-                        } else {
-                            print_error_line(started.error().detail);
-                        }
-                    }
-                } else if (sub_choice == "2") {
-                    if (autostart && autostart->installed) {
-                        const auto res =
-                            application::uninstall_daemon_autostart();
-                        if (res) {
-                            print_ok_line(i18n::format(
-                                i18n::Key::DaemonAutostartUninstalled,
-                                sanitize_terminal_text(res->method)));
-                        } else {
-                            print_error_line(res.error().detail);
-                        }
-                    } else {
-                        const auto res =
-                            application::install_daemon_autostart();
-                        if (res) {
-                            print_ok_line(i18n::format(
-                                i18n::Key::DaemonAutostartInstalled,
-                                sanitize_terminal_text(res->method),
-                                sanitize_terminal_text(res->location)));
-                        } else {
-                            print_error_line(res.error().detail);
-                        }
-                    }
-                } else if (sub_choice == "3") {
-                    if (profiles.empty()) {
-                        i18n::println(i18n::Key::WizardNoProfiles);
-                        continue;
-                    }
-                    const bool all_paused =
-                        std::ranges::all_of(profiles, &application::Profile::paused);
-                    const bool target_pause = !all_paused;
-                    for (const auto& p : profiles) {
-                        const auto res =
-                            target_pause
-                                ? application::pause_daemon_profile(environment,
-                                                                    p.name)
-                                : application::resume_daemon_profile(
-                                      environment, p.name);
-                        if (!res) {
-                            print_error_line(res.error().detail);
-                        }
-                    }
-                    print_ok_line(i18n::format(
-                        target_pause ? i18n::Key::DaemonAllPaused
-                                     : i18n::Key::DaemonAllResumed,
-                        profiles.size()));
-                    if (auto refreshed = application::list_profiles(environment)) {
-                        profiles = std::move(*refreshed);
-                    }
-                } else if (sub_choice == "4") {
-                    std::string target;
-                    if (!prompt_existing(i18n::Key::WizardPromptProfileToEdit,
-                                         target)) {
-                        continue;
-                    }
-                    auto it = std::ranges::find(
-                        profiles, target, &application::Profile::name);
-                    if (it == profiles.end()) {
-                        continue;
-                    }
-                    application::Profile updated = *it;
-                    const std::string cur_watch =
-                        updated.watch_enabled.value_or(true) ? "on" : "off";
-                    std::string watch_val;
-                    if (!prompt_form_line(
-                            i18n::format(i18n::Key::WizardAutoPromptWatch,
-                                         cur_watch),
-                            watch_val)) {
-                        continue;
-                    }
-                    if (!watch_val.empty()) {
-                        if (watch_val == "on" || watch_val == "true" ||
-                            watch_val == "1") {
-                            updated.watch_enabled = true;
-                        } else if (watch_val == "off" || watch_val == "false" ||
-                                   watch_val == "0") {
-                            updated.watch_enabled = false;
-                        } else {
-                            print_error_line(
-                                i18n::tr(i18n::Key::WizardInvalidOption));
-                            continue;
-                        }
-                    }
-                    const std::uint32_t cur_sync =
-                        updated.sync_interval_seconds.value_or(300U);
-                    std::string sync_val;
-                    if (!prompt_form_line(
-                            i18n::format(
-                                i18n::Key::WizardAutoPromptSyncInterval,
-                                cur_sync),
-                            sync_val)) {
-                        continue;
-                    }
-                    if (!sync_val.empty()) {
-                        try {
-                            const auto parsed = std::stoul(sync_val);
-                            if (parsed > 86400UL ||
-                                (parsed != 0UL && parsed < 10UL)) {
-                                print_error_line(i18n::format(
-                                    i18n::Key::WizardAutoInvalidInterval,
-                                    10U,
-                                    86400U));
-                                continue;
-                            }
-                            updated.sync_interval_seconds =
-                                static_cast<std::uint32_t>(parsed);
-                        } catch (...) {
-                            print_error_line(i18n::format(
-                                i18n::Key::WizardAutoInvalidInterval,
-                                10U,
-                                86400U));
-                            continue;
-                        }
-                    }
-                    const std::uint32_t cur_gc =
-                        updated.gc_interval_hours.value_or(0U);
-                    std::string gc_val;
-                    if (!prompt_form_line(
-                            i18n::format(i18n::Key::WizardAutoPromptGcInterval,
-                                         cur_gc),
-                            gc_val)) {
-                        continue;
-                    }
-                    if (!gc_val.empty()) {
-                        try {
-                            const auto parsed = std::stoul(gc_val);
-                            if (parsed > 8760UL) {
-                                print_error_line(i18n::format(
-                                    i18n::Key::WizardAutoInvalidInterval,
-                                    1U,
-                                    8760U));
-                                continue;
-                            }
-                            updated.gc_interval_hours =
-                                static_cast<std::uint32_t>(parsed);
-                        } catch (...) {
-                            print_error_line(i18n::format(
-                                i18n::Key::WizardAutoInvalidInterval,
-                                1U,
-                                8760U));
-                            continue;
-                        }
-                    }
-                    report_result(
-                        application::update_profile(environment, updated, true),
-                        i18n::format(i18n::Key::WizardAutoScheduleUpdated,
-                                     updated.name));
-                    if (auto refreshed = application::list_profiles(environment)) {
-                        profiles = std::move(*refreshed);
-                    }
-                } else {
-                    print_error_line(i18n::tr(i18n::Key::WizardInvalidOption));
-                }
-            }
         } else {
             print_error_line(i18n::tr(i18n::Key::WizardInvalidOption));
         }

@@ -1139,7 +1139,7 @@ TEST_F(CliInterfaceTest, UnifiedDaemonErrorsAndListFullWorkCleanly) {
     EXPECT_NE(list_full.out.find("->"), std::string::npos);
 }
 
-TEST_F(CliInterfaceTest, ConfigAutomationSubmenuUpdatesProfileSchedule) {
+TEST_F(CliInterfaceTest, ConfigEditUpdatesProfileAutomationSchedule) {
     const auto root = kasumi::test::workspace_root(workspace);
     const kasumi::application::ExecutionEnvironment environment{root /
                                                                 "kasumi"};
@@ -1151,13 +1151,14 @@ TEST_F(CliInterfaceTest, ConfigAutomationSubmenuUpdatesProfileSchedule) {
         kasumi::application::MasterKeyHex{std::string(64, '8')}));
     std::filesystem::create_directories(profile.local_dir);
 
-    std::istringstream wizard_input("a\n4\nnotes\noff\n120\n24\nb\nq\n");
+    std::istringstream wizard_input("e\nnotes\n\n\noff\n120\n24\nq\n");
     auto* previous = std::cin.rdbuf(wizard_input.rdbuf());
     const auto out = run({"kasumi", "config"});
     std::cin.rdbuf(previous);
     std::cin.clear();
     EXPECT_EQ(out.code, 0) << out.err;
-    EXPECT_NE(out.out.find("Daemon & Automation"), std::string::npos);
+    EXPECT_NE(out.out.find("Profile 'notes' edited successfully."),
+              std::string::npos);
 
     const auto profiles = kasumi::application::list_profiles(environment);
     ASSERT_TRUE(profiles.has_value());

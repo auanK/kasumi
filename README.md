@@ -112,7 +112,7 @@ cmake --preset default && cmake --build --preset default
 | `kasumi sync <profile> [--repair]` | Run manual bidirectional sync (or re-upload missing remote objects) |
 | `kasumi status <profile>` | Preview synchronization changes read-only (`sync --dry-run`) |
 | `kasumi show <profile> [--full]` | Inspect profile settings, last complete sync, and recent history (`--full` expands details) |
-| `kasumi config` | Interactive wizard (`rclone` remote hints, profiles, keys, and automation settings) |
+| `kasumi config` | Interactive profile wizard (`rclone` remote hints, paths, keys, and sync schedule) |
 | `kasumi conflicts <profile>` | Scan local folder read-only or `resolve <profile> <path>` preserved conflicts |
 | `kasumi diagnostics [<profile>]` | Inspect local environment, `rclone >= v1.60.0`, disk space, and profile health |
 | `kasumi remote <subcommand> <profile>` | Read-only inspection & restore (`summary`, `heads`, `tree`, `log`, `stat`/`get`/`restore`, `writers`) |

@@ -302,8 +302,7 @@ class CliProcessTest(unittest.TestCase):
     def test_empty_wizard_quits_without_creating_profile_data(self):
         output = self.invoke("config", input=b"e\nc\nk\ns\nd\nr\nq\n")
         self.assertIn(b"No profiles registered.", output)
-        self.assertIn(b"[n] New", output)
-        self.assertIn(b"[q] Quit", output)
+        self.assertIn(b"[n] New  [q] Quit", output)
         self.assertFalse((self.root / "kasumi").exists())
 
     def test_wizard_invalid_option_does_not_reprint_menu(self):
@@ -416,15 +415,15 @@ class CliProcessTest(unittest.TestCase):
         new_remote = self.root / "edited-remote"
         before_edit = self._tree_snapshot(data)
         # Unchanged input, rejected changes, and EOF must preserve profile data.
-        self.invoke("config", input=b"e\ndemo\n\n\nq\n")
+        self.invoke("config", input=b"e\ndemo\n\n\n\n\n\nq\n")
         self.assertEqual(self._tree_snapshot(data), before_edit)
         for confirmation in ("", "n"):
-            self.invoke("config", input=f"e\ndemo\n{new_local}\n{new_remote}\n{confirmation}\nq\n".encode())
+            self.invoke("config", input=f"e\ndemo\n{new_local}\n{new_remote}\n\n\n\n{confirmation}\nq\n".encode())
             self.assertEqual(self._tree_snapshot(data), before_edit)
-        self.invoke("config", input=f"e\ndemo\n{new_local}\n{new_remote}\n".encode(), expected=130)
+        self.invoke("config", input=f"e\ndemo\n{new_local}\n{new_remote}\n\n\n\n".encode(), expected=130)
         self.assertEqual(self._tree_snapshot(data), before_edit)
         edited = self.invoke(
-            "config", input=f"e\ndemo\n{new_local}\n{new_remote}\ny\nq\n".encode(),
+            "config", input=f"e\ndemo\n{new_local}\n{new_remote}\n\n\n\ny\nq\n".encode(),
         )
         self.assertIn(b"Profile 'demo' edited successfully.", edited)
         profiles = tomllib.loads(config.read_text(encoding="utf-8"))["profiles"]
@@ -480,7 +479,7 @@ class CliProcessTest(unittest.TestCase):
                 inputs.extend(("n", name, str(local), str(remote), ""))
             else:
                 inputs.extend(
-                    ("c", "initialized", name, "e", name, str(local), str(remote), "y")
+                    ("c", "initialized", name, "e", name, str(local), str(remote), "", "", "", "y")
                 )
         self.invoke("config", input=("\n".join((*inputs, "q", ""))).encode())
 
