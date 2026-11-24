@@ -619,7 +619,11 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
             };
 
             if (on_progress) {
-                std::jthread driver([&] {
+                const auto stop_token =
+                    platform::cancellation::current_stop_token();
+                std::jthread driver([&, stop_token] {
+                    const platform::cancellation::ScopedStopToken stop_scope{
+                        stop_token};
                     run_workers();
                     workers_done.store(true, std::memory_order_release);
                     progress_signal.release();

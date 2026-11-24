@@ -197,7 +197,10 @@ void parse_rule_line(std::string line,
     if (line.empty() || line[0] == '#')
         return;
 
+    std::string trimmed_raw = line;
     IgnoreRule rule;
+    rule.line = line_number;
+    rule.raw = trimmed_raw;
     if (line[0] == '!') {
         rule.negated = true;
         line.erase(0, 1);
@@ -376,25 +379,62 @@ bool is_ignored(std::string_view path,
            IgnoreDisposition::Managed;
 }
 
+IgnoreMatch inspect_ignore(std::string_view logical_path,
+                           bool is_directory,
+                           const IgnoreList& rules) {
+    if (rules.parse_error) {
+        return IgnoreMatch{
+            .disposition = IgnoreDisposition::IgnoredProtected,
+            .reserved_internal = false,
+            .matched = false,
+        };
+    }
+    if (is_reserved_internal(logical_path)) {
+        return IgnoreMatch{
+            .disposition = IgnoreDisposition::IgnoredProtected,
+            .reserved_internal = true,
+            .matched = true,
+        };
+    }
+    const auto* rule = last_matching_rule(rules, logical_path, is_directory);
+    if (rule == nullptr) {
+        return IgnoreMatch{
+            .disposition = IgnoreDisposition::Managed,
+            .matched = false,
+        };
+    }
+    IgnoreMatch match{
+        .disposition = IgnoreDisposition::IgnoredProtected,
+        .reserved_internal = false,
+        .matched = true,
+        .line = rule->line,
+        .raw = rule->raw,
+        .negated = rule->negated,
+        .directory_only = rule->directory_only,
+        .disposable = rule->disposable,
+    };
+    if (rule->negated) {
+        match.disposition = IgnoreDisposition::Managed;
+        return match;
+    }
+    if (rule->disposable && is_kasumiignore_path(logical_path)) {
+        match.disposition =
+            logical_path.find_first_of("/\\") == std::string_view::npos
+                ? IgnoreDisposition::Managed
+                : IgnoreDisposition::IgnoredProtected;
+        return match;
+    }
+    if (rule->disposable && !is_directory) {
+        match.disposition = IgnoreDisposition::IgnoredDisposable;
+        return match;
+    }
+    return match;
+}
+
 IgnoreDisposition classify_ignore(std::string_view logical_path,
                                   bool is_directory,
                                   const IgnoreList& rules) {
-    if (rules.parse_error || is_reserved_internal(logical_path)) {
-        return IgnoreDisposition::IgnoredProtected;
-    }
-    const auto* rule = last_matching_rule(rules, logical_path, is_directory);
-    if (rule == nullptr || rule->negated) {
-        return IgnoreDisposition::Managed;
-    }
-    if (rule->disposable && is_kasumiignore_path(logical_path)) {
-        return logical_path.find_first_of("/\\") == std::string_view::npos
-                   ? IgnoreDisposition::Managed
-                   : IgnoreDisposition::IgnoredProtected;
-    }
-    if (rule->disposable && !is_directory) {
-        return IgnoreDisposition::IgnoredDisposable;
-    }
-    return IgnoreDisposition::IgnoredProtected;
+    return inspect_ignore(logical_path, is_directory, rules).disposition;
 }
 
 } // namespace kasumi::ignore

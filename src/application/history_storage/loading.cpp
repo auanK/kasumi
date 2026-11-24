@@ -606,11 +606,14 @@ LoadResult load_impl(transport::Transport& storage,
         return *raw_epoch;
     };
 
+    const auto stop_token = platform::cancellation::current_stop_token();
     std::future<std::expected<std::optional<epoch::VerifiedEpoch>, Error>>
         scoped_epoch;
     // Native batch backends already support concurrent history reads.
     if (scoped && storage.storage.get_batch != nullptr) {
-        scoped_epoch = std::async(std::launch::async, [&] {
+        scoped_epoch = std::async(std::launch::async, [&, stop_token] {
+            const platform::cancellation::ScopedStopToken stop_scope{
+                stop_token};
             return load_latest_epoch(
                 frontier ? frontier->accepted_epoch : std::nullopt, true);
         });
@@ -705,13 +708,19 @@ LoadResult load_impl(transport::Transport& storage,
         };
 
         {
-            std::jthread batch_thread([&] {
+            std::jthread batch_thread([&, stop_token] {
+                const platform::cancellation::ScopedStopToken stop_scope{
+                    stop_token};
                 reads.commit_batch_result = fetch_commit_batch();
             });
-            std::jthread epoch_thread([&] {
+            std::jthread epoch_thread([&, stop_token] {
+                const platform::cancellation::ScopedStopToken stop_scope{
+                    stop_token};
                 reads.epoch_result = load_latest_epoch(std::nullopt, true);
             });
-            std::jthread marker_thread([&] {
+            std::jthread marker_thread([&, stop_token] {
+                const platform::cancellation::ScopedStopToken stop_scope{
+                    stop_token};
                 reads.marker_result =
                     load_markers((*marker_temporary)->workspace.root, true);
             });

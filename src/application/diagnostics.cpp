@@ -1,5 +1,6 @@
 #include "application/detail.hpp"
 #include "application/profile.hpp"
+#include "core/ignore.hpp"
 #include "platform/path.hpp"
 #include "platform/profile_lock.hpp"
 #include "runtime/paths.hpp"
@@ -194,6 +195,19 @@ collect_diagnostics(const ExecutionEnvironment& environment,
                 diag.local_free_bytes = to_space_u64(space->available);
                 diag.local_capacity_bytes = to_space_u64(space->capacity);
             }
+            const auto ignore_path = profile.local_dir / ".kasumiignore";
+            std::error_code ignore_ec;
+            const auto ignore_status =
+                std::filesystem::symlink_status(ignore_path, ignore_ec);
+            diag.ignore_file_present =
+                !ignore_ec &&
+                ignore_status.type() != std::filesystem::file_type::not_found;
+            const auto ignore_list = ignore::load_ignore_list(ignore_path);
+            if (ignore_list.parse_error) {
+                diag.ignore_file_valid = false;
+                diag.ignore_error_line = ignore_list.parse_error->line;
+                diag.ignore_error_detail = ignore_list.parse_error->detail;
+            }
         }
 
         const auto lock_path =
@@ -252,6 +266,16 @@ collect_diagnostics(const ExecutionEnvironment& environment,
                           report.rclone.detail.empty()
                               ? "rclone toolchain unavailable"
                               : report.rclone.detail);
+        }
+        if (!diag.ignore_file_valid) {
+            append_reason(
+                issues,
+                diag.ignore_error_line && *diag.ignore_error_line > 0
+                    ? std::format(".kasumiignore invalid on line {}: {}",
+                                  *diag.ignore_error_line,
+                                  diag.ignore_error_detail)
+                    : std::format(".kasumiignore invalid: {}",
+                                  diag.ignore_error_detail));
         }
 
         diag.healthy = issues.empty() &&

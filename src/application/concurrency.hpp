@@ -1,11 +1,13 @@
 #ifndef KASUMI_APPLICATION_CONCURRENCY_HPP
 #define KASUMI_APPLICATION_CONCURRENCY_HPP
 
+#include "platform/cancellation.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <optional>
 #include <thread>
-#include <utility>
 #include <vector>
 
 namespace kasumi::application {
@@ -13,10 +15,32 @@ namespace kasumi::application {
 constexpr std::size_t default_content_concurrency = 8;
 constexpr std::size_t maximum_experimental_content_concurrency = 16;
 
-// Resolves configured transfer concurrency from KASUMI_CONTENT_CONCURRENCY.
-// Returns default_content_concurrency (8) when unset or invalid.
-// Caps at maximum_experimental_content_concurrency (16).
+// Resolves effective transfer concurrency from request override,
+// KASUMI_CONTENT_CONCURRENCY environment variable, profile override, or
+// default.
+std::size_t resolve_content_concurrency(
+    std::optional<std::size_t> request_override = std::nullopt,
+    std::optional<std::size_t> profile_override = std::nullopt) noexcept;
+
+// Returns the active scoped transfer concurrency or falls back to
+// KASUMI_CONTENT_CONCURRENCY / default_content_concurrency (8).
 std::size_t content_concurrency() noexcept;
+
+std::optional<std::size_t> current_content_concurrency_override() noexcept;
+
+class ScopedContentConcurrency {
+public:
+    explicit ScopedContentConcurrency(
+        std::optional<std::size_t> override_value) noexcept;
+    ~ScopedContentConcurrency() noexcept;
+
+    ScopedContentConcurrency(const ScopedContentConcurrency&) = delete;
+    ScopedContentConcurrency&
+    operator=(const ScopedContentConcurrency&) = delete;
+
+private:
+    std::optional<std::size_t> previous_;
+};
 
 template <typename Fn>
 void parallel_for_indexed(std::size_t count, std::size_t parallelism, Fn&& fn) {
@@ -31,11 +55,17 @@ void parallel_for_indexed(std::size_t count, std::size_t parallelism, Fn&& fn) {
         }
         return;
     }
+    const auto stop_token = platform::cancellation::current_stop_token();
+    const auto concurrency_override = current_content_concurrency_override();
     std::atomic<std::size_t> next{0};
     std::vector<std::jthread> workers;
     workers.reserve(worker_count);
     for (std::size_t w = 0; w < worker_count; ++w) {
-        workers.emplace_back([&]() {
+        workers.emplace_back([&, stop_token, concurrency_override]() {
+            const platform::cancellation::ScopedStopToken stop_scope{
+                stop_token};
+            const ScopedContentConcurrency concurrency_scope{
+                concurrency_override};
             while (true) {
                 const auto index = next.fetch_add(1, std::memory_order_relaxed);
                 if (index >= count) {

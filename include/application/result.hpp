@@ -304,6 +304,7 @@ struct Error {
     bool lock_busy = false;
     bool remote_busy = false;
     bool insufficient_disk_space = false;
+    bool empty_local_blocked = false;
 };
 
 } // namespace kasumi::application

@@ -10,6 +10,7 @@
 #include "core/reconciliation/plan.hpp"
 #include "crypto/content.hpp"
 #include "crypto/file_crypto.hpp"
+#include "platform/cancellation.hpp"
 #include "platform/path.hpp"
 #include "state_storage/database.hpp"
 
@@ -335,7 +336,9 @@ collect_reconciliation_input(
         runtime_data.local_dir / ".kasumiignore");
     input.ignore_list = local_ignore_list;
 
-    std::jthread local_scan([&] {
+    const auto stop_token = platform::cancellation::current_stop_token();
+    std::jthread local_scan([&, stop_token] {
+        const platform::cancellation::ScopedStopToken stop_scope{stop_token};
         local_observation =
             collect_local_observation(runtime_data.local_dir, session);
         if (local_observation && input.base_state_present &&

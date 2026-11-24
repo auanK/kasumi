@@ -14,8 +14,11 @@
 #include "platform/path.hpp"
 #include "state_storage/database.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <exception>
+#include <filesystem>
+#include <format>
 #include <optional>
 #include <utility>
 
@@ -215,6 +218,44 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                         ErrorCode::PlanFailure,
                         describe_reconciliation_error(reconciled.error()),
                         SyncStage::Calculating);
+                }
+
+                if (initial_pass &&
+                    *recovery == sync::coordinator::RecoveryResult::NoJournal &&
+                    !context.initial_sync && !context.repair &&
+                    !context.allow_empty_local &&
+                    collected->base_state_present &&
+                    collected->base_tree.rows.size() > 5U &&
+                    collected->local_tree.rows.size() <= 1U) {
+                    std::error_code dir_ec;
+                    std::filesystem::directory_iterator dir_it(
+                        context.runtime.local_dir, dir_ec);
+                    const bool physically_empty =
+                        !dir_ec &&
+                        dir_it == std::filesystem::directory_iterator{};
+                    const auto ops = sync_plan_operations(reconciled->plan);
+                    const bool all_remote_deletes =
+                        !ops.empty() &&
+                        std::ranges::all_of(ops, [](const auto& op) {
+                            return op.action == Action::DeleteRemote ||
+                                   op.action == Action::DeleteRemoteDirectory;
+                        });
+                    if (physically_empty && all_remote_deletes) {
+                        auto err = make_error(
+                            context,
+                            ErrorCode::SynchronizationFailure,
+                            std::format(
+                                "refusing to delete all {} remote entries "
+                                "because local directory '{}' is completely "
+                                "empty (verify mounted storage or pass "
+                                "--allow-empty-local to propagate deletions)",
+                                collected->base_tree.rows.size() - 1U,
+                                platform::path::to_utf8(
+                                    context.runtime.local_dir)),
+                            SyncStage::Calculating);
+                        err.empty_local_blocked = true;
+                        return std::unexpected(std::move(err));
+                    }
                 }
 
                 if (initial_pass) {

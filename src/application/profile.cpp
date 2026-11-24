@@ -1,14 +1,18 @@
 #include "application/profile.hpp"
 
 #include "application/detail.hpp"
+#include "application/history_storage/remote_layout.hpp"
+#include "application/observation/history.hpp"
 #include "application/sync/journal.hpp"
 #include "core/history.hpp"
 #include "crypto/content.hpp"
 #include "crypto/secure_memory.hpp"
+#include "platform/cancellation.hpp"
 #include "platform/path.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/profile_lock.hpp"
 #include "platform/random.hpp"
+#include "platform/workspace.hpp"
 #include "runtime/error.hpp"
 #include "runtime/paths.hpp"
 #include "runtime/profile.hpp"
@@ -728,6 +732,9 @@ resolve_profile_credentials(const ProfileCredentials& credentials) {
     if (const auto* hex = std::get_if<MasterKeyHex>(&credentials)) {
         return runtime::vault::decode_hex(hex->value);
     }
+    if (const auto* bytes = std::get_if<MasterKeyBytes>(&credentials)) {
+        return bytes->bytes;
+    }
     if (const auto* pair = std::get_if<PasswordPair>(&credentials)) {
         return runtime::vault::derive(pair->password, pair->salt_password);
     }
@@ -752,10 +759,53 @@ validate_profile_field(ProfileField field, std::string_view value) {
             return fail_profile(ProfileErrorCode::StorageFailure,
                                 "local path must be absolute");
         }
+    } else if (field == ProfileField::BandwidthLimit) {
+        if (const auto valid = transport::validate_bandwidth_limit(value);
+            !valid) {
+            return fail_profile(ProfileErrorCode::ConfigFailure,
+                                valid.error().message);
+        }
+    } else if (field == ProfileField::RcloneConfig) {
+        if (value.empty() ||
+            std::isspace(static_cast<unsigned char>(value.front())) != 0 ||
+            std::isspace(static_cast<unsigned char>(value.back())) != 0 ||
+            std::ranges::any_of(value,
+                                [](unsigned char ch) noexcept {
+                                    return ch <= 0x1fU || ch == 0x7fU;
+                                }) ||
+            !platform::path::from_utf8(value).is_absolute()) {
+            return fail_profile(ProfileErrorCode::ConfigFailure,
+                                "rclone_config must be an absolute path");
+        }
     } else if (auto valid = transport::validate_transport_location(value);
                !valid) {
         return fail_profile(ProfileErrorCode::StorageFailure,
                             transport::describe(valid.error()));
+    }
+    return {};
+}
+
+std::expected<void, ProfileError>
+validate_optional_profile_settings(const Profile& profile) {
+    if (profile.bandwidth_limit) {
+        if (const auto valid = validate_profile_field(
+                ProfileField::BandwidthLimit, *profile.bandwidth_limit);
+            !valid) {
+            return valid;
+        }
+    }
+    if (profile.transfer_concurrency && (*profile.transfer_concurrency < 1U ||
+                                         *profile.transfer_concurrency > 16U)) {
+        return fail_profile(ProfileErrorCode::ConfigFailure,
+                            "transfer_concurrency must be between 1 and 16");
+    }
+    if (profile.rclone_config) {
+        if (const auto valid = validate_profile_field(
+                ProfileField::RcloneConfig,
+                platform::path::to_utf8(*profile.rclone_config));
+            !valid) {
+            return valid;
+        }
     }
     return {};
 }
@@ -775,13 +825,17 @@ list_profiles(const ExecutionEnvironment& environment) {
     std::vector<Profile> result;
     result.reserve(profiles_res->size());
     for (const auto& p : *profiles_res) {
-        result.push_back(
-            Profile{.name = p.name,
-                    .local_dir = p.local_dir,
-                    .remote_dir = p.remote_dir,
-                    .min_history_depth = p.min_history_depth,
-                    .min_history_age_hours = p.min_history_age_hours,
-                    .key_storage = to_app_key_storage(p.key_storage)});
+        result.push_back(Profile{
+            .name = p.name,
+            .local_dir = p.local_dir,
+            .remote_dir = p.remote_dir,
+            .min_history_depth = p.min_history_depth,
+            .min_history_age_hours = p.min_history_age_hours,
+            .key_storage = to_app_key_storage(p.key_storage),
+            .bandwidth_limit = p.bandwidth_limit,
+            .transfer_concurrency = p.transfer_concurrency,
+            .rclone_config = p.rclone_config,
+        });
     }
     return result;
 }
@@ -804,6 +858,10 @@ create_profile(const ExecutionEnvironment& environment,
                                 "invalid retention policy");
         }
         if (const auto valid = validate_profile_locations(profile); !valid) {
+            return valid;
+        }
+        if (const auto valid = validate_optional_profile_settings(profile);
+            !valid) {
             return valid;
         }
 
@@ -872,13 +930,17 @@ create_profile(const ExecutionEnvironment& environment,
                                     "failed to initialize profile database");
         }
 
-        profiles.push_back(
-            runtime::ProfileData{profile.name,
-                                 profile.local_dir,
-                                 profile.remote_dir,
-                                 profile.min_history_depth,
-                                 profile.min_history_age_hours,
-                                 to_runtime_key_storage(profile.key_storage)});
+        profiles.push_back(runtime::ProfileData{
+            profile.name,
+            profile.local_dir,
+            profile.remote_dir,
+            profile.min_history_depth,
+            profile.min_history_age_hours,
+            to_runtime_key_storage(profile.key_storage),
+            profile.bandwidth_limit,
+            profile.transfer_concurrency,
+            profile.rclone_config,
+        });
         if (auto save_res = runtime::save_profiles(config_path, profiles);
             !save_res) {
             return rollback_failure(ProfileErrorCode::ConfigFailure,
@@ -953,12 +1015,18 @@ acquire_target_profile_lock(const ExecutionEnvironment& environment,
 }
 
 std::expected<void, ProfileError>
-update_profile(const ExecutionEnvironment& environment, Profile profile) {
+update_profile(const ExecutionEnvironment& environment,
+               Profile profile,
+               bool allow_empty_local) {
     if (!valid_retention_policy(profile)) {
         return fail_profile(ProfileErrorCode::ConfigFailure,
                             "invalid retention policy");
     }
     if (const auto valid = validate_profile_locations(profile); !valid) {
+        return valid;
+    }
+    if (const auto valid = validate_optional_profile_settings(profile);
+        !valid) {
         return valid;
     }
 
@@ -979,11 +1047,45 @@ update_profile(const ExecutionEnvironment& environment, Profile profile) {
         return std::unexpected(profile_lock.error());
     }
 
+    if (!allow_empty_local && profile.local_dir.lexically_normal() !=
+                                  it->local_dir.lexically_normal()) {
+        if (auto paths_res = runtime::resolve_profile_paths(
+                environment.app_data_dir, profile.name);
+            paths_res && state_storage::validate(paths_res->database_path)) {
+            const auto persisted =
+                state_storage::load_state(paths_res->database_path);
+            if (persisted && *persisted &&
+                (*persisted)->tree.rows.size() > 1U) {
+                const auto entry = query_entry(profile.local_dir);
+                bool empty_target = entry.state == EntryState::Absent;
+                if (entry.is_plain_dir()) {
+                    std::error_code dir_ec;
+                    std::filesystem::directory_iterator dir_it(
+                        profile.local_dir, dir_ec);
+                    empty_target =
+                        !dir_ec &&
+                        dir_it == std::filesystem::directory_iterator{};
+                }
+                if (empty_target) {
+                    return fail_profile(
+                        ProfileErrorCode::StorageFailure,
+                        "cannot point a profile with synchronized history to "
+                        "a missing or empty local directory (move "
+                        "synchronized files first, clone the profile instead, "
+                        "or pass --allow-empty-local)");
+                }
+            }
+        }
+    }
+
     it->local_dir = profile.local_dir;
     it->remote_dir = profile.remote_dir;
     it->min_history_depth = profile.min_history_depth;
     it->min_history_age_hours = profile.min_history_age_hours;
     it->key_storage = new_storage;
+    it->bandwidth_limit = profile.bandwidth_limit;
+    it->transfer_concurrency = profile.transfer_concurrency;
+    it->rclone_config = profile.rclone_config;
 
     auto save_res =
         runtime::save_profiles(loaded->config_path, loaded->profiles);
@@ -2271,6 +2373,137 @@ inspect_profile_activity(const ExecutionEnvironment& environment,
             .cached_at = entry.cached_at,
         });
     }
+    return report;
+}
+
+std::expected<ProfileConnectionReport, ProfileError>
+test_profile_connection(const ExecutionEnvironment& environment,
+                        std::string_view profile_name,
+                        Credentials credentials,
+                        std::stop_token stop_token) {
+    const platform::cancellation::ScopedStopToken stop_scope{stop_token};
+    struct CredsGuard {
+        Credentials& creds;
+        ~CredsGuard() noexcept {
+            wipe_credentials(creds);
+        }
+    } creds_guard{credentials};
+
+    if (!runtime::is_valid_profile_name(profile_name)) {
+        return fail_profile(ProfileErrorCode::InvalidName,
+                            "invalid profile name");
+    }
+    auto runtime_res = runtime::resolve(environment.app_data_dir,
+                                        profile_name,
+                                        runtime::AccessMode::ReadOnly,
+                                        false);
+    if (!runtime_res) {
+        return std::unexpected(map_runtime_error(runtime_res.error()));
+    }
+
+    runtime::vault::KeyBytes key{};
+    KeyBytesWiper key_wiper{key};
+    auto key_res = detail::resolve_vault_key<ProfileError>(
+        credentials,
+        *runtime_res,
+        key,
+        detail::VaultKeyPolicy<ProfileError>{
+            .read_only = true,
+            .missing_code = ProfileErrorCode::CredentialFailure,
+            .mismatch_code = ProfileErrorCode::CredentialFailure,
+            .io_code = ProfileErrorCode::StorageFailure,
+            .credential_code = ProfileErrorCode::CredentialFailure,
+            .missing_detail =
+                "credentials are required to test remote vault connection",
+        },
+        [](ProfileErrorCode code, std::string detail) {
+            return ProfileError{.code = code, .detail = std::move(detail)};
+        });
+    if (!key_res) {
+        return std::unexpected(key_res.error());
+    }
+
+    ProfileConnectionReport report{
+        .profile_name = std::string{profile_name},
+        .remote_dir = runtime_res->storage_location,
+    };
+    auto opened = transport::open_transport(
+        runtime_res->storage_location,
+        transport::TransportOptions{
+            .forbidden_executable_root = runtime_res->local_dir,
+            .rclone_config = runtime_res->rclone_config,
+            .bandwidth_limit = runtime_res->bandwidth_limit,
+        });
+    if (!opened) {
+        report.transport_ok = false;
+        report.ready = false;
+        report.vault_state = RemoteVaultState::TransportFailure;
+        report.detail = transport::describe(opened.error());
+        return report;
+    }
+
+    auto listed = transport::list(*opened);
+    if (!listed) {
+        if (listed.error().code == transport::ErrorCode::StorageNotFound) {
+            report.transport_ok = true;
+            report.ready = true;
+            report.vault_state = RemoteVaultState::EmptyReadyForInit;
+            report.detail =
+                "remote destination is reachable and uninitialized/empty "
+                "(ready for initial sync)";
+            return report;
+        }
+        report.transport_ok = false;
+        report.ready = false;
+        report.vault_state = RemoteVaultState::TransportFailure;
+        report.detail = transport::describe(listed.error());
+        return report;
+    }
+
+    if (listed->empty()) {
+        report.transport_ok = true;
+        report.ready = true;
+        report.vault_state = RemoteVaultState::EmptyReadyForInit;
+        report.detail =
+            "remote destination is reachable and empty (ready for initial "
+            "sync)";
+        return report;
+    }
+
+    report.transport_ok = true;
+    auto workspace = platform::create_workspace("kasumi-profile-test");
+    if (!workspace) {
+        return fail_profile(ProfileErrorCode::StorageFailure,
+                            "failed to prepare temporary workspace: " +
+                                workspace.error());
+    }
+    struct WorkspaceGuard {
+        platform::Workspace& ws;
+        ~WorkspaceGuard() noexcept {
+            platform::cleanup_workspace(ws);
+        }
+    } ws_guard{*workspace};
+
+    const auto observed =
+        observation::history::observe(*opened, key, workspace->root, false);
+    if (!observed || !observed->history_present) {
+        report.ready = false;
+        report.vault_state = RemoteVaultState::KeyMismatchOrInvalidHistory;
+        report.detail =
+            "remote destination contains objects that could not be "
+            "authenticated with this profile's key (verify password/salt or "
+            "remote_dir)";
+        return report;
+    }
+
+    report.ready = true;
+    report.vault_state = RemoteVaultState::AuthenticatedVault;
+    report.head_count = observed->logical_heads.size();
+    if (observed->epoch && !observed->epoch->reference.epoch_id.empty()) {
+        report.epoch_sequence = observed->epoch->reference.sequence;
+        report.epoch_id = observed->epoch->reference.epoch_id;
+    }
+    report.detail = "authenticated existing remote vault";
     return report;
 }
 

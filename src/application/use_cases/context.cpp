@@ -1,5 +1,6 @@
 #include "application/use_cases/context.hpp"
 
+#include "application/concurrency.hpp"
 #include "application/detail.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
@@ -7,6 +8,7 @@
 #include "application/sync/journal.hpp"
 #include "core/history.hpp"
 #include "crypto/secure_memory.hpp"
+#include "platform/path.hpp"
 #include "platform/profile_lock.hpp"
 #include "runtime/machine.hpp"
 #include "runtime/resolver.hpp"
@@ -35,6 +37,7 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     output.repair = input.request.repair;
     output.dry_run = input.request.dry_run;
     output.reclaim_dirty = input.request.reclaim_dirty;
+    output.allow_empty_local = input.request.allow_empty_local;
     output.gc_min_age_hours = input.request.gc_min_age_hours;
     output.writer_identifier = input.request.writer_identifier;
     output.barrier_identifier = input.request.barrier_identifier;
@@ -54,6 +57,17 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     }
     if (input.request.repair && operation != Operation::Sync) {
         return invalid_request("--repair is only valid for sync");
+    }
+    if (input.request.allow_empty_local && operation != Operation::Sync) {
+        return invalid_request("--allow-empty-local is only valid for sync");
+    }
+    if (input.request.allow_empty_local && input.request.initial) {
+        return invalid_request(
+            "--allow-empty-local cannot be combined with --initial");
+    }
+    if (input.request.allow_empty_local && input.request.repair) {
+        return invalid_request(
+            "--allow-empty-local cannot be combined with --repair");
     }
     if (input.request.audit_inventory && input.request.initial) {
         return invalid_request(
@@ -76,6 +90,19 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     }
     if (input.request.reclaim_dirty && operation != Operation::Repack) {
         return invalid_request("--reclaim-dirty is only valid for repack");
+    }
+    if (input.request.transfer_concurrency.has_value() &&
+        (*input.request.transfer_concurrency < 1U ||
+         *input.request.transfer_concurrency >
+             maximum_experimental_content_concurrency)) {
+        return invalid_request("--concurrency must be between 1 and 16");
+    }
+    if (input.request.bandwidth_limit.has_value()) {
+        if (const auto valid_bw = transport::validate_bandwidth_limit(
+                *input.request.bandwidth_limit);
+            !valid_bw) {
+            return invalid_request(valid_bw.error().message);
+        }
     }
     if (input.request.gc_min_age_hours.has_value()) {
         if (operation != Operation::GarbageCollect) {
@@ -110,9 +137,13 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         });
     };
 
-    auto runtime_data = runtime::resolve(input.environment.app_data_dir,
-                                         input.request.profile_name,
-                                         access_mode);
+    const bool guard_missing_local_root =
+        operation == Operation::Sync && !input.request.initial &&
+        !input.request.repair && !input.request.allow_empty_local;
+    auto runtime_data = runtime::resolve(
+        input.environment.app_data_dir,
+        input.request.profile_name,
+        guard_missing_local_root ? runtime::AccessMode::ReadOnly : access_mode);
     if (!runtime_data) {
         return fail(runtime_data.error().detail,
                     map_runtime_error_code(runtime_data.error().code,
@@ -128,6 +159,8 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     output.summary =
         RuntimeSummary{.local_dir = runtime_data->local_dir,
                        .remote_dir = runtime_data->storage_location};
+    output.transfer_concurrency = resolve_content_concurrency(
+        input.request.transfer_concurrency, runtime_data->transfer_concurrency);
     if (runtime_data->min_history_depth == 0 ||
         runtime_data->min_history_depth > history::maximum_graph_depth ||
         runtime_data->min_history_age_hours == 0) {
@@ -173,6 +206,64 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         });
     }
     output.profile_lock = *profile_lock;
+
+    if (guard_missing_local_root) {
+        std::error_code local_ec;
+        const auto local_status =
+            std::filesystem::symlink_status(runtime_data->local_dir, local_ec);
+        const bool local_missing =
+            local_ec == std::errc::no_such_file_or_directory ||
+            (!local_ec &&
+             local_status.type() == std::filesystem::file_type::not_found);
+        if (local_missing &&
+            state_storage::validate(runtime_data->database_path)) {
+            const auto persisted =
+                state_storage::load_state(runtime_data->database_path);
+            const auto journal_paths = sync::journal::make_paths(
+                runtime_data->database_path.parent_path());
+            bool journal_present = false;
+            if (journal_paths) {
+                std::error_code j_ec;
+                const auto j_status = std::filesystem::symlink_status(
+                    journal_paths->final_path.parent_path(), j_ec);
+                journal_present =
+                    j_ec != std::errc::no_such_file_or_directory &&
+                    (j_ec ||
+                     j_status.type() != std::filesystem::file_type::not_found);
+            }
+            if (!journal_present && persisted && *persisted &&
+                (*persisted)->tree.rows.size() > 1U) {
+                auto err = make_error(
+                    output,
+                    ErrorCode::SynchronizationFailure,
+                    std::format(
+                        "synchronized local directory '{}' is missing while "
+                        "accepted state tracks {} synchronized entries; "
+                        "restore the directory or pass --allow-empty-local to "
+                        "propagate deletions",
+                        platform::path::to_utf8(runtime_data->local_dir),
+                        (*persisted)->tree.rows.size() - 1U),
+                    SyncStage::Observing);
+                err.empty_local_blocked = true;
+                wipe_operation(output);
+                return std::unexpected(std::move(err));
+            }
+        }
+        auto rw_runtime = runtime::resolve(input.environment.app_data_dir,
+                                           input.request.profile_name,
+                                           runtime::AccessMode::ReadWrite);
+        if (!rw_runtime) {
+            return fail(rw_runtime.error().detail,
+                        map_runtime_error_code(rw_runtime.error().code,
+                                               ErrorCode::InvalidProfile,
+                                               ErrorCode::ProfileNotFound,
+                                               ErrorCode::CredentialFailure,
+                                               ErrorCode::RuntimeFailure,
+                                               ErrorCode::RuntimeFailure));
+        }
+        output.runtime = *rw_runtime;
+        runtime_data = *rw_runtime;
+    }
 
     if (input.request.initial) {
         const auto inspect_status = [](const std::filesystem::path& path,
@@ -303,7 +394,14 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     }
 
     auto opened_storage = transport::open_transport(
-        runtime_data->storage_location, runtime_data->local_dir);
+        runtime_data->storage_location,
+        transport::TransportOptions{
+            .forbidden_executable_root = runtime_data->local_dir,
+            .rclone_config = runtime_data->rclone_config,
+            .bandwidth_limit = input.request.bandwidth_limit
+                                   ? input.request.bandwidth_limit
+                                   : runtime_data->bandwidth_limit,
+        });
     if (!opened_storage) {
         return fail(transport::describe(opened_storage.error()));
     }
