@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.29.0]
+
+### Changed
+
+- **Cohesive Vertical CLI Layouts & Standardized Timestamps**:
+  - Redesigned `kasumi` / `kasumi --full`, `kasumi list --full`, and `kasumi daemon status` / `daemon status --full` with unified vertical profile blocks (`Name [State]` with aligned `Local:`, `Remote:`, `Last sync:`, and `Last change:` rows separated by blank lines).
+  - Standardized multi-profile and daemon status timestamps onto the UTC-offset clock format (`YYYY-MM-DD HH:MM ±HH:MM`, matching `kasumi config` and `kasumi show`), removed the green `ok` badge from overview menus (`Ready` uses default text; color is reserved for active/alert states), and updated overview JSON envelope `"command"` to `"overview"`.
+- **`kasumi version`, `kasumi help`, and Local/Remote Status Separation**:
+  - Added subcommand aliases `kasumi version` and `kasumi help [<topic> | --all]` alongside `--version`/`-v` and `--help`/`-h`, plus shell completion entries (`bash`, `zsh`, `fish`, `powershell`).
+  - Removed bare `kasumi status` as an overview alias so `kasumi [--full]` clearly owns local overview while `kasumi status <profile>` exclusively previews remote changes.
+- **Executable Metadata Alignment**:
+  - Updated Windows `FileDescription` in `kasumi.rc.in` from `over any cloud storage` to `over local paths, network shares, or rclone-compatible storage` to match `README.md`.
+
+### Removed
+
+- **Automated Daemon GC Scheduling**:
+  - Removed scheduled/automatic GC execution from `kasumi daemon` (`gc_interval_hours`, `--gc-interval`, `--clear-gc-interval`, interactive GC schedule prompt in `kasumi config`, and `gc=` daemon metrics). Manual `kasumi gc`, `kasumi repack`, and `kasumi fsck` remain unchanged, and pre-v0.29 `config.toml` files containing `gc_interval_hours` continue to load cleanly and omit the key on save.
+
+### Fixed
+
+- **`fast_noop` DB Stamp Invalidation**:
+  - Refreshed `warm_observation` DB stamps and `cold.external_db_stamp` inside `try_fast_remote_noop_poll()` / `finish_fast_noop()` after `state_storage::validate()` WAL read-write fallback, eliminating 1:1 alternation between `fast_noop` and full scans so idle profiles honor the 30-minute verification interval.
+- **`CopyLocal` Accounting in Sync Summaries**:
+  - Counted `Action::CopyLocal` in `SyncCompleted::copied` (`compute_sync_summary`), prevented `CopyLocal`-only runs from being marked `SucceededNoChanges` (`no changes`), and surfaced `cp` counts in text, daemon outcome (`cp={}`), and JSON (`"copied"`) outputs.
+- **`rclone` Rate-Limit Handling & Daemon Startup Pacing**:
+  - Classified HTTP `429` and rate-limit `403`/`5xx` RC errors (`rateLimitExceeded`, `userRateLimitExceeded`, `too many requests`, `quota exceeded`, throttling) as transient `BackendUnavailable` rather than permanent `ProtocolFailure`/`PermissionDenied`, added bounded exponential-backoff retries (`250ms`–`1s`, up to 4 attempts) in `post_rc_read_only()` and daemon transient backoff classification, staggered initial daemon polls (`startup_stagger = 3s`, `max_parallel_per_remote = 2`), and updated daemon `active_stage` to `"listing"` when local scanning completes while remote observation is pending.
+
 ## [0.28.0]
 
 ### Added
