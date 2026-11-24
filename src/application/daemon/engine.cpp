@@ -82,8 +82,6 @@ std::string_view to_string(DaemonProfileState state) noexcept {
             return "pending_debounce";
         case DaemonProfileState::RunningSync:
             return "running_sync";
-        case DaemonProfileState::RunningGc:
-            return "running_gc";
         case DaemonProfileState::Paused:
             return "paused";
         case DaemonProfileState::Locked:
@@ -99,7 +97,6 @@ std::string_view to_string(DaemonProfileState state) noexcept {
 namespace {
 
 constexpr std::uint32_t kDefaultSyncIntervalSeconds = 300U;
-constexpr std::uint32_t kDefaultGcIntervalHours = 0U;
 constexpr std::uint32_t kDaemonApiVersion = 1U;
 constexpr std::size_t kMaxEventRingSize = 512U;
 constexpr std::uint64_t kMaxDaemonLogBytes = 2ULL * 1024ULL * 1024ULL;
@@ -200,6 +197,30 @@ bool contains_case_insensitive(std::string_view haystack,
 
 namespace daemon_detail {
 
+std::optional<std::string_view>
+extract_rclone_remote_name(std::string_view remote_dir) noexcept {
+    if (remote_dir.empty()) {
+        return std::nullopt;
+    }
+    const auto colon = remote_dir.find(':');
+    if (colon == std::string_view::npos || colon == 0U) {
+        return std::nullopt;
+    }
+    const auto prefix = remote_dir.substr(0, colon);
+    if (prefix.find('/') != std::string_view::npos ||
+        prefix.find('\\') != std::string_view::npos) {
+        return std::nullopt;
+    }
+    if (colon == 1U &&
+        ((remote_dir[0] >= 'a' && remote_dir[0] <= 'z') ||
+         (remote_dir[0] >= 'A' && remote_dir[0] <= 'Z')) &&
+        (remote_dir.size() == 2U || remote_dir[2] == '\\' ||
+         remote_dir[2] == '/')) {
+        return std::nullopt;
+    }
+    return prefix;
+}
+
 bool is_concurrent_local_mutation_error(const Error& error) noexcept {
     return contains_case_insensitive(error.detail, "concurrent_modification") ||
            contains_case_insensitive(
@@ -235,7 +256,13 @@ bool is_transient_sync_error(const Error& error) noexcept {
         contains_case_insensitive(error.detail, "connection") ||
         contains_case_insensitive(error.detail, "transport") ||
         contains_case_insensitive(error.detail, "backend") ||
-        contains_case_insensitive(error.detail, "network")) {
+        contains_case_insensitive(error.detail, "network") ||
+        contains_case_insensitive(error.detail, "ratelimit") ||
+        contains_case_insensitive(error.detail, "rate limit") ||
+        contains_case_insensitive(error.detail, "rate_limit") ||
+        contains_case_insensitive(error.detail, "too many requests") ||
+        contains_case_insensitive(error.detail, "quota exceeded") ||
+        contains_case_insensitive(error.detail, "throttl")) {
         return true;
     }
     if (contains_case_insensitive(error.detail, "composition_mismatch") ||
@@ -317,6 +344,14 @@ capture_ignore_stamp(const std::filesystem::path& local_dir,
 }
 
 std::string format_sync_outcome(const SyncCompleted& completed) {
+    if (completed.copied > 0) {
+        return std::format("up={}, down={}, rm={}, mv={}, cp={}",
+                           completed.uploaded,
+                           completed.downloaded,
+                           completed.removed,
+                           completed.renamed,
+                           completed.copied);
+    }
     return std::format("up={}, down={}, rm={}, mv={}",
                        completed.uploaded,
                        completed.downloaded,
@@ -393,11 +428,9 @@ struct ProfileHotSchedule {
     bool watcher_baseline_established = false;
     bool immediate_sync_requested = false;
     bool in_flight = false;
-    bool active_gc = false;
     bool watch_enabled = true;
 
     std::uint32_t sync_interval_seconds = kDefaultSyncIntervalSeconds;
-    std::uint32_t gc_interval_hours = kDefaultGcIntervalHours;
     std::uint32_t backoff_seconds = 0;
     std::uint32_t consecutive_failures = 0;
 
@@ -408,7 +441,6 @@ struct ProfileHotSchedule {
     std::optional<std::chrono::steady_clock::time_point> first_dirty_at;
     std::optional<std::chrono::steady_clock::time_point> last_dirty_at;
     std::chrono::steady_clock::time_point next_sync_at{};
-    std::chrono::steady_clock::time_point next_gc_at{};
     std::chrono::steady_clock::time_point last_full_verify_at{};
     std::chrono::steady_clock::time_point backoff_until{};
     std::uint32_t vault_recheck_attempts = 0;
@@ -436,7 +468,6 @@ struct ProfileTelemetryRow {
     std::optional<std::int64_t> last_checked_at;
     std::uint64_t sync_runs = 0;
     std::uint64_t fast_noop_polls = 0;
-    std::uint64_t gc_runs = 0;
     std::string last_outcome;
     std::string last_error;
 };
@@ -1043,41 +1074,6 @@ bool db_initialized_and_has_state(const std::filesystem::path& db_path) {
     return loaded && loaded->has_value() && !(*loaded)->commit_id.empty();
 }
 
-std::chrono::steady_clock::time_point
-compute_initial_next_gc_at(const ExecutionEnvironment& env,
-                           std::string_view profile_name,
-                           std::uint32_t gc_hrs,
-                           std::chrono::steady_clock::time_point now_steady,
-                           std::int64_t now_unix) {
-    if (gc_hrs == 0U) {
-        return (std::chrono::steady_clock::time_point::max)();
-    }
-    const auto interval_sec = static_cast<std::int64_t>(gc_hrs) * 3600LL;
-    std::optional<std::int64_t> last_gc_unix;
-    const auto act = inspect_profile_activity(env, profile_name);
-    for (const auto& e : act.recent_executions) {
-        if (e.operation == ProfileOperationKind::GarbageCollect &&
-            (e.status == ProfileExecutionStatus::Succeeded ||
-             e.status == ProfileExecutionStatus::SucceededNoChanges)) {
-            const auto ts = e.finished_at.value_or(e.started_at);
-            if (!last_gc_unix || ts > *last_gc_unix) {
-                last_gc_unix = ts;
-            }
-        }
-    }
-    if (!last_gc_unix || *last_gc_unix <= 0 || now_unix <= 0) {
-        return now_steady + std::chrono::hours{gc_hrs};
-    }
-    const auto elapsed = now_unix - *last_gc_unix;
-    if (elapsed >= interval_sec) {
-        return now_steady + std::chrono::seconds{10};
-    }
-    if (elapsed > 0) {
-        return now_steady + std::chrono::seconds{interval_sec - elapsed};
-    }
-    return now_steady + std::chrono::hours{gc_hrs};
-}
-
 bool refresh_key_status_for_slot(DaemonSessionState& state,
                                  std::size_t slot,
                                  bool force_recheck) {
@@ -1236,7 +1232,7 @@ sync_profiles_from_disk_locked(DaemonSessionState& state,
     }
 
     const auto now_steady = std::chrono::steady_clock::now();
-    const auto now_unix = current_unix_seconds();
+    std::size_t startup_index = 0;
     // 2. Add new profiles or update changed settings.
     for (const auto& cfg : disk_profiles) {
         const auto paths = runtime::resolve_profile_paths(
@@ -1248,19 +1244,17 @@ sync_profiles_from_disk_locked(DaemonSessionState& state,
         if (!existing) {
             const auto sync_sec =
                 cfg.sync_interval_seconds.value_or(kDefaultSyncIntervalSeconds);
-            const auto gc_hrs =
-                cfg.gc_interval_hours.value_or(kDefaultGcIntervalHours);
+            const auto stagger = state.options.startup_stagger *
+                                 static_cast<std::int64_t>(startup_index);
+            ++startup_index;
             ProfileHotSchedule hot{
                 .paused = cfg.paused,
                 .watch_enabled = cfg.watch_enabled.value_or(true),
                 .sync_interval_seconds = sync_sec,
-                .gc_interval_hours = gc_hrs,
                 .next_sync_at =
                     sync_sec > 0
-                        ? (now_steady + std::chrono::seconds{2})
+                        ? (now_steady + std::chrono::seconds{2} + stagger)
                         : (std::chrono::steady_clock::time_point::max)(),
-                .next_gc_at = compute_initial_next_gc_at(
-                    state.environment, cfg.name, gc_hrs, now_steady, now_unix),
                 .last_full_verify_at = now_steady,
             };
             ProfileColdMeta cold{
@@ -1301,8 +1295,6 @@ sync_profiles_from_disk_locked(DaemonSessionState& state,
                 hot.paused != cfg.paused;
             const bool sync_interval_changed =
                 cold.config.sync_interval_seconds != cfg.sync_interval_seconds;
-            const bool gc_interval_changed =
-                cold.config.gc_interval_hours != cfg.gc_interval_hours;
             const bool unpaused = hot.paused && !cfg.paused;
 
             cold.config = cfg;
@@ -1310,8 +1302,6 @@ sync_profiles_from_disk_locked(DaemonSessionState& state,
             hot.watch_enabled = cfg.watch_enabled.value_or(true);
             hot.sync_interval_seconds =
                 cfg.sync_interval_seconds.value_or(kDefaultSyncIntervalSeconds);
-            hot.gc_interval_hours =
-                cfg.gc_interval_hours.value_or(kDefaultGcIntervalHours);
 
             if (key_mode_changed) {
                 platform::erase_secure_key(state.key_arena, cfg.name);
@@ -1367,14 +1357,6 @@ sync_profiles_from_disk_locked(DaemonSessionState& state,
                                           std::chrono::seconds{
                                               hot.sync_interval_seconds})
                         : (std::chrono::steady_clock::time_point::max)();
-            }
-            if (gc_interval_changed || unpaused) {
-                hot.next_gc_at =
-                    compute_initial_next_gc_at(state.environment,
-                                               cfg.name,
-                                               hot.gc_interval_hours,
-                                               now_steady,
-                                               now_unix);
             }
         }
     }
@@ -1482,8 +1464,7 @@ build_status_locked(const DaemonSessionState& state,
         if (hot.paused) {
             pstate = DaemonProfileState::Paused;
         } else if (hot.in_flight) {
-            pstate = hot.active_gc ? DaemonProfileState::RunningGc
-                                   : DaemonProfileState::RunningSync;
+            pstate = DaemonProfileState::RunningSync;
         } else if (hot.locked) {
             pstate = DaemonProfileState::Locked;
         } else if (hot.needs_attention) {
@@ -1501,13 +1482,6 @@ build_status_locked(const DaemonSessionState& state,
             next_sync_unix =
                 steady_to_unix_estimate(hot.next_sync_at, now_steady, now_unix);
         }
-        std::optional<std::int64_t> next_gc_unix;
-        if (!hot.paused && !hot.locked && !hot.needs_attention &&
-            hot.gc_interval_hours > 0 &&
-            hot.next_gc_at != std::chrono::steady_clock::time_point::max()) {
-            next_gc_unix =
-                steady_to_unix_estimate(hot.next_gc_at, now_steady, now_unix);
-        }
 
         report.profiles.push_back(DaemonProfileStatus{
             .name = name,
@@ -1523,7 +1497,6 @@ build_status_locked(const DaemonSessionState& state,
             .warm_transport_active = warm.warm_transport.has_value(),
             .warm_cache_entries = warm.warm_observation.cache.size(),
             .sync_interval_seconds = hot.sync_interval_seconds,
-            .gc_interval_hours = hot.gc_interval_hours,
             .local_dir = platform::path::to_utf8(cold.config.local_dir),
             .remote_dir = cold.config.remote_dir,
             .dirty_paths_count = cold.dirty_paths.size(),
@@ -1536,13 +1509,11 @@ build_status_locked(const DaemonSessionState& state,
             .last_sync_finished_at = telemetry.last_sync_finished_at,
             .last_checked_at = telemetry.last_checked_at,
             .next_sync_at = next_sync_unix,
-            .next_gc_at = next_gc_unix,
             .backoff_until_unix = backoff_until_unix,
             .backoff_seconds = remaining_backoff_seconds,
             .consecutive_failures = hot.consecutive_failures,
             .sync_runs = telemetry.sync_runs,
             .fast_noop_polls = telemetry.fast_noop_polls,
-            .gc_runs = telemetry.gc_runs,
             .last_outcome = telemetry.last_outcome,
             .last_error = telemetry.last_error,
         });
@@ -1563,6 +1534,7 @@ void finish_fast_noop(DaemonSessionState& state,
         if (const auto slot = find_profile_slot(state.profiles, profile_name)) {
             auto& hot = state.profiles.hot[*slot];
             auto& telemetry = state.profiles.telemetry[*slot];
+            auto& cold = state.profiles.cold[*slot];
             auto& warm = state.profiles.warm[*slot];
             if (hot.config_generation == task_config_gen && !hot.paused &&
                 !hot.locked) {
@@ -1574,8 +1546,10 @@ void finish_fast_noop(DaemonSessionState& state,
             } else {
                 discard_transport = std::move(borrowed_owner);
             }
+            const auto db_stamp = read_file_stamp(cold.database_path);
+            cold.external_db_stamp = db_stamp;
+            cold.has_external_db_stamp = db_stamp.present;
             hot.in_flight = false;
-            hot.active_gc = false;
             clear_active_telemetry(telemetry);
             warm.task_stop_source.reset();
             telemetry.last_checked_at = now_unix;
@@ -1599,50 +1573,6 @@ void finish_fast_noop(DaemonSessionState& state,
                       "fast_noop",
                       "remote unchanged (fast poll)",
                       false);
-    state.cv.notify_all();
-}
-
-void finish_gc_success(DaemonSessionState& state,
-                       const std::string& profile_name,
-                       std::uint64_t task_config_gen,
-                       std::optional<transport::Transport>& borrowed_owner,
-                       observation::LocalObservationSession& warm_obs,
-                       const std::string& detail) {
-    const auto now_steady = std::chrono::steady_clock::now();
-    const auto now_unix = current_unix_seconds();
-    std::optional<transport::Transport> discard_transport;
-    {
-        std::lock_guard lock(state.mutex);
-        if (const auto slot = find_profile_slot(state.profiles, profile_name)) {
-            auto& hot = state.profiles.hot[*slot];
-            auto& telemetry = state.profiles.telemetry[*slot];
-            auto& warm = state.profiles.warm[*slot];
-            if (hot.config_generation == task_config_gen && !hot.paused &&
-                !hot.locked) {
-                warm.warm_observation = std::move(warm_obs);
-                if (borrowed_owner) {
-                    warm.warm_transport = std::move(borrowed_owner);
-                    warm.warm_transport_last_used = now_steady;
-                }
-            } else {
-                discard_transport = std::move(borrowed_owner);
-            }
-            hot.in_flight = false;
-            hot.active_gc = false;
-            clear_active_telemetry(telemetry);
-            warm.task_stop_source.reset();
-            telemetry.last_checked_at = now_unix;
-            telemetry.last_outcome = detail;
-            telemetry.last_error.clear();
-            ++telemetry.gc_runs;
-            ++hot.completed_generation;
-            hot.next_gc_at =
-                hot.gc_interval_hours > 0
-                    ? (now_steady + std::chrono::hours{hot.gc_interval_hours})
-                    : (std::chrono::steady_clock::time_point::max)();
-        }
-    }
-    discard_transport.reset();
     state.cv.notify_all();
 }
 
@@ -1685,7 +1615,6 @@ void finish_sync_success(DaemonSessionState& state,
             cold.has_external_db_stamp = db_stamp.present;
 
             hot.in_flight = false;
-            hot.active_gc = false;
             clear_active_telemetry(telemetry);
             warm.task_stop_source.reset();
             telemetry.last_sync_finished_at = now_unix;
@@ -1763,7 +1692,6 @@ void finish_task_state(DaemonSessionState& state,
                 discard_transport = std::move(borrowed_owner);
             }
             hot.in_flight = false;
-            hot.active_gc = false;
             clear_active_telemetry(telemetry);
             warm.task_stop_source.reset();
             telemetry.last_checked_at = now_unix;
@@ -1810,7 +1738,6 @@ void finish_task_state(DaemonSessionState& state,
 
 void run_profile_task(DaemonSessionState& state,
                       const std::string& profile_name,
-                      bool run_gc,
                       bool from_timer_poll,
                       bool manual_trigger) {
     runtime::ProfileData cfg;
@@ -1851,7 +1778,7 @@ void run_profile_task(DaemonSessionState& state,
 
         const auto now = std::chrono::steady_clock::now();
         can_try_fast_poll =
-            !run_gc && !manual_trigger && from_timer_poll && !hot.dirty &&
+            !manual_trigger && from_timer_poll && !hot.dirty &&
             !hot.overflow && platform::directory_watcher_valid(warm.watcher) &&
             hot.watcher_healthy && hot.watcher_baseline_established &&
             (now - hot.last_full_verify_at <
@@ -1859,7 +1786,7 @@ void run_profile_task(DaemonSessionState& state,
         ignore_present = cold.ignore_file_present;
         ignore_stamp = cold.ignore_stamp;
         watched_dir_id = cold.local_dir_identity;
-        telemetry.active_stage = run_gc ? "gc" : "checking";
+        telemetry.active_stage = "checking";
         telemetry.active_objects = 0;
         telemetry.active_total_objects.reset();
         telemetry.active_bytes = 0;
@@ -2046,7 +1973,7 @@ void run_profile_task(DaemonSessionState& state,
 
     // Before full sync: fail-closed with clean NeedsAttention if db.sqlite is
     // missing or invalid and requires `--initial`.
-    if (!run_gc && !db_schema_valid(db_path)) {
+    if (!db_schema_valid(db_path)) {
         finish_task_state(state,
                           profile_name,
                           task_config_gen,
@@ -2098,8 +2025,7 @@ void run_profile_task(DaemonSessionState& state,
     const ExecutionInput exec_input{
         .request =
             Request{
-                .operation =
-                    run_gc ? Operation::GarbageCollect : Operation::Sync,
+                .operation = Operation::Sync,
                 .profile_name = profile_name,
                 .bandwidth_limit = cfg.bandwidth_limit,
                 .transfer_concurrency = cfg.transfer_concurrency,
@@ -2117,12 +2043,23 @@ void run_profile_task(DaemonSessionState& state,
                 auto& telemetry = state.profiles.telemetry[*slot];
                 if (const auto* act =
                         std::get_if<ActivityProgress>(&progress)) {
-                    telemetry.active_stage =
-                        activity_stage_label(act->activity);
-                    telemetry.active_objects = act->objects;
-                    telemetry.active_total_objects = act->total_objects;
-                    telemetry.active_bytes = act->bytes;
-                    telemetry.active_total_bytes = act->total_bytes;
+                    if (act->activity == Activity::Scanning &&
+                        act->observing_remote &&
+                        act->total_objects.has_value() &&
+                        act->objects >= *act->total_objects) {
+                        telemetry.active_stage = "listing";
+                        telemetry.active_objects = 0;
+                        telemetry.active_total_objects.reset();
+                        telemetry.active_bytes = 0;
+                        telemetry.active_total_bytes.reset();
+                    } else {
+                        telemetry.active_stage =
+                            activity_stage_label(act->activity);
+                        telemetry.active_objects = act->objects;
+                        telemetry.active_total_objects = act->total_objects;
+                        telemetry.active_bytes = act->bytes;
+                        telemetry.active_total_bytes = act->total_bytes;
+                    }
                 } else if (const auto* sp =
                                std::get_if<SyncProgress>(&progress)) {
                     switch (sp->stage) {
@@ -2142,22 +2079,6 @@ void run_profile_task(DaemonSessionState& state,
                             telemetry.active_stage = "finalizing";
                             break;
                     }
-                } else if (const auto* gp =
-                               std::get_if<GarbageCollectProgress>(&progress)) {
-                    switch (gp->stage) {
-                        case GarbageCollectStage::Preparing:
-                            telemetry.active_stage = "gc_preparing";
-                            break;
-                        case GarbageCollectStage::Analyzing:
-                            telemetry.active_stage = "gc_analyzing";
-                            break;
-                        case GarbageCollectStage::Applying:
-                            telemetry.active_stage = "gc_applying";
-                            break;
-                        case GarbageCollectStage::Finalizing:
-                            telemetry.active_stage = "gc_finalizing";
-                            break;
-                    }
                 }
             },
         .stop_token = task_stop.get_token(),
@@ -2167,24 +2088,6 @@ void run_profile_task(DaemonSessionState& state,
     auto res = detail::execute_warm(exec_input, warm_ctx);
 
     if (res) {
-        if (run_gc) {
-            const auto* gc_done =
-                std::get_if<GarbageCollectCompleted>(&res->data);
-            const std::string detail =
-                gc_done ? std::format("removed {} objects ({} bytes)",
-                                      gc_done->removed_objects,
-                                      gc_done->removed_bytes)
-                        : std::string{"gc completed"};
-            finish_gc_success(state,
-                              profile_name,
-                              task_config_gen,
-                              borrowed_owner,
-                              warm_obs,
-                              detail);
-            emit_daemon_event(state, profile_name, "gc_completed", detail);
-            return;
-        }
-
         const auto* sync_done = std::get_if<SyncCompleted>(&res->data);
         const std::string outcome =
             sync_done ? format_sync_outcome(*sync_done) : std::string{"ok"};
@@ -2353,7 +2256,6 @@ void run_profile_task(DaemonSessionState& state,
                                         dirty_snapshot.end());
                 hot.overflow = hot.overflow || had_overflow_snapshot;
                 hot.in_flight = false;
-                hot.active_gc = false;
                 clear_active_telemetry(telemetry);
                 warm.task_stop_source.reset();
                 ++hot.completed_generation;
@@ -2376,50 +2278,6 @@ void run_profile_task(DaemonSessionState& state,
     const bool lock_only = ((err.code == ErrorCode::CredentialFailure ||
                              err.code == ErrorCode::CredentialsRequired) &&
                             cfg.key_storage == runtime::KeyStorage::Memory);
-    if (run_gc) {
-        // Transient GC contention waits for next window instead of
-        // NeedsAttention.
-        std::optional<transport::Transport> discard_transport;
-        {
-            std::lock_guard lock(state.mutex);
-            if (const auto slot =
-                    find_profile_slot(state.profiles, profile_name)) {
-                auto& hot = state.profiles.hot[*slot];
-                auto& telemetry = state.profiles.telemetry[*slot];
-                auto& warm = state.profiles.warm[*slot];
-                if (hot.config_generation == task_config_gen && !hot.paused &&
-                    !hot.locked) {
-                    warm.warm_observation = std::move(warm_obs);
-                    if (borrowed_owner) {
-                        warm.warm_transport = std::move(borrowed_owner);
-                        warm.warm_transport_last_used =
-                            std::chrono::steady_clock::now();
-                    }
-                } else {
-                    discard_transport = std::move(borrowed_owner);
-                }
-                hot.in_flight = false;
-                hot.active_gc = false;
-                clear_active_telemetry(telemetry);
-                warm.task_stop_source.reset();
-                ++hot.completed_generation;
-                telemetry.last_error = err.detail;
-                telemetry.last_outcome = "gc_deferred";
-                hot.next_gc_at =
-                    transient
-                        ? std::chrono::steady_clock::now() +
-                              std::chrono::minutes{15}
-                        : (hot.gc_interval_hours > 0
-                               ? std::chrono::steady_clock::now() +
-                                     std::chrono::hours{hot.gc_interval_hours}
-                               : (std::chrono::steady_clock::time_point::
-                                      max)());
-            }
-        }
-        discard_transport.reset();
-        state.cv.notify_all();
-        return;
-    }
 
     // Restore any dirty snapshot before recording failure state.
     {
@@ -2739,14 +2597,39 @@ void scheduler_loop(DaemonSessionState& state) {
         }
 
         // 3. Scan hot SoA scheduling array contiguously up to
-        // max_parallel_profiles.
+        // max_parallel_profiles and max_parallel_per_remote.
         struct ScheduledJob {
             std::string name;
-            bool run_gc = false;
+            std::optional<std::string> rclone_remote;
             bool from_timer = false;
             bool manual = false;
         };
         std::vector<ScheduledJob> jobs;
+        auto can_launch_job = [&](std::string_view remote_dir) -> bool {
+            if (state.active_workers + jobs.size() >=
+                state.options.max_parallel_profiles) {
+                return false;
+            }
+            const auto remote =
+                daemon_detail::extract_rclone_remote_name(remote_dir);
+            if (!remote || state.options.max_parallel_per_remote == 0U) {
+                return true;
+            }
+            std::size_t active_on_remote = 0U;
+            for (std::size_t i = 0; i < state.profiles.hot.size(); ++i) {
+                if (state.profiles.hot[i].in_flight &&
+                    daemon_detail::extract_rclone_remote_name(
+                        state.profiles.cold[i].config.remote_dir) == remote) {
+                    ++active_on_remote;
+                }
+            }
+            for (const auto& queued : jobs) {
+                if (queued.rclone_remote && *queued.rclone_remote == *remote) {
+                    ++active_on_remote;
+                }
+            }
+            return active_on_remote < state.options.max_parallel_per_remote;
+        };
         auto next_wake = now + state.options.config_poll_interval;
 
         for (std::size_t idx = 0; idx < state.profiles.hot.size(); ++idx) {
@@ -2763,15 +2646,17 @@ void scheduler_loop(DaemonSessionState& state) {
                 continue;
             }
             const auto& name = state.profiles.names[idx];
+            const auto remote_name =
+                daemon_detail::extract_rclone_remote_name(cold.config.remote_dir);
             if (hot.immediate_sync_requested) {
-                if (state.active_workers + jobs.size() <
-                    state.options.max_parallel_profiles) {
+                if (can_launch_job(cold.config.remote_dir)) {
                     hot.immediate_sync_requested = false;
                     hot.in_flight = true;
-                    hot.active_gc = false;
                     jobs.push_back(ScheduledJob{
                         .name = name,
-                        .run_gc = false,
+                        .rclone_remote = remote_name
+                                             ? std::optional<std::string>{*remote_name}
+                                             : std::nullopt,
                         .from_timer = false,
                         .manual = true,
                     });
@@ -2791,13 +2676,14 @@ void scheduler_loop(DaemonSessionState& state) {
                     *hot.first_dirty_at + state.options.watch_max_wait;
                 const auto due = std::min(quiet_due, max_due);
                 if (now >= due) {
-                    if (state.active_workers + jobs.size() <
-                        state.options.max_parallel_profiles) {
+                    if (can_launch_job(cold.config.remote_dir)) {
                         hot.in_flight = true;
-                        hot.active_gc = false;
                         jobs.push_back(ScheduledJob{
                             .name = name,
-                            .run_gc = false,
+                            .rclone_remote =
+                                remote_name
+                                    ? std::optional<std::string>{*remote_name}
+                                    : std::nullopt,
                             .from_timer = false,
                             .manual = false,
                         });
@@ -2809,13 +2695,14 @@ void scheduler_loop(DaemonSessionState& state) {
 
             // Evaluate periodic poll timer.
             if (hot.sync_interval_seconds > 0 && now >= hot.next_sync_at) {
-                if (state.active_workers + jobs.size() <
-                    state.options.max_parallel_profiles) {
+                if (can_launch_job(cold.config.remote_dir)) {
                     hot.in_flight = true;
-                    hot.active_gc = false;
                     jobs.push_back(ScheduledJob{
                         .name = name,
-                        .run_gc = false,
+                        .rclone_remote =
+                            remote_name
+                                ? std::optional<std::string>{*remote_name}
+                                : std::nullopt,
                         .from_timer = true,
                         .manual = false,
                     });
@@ -2827,26 +2714,6 @@ void scheduler_loop(DaemonSessionState& state) {
                     std::chrono::steady_clock::time_point::max()) {
                 next_wake = std::min(next_wake, hot.next_sync_at);
             }
-
-            // Evaluate periodic cooperative GC timer.
-            if (hot.gc_interval_hours > 0 && now >= hot.next_gc_at) {
-                if (state.active_workers + jobs.size() <
-                    state.options.max_parallel_profiles) {
-                    hot.in_flight = true;
-                    hot.active_gc = true;
-                    jobs.push_back(ScheduledJob{
-                        .name = name,
-                        .run_gc = true,
-                        .from_timer = true,
-                        .manual = false,
-                    });
-                }
-                continue;
-            }
-            if (hot.gc_interval_hours > 0 &&
-                hot.next_gc_at < std::chrono::steady_clock::time_point::max()) {
-                next_wake = std::min(next_wake, hot.next_gc_at);
-            }
         }
 
         // Launch selected jobs on tracked worker threads.
@@ -2857,7 +2724,6 @@ void scheduler_loop(DaemonSessionState& state) {
                 std::thread t([&state, job, finished_flag] {
                     run_profile_task(state,
                                      job.name,
-                                     job.run_gc,
                                      job.from_timer,
                                      job.manual);
                     {
@@ -2881,7 +2747,6 @@ void scheduler_loop(DaemonSessionState& state) {
                         find_profile_slot(state.profiles, job.name)) {
                     auto& hot = state.profiles.hot[*slot];
                     hot.in_flight = false;
-                    hot.active_gc = false;
                     if (job.manual) {
                         hot.immediate_sync_requested = true;
                     }
@@ -3195,14 +3060,6 @@ resume_session_state(DaemonSessionState& state, std::string_view profile_name) {
             hot.backoff_until = {};
             telemetry.last_error.clear();
             hot.next_sync_at = std::chrono::steady_clock::now();
-            if (hot.gc_interval_hours > 0) {
-                hot.next_gc_at =
-                    compute_initial_next_gc_at(env_copy,
-                                               profile_name,
-                                               hot.gc_interval_hours,
-                                               hot.next_sync_at,
-                                               current_unix_seconds());
-            }
         }
         state.config_stamp =
             read_file_stamp(env_copy.app_data_dir / "config.toml");
@@ -3582,7 +3439,6 @@ std::expected<void, DaemonError> start_ipc_server(DaemonSessionState& state) {
                     {"warm_transport_active", p.warm_transport_active},
                     {"warm_cache_entries", p.warm_cache_entries},
                     {"sync_interval_seconds", p.sync_interval_seconds},
-                    {"gc_interval_hours", p.gc_interval_hours},
                     {"local_dir", p.local_dir},
                     {"remote_dir", p.remote_dir},
                     {"dirty_paths_count", p.dirty_paths_count},
@@ -3611,9 +3467,6 @@ std::expected<void, DaemonError> start_ipc_server(DaemonSessionState& state) {
                     {"next_sync_at",
                      p.next_sync_at ? nlohmann::json(*p.next_sync_at)
                                     : nlohmann::json(nullptr)},
-                    {"next_gc_at",
-                     p.next_gc_at ? nlohmann::json(*p.next_gc_at)
-                                  : nlohmann::json(nullptr)},
                     {"backoff_until_unix",
                      p.backoff_until_unix
                          ? nlohmann::json(*p.backoff_until_unix)
@@ -3622,7 +3475,6 @@ std::expected<void, DaemonError> start_ipc_server(DaemonSessionState& state) {
                     {"consecutive_failures", p.consecutive_failures},
                     {"sync_runs", p.sync_runs},
                     {"fast_noop_polls", p.fast_noop_polls},
-                    {"gc_runs", p.gc_runs},
                     {"last_outcome", p.last_outcome},
                     {"last_error", p.last_error},
                 };
@@ -4337,9 +4189,6 @@ DaemonProfileState parse_profile_state(std::string_view s) noexcept {
     if (s == "running_sync") {
         return DaemonProfileState::RunningSync;
     }
-    if (s == "running_gc") {
-        return DaemonProfileState::RunningGc;
-    }
     if (s == "paused") {
         return DaemonProfileState::Paused;
     }
@@ -4401,8 +4250,6 @@ build_offline_status_report(const ExecutionEnvironment& env,
                 .watch_enabled = p.watch_enabled.value_or(true),
                 .sync_interval_seconds = p.sync_interval_seconds.value_or(
                     kDefaultSyncIntervalSeconds),
-                .gc_interval_hours =
-                    p.gc_interval_hours.value_or(kDefaultGcIntervalHours),
                 .local_dir = platform::path::to_utf8(p.local_dir),
                 .remote_dir = p.remote_dir,
             });
@@ -4626,8 +4473,6 @@ query_daemon_status(const ExecutionEnvironment& environment,
                         p.value("warm_cache_entries", std::size_t{0}),
                     .sync_interval_seconds = p.value(
                         "sync_interval_seconds", kDefaultSyncIntervalSeconds),
-                    .gc_interval_hours =
-                        p.value("gc_interval_hours", kDefaultGcIntervalHours),
                     .local_dir = p.value("local_dir", std::string{}),
                     .remote_dir = p.value("remote_dir", std::string{}),
                     .dirty_paths_count =
@@ -4648,7 +4493,6 @@ query_daemon_status(const ExecutionEnvironment& environment,
                         optional_field<std::int64_t>(p, "last_checked_at"),
                     .next_sync_at =
                         optional_field<std::int64_t>(p, "next_sync_at"),
-                    .next_gc_at = optional_field<std::int64_t>(p, "next_gc_at"),
                     .backoff_until_unix =
                         optional_field<std::int64_t>(p, "backoff_until_unix"),
                     .backoff_seconds =
@@ -4658,7 +4502,6 @@ query_daemon_status(const ExecutionEnvironment& environment,
                     .sync_runs = p.value("sync_runs", std::uint64_t{0}),
                     .fast_noop_polls =
                         p.value("fast_noop_polls", std::uint64_t{0}),
-                    .gc_runs = p.value("gc_runs", std::uint64_t{0}),
                     .last_outcome = p.value("last_outcome", std::string{}),
                     .last_error = p.value("last_error", std::string{}),
                 });

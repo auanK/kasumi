@@ -9,7 +9,9 @@
 #include <cstdlib>
 #include <cwchar>
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <utility>
@@ -403,7 +405,6 @@ TEST(RuntimeProfileTest, RoundTripsAndValidatesDaemonAutomationFields) {
     };
     profile.watch_enabled = false;
     profile.sync_interval_seconds = 120U;
-    profile.gc_interval_hours = 12U;
     profile.paused = true;
 
     const std::array<kasumi::runtime::ProfileData, 1> saved{profile};
@@ -415,13 +416,10 @@ TEST(RuntimeProfileTest, RoundTripsAndValidatesDaemonAutomationFields) {
     EXPECT_EQ((*loaded)[0].watch_enabled, std::optional<bool>{false});
     EXPECT_EQ((*loaded)[0].sync_interval_seconds,
               std::optional<std::uint32_t>{120U});
-    EXPECT_EQ((*loaded)[0].gc_interval_hours,
-              std::optional<std::uint32_t>{12U});
     EXPECT_TRUE((*loaded)[0].paused);
 
-    // Zero intervals (disabled) are accepted.
+    // Zero interval (disabled) is accepted.
     profile.sync_interval_seconds = 0U;
-    profile.gc_interval_hours = 0U;
     profile.paused = false;
     const std::array<kasumi::runtime::ProfileData, 1> disabled_saved{profile};
     ASSERT_TRUE(
@@ -430,9 +428,33 @@ TEST(RuntimeProfileTest, RoundTripsAndValidatesDaemonAutomationFields) {
     ASSERT_TRUE(disabled_loaded.has_value());
     EXPECT_EQ((*disabled_loaded)[0].sync_interval_seconds,
               std::optional<std::uint32_t>{0U});
-    EXPECT_EQ((*disabled_loaded)[0].gc_interval_hours,
-              std::optional<std::uint32_t>{0U});
     EXPECT_FALSE((*disabled_loaded)[0].paused);
+
+    // Legacy v0.28 config.toml with gc_interval_hours loads cleanly and omits
+    // gc_interval_hours when re-saved.
+    {
+        std::ofstream legacy(config, std::ios::binary);
+        legacy << "version = 1\n\n"
+               << "[profiles.auto]\n"
+               << "local_dir = '"
+               << kasumi::platform::path::to_utf8(profile.local_dir) << "'\n"
+               << "remote_dir = 'drive:auto'\n"
+               << "min_history_depth = 5\n"
+               << "min_history_age_hours = 6\n"
+               << "key_storage = 'vault'\n"
+               << "gc_interval_hours = 24\n";
+    }
+    const auto legacy_loaded = kasumi::runtime::load_profiles(config);
+    ASSERT_TRUE(legacy_loaded.has_value()) << legacy_loaded.error().detail;
+    ASSERT_TRUE(
+        kasumi::runtime::save_profiles(config, *legacy_loaded).has_value());
+    {
+        std::ifstream saved_in(config, std::ios::binary);
+        const std::string saved_text(
+            (std::istreambuf_iterator<char>(saved_in)),
+            std::istreambuf_iterator<char>());
+        EXPECT_EQ(saved_text.find("gc_interval_hours"), std::string::npos);
+    }
 
     // Out-of-range interval (<10s when nonzero) fails closed.
     profile.sync_interval_seconds = 5U;

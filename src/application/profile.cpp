@@ -827,13 +827,6 @@ validate_optional_profile_settings(const Profile& profile) {
             ProfileErrorCode::ConfigFailure,
             "sync_interval_seconds must be 0 or between 10 and 86400");
     }
-    if (profile.gc_interval_hours && (*profile.gc_interval_hours != 0U &&
-                                      (*profile.gc_interval_hours < 1U ||
-                                       *profile.gc_interval_hours > 8760U))) {
-        return fail_profile(
-            ProfileErrorCode::ConfigFailure,
-            "gc_interval_hours must be 0 or between 1 and 8760");
-    }
     return {};
 }
 
@@ -864,7 +857,6 @@ list_profiles(const ExecutionEnvironment& environment) {
             .rclone_config = p.rclone_config,
             .watch_enabled = p.watch_enabled,
             .sync_interval_seconds = p.sync_interval_seconds,
-            .gc_interval_hours = p.gc_interval_hours,
             .paused = p.paused,
         });
     }
@@ -973,7 +965,6 @@ create_profile(const ExecutionEnvironment& environment,
             profile.rclone_config,
             profile.watch_enabled,
             profile.sync_interval_seconds,
-            profile.gc_interval_hours,
             profile.paused,
         });
         if (auto save_res = runtime::save_profiles(config_path, profiles);
@@ -1030,8 +1021,7 @@ std::string format_profile_lock_error(const ExecutionEnvironment& environment,
             if (const auto st = query_daemon_status(environment, profile_name);
                 st && st->running && !st->profiles.empty()) {
                 const auto& dp = st->profiles.front();
-                if (dp.state == DaemonProfileState::RunningSync ||
-                    dp.state == DaemonProfileState::RunningGc) {
+                if (dp.state == DaemonProfileState::RunningSync) {
                     if (!dp.active_stage.empty()) {
                         return std::format("{} (daemon PID {}: {} - {})",
                                            lock_error,
@@ -1143,7 +1133,6 @@ update_profile(const ExecutionEnvironment& environment,
     it->rclone_config = profile.rclone_config;
     it->watch_enabled = profile.watch_enabled;
     it->sync_interval_seconds = profile.sync_interval_seconds;
-    it->gc_interval_hours = profile.gc_interval_hours;
     it->paused = profile.paused;
 
     auto save_res =
