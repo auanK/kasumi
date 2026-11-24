@@ -103,12 +103,14 @@ cmake --preset default && cmake --build --preset default
 | Command | Purpose |
 |---|---|
 | `kasumi config` | Interactive wizard (with `rclone` remote hints) to manage profiles and key storage |
-| `kasumi profile <subcommand>` | Non-interactive profile management (`create`, `edit`, `clone`, `storage`, `rename`, `delete`) |
+| `kasumi profile <subcommand>` | Non-interactive profile management (`create [--verify]`, `edit`, `clone`, `storage`, `rename`, `delete`, `test`) |
+| `kasumi key <profile>` | Save or `--replace` the profile key (supports `--json` and `--quiet`) |
+| `kasumi ignore <subcommand>` | Inspect `.kasumiignore` rule matches (`check`) or generate preset templates (`init`) |
 | `kasumi status <profile>` | Preview synchronization changes read-only (`sync --dry-run`) |
-| `kasumi sync <profile> [--repair]` | Synchronize bidirectionally or re-upload missing remote objects |
+| `kasumi sync <profile> [--repair]` | Synchronize bidirectionally or re-upload missing remote objects (supports `--bwlimit`, `--concurrency`, `--allow-empty-local`) |
 | `kasumi conflicts <profile>` | Scan local folder read-only and group preserved `.kasumiconflict_*` artifacts |
 | `kasumi conflicts resolve <profile> <path>` | Resolve a conflict group (`--keep-canonical` or `--keep <artifact>`, optional `--dry-run`) |
-| `kasumi diagnostics [<profile>]` | Inspect local environment, `rclone >= v1.60.0`, disk space, and profile health |
+| `kasumi diagnostics [<profile>]` | Inspect local environment, `rclone >= v1.60.0`, disk space, `.kasumiignore` syntax, and profile health |
 | `kasumi fsck <profile>` | Download and cryptographically audit every referenced payload |
 | `kasumi repack <profile> [--dry-run]` | Consolidate fragmented `KPAK\x01` Micro-Packs locally without remote downloads/deletions |
 | `kasumi gc <profile> [--dry-run] [--min-age <hours>]` | Reclaim eligible orphans, expired commits, redundant variants, and old activities |

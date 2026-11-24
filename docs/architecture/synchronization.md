@@ -1,6 +1,6 @@
 # Synchronization
 
-`kasumi sync <profile>` prepares the [runtime](application-and-runtime.md), recovers a pending [transaction](transactions-and-recovery.md), then collects local disk, accepted `StoredState`, and authenticated remote history. Local scan and remote observation can overlap. Remote history resolution produces an effective remote tree; [reconciliation](reconciliation.md) creates a candidate shared tree, an ordered `SyncPlan`, and flags for physical repair, local mutation, publication, or accepted-state commit.
+`kasumi sync <profile>` prepares the [runtime](application-and-runtime.md), recovers a pending [transaction](transactions-and-recovery.md), enforces empty-local safety guards (blocking with `empty_local_blocked` if a missing `local_dir` or emptied >5-entry populated tree would trigger mass remote deletion, unless `allow_empty_local` is explicitly set), then collects local disk, accepted `StoredState`, and authenticated remote history. Local scan and remote observation can overlap. Remote history resolution produces an effective remote tree; [reconciliation](reconciliation.md) creates a candidate shared tree, an ordered `SyncPlan`, and flags for physical repair, local mutation, publication, or accepted-state commit.
 
 ## Initial Sync
 

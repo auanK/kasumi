@@ -131,7 +131,8 @@ backups outside this destination; do not edit Kasumi's remote objects manually.
 ## 3. Create the First Profile
 
 On Machine A, create the local folder containing the files you want to sync,
-then launch the wizard (or use `kasumi profile create` for non-interactive setup):
+then launch the wizard (or use `kasumi profile create ... --verify` for
+non-interactive setup with immediate remote verification):
 
 ```sh
 kasumi config
@@ -164,7 +165,7 @@ needed to derive it are lost, the encrypted vault cannot be recovered. See
 
 ## 4. Preview and Synchronize Machine A
 
-Inspect the proposed changes:
+Check connectivity and vault authentication first if needed with `kasumi profile test work`, then inspect the proposed changes:
 
 ```sh
 kasumi status work

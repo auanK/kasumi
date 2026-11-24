@@ -62,15 +62,21 @@ the host's `LongPathsEnabled` policy for long Win32 paths. See
 [path diagnostics](troubleshooting.md#windows-path-exceeds-the-supported-limit).
 
 ```toml
+version = 1
+
 [profiles.my-profile]
 local_dir = "D:/Documents"
 remote_dir = "drive:kasumi/my-profile"
 min_history_depth = 5
 min_history_age_hours = 6
 key_storage = "vault"
+# Optional transport controls:
+# bandwidth_limit = "10M:5M"
+# transfer_concurrency = 4
+# rclone_config = "/path/to/custom-rclone.conf"
 ```
 
-New profiles default to `key_storage = "vault"`, a minimum retention depth of 5 commits, and a minimum retention age of 6 hours. Every profile in `config.toml` must specify `local_dir`, `remote_dir`, `min_history_depth`, `min_history_age_hours`, and `key_storage` (`vault`, `file`, or `memory`). Manual editing of `config.toml` allows adjusting `key_storage` (`vault`, `file`, or `memory`) and retention values using positive integers; runtime operations limit depth to 4096. Unknown fields and missing required profile values are rejected rather than migrated. The local profile policy is used when planning or publishing retention state. Published authenticated Epochs carry the retention policy and anchors used by the remote history and maintenance protocol.
+Kasumi saves `version = 1` at the top of `config.toml` and accepts both version `1` and legacy unversioned tables (rejecting unsupported schema versions). New profiles default to `key_storage = "vault"`, a minimum retention depth of 5 commits, and a minimum retention age of 6 hours. Every profile in `config.toml` must specify `local_dir`, `remote_dir`, `min_history_depth`, `min_history_age_hours`, and `key_storage` (`vault`, `file`, or `memory`). Optional per-profile settings include `bandwidth_limit` (validated rclone rate spec passed to `RCLONE_BWLIMIT`, e.g. `"10M"`, `"5M:2M"`, or `"off"`), `transfer_concurrency` (positive integer `1..16`, overriding `KASUMI_CONTENT_CONCURRENCY`), and `rclone_config` (explicit absolute `rclone.conf` path passed to `RCLONE_CONFIG`). Manual editing of `config.toml` allows adjusting `key_storage` (`vault`, `file`, or `memory`), retention values, and these optional transport keys; runtime operations limit depth to 4096. Unknown fields and missing required profile values are rejected rather than migrated. The local profile policy is used when planning or publishing retention state. Published authenticated Epochs carry the retention policy and anchors used by the remote history and maintenance protocol.
 
 ## Core Commands
 
@@ -79,15 +85,16 @@ Use `kasumi <command> --help` for the complete arguments, options and examples.
 | Purpose | Command |
 |---|---|
 | Manage local profiles interactively | `kasumi config` |
-| Manage local profiles non-interactively | `kasumi profile <create\|edit\|clone\|storage\|rename\|delete> ...` |
-| Re-enter or save profile key | `kasumi key <profile>` |
+| Manage local profiles non-interactively | `kasumi profile <create\|edit\|clone\|storage\|rename\|delete\|test> ...` |
+| Re-enter or replace profile key | `kasumi key <profile> [--replace] [--json] [--quiet]` |
+| Inspect or initialize `.kasumiignore` rules | `kasumi ignore <check\|init> <profile> ...` |
 | List profile names | `kasumi list` |
 | Show profile settings and local traceability | `kasumi show <profile> [--full]` |
 | Inspect local environment, `rclone`, and profile health | `kasumi diagnostics [<profile>]` |
 | Inspect the current plan | `kasumi status <profile>` or `kasumi sync <profile> --dry-run` |
 | List preserved local conflict artifacts | `kasumi conflicts <profile>` |
 | Resolve a preserved local conflict group | `kasumi conflicts resolve <profile> <path> (--keep-canonical \| --keep <artifact>) [--dry-run]` |
-| Synchronize (or fast-repair missing remote objects) | `kasumi sync <profile> [--repair]` |
+| Synchronize (or fast-repair missing remote objects) | `kasumi sync <profile> [--repair] [--allow-empty-local]` |
 | Audit referenced payloads | `kasumi fsck <profile>` |
 | Consolidate fragmented Micro-Packs | `kasumi repack <profile> [--dry-run] [--reclaim-dirty] [--full]` |
 | Reclaim eligible remote storage | `kasumi gc <profile> [--dry-run] [--min-age <hours>]` |
@@ -117,11 +124,14 @@ under `--json`.
 Before running remote transfers or downloads, `sync` performs local disk-space
 and toolchain preflight checks: insufficient local free space for planned
 downloads fails cleanly before staging (`error.code = "insufficient_disk_space"`
-in `--json`), and `rclone` backends enforce a minimum supported `rclone` version
-of `v1.60.0` via `core/version`. Run `kasumi diagnostics [<profile>]` to inspect
-`rclone` availability/version, OS, free disk space, profile local state,
-active locks, journals, and key availability read-only without remote access or
-exposing secrets.
+in `--json`), missing or emptied local directories on already-populated vaults
+fail safely (`error.code = "empty_local_blocked"`) unless `--allow-empty-local`
+is explicitly passed, and `rclone` backends enforce a minimum supported `rclone`
+version of `v1.60.0` via `core/version`.
+
+`kasumi` also supports non-interactive connectivity and credential validation: `kasumi profile create <name> ... [--bwlimit <rate>] [--concurrency <1..16>] [--rclone-config <path>] [--verify]` tests remote connectivity and vault authentication after saving and rolls back the profile on failure, while `kasumi profile test <name>` checks connectivity/auth at any time without mutating local or remote state. `kasumi profile edit <name>` supports updating or clearing optional transport controls (`--bwlimit` / `--clear-bwlimit`, `--concurrency` / `--clear-concurrency`, `--rclone-config` / `--clear-rclone-config`) and requires `--allow-empty-local` when relocating a populated profile to a missing or empty local directory.
+
+Run `kasumi diagnostics [<profile>]` to inspect `rclone` availability/version (`>= v1.60.0`), OS, free disk space, `.kasumiignore` syntax, profile local state, active locks, journals, and key availability read-only without remote access or exposing secrets.
 
 **GC permanently deletes eligible objects.** Scheduled unattended `kasumi gc <profile>`
 checks active writers and barriers read-only before barrier acquisition (backing off
@@ -245,7 +255,7 @@ kasumi [--lang <code>] <command> [subcommand] [arguments] [options]
 ```
 
 `--lang <code>` is the optional global prefix, before the command. Command
-options follow required arguments; `--full` is available to `sync`, `status`, `repack`, `show`, `remote summary`, and `remote log`. `config` and `list` take no profile.
+options follow required arguments; `--full` is available to `sync`, `status`, `repack`, `show`, `remote summary`, and `remote log`. Network commands (`sync`, `status`, `fsck`, `gc`, `repack`, and `remote ...`) also accept per-invocation overrides `--bwlimit <rate>` and `--concurrency <1..16>` (overriding profile `transfer_concurrency` and `KASUMI_CONTENT_CONCURRENCY`). `config` and `list` take no profile.
 
 `kasumi --help` (`-h`) shows global Help. Add `--help` or `-h` after a command,
 subcommand or otherwise valid invocation for contextual Help. Help returns 0
@@ -291,7 +301,7 @@ To switch to **Portuguese**:
 | `KASUMI_MASTER_KEY` | Provides a 64-hex-digit master key to application/inspection operations. It does not replace the wizard's Password/Password Salt creation prompts. When the profile has a persisted key (`vault` or `file` mode), the supplied key must match the persisted key |
 | `KASUMI_PASSWORD` | Provides the Password to the profile creation, `kasumi key`, or `memory`-mode credential flow (minimum 12 characters) |
 | `KASUMI_PASSWORD2` | Provides the Password Salt to the profile creation, `kasumi key`, or `memory`-mode credential flow (minimum 16 characters) |
-| `KASUMI_CONTENT_CONCURRENCY` | Sets content-transfer concurrency. Default: 8. Positive values above 16 are capped at 16; invalid or zero values use the default |
+| `KASUMI_CONTENT_CONCURRENCY` | Fallback content-transfer concurrency (`1..16`, default `8`) when neither CLI `--concurrency` nor profile `transfer_concurrency` is set |
 
 > [!NOTE]
 > Master-key persistence depends on the profile's required `key_storage` setting in `config.toml` (`vault`, `file`, or `memory`; new profiles default to `vault`). In `vault` mode, the derived 32-byte master key is stored in the OS credential vault (`kasumi/<profile>`); in `file` mode, it is persisted in `profiles/<profile>/key.bin` using a reversible XOR mask and OS filesystem permissions; in `memory` mode, the key is never persisted and must be supplied via prompt, `KASUMI_PASSWORD` + `KASUMI_PASSWORD2`, or `KASUMI_MASTER_KEY` on every operation. For `vault` and `file` profiles, routine operations load the persisted key without re-verifying `KASUMI_PASSWORD` and `KASUMI_PASSWORD2`. For details on security boundaries and key storage, see [Security Specification](security.md).
@@ -315,16 +325,16 @@ Pass `--quiet` after the profile (or after `kasumi list`, `kasumi diagnostics [<
 
 ### Machine-Readable Output (`--json`)
 
-Pass `--json` on supported commands (`list`, `show`, `diagnostics`, `profile ...`, `conflicts`, `conflicts resolve`, `status`, `sync`, `fsck`, `gc <profile>`, `gc remove-barrier`, `repack`, `resolve-missing`, `remote summary`, `remote writers`, `remote stat`, `remote get`, `remote log`, and `remote restore`) to emit a single language-independent JSON object (`"schema_version": 1`) to `stdout` with empty `stderr`, suppressing banners, progress output, and localized text differences regardless of `--lang`:
+Pass `--json` on supported commands (`list`, `show`, `diagnostics`, `key`, `ignore check|init`, `profile ...`, `conflicts`, `conflicts resolve`, `status`, `sync`, `fsck`, `gc <profile>`, `gc remove-barrier`, `repack`, `resolve-missing`, `remote summary`, `remote writers`, `remote stat`, `remote get`, `remote log`, and `remote restore`) to emit a single language-independent JSON object (`"schema_version": 1`) to `stdout` with empty `stderr`, suppressing banners, progress output, and localized text differences regardless of `--lang`:
 
 - Every response includes `schema_version`, `command`, `ok`, `exit_code`, and `timestamp` (UTC ISO-8601 ending in `Z`), plus `profile`, `duration_ms`, `data`, `warning`, or `error` as applicable.
-- Command `data` objects retain all raw numeric/boolean/array fields alongside a concise language-independent `summary` string (such as `"Everything in sync"` or `"3 changes | ↑ 2 (2 KB) | ↓ 1 (512 bytes)"`). On `gc`, `data` also exposes `candidate_expired_commits`, `deferred_recent_objects`, `candidate_bytes`, `removed_bytes`, and `min_age_hours`.
+- Command `data` objects retain all raw numeric/boolean/array fields alongside a concise language-independent `summary` string (such as `"Everything in sync"` or `"3 changes | ↑ 2 (2 KB) | ↓ 1 (512 bytes)"`). On `gc`, `data` also exposes `candidate_expired_commits`, `deferred_recent_objects`, `candidate_bytes`, `removed_bytes`, and `min_age_hours`. On `diagnostics`, each profile exposes `ignore_file_present`, `ignore_file_valid`, `ignore_error_line`, and `ignore_error_detail`. On `key`, `--json` never blocks for interactive confirmation when overwriting a different key (`error.code = "already_exists"` unless `--replace` is supplied).
 - `resolve-missing <profile> --json` without `--confirm` or `--dry-run` runs read-only and fails safely with `error.code = "confirmation_required"` and `data.resolved_paths` whenever unresolved paths exist (never blocking on `stdin`).
-- Stable `error.code` values: `invalid_arguments`, `invalid_path`, `profile_not_found`, `lock_busy`, `remote_busy`, `credentials_required`, `auth_failed`, `confirmation_required`, `insufficient_disk_space`, `io_error`, `cancelled`, `partial_pending`, `audit_findings`, `transport_error`, `plan_failed`, `sync_failed`, `recovery_failed`, `fsck_failed`, `gc_failed`, `repack_failed`, `writer_removal_failed`, `barrier_removal_failed`, `inventory_audit_failed`, `remote_observation_failed`, `config_error`, and `runtime_error`.
+- Stable `error.code` values: `invalid_arguments`, `invalid_path`, `profile_not_found`, `already_exists`, `empty_local_blocked`, `lock_busy`, `remote_busy`, `credentials_required`, `auth_failed`, `confirmation_required`, `insufficient_disk_space`, `io_error`, `cancelled`, `partial_pending`, `audit_findings`, `transport_error`, `plan_failed`, `sync_failed`, `recovery_failed`, `fsck_failed`, `gc_failed`, `repack_failed`, `writer_removal_failed`, `barrier_removal_failed`, `inventory_audit_failed`, `remote_observation_failed`, `config_error`, and `runtime_error`.
 
 ### Persistent Log File (`--log-file <path>`)
 
-Pass `--log-file <path>` (or `--log-file=<path>`) on supported non-interactive commands (`list`, `show`, `diagnostics`, `profile ...`, `conflicts`, `conflicts resolve`, `sync`, `status`, `fsck`, `gc`, `repack`, `resolve-missing`, and `remote ...`) to append durable logs without interrupting terminal output:
+Pass `--log-file <path>` (or `--log-file=<path>`) on supported non-interactive commands (`list`, `show`, `diagnostics`, `key`, `ignore check|init`, `profile ...`, `conflicts`, `conflicts resolve`, `sync`, `status`, `fsck`, `gc`, `repack`, `resolve-missing`, and `remote ...`) to append durable logs without interrupting terminal output:
 
 - **With `--json`**: Appends the exact serialized JSON envelope (`timestamp`, `data.summary`, raw counts, and error codes) as one NDJSON line per invocation.
 - **Without `--json`**: Appends UTF-8 plain-text entries in one atomic write per command using local timestamps with UTC offset, status tags (`[OK]`, `[WARN]`, `[PARTIAL]`, `[LOCKED]`, `[BUSY]`, `[CANCELLED]`, `[ERROR]`), command/profile target, ANSI-free compact summary (with human-readable sizes), duration (`(<seconds> s)`), and indented detail lines for pending paths, warnings, or unhealthy diagnostic items.
@@ -332,7 +342,7 @@ Pass `--log-file <path>` (or `--log-file=<path>`) on supported non-interactive c
 
 ## `.kasumiignore`
 
-Create a `.kasumiignore` file in the root of the synchronized folder. The last matching rule takes precedence.
+Create a `.kasumiignore` file in the root of the synchronized folder, or generate one with `kasumi ignore init <profile> [--preset default|dev|office|minimal] [--force] [--dry-run]`. To verify which rule matches specific files or directories (including Kasumi's reserved internal exclusions), run `kasumi ignore check <profile> [--] <path...> [--json]`. Rule syntax errors are also surfaced locally by `kasumi diagnostics [<profile>]`. The last matching rule takes precedence.
 
 ```text
 *.tmp

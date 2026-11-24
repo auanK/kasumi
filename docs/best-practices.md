@@ -184,7 +184,8 @@ When running Kasumi in automated scripts, cron jobs, or task schedulers:
 * **External Scheduling**: Kasumi does not contain an internal background daemon. Use system scheduling tools:
   * **Linux**: `cron` or `systemd` timers.
   * **Windows**: Task Scheduler.
-* **Concurrency Configuration**: Adjust transfer concurrency using the environment variable `KASUMI_CONTENT_CONCURRENCY` (default: 8, maximum: 16).
+* **Concurrency & Bandwidth Configuration**: Configure per-profile `transfer_concurrency` (`1..16`), `bandwidth_limit` (`RCLONE_BWLIMIT`), or `rclone_config` in `config.toml` / `kasumi profile edit`, or override per run with `--concurrency <1..16>` and `--bwlimit <rate>`. Without CLI or profile overrides, Kasumi uses `KASUMI_CONTENT_CONCURRENCY` (default: `8`, max: `16`).
+* **Empty-Local Safety & Pre-Sync Checks**: Keep Kasumi's default protection against unmounted or accidentally wiped local folders (`empty_local_blocked`); validate ignore rules with `kasumi ignore check <profile> ...` and remote reachability/credentials with `kasumi profile test <profile>` before automating unattended jobs.
 
 ## Maintenance Cadence
 
