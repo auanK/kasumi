@@ -81,6 +81,7 @@ struct SyncCompleted {
     std::uint32_t downloaded = 0;
     std::uint32_t removed = 0;
     std::uint32_t renamed = 0;
+    std::uint32_t copied = 0;
     std::uint32_t created_dirs = 0;
     std::uint32_t removed_dirs = 0;
     std::uint32_t repaired = 0;
