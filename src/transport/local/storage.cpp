@@ -233,8 +233,21 @@ Result copy_file_overwrite(const std::filesystem::path& source,
         progress.total_bytes = progress.bytes_transferred;
     } else {
 #if defined(_WIN32)
-        if (!CopyFileW(source.c_str(), staging.c_str(), TRUE)) {
-            const auto win_err = GetLastError();
+        DWORD win_err = ERROR_SUCCESS;
+        for (unsigned attempt = 0;; ++attempt) {
+            if (CopyFileW(source.c_str(), staging.c_str(), TRUE)) {
+                win_err = ERROR_SUCCESS;
+                break;
+            }
+            win_err = GetLastError();
+            if (attempt == 5 || (win_err != ERROR_SHARING_VIOLATION &&
+                                 win_err != ERROR_LOCK_VIOLATION &&
+                                 win_err != ERROR_ACCESS_DENIED)) {
+                break;
+            }
+            Sleep(10UL << attempt);
+        }
+        if (win_err != ERROR_SUCCESS) {
             if (win_err == ERROR_FILE_EXISTS ||
                 win_err == ERROR_ALREADY_EXISTS) {
                 guard.active = false;
