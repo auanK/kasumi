@@ -678,4 +678,307 @@ TEST(DaemonEngineTest,
     EXPECT_LT(std::chrono::steady_clock::now() - stop_started, 5s);
 }
 
+TEST(DaemonEngineTest,
+     TwoIndependentDaemonsConvergeRemoteEditsConflictsAndMassDeletes) {
+    auto workspace = kasumi::test::make_temp_workspace("kasumi-daemon-2p-");
+    const app::ExecutionEnvironment env_a{
+        .app_data_dir = kasumi::test::workspace_path(workspace, "app_a")};
+    const app::ExecutionEnvironment env_b{
+        .app_data_dir = kasumi::test::workspace_path(workspace, "app_b")};
+    const auto dir_a = kasumi::test::workspace_path(workspace, "vault_a");
+    const auto dir_b = kasumi::test::workspace_path(workspace, "vault_b");
+    const auto remote_dir = kasumi::test::workspace_path(workspace, "remote");
+    std::filesystem::create_directories(dir_a);
+    std::filesystem::create_directories(dir_b);
+    std::filesystem::create_directories(remote_dir);
+
+    const std::string hex_key(64, '5');
+    ASSERT_TRUE(
+        app::create_profile(
+            env_a,
+            app::Profile{
+                .name = "peer_a",
+                .local_dir = dir_a,
+                .remote_dir = kasumi::platform::path::to_utf8(remote_dir),
+                .key_storage = app::KeyStorage::File,
+                .sync_interval_seconds = 10U,
+            },
+            app::MasterKeyHex{hex_key})
+            .has_value());
+    ASSERT_TRUE(
+        app::create_profile(
+            env_b,
+            app::Profile{
+                .name = "peer_b",
+                .local_dir = dir_b,
+                .remote_dir = kasumi::platform::path::to_utf8(remote_dir),
+                .key_storage = app::KeyStorage::File,
+                .sync_interval_seconds = 10U,
+            },
+            app::MasterKeyHex{hex_key})
+            .has_value());
+
+    kasumi::test::write_text(dir_a / "conflict.md", "base-line\n");
+    ASSERT_TRUE(
+        app::execute(app::ExecutionInput{
+                         .request = {.operation = app::Operation::Sync,
+                                     .profile_name = "peer_a"},
+                         .credentials = app::NoCredentials{},
+                         .environment = env_a})
+            .has_value());
+    ASSERT_TRUE(
+        app::execute(app::ExecutionInput{
+                         .request = {.operation = app::Operation::Sync,
+                                     .profile_name = "peer_b"},
+                         .credentials = app::NoCredentials{},
+                         .environment = env_b})
+            .has_value());
+
+    app::DaemonOptions opts;
+    opts.watch_debounce = 80ms;
+    opts.watch_max_wait = 250ms;
+    opts.config_poll_interval = 150ms;
+    opts.full_scan_verification_interval = 10min;
+
+    auto session_a = app::start_daemon_session(env_a, opts);
+    ASSERT_TRUE(session_a.has_value()) << session_a.error().detail;
+    auto session_b = app::start_daemon_session(env_b, opts);
+    ASSERT_TRUE(session_b.has_value()) << session_b.error().detail;
+
+    ASSERT_TRUE(
+        app::trigger_daemon_session_sync(*session_a, "peer_a", true)
+            .has_value());
+    ASSERT_TRUE(
+        app::trigger_daemon_session_sync(*session_b, "peer_b", true)
+            .has_value());
+    ASSERT_TRUE(wait_until([&] {
+        const auto sa = app::query_daemon_session_status(*session_a, "peer_a");
+        const auto sb = app::query_daemon_session_status(*session_b, "peer_b");
+        return sa && sb && !sa->profiles.empty() && !sb->profiles.empty() &&
+               sa->profiles[0].watcher_active && sb->profiles[0].watcher_active;
+    }));
+
+    // 1. Multi-chunk payload (~2 MiB) + note on peer_a -> peer_b downloads
+    //    intact and self-suppression prevents cascading extra sync runs.
+    const std::string large_payload(2U * 1024U * 1024U, 'K');
+    const auto a_s0 = app::query_daemon_session_status(*session_a, "peer_a")
+                          ->profiles[0]
+                          .sync_runs;
+    kasumi::test::write_text(dir_a / "large_2mb.bin", large_payload);
+    kasumi::test::write_text(dir_a / "hello.md", "from-daemon-a");
+    ASSERT_TRUE(wait_until(
+        [&] {
+            const auto sa =
+                app::query_daemon_session_status(*session_a, "peer_a");
+            return sa && sa->profiles[0].sync_runs > a_s0 &&
+                   sa->profiles[0].state == app::DaemonProfileState::Idle &&
+                   sa->profiles[0].dirty_paths_count == 0U;
+        },
+        15s));
+
+    const auto b_s0 = app::query_daemon_session_status(*session_b, "peer_b")
+                          ->profiles[0]
+                          .sync_runs;
+    ASSERT_TRUE(
+        app::trigger_daemon_session_sync(*session_b, "peer_b", true)
+            .has_value());
+    EXPECT_EQ(kasumi::test::read_text(dir_b / "hello.md"), "from-daemon-a");
+    EXPECT_EQ(kasumi::test::read_text(dir_b / "large_2mb.bin"), large_payload);
+    std::this_thread::sleep_for(400ms);
+    EXPECT_EQ(app::query_daemon_session_status(*session_b, "peer_b")
+                  ->profiles[0]
+                  .sync_runs,
+              b_s0 + 1U);
+
+    // 2. Real simultaneous conflict: pause peer_b, edit conflict.md on both
+    //    daemons, resume peer_b -> materializes .kasumiconflict_* without
+    //    tripping NeedsAttention on either daemon.
+    ASSERT_TRUE(app::pause_daemon_profile(env_b, "peer_b").has_value());
+    const auto a_s1 = app::query_daemon_session_status(*session_a, "peer_a")
+                          ->profiles[0]
+                          .sync_runs;
+    kasumi::test::write_text(dir_a / "conflict.md", "edited-on-a\n");
+    ASSERT_TRUE(wait_until(
+        [&] {
+            const auto sa =
+                app::query_daemon_session_status(*session_a, "peer_a");
+            return sa && sa->profiles[0].sync_runs > a_s1 &&
+                   sa->profiles[0].state == app::DaemonProfileState::Idle;
+        },
+        15s));
+    kasumi::test::write_text(dir_b / "conflict.md", "edited-on-b\n");
+    ASSERT_TRUE(app::resume_daemon_profile(env_b, "peer_b").has_value());
+    ASSERT_TRUE(
+        app::trigger_daemon_session_sync(*session_b, "peer_b", true)
+            .has_value());
+
+    bool saw_conflict_file = false;
+    for (const auto& entry : std::filesystem::directory_iterator(dir_b)) {
+        const auto name = kasumi::platform::path::to_utf8(
+            entry.path().filename());
+        if (name.find("kasumiconflict") != std::string::npos) {
+            saw_conflict_file = true;
+        }
+    }
+    EXPECT_TRUE(saw_conflict_file);
+    EXPECT_NE(app::query_daemon_session_status(*session_a, "peer_a")
+                  ->profiles[0]
+                  .state,
+              app::DaemonProfileState::NeedsAttention);
+    EXPECT_NE(app::query_daemon_session_status(*session_b, "peer_b")
+                  ->profiles[0]
+                  .state,
+              app::DaemonProfileState::NeedsAttention);
+
+    // 3. Mass delete propagates from peer_a -> peer_b cleanly.
+    const auto a_s2 = app::query_daemon_session_status(*session_a, "peer_a")
+                          ->profiles[0]
+                          .sync_runs;
+    std::filesystem::remove(dir_a / "large_2mb.bin");
+    std::filesystem::remove(dir_a / "hello.md");
+    ASSERT_TRUE(wait_until(
+        [&] {
+            const auto sa =
+                app::query_daemon_session_status(*session_a, "peer_a");
+            return sa && sa->profiles[0].sync_runs > a_s2 &&
+                   sa->profiles[0].state == app::DaemonProfileState::Idle &&
+                   sa->profiles[0].dirty_paths_count == 0U;
+        },
+        15s));
+    ASSERT_TRUE(
+        app::trigger_daemon_session_sync(*session_b, "peer_b", true)
+            .has_value());
+    EXPECT_FALSE(std::filesystem::exists(dir_b / "large_2mb.bin"));
+    EXPECT_FALSE(std::filesystem::exists(dir_b / "hello.md"));
+
+    app::stop_daemon_session(*session_a);
+    app::stop_daemon_session(*session_b);
+}
+
+TEST(DaemonEngineTest,
+     ConfigTomlHotReloadUpdatesIntervalAutomaticallyWithoutReloadIpc) {
+    auto setup = TwoPeerSetup::create(
+        "kasumi-daemon-hotreload-", app::KeyStorage::File, 15U);
+    app::DaemonOptions opts;
+    opts.watch_debounce = 80ms;
+    opts.config_poll_interval = 100ms;
+    opts.full_scan_verification_interval = 10min;
+
+    auto session = app::start_daemon_session(setup.env, opts);
+    ASSERT_TRUE(session.has_value()) << session.error().detail;
+
+    ASSERT_TRUE(wait_until([&] {
+        const auto st = app::query_daemon_session_status(*session, "peer_a");
+        return st && !st->profiles.empty() &&
+               st->profiles[0].sync_interval_seconds == 15U;
+    }));
+
+    // Edit config.toml directly on disk without calling reload_running_daemon.
+    const auto config_path = setup.env.app_data_dir / "config.toml";
+    std::string toml = kasumi::test::read_text(config_path);
+    const std::string needle = "sync_interval_seconds = 15";
+    const auto pos = toml.find(needle);
+    ASSERT_NE(pos, std::string::npos);
+    toml.replace(pos, needle.size(), "sync_interval_seconds = 25");
+    kasumi::test::write_text(config_path, toml);
+
+    ASSERT_TRUE(wait_until(
+        [&] {
+            const auto st =
+                app::query_daemon_session_status(*session, "peer_a");
+            return st && !st->profiles.empty() &&
+                   st->profiles[0].sync_interval_seconds == 25U;
+        },
+        10s));
+
+    app::stop_daemon_session(*session);
+}
+
+TEST(DaemonEngineTest,
+     ConcurrentCliFsckAndInFlightCancelKeepDaemonHealthyAndConvergent) {
+    auto setup = TwoPeerSetup::create(
+        "kasumi-daemon-contention-", app::KeyStorage::File, 10U);
+    app::DaemonOptions opts;
+    opts.watch_debounce = 50ms;
+    opts.watch_max_wait = 150ms;
+    opts.config_poll_interval = 150ms;
+    opts.full_scan_verification_interval = 10min;
+
+    auto session = app::start_daemon_session(setup.env, opts);
+    ASSERT_TRUE(session.has_value()) << session.error().detail;
+    ASSERT_TRUE(
+        app::trigger_daemon_session_sync(*session, "peer_a", true).has_value());
+    ASSERT_TRUE(wait_until([&] {
+        const auto st = app::query_daemon_session_status(*session, "peer_a");
+        return st && !st->profiles.empty() && st->profiles[0].watcher_active;
+    }));
+
+    // 1. Live CLI fsck running concurrently with daemon sync + local write.
+    kasumi::test::write_text(setup.peer_a_dir / "cli_contention.md",
+                             "contention-payload");
+    std::atomic<bool> fsck_done{false};
+    std::thread fsck_thread([&] {
+        static_cast<void>(app::execute(app::ExecutionInput{
+            .request = {.operation = app::Operation::Fsck,
+                        .profile_name = "peer_a"},
+            .credentials = app::NoCredentials{},
+            .environment = setup.env}));
+        fsck_done.store(true, std::memory_order_release);
+    });
+    static_cast<void>(
+        app::trigger_daemon_session_sync(*session, "peer_a", false));
+    fsck_thread.join();
+    EXPECT_TRUE(fsck_done.load(std::memory_order_acquire));
+
+    ASSERT_TRUE(
+        app::trigger_daemon_session_sync(*session, "peer_a", true).has_value());
+    ASSERT_TRUE(wait_until(
+        [&] {
+            const auto st =
+                app::query_daemon_session_status(*session, "peer_a");
+            return st && !st->profiles.empty() &&
+                   st->profiles[0].state == app::DaemonProfileState::Idle &&
+                   st->profiles[0].dirty_paths_count == 0U;
+        },
+        15s));
+    EXPECT_NE(app::query_daemon_session_status(*session, "peer_a")
+                  ->profiles[0]
+                  .state,
+              app::DaemonProfileState::NeedsAttention);
+
+    // 2. In-flight cancel during a multi-chunk payload sync must keep the
+    //    daemon healthy and allow clean convergence on the follow-up sync.
+    const std::string payload(4U * 1024U * 1024U, 'C');
+    kasumi::test::write_text(setup.peer_a_dir / "cancel_4mb.bin", payload);
+    static_cast<void>(
+        app::trigger_daemon_session_sync(*session, "peer_a", false));
+    std::this_thread::sleep_for(20ms);
+    EXPECT_TRUE(app::cancel_daemon_profile(setup.env, "peer_a").has_value());
+
+    ASSERT_TRUE(
+        app::trigger_daemon_session_sync(*session, "peer_a", true).has_value());
+    ASSERT_TRUE(wait_until(
+        [&] {
+            const auto st =
+                app::query_daemon_session_status(*session, "peer_a");
+            return st && !st->profiles.empty() &&
+                   st->profiles[0].state == app::DaemonProfileState::Idle &&
+                   st->profiles[0].dirty_paths_count == 0U;
+        },
+        15s));
+    EXPECT_NE(app::query_daemon_session_status(*session, "peer_a")
+                  ->profiles[0]
+                  .state,
+              app::DaemonProfileState::NeedsAttention);
+
+    ASSERT_TRUE(
+        app::trigger_daemon_session_sync(*session, "peer_b", true).has_value());
+    EXPECT_EQ(kasumi::test::read_text(setup.peer_b_dir / "cli_contention.md"),
+              "contention-payload");
+    EXPECT_EQ(kasumi::test::read_text(setup.peer_b_dir / "cancel_4mb.bin"),
+              payload);
+
+    app::stop_daemon_session(*session);
+}
+
 } // namespace
