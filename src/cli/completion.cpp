@@ -16,7 +16,7 @@ _kasumi() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    local top_commands="status show logs start stop pause resume sync conflicts config list diagnostics key profile daemon ignore fsck gc repack resolve-missing remote completion"
+    local top_commands="status show logs start stop pause resume sync conflicts config list diagnostics key profile daemon ignore fsck gc repack resolve-missing remote version help completion"
     local profile_cmds="create edit clone storage rename delete test"
     local daemon_cmds="run stop status sync pause resume unlock lock reload logs autostart"
     local autostart_cmds="install uninstall status"
@@ -73,7 +73,7 @@ _kasumi() {
             elif [[ ${COMP_CWORD} -eq 4 && "${COMP_WORDS[2]}" == "storage" ]]; then
                 COMPREPLY=( $(compgen -W "vault file memory" -- "${cur}") )
             elif [[ ${cur} == -* ]]; then
-                COMPREPLY=( $(compgen -W "--local --remote --key-storage --min-depth --min-age --bwlimit --clear-bwlimit --concurrency --clear-concurrency --rclone-config --clear-rclone-config --watch --clear-watch --sync-interval --clear-sync-interval --gc-interval --clear-gc-interval --paused --verify --allow-empty-local --confirm --quiet --json --log-file --help" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--local --remote --key-storage --min-depth --min-age --bwlimit --clear-bwlimit --concurrency --clear-concurrency --rclone-config --clear-rclone-config --watch --clear-watch --sync-interval --clear-sync-interval --paused --verify --allow-empty-local --confirm --quiet --json --log-file --help" -- "${cur}") )
             fi
             ;;
         daemon)
@@ -218,7 +218,7 @@ _kasumi_profiles() {
 _kasumi() {
     local -a top_commands profile_cmds daemon_cmds autostart_cmds ignore_cmds remote_cmds gc_cmds shells
     top_commands=(
-        'status:Show overview or pending synchronization changes'
+        'status:Preview pending synchronization changes against remote storage'
         'show:Show profile summary and local traceability'
         'logs:Show or follow daemon logs'
         'start:Start the continuous background sync daemon'
@@ -239,6 +239,8 @@ _kasumi() {
         'repack:Consolidate fragmented Micro-Packs'
         'resolve-missing:Resolve missing content as logical deletions'
         'remote:Read-only remote vault inspection'
+        'version:Show Kasumi version'
+        'help:Show help information'
         'completion:Output shell completion script'
     )
     profile_cmds=(create edit clone storage rename delete test)
@@ -264,7 +266,7 @@ _kasumi() {
             elif (( CURRENT == 5 )) && [[ "${words[3]}" == "storage" ]]; then
                 compadd -- vault file memory
             else
-                compadd -- --local --remote --key-storage --min-depth --min-age --bwlimit --clear-bwlimit --concurrency --clear-concurrency --rclone-config --clear-rclone-config --watch --clear-watch --sync-interval --clear-sync-interval --gc-interval --clear-gc-interval --paused --verify --allow-empty-local --confirm --quiet --json --log-file --help
+                compadd -- --local --remote --key-storage --min-depth --min-age --bwlimit --clear-bwlimit --concurrency --clear-concurrency --rclone-config --clear-rclone-config --watch --clear-watch --sync-interval --clear-sync-interval --paused --verify --allow-empty-local --confirm --quiet --json --log-file --help
             fi
             ;;
         daemon)
@@ -342,8 +344,10 @@ function __kasumi_profiles
     command kasumi list 2>/dev/null
 end
 
-set -l top_cmds status show logs start stop pause resume sync conflicts config list diagnostics key profile daemon ignore fsck gc repack resolve-missing remote completion
-complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "status" -d "Show overview or pending changes"
+set -l top_cmds status show logs start stop pause resume sync conflicts config list diagnostics key profile daemon ignore fsck gc repack resolve-missing remote version help completion
+complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "status" -d "Preview pending changes against remote"
+complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "version" -d "Show version"
+complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "help" -d "Show help"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "show" -d "Show profile details"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "logs" -d "Show or follow daemon logs"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "start" -d "Start continuous background sync daemon"
@@ -398,8 +402,6 @@ complete -c kasumi -l watch -x -a "on off" -d "Enable or disable daemon director
 complete -c kasumi -l clear-watch -d "Reset daemon watcher setting to default"
 complete -c kasumi -l sync-interval -r -d "Daemon fallback sync interval in seconds (0 or 10-86400)"
 complete -c kasumi -l clear-sync-interval -d "Reset daemon sync interval to default"
-complete -c kasumi -l gc-interval -r -d "Daemon scheduled GC interval in hours (0 or 1-8760)"
-complete -c kasumi -l clear-gc-interval -d "Reset daemon GC interval to default"
 complete -c kasumi -l paused -x -a "on off" -d "Pause or resume automated daemon cycles"
 complete -c kasumi -l dry-run -d "Preview without mutating"
 complete -c kasumi -l verify -d "Verify remote connectivity/auth after profile create"
@@ -424,7 +426,7 @@ Register-ArgumentCompleter -Native -CommandName kasumi -ScriptBlock {
     $count = $tokens.Count
     if ($wordToComplete -eq '') { $count++ }
 
-    $topCommands = @('status', 'show', 'logs', 'start', 'stop', 'pause', 'resume', 'sync', 'conflicts', 'config', 'list', 'diagnostics', 'key', 'profile', 'daemon', 'ignore', 'fsck', 'gc', 'repack', 'resolve-missing', 'remote', 'completion')
+    $topCommands = @('status', 'show', 'logs', 'start', 'stop', 'pause', 'resume', 'sync', 'conflicts', 'config', 'list', 'diagnostics', 'key', 'profile', 'daemon', 'ignore', 'fsck', 'gc', 'repack', 'resolve-missing', 'remote', 'version', 'help', 'completion')
     $profileSubs = @('create', 'edit', 'clone', 'storage', 'rename', 'delete', 'test')
     $daemonSubs = @('run', 'stop', 'status', 'sync', 'pause', 'resume', 'unlock', 'lock', 'reload', 'logs', 'autostart')
     $autostartSubs = @('install', 'uninstall', 'status')
@@ -456,7 +458,7 @@ Register-ArgumentCompleter -Native -CommandName kasumi -ScriptBlock {
                 } elseif ($count -eq 5 -and $tokens[2] -eq 'storage') {
                     $candidates = @('vault', 'file', 'memory')
                 } elseif ($wordToComplete -like '-*') {
-                    $candidates = @('--local', '--remote', '--key-storage', '--min-depth', '--min-age', '--bwlimit', '--clear-bwlimit', '--concurrency', '--clear-concurrency', '--rclone-config', '--clear-rclone-config', '--watch', '--clear-watch', '--sync-interval', '--clear-sync-interval', '--gc-interval', '--clear-gc-interval', '--paused', '--verify', '--allow-empty-local', '--confirm', '--quiet', '--json', '--log-file', '--help')
+                    $candidates = @('--local', '--remote', '--key-storage', '--min-depth', '--min-age', '--bwlimit', '--clear-bwlimit', '--concurrency', '--clear-concurrency', '--rclone-config', '--clear-rclone-config', '--watch', '--clear-watch', '--sync-interval', '--clear-sync-interval', '--paused', '--verify', '--allow-empty-local', '--confirm', '--quiet', '--json', '--log-file', '--help')
                 }
             }
             'daemon' {

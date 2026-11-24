@@ -278,8 +278,6 @@ std::string_view to_string(DaemonProfileState state) noexcept {
             return "pending_debounce";
         case DaemonProfileState::RunningSync:
             return "running_sync";
-        case DaemonProfileState::RunningGc:
-            return "running_gc";
         case DaemonProfileState::Paused:
             return "paused";
         case DaemonProfileState::Locked:

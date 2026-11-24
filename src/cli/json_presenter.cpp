@@ -417,6 +417,7 @@ json serialize_sync_completed(const application::SyncCompleted& sync) {
         {"downloaded", sync.downloaded},
         {"removed", sync.removed},
         {"renamed", sync.renamed},
+        {"copied", sync.copied},
         {"created_dirs", sync.created_dirs},
         {"removed_dirs", sync.removed_dirs},
         {"repaired", sync.repaired},
@@ -599,7 +600,6 @@ int present_json_show(
             {"locked", daemon_profile->locked},
             {"warm_transport_active", daemon_profile->warm_transport_active},
             {"sync_runs", daemon_profile->sync_runs},
-            {"gc_runs", daemon_profile->gc_runs},
             {"last_error", daemon_profile->last_error},
         };
     }
@@ -630,9 +630,6 @@ int present_json_show(
         {"sync_interval_seconds",
          profile.sync_interval_seconds ? json(*profile.sync_interval_seconds)
                                        : json(nullptr)},
-        {"gc_interval_hours",
-         profile.gc_interval_hours ? json(*profile.gc_interval_hours)
-                                   : json(nullptr)},
         {"paused", profile.paused},
         {"daemon", std::move(daemon_json)},
         {"database_present", activity.database_present},
@@ -909,9 +906,6 @@ int present_json_profile_action(std::string_view command,
              profile->sync_interval_seconds
                  ? json(*profile->sync_interval_seconds)
                  : json(nullptr)},
-            {"gc_interval_hours",
-             profile->gc_interval_hours ? json(*profile->gc_interval_hours)
-                                        : json(nullptr)},
             {"paused", profile->paused},
         };
     }
@@ -1586,7 +1580,6 @@ int present_json_daemon_status(std::string_view command,
             {"warm_transport_active", p.warm_transport_active},
             {"warm_cache_entries", p.warm_cache_entries},
             {"sync_interval_seconds", p.sync_interval_seconds},
-            {"gc_interval_hours", p.gc_interval_hours},
             {"active_stage", p.active_stage},
             {"active_objects", p.active_objects},
             {"active_total_objects",
@@ -1606,7 +1599,6 @@ int present_json_daemon_status(std::string_view command,
              p.last_checked_at ? json(*p.last_checked_at) : json(nullptr)},
             {"next_sync_at",
              p.next_sync_at ? json(*p.next_sync_at) : json(nullptr)},
-            {"next_gc_at", p.next_gc_at ? json(*p.next_gc_at) : json(nullptr)},
             {"backoff_seconds", p.backoff_seconds},
             {"backoff_until_unix",
              p.backoff_until_unix ? json(*p.backoff_until_unix)
@@ -1614,7 +1606,6 @@ int present_json_daemon_status(std::string_view command,
             {"consecutive_failures", p.consecutive_failures},
             {"sync_runs", p.sync_runs},
             {"fast_noop_polls", p.fast_noop_polls},
-            {"gc_runs", p.gc_runs},
             {"last_outcome", p.last_outcome},
             {"last_error", p.last_error},
         });
@@ -1753,7 +1744,7 @@ int present_json_overview(const application::DaemonStatusReport& daemon,
                           const std::vector<OverviewProfileRow>& rows,
                           std::chrono::nanoseconds duration,
                           bool full) {
-    auto doc = make_envelope("status", {}, true, 0, duration);
+    auto doc = make_envelope("overview", {}, true, 0, duration);
     json profiles = json::array();
     for (const auto& row : rows) {
         const application::ProfileExecutionSummary* chosen =
@@ -1825,8 +1816,6 @@ int present_json_overview(const application::DaemonStatusReport& daemon,
             entry["local_dir"] =
                 platform::path::to_utf8(row.profile.local_dir);
             entry["remote_dir"] = row.profile.remote_dir;
-            entry["gc_interval_hours"] =
-                row.profile.gc_interval_hours.value_or(0U);
             if (row.daemon_profile) {
                 entry["sync_runs"] = row.daemon_profile->sync_runs;
                 entry["fast_noop_polls"] = row.daemon_profile->fast_noop_polls;

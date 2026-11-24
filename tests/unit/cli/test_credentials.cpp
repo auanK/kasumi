@@ -351,7 +351,7 @@ TEST(CliWizardTest, EditingProfilePreservesManualRetentionValues) {
         kasumi::application::MasterKeyHex{std::string(64, '1')}));
 
     const auto output = run_wizard_out(
-        environment, "e\nadvanced\n" + new_local.string() + "\n\n\n\n\ny\nq\n");
+        environment, "e\nadvanced\n" + new_local.string() + "\n\n\n\ny\nq\n");
     EXPECT_EQ(output.find("Política do histórico"), std::string::npos);
     EXPECT_EQ(output.find("Profundidade mínima"), std::string::npos);
     EXPECT_EQ(output.find("Retenção mínima"), std::string::npos);

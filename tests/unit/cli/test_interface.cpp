@@ -929,8 +929,6 @@ TEST_F(CliInterfaceTest, ShowJsonIncludesAutomationFields) {
                                  "off",
                                  "--sync-interval",
                                  "120",
-                                 "--gc-interval",
-                                 "48",
                                  "--paused",
                                  "on",
                                  "--json"});
@@ -941,9 +939,17 @@ TEST_F(CliInterfaceTest, ShowJsonIncludesAutomationFields) {
     EXPECT_NE(show_out.out.find("\"watch_enabled\":false"), std::string::npos);
     EXPECT_NE(show_out.out.find("\"sync_interval_seconds\":120"),
               std::string::npos);
-    EXPECT_NE(show_out.out.find("\"gc_interval_hours\":48"), std::string::npos);
+    EXPECT_EQ(show_out.out.find("gc_interval_hours"), std::string::npos);
     EXPECT_NE(show_out.out.find("\"paused\":true"), std::string::npos);
     EXPECT_NE(show_out.out.find("\"daemon\":null"), std::string::npos);
+
+    const auto rejected_gc = run({"kasumi",
+                                  "profile",
+                                  "edit",
+                                  "auto_prof",
+                                  "--gc-interval",
+                                  "12"});
+    EXPECT_EQ(rejected_gc.code, 1);
 }
 
 TEST_F(CliInterfaceTest, DaemonHelpLogsAndErrorContractsWork) {
@@ -994,14 +1000,18 @@ TEST_F(CliInterfaceTest, DaemonHelpLogsAndErrorContractsWork) {
     EXPECT_TRUE(unlock_quiet.err.empty());
 }
 
-TEST_F(CliInterfaceTest, HelpTwoTierEnglishAndPortuguese) {
+TEST_F(CliInterfaceTest, HelpTwoTierAndWordCommandsEnglishAndPortuguese) {
     const auto compact_en = run({"kasumi", "--help"});
     EXPECT_EQ(compact_en.code, 0);
     EXPECT_NE(compact_en.out.find("kasumi start"), std::string::npos);
     EXPECT_NE(compact_en.out.find("kasumi logs"), std::string::npos);
-    EXPECT_NE(compact_en.out.find("--help --all"), std::string::npos);
+    EXPECT_NE(compact_en.out.find("help --all"), std::string::npos);
     EXPECT_EQ(compact_en.out.find("kasumi remote contents <profile> --audit"),
               std::string::npos);
+
+    const auto word_help = run({"kasumi", "help"});
+    EXPECT_EQ(word_help.code, 0);
+    EXPECT_EQ(word_help.out, compact_en.out);
 
     const auto all_en = run({"kasumi", "--help", "--all"});
     EXPECT_EQ(all_en.code, 0);
@@ -1009,19 +1019,35 @@ TEST_F(CliInterfaceTest, HelpTwoTierEnglishAndPortuguese) {
               std::string::npos);
     EXPECT_NE(all_en.out.find("kasumi gc <profile>"), std::string::npos);
 
+    const auto word_help_all = run({"kasumi", "help", "--all"});
+    EXPECT_EQ(word_help_all.code, 0);
+    EXPECT_EQ(word_help_all.out, all_en.out);
+
+    const auto word_help_sync = run({"kasumi", "help", "sync"});
+    EXPECT_EQ(word_help_sync.code, 0);
+    EXPECT_NE(word_help_sync.out.find("kasumi sync <profile>"),
+              std::string::npos);
+
+    const auto ver_flag = run({"kasumi", "--version"});
+    const auto ver_word = run({"kasumi", "version"});
+    EXPECT_EQ(ver_flag.code, 0);
+    EXPECT_EQ(ver_word.code, 0);
+    EXPECT_EQ(ver_word.out, ver_flag.out);
+
     const auto all_pt = run({"kasumi", "--lang", "pt-BR", "--help", "--all"});
     EXPECT_EQ(all_pt.code, 0);
     EXPECT_NE(all_pt.out.find("kasumi gc <perfil>"), std::string::npos);
 }
 
-TEST_F(CliInterfaceTest, OverviewBareAndStatusFullJsonAndPtBr) {
+TEST_F(CliInterfaceTest, OverviewBareFullJsonAndBareStatusRejection) {
     const auto empty_en = run({"kasumi"});
     EXPECT_EQ(empty_en.code, 0) << empty_en.err;
     EXPECT_NE(empty_en.out.find("No profiles configured"), std::string::npos);
 
-    const auto empty_status = run({"kasumi", "status"});
-    EXPECT_EQ(empty_status.code, 0) << empty_status.err;
-    EXPECT_NE(empty_status.out.find("kasumi config"), std::string::npos);
+    const auto bare_status = run({"kasumi", "status"});
+    EXPECT_EQ(bare_status.code, 1);
+    EXPECT_NE(bare_status.err.find("kasumi status --help"),
+              std::string::npos);
 
     const auto root = kasumi::test::workspace_root(workspace);
     const kasumi::application::ExecutionEnvironment environment{root /
@@ -1037,19 +1063,20 @@ TEST_F(CliInterfaceTest, OverviewBareAndStatusFullJsonAndPtBr) {
     const auto overview = run({"kasumi"});
     EXPECT_EQ(overview.code, 0) << overview.err;
     EXPECT_NE(overview.out.find("Daemon: stopped"), std::string::npos);
-    EXPECT_NE(overview.out.find("notes"), std::string::npos);
-    EXPECT_NE(overview.out.find("--full"), std::string::npos);
+    EXPECT_NE(overview.out.find("notes [Ready]"), std::string::npos);
+    EXPECT_NE(overview.out.find("kasumi --full"), std::string::npos);
 
-    const auto overview_full = run({"kasumi", "status", "--full"});
+    const auto overview_full = run({"kasumi", "--full"});
     EXPECT_EQ(overview_full.code, 0) << overview_full.err;
     EXPECT_NE(overview_full.out.find("Daemon: stopped"), std::string::npos);
-    EXPECT_NE(overview_full.out.find("notes"), std::string::npos);
-    EXPECT_NE(overview_full.out.find("local="), std::string::npos);
+    EXPECT_NE(overview_full.out.find("notes [Ready]"), std::string::npos);
+    EXPECT_NE(overview_full.out.find("Local:"), std::string::npos);
+    EXPECT_NE(overview_full.out.find("Remote:"), std::string::npos);
 
-    const auto overview_json = run({"kasumi", "status", "--json"});
+    const auto overview_json = run({"kasumi", "--json"});
     EXPECT_EQ(overview_json.code, 0) << overview_json.err;
     EXPECT_NE(overview_json.out.find("\"schema_version\":1"), std::string::npos);
-    EXPECT_NE(overview_json.out.find("\"command\":\"status\""),
+    EXPECT_NE(overview_json.out.find("\"command\":\"overview\""),
               std::string::npos);
     EXPECT_NE(overview_json.out.find("\"profiles\":[{"), std::string::npos);
     EXPECT_NE(overview_json.out.find("\"name\":\"notes\""), std::string::npos);
@@ -1057,7 +1084,7 @@ TEST_F(CliInterfaceTest, OverviewBareAndStatusFullJsonAndPtBr) {
     const auto overview_pt = run({"kasumi", "--lang", "pt-BR"});
     EXPECT_EQ(overview_pt.code, 0) << overview_pt.err;
     EXPECT_NE(overview_pt.out.find("Daemon: parado"), std::string::npos);
-    EXPECT_NE(overview_pt.out.find("notes"), std::string::npos);
+    EXPECT_NE(overview_pt.out.find("notes [Pronto]"), std::string::npos);
 }
 
 TEST_F(CliInterfaceTest, LogsFiltersNoisyEventsAndHandlesOfflineFollow) {
@@ -1131,12 +1158,13 @@ TEST_F(CliInterfaceTest, UnifiedDaemonErrorsAndListFullWorkCleanly) {
     const auto list_compact = run({"kasumi", "list"});
     EXPECT_EQ(list_compact.code, 0);
     EXPECT_NE(list_compact.out.find("notes"), std::string::npos);
-    EXPECT_EQ(list_compact.out.find("->"), std::string::npos);
+    EXPECT_EQ(list_compact.out.find("Local:"), std::string::npos);
 
     const auto list_full = run({"kasumi", "list", "--full"});
     EXPECT_EQ(list_full.code, 0);
     EXPECT_NE(list_full.out.find("notes"), std::string::npos);
-    EXPECT_NE(list_full.out.find("->"), std::string::npos);
+    EXPECT_NE(list_full.out.find("Local:"), std::string::npos);
+    EXPECT_NE(list_full.out.find("Remote:"), std::string::npos);
 }
 
 TEST_F(CliInterfaceTest, ConfigEditUpdatesProfileAutomationSchedule) {
@@ -1151,7 +1179,7 @@ TEST_F(CliInterfaceTest, ConfigEditUpdatesProfileAutomationSchedule) {
         kasumi::application::MasterKeyHex{std::string(64, '8')}));
     std::filesystem::create_directories(profile.local_dir);
 
-    std::istringstream wizard_input("e\nnotes\n\n\noff\n120\n24\nq\n");
+    std::istringstream wizard_input("e\nnotes\n\n\noff\n120\nq\n");
     auto* previous = std::cin.rdbuf(wizard_input.rdbuf());
     const auto out = run({"kasumi", "config"});
     std::cin.rdbuf(previous);
@@ -1168,14 +1196,12 @@ TEST_F(CliInterfaceTest, ConfigEditUpdatesProfileAutomationSchedule) {
     EXPECT_FALSE(*updated.watch_enabled);
     ASSERT_TRUE(updated.sync_interval_seconds.has_value());
     EXPECT_EQ(*updated.sync_interval_seconds, 120U);
-    ASSERT_TRUE(updated.gc_interval_hours.has_value());
-    EXPECT_EQ(*updated.gc_interval_hours, 24U);
 
     const auto watch_off_overview = run({"kasumi"});
     EXPECT_EQ(watch_off_overview.code, 0);
-    EXPECT_NE(watch_off_overview.out.find("[watch off]"), std::string::npos);
+    EXPECT_NE(watch_off_overview.out.find("watch off"), std::string::npos);
 
-    const auto watch_off_json = run({"kasumi", "status", "--json"});
+    const auto watch_off_json = run({"kasumi", "--json"});
     EXPECT_EQ(watch_off_json.code, 0);
     EXPECT_NE(watch_off_json.out.find("\"watch_enabled\":false"),
               std::string::npos);

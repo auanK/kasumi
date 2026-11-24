@@ -789,15 +789,12 @@ TEST(CliParserTest, ParsesProfileConflictsAndCompletionCommands) {
                                "off",
                                "--sync-interval",
                                "120",
-                               "--gc-interval",
-                               "12",
                                "--paused",
                                "on"});
     ASSERT_TRUE(p_auto.has_value());
     const auto& p_auto_inv = std::get<kasumi::cli::ProfileInvocation>(*p_auto);
     EXPECT_EQ(p_auto_inv.watch_enabled, false);
     EXPECT_EQ(p_auto_inv.sync_interval_seconds, 120U);
-    EXPECT_EQ(p_auto_inv.gc_interval_hours, 12U);
     EXPECT_EQ(p_auto_inv.paused, true);
 
     const auto p_edit_auto = parse({"profile",
@@ -805,15 +802,26 @@ TEST(CliParserTest, ParsesProfileConflictsAndCompletionCommands) {
                                     "auto_p",
                                     "--clear-watch",
                                     "--clear-sync-interval",
-                                    "--clear-gc-interval",
                                     "--paused=off"});
     ASSERT_TRUE(p_edit_auto.has_value());
     const auto& p_edit_auto_inv =
         std::get<kasumi::cli::ProfileInvocation>(*p_edit_auto);
     EXPECT_TRUE(p_edit_auto_inv.clear_watch_enabled);
     EXPECT_TRUE(p_edit_auto_inv.clear_sync_interval_seconds);
-    EXPECT_TRUE(p_edit_auto_inv.clear_gc_interval_hours);
     EXPECT_EQ(p_edit_auto_inv.paused, false);
+
+    EXPECT_FALSE(parse({"profile",
+                        "create",
+                        "auto_p",
+                        "--local",
+                        "/data/auto",
+                        "--remote",
+                        "drive:auto",
+                        "--gc-interval",
+                        "12"})
+                     .has_value());
+    EXPECT_FALSE(parse({"profile", "edit", "auto_p", "--clear-gc-interval"})
+                     .has_value());
 
     EXPECT_FALSE(parse({"profile",
                         "create",
@@ -944,10 +952,39 @@ TEST(ParserTest, ParsesV028UnifiedCommandsAndHelpAll) {
 
     EXPECT_FALSE(parse({"--all"}).has_value());
 
-    const auto bare_status = parse({"status"});
-    ASSERT_TRUE(bare_status.has_value());
-    EXPECT_TRUE(
-        std::holds_alternative<kasumi::cli::OverviewInvocation>(*bare_status));
+    const auto help_word = parse({"help"});
+    ASSERT_TRUE(help_word.has_value());
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::cli::HelpInvocation>(*help_word));
+    EXPECT_FALSE(std::get<kasumi::cli::HelpInvocation>(*help_word).all);
+
+    const auto help_word_all = parse({"help", "--all"});
+    ASSERT_TRUE(help_word_all.has_value());
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::cli::HelpInvocation>(*help_word_all));
+    EXPECT_TRUE(std::get<kasumi::cli::HelpInvocation>(*help_word_all).all);
+
+    const auto help_word_all_kw = parse({"help", "all"});
+    ASSERT_TRUE(help_word_all_kw.has_value());
+    ASSERT_TRUE(std::holds_alternative<kasumi::cli::HelpInvocation>(
+        *help_word_all_kw));
+    EXPECT_TRUE(std::get<kasumi::cli::HelpInvocation>(*help_word_all_kw).all);
+
+    const auto help_word_sync = parse({"help", "sync"});
+    ASSERT_TRUE(help_word_sync.has_value());
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::cli::HelpInvocation>(*help_word_sync));
+    EXPECT_EQ(std::get<kasumi::cli::HelpInvocation>(*help_word_sync).topic,
+              "sync");
+
+    const auto help_word_daemon_status = parse({"help", "daemon", "status"});
+    ASSERT_TRUE(help_word_daemon_status.has_value());
+    EXPECT_EQ(
+        std::get<kasumi::cli::HelpInvocation>(*help_word_daemon_status).topic,
+        "daemon status");
+
+    EXPECT_FALSE(parse({"help", "not-a-command"}).has_value());
+    EXPECT_FALSE(parse({"status"}).has_value());
 
     const auto prof_status = parse({"status", "notes"});
     ASSERT_TRUE(prof_status.has_value());

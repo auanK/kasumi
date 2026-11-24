@@ -186,7 +186,7 @@ int present(const application::Error& error);
 // Displays the error of a remote inspection and returns 1.
 int present(const application::InspectionError& error);
 
-// Displays consolidated daemon + profile overview (for bare `kasumi` / `kasumi status`).
+// Displays consolidated daemon + profile overview (for bare `kasumi`).
 int present_overview(const application::DaemonStatusReport& daemon,
                      const std::vector<OverviewProfileRow>& rows,
                      bool full = false,
@@ -207,7 +207,8 @@ int present(const application::DaemonLogsReport& report,
             bool full = false,
             bool quiet = false);
 int present(const application::DaemonError& error);
-std::string format_relative_time(std::int64_t unix_timestamp);
+std::string_view
+execution_status_label(application::ProfileExecutionStatus status);
 std::string_view overview_problem_message(
     application::ProfileLocalProblem problem);
 
