@@ -1,5 +1,6 @@
 #include "cli/wizard.hpp"
 
+#include "application/daemon.hpp"
 #include "application/profile.hpp"
 #include "cli/credentials.hpp"
 #include "cli/i18n.hpp"
@@ -137,23 +138,28 @@ std::string
 format_execution_metrics(const application::ProfileExecutionSummary& e) {
     using K = application::ProfileOperationKind;
     switch (e.operation) {
-        case K::Sync:
-            if (e.summary_a > 0 && e.summary_c > 0) {
-                return i18n::format(i18n::Key::LabelMetricSyncChanged,
-                                    e.summary_a) +
-                       ", " +
-                       i18n::format(i18n::Key::LabelMetricSyncPending,
-                                    e.summary_c);
-            }
+        case K::Sync: {
+            std::string parts;
+            const auto add = [&](std::string part) {
+                if (!parts.empty()) {
+                    parts += ", ";
+                }
+                parts += std::move(part);
+            };
             if (e.summary_a > 0) {
-                return i18n::format(i18n::Key::LabelMetricSyncChanged,
-                                    e.summary_a);
+                add(i18n::format(i18n::Key::LabelMetricSyncUploaded,
+                                 e.summary_a));
+            }
+            if (e.summary_b > 0) {
+                add(i18n::format(i18n::Key::LabelMetricSyncDownloaded,
+                                 e.summary_b));
             }
             if (e.summary_c > 0) {
-                return i18n::format(i18n::Key::LabelMetricSyncPending,
-                                    e.summary_c);
+                add(i18n::format(i18n::Key::LabelMetricSyncRemoved,
+                                 e.summary_c));
             }
-            return {};
+            return parts;
+        }
         case K::Fsck:
             if (e.summary_a > 0 || e.summary_bytes > 0) {
                 return format_activity_metrics(
@@ -210,6 +216,9 @@ format_execution_extra(const application::ProfileExecutionSummary& e,
         }
         extra += part;
     };
+    if ((e.flags & application::profile_execution_flag_origin_daemon) != 0U) {
+        append(i18n::tr(i18n::Key::LabelFlagOriginDaemon));
+    }
     if (e.recovered) {
         append(i18n::tr(i18n::Key::LabelFlagRecovered));
     }
@@ -221,7 +230,12 @@ format_execution_extra(const application::ProfileExecutionSummary& e,
         application::ProfileRemotePublishState::Pending) {
         append(i18n::tr(i18n::Key::LabelFlagRemotePublishPending));
     }
-    append(format_activity_flags(e.flags));
+    if (e.operation == application::ProfileOperationKind::Fsck ||
+        e.operation == application::ProfileOperationKind::GarbageCollect ||
+        e.operation == application::ProfileOperationKind::RemoveWriter ||
+        e.operation == application::ProfileOperationKind::RemoveBarrier) {
+        append(format_activity_flags(e.flags));
+    }
     if (include_stage && !e.stage.empty()) {
         append(sanitize_terminal_text(e.stage));
     }
@@ -798,6 +812,10 @@ int run_profile_command(const application::ExecutionEnvironment& environment,
                               std::filesystem::path>{platform::path::from_utf8(
                               *invocation.rclone_config)}
                         : std::nullopt,
+                .watch_enabled = invocation.watch_enabled,
+                .sync_interval_seconds = invocation.sync_interval_seconds,
+                .gc_interval_hours = invocation.gc_interval_hours,
+                .paused = invocation.paused.value_or(false),
             };
             application::Credentials verify_creds{application::NoCredentials{}};
             CredsWipeGuard verify_guard{verify_creds};
@@ -889,6 +907,25 @@ int run_profile_command(const application::ExecutionEnvironment& environment,
                     platform::path::from_utf8(*invocation.rclone_config);
             } else if (invocation.clear_rclone_config) {
                 updated.rclone_config.reset();
+            }
+            if (invocation.watch_enabled.has_value()) {
+                updated.watch_enabled = *invocation.watch_enabled;
+            } else if (invocation.clear_watch_enabled) {
+                updated.watch_enabled.reset();
+            }
+            if (invocation.sync_interval_seconds.has_value()) {
+                updated.sync_interval_seconds =
+                    *invocation.sync_interval_seconds;
+            } else if (invocation.clear_sync_interval_seconds) {
+                updated.sync_interval_seconds.reset();
+            }
+            if (invocation.gc_interval_hours.has_value()) {
+                updated.gc_interval_hours = *invocation.gc_interval_hours;
+            } else if (invocation.clear_gc_interval_hours) {
+                updated.gc_interval_hours.reset();
+            }
+            if (invocation.paused.has_value()) {
+                updated.paused = *invocation.paused;
             }
             auto res = application::update_profile(
                 environment, updated, invocation.allow_empty_local);
@@ -1162,9 +1199,22 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
                 environment, profile.name, &problem);
             const auto activity = application::inspect_profile_activity(
                 environment, profile.name);
+            std::optional<application::DaemonProfileStatus> daemon_prof;
+            if (application::is_daemon_running(environment)) {
+                if (const auto ds = application::query_daemon_status(
+                        environment, profile.name);
+                    ds && !ds->profiles.empty()) {
+                    for (const auto& candidate : ds->profiles) {
+                        if (candidate.name == profile.name) {
+                            daemon_prof = candidate;
+                            break;
+                        }
+                    }
+                }
+            }
             if (json) {
                 return present_json_show(
-                    profile, state, problem, activity, full);
+                    profile, state, problem, activity, full, daemon_prof);
             }
             i18n::println(i18n::Key::WizardProfileDetails,
                           profile.name,
@@ -1186,6 +1236,46 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
                 i18n::println(i18n::Key::WizardShowRcloneConfig,
                               sanitize_terminal_text(platform::path::to_utf8(
                                   *profile.rclone_config)));
+            }
+            if (profile.watch_enabled.has_value()) {
+                i18n::println(i18n::Key::WizardShowWatch,
+                              *profile.watch_enabled
+                                  ? i18n::tr(i18n::Key::LabelYes)
+                                  : i18n::tr(i18n::Key::LabelNo));
+            }
+            if (profile.sync_interval_seconds.has_value()) {
+                if (*profile.sync_interval_seconds == 0) {
+                    i18n::println(i18n::Key::WizardShowSyncIntervalDisabled);
+                } else {
+                    i18n::println(i18n::Key::WizardShowSyncInterval,
+                                  *profile.sync_interval_seconds);
+                }
+            }
+            if (profile.gc_interval_hours.has_value()) {
+                if (*profile.gc_interval_hours == 0) {
+                    i18n::println(i18n::Key::WizardShowGcIntervalDisabled);
+                } else {
+                    i18n::println(i18n::Key::WizardShowGcInterval,
+                                  *profile.gc_interval_hours);
+                }
+            }
+            if (profile.paused) {
+                i18n::println(i18n::Key::WizardShowPaused,
+                              i18n::tr(i18n::Key::LabelYes));
+            }
+            if (daemon_prof.has_value()) {
+                i18n::println(i18n::Key::WizardShowDaemonStatus,
+                              sanitize_terminal_text(
+                                  application::to_string(daemon_prof->state)));
+                if (!daemon_prof->active_stage.empty()) {
+                    i18n::println(
+                        i18n::Key::WizardShowDaemonStage,
+                        sanitize_terminal_text(daemon_prof->active_stage));
+                }
+                if (daemon_prof->dirty_paths_count > 0) {
+                    i18n::println(i18n::Key::WizardShowDaemonDirty,
+                                  daemon_prof->dirty_paths_count);
+                }
             }
             if (state == application::ProfileLocalState::Problem) {
                 static constexpr auto problem_keys = std::to_array<i18n::Key>({

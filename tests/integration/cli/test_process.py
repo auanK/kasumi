@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
 
@@ -1396,6 +1397,213 @@ class CliProcessTest(unittest.TestCase):
         sync_override = self.invoke_raw("sync", "v26", "--allow-empty-local", "--json")
         self.assertEqual(sync_override.returncode, 0, sync_override.stdout + sync_override.stderr)
         self.assertTrue(local.exists())
+
+    def test_daemon_lifecycle_and_profile_automation_workflow(self):
+        env = self.environment.copy()
+        autostart_dir = self.root / "autostart-entries"
+        env["KASUMI_AUTOSTART_DIR"] = str(autostart_dir)
+        env["KASUMI_MASTER_KEY"] = "c" * 64
+
+        local_a = self.root / "daemon_local_a"
+        local_b = self.root / "daemon_local_b"
+        remote_shared = self.root / "daemon_remote_shared"
+        local_mem = self.root / "daemon_local_mem"
+        remote_mem = self.root / "daemon_remote_mem"
+        for d in (local_a, local_b, remote_shared, local_mem, remote_mem):
+            d.mkdir(parents=True, exist_ok=True)
+
+        # Profile automation flags + show --json + clear flags
+        create_a = self.invoke_raw(
+            "profile", "create", "auto_a",
+            "--local", str(local_a),
+            "--remote", str(remote_shared),
+            "--key-storage", "file",
+            "--watch", "on",
+            "--sync-interval", "120",
+            "--gc-interval", "48",
+            "--paused", "on",
+            "--json",
+            environment=env,
+        )
+        self.assertEqual(create_a.returncode, 0, create_a.stdout + create_a.stderr)
+
+        show_a = json.loads(
+            self.invoke_raw("show", "auto_a", "--json", environment=env).stdout.decode("utf-8")
+        )
+        self.assertTrue(show_a["data"]["watch_enabled"])
+        self.assertEqual(show_a["data"]["sync_interval_seconds"], 120)
+        self.assertEqual(show_a["data"]["gc_interval_hours"], 48)
+        self.assertTrue(show_a["data"]["paused"])
+
+        edit_a = self.invoke_raw(
+            "profile", "edit", "auto_a",
+            "--paused", "off",
+            "--clear-sync-interval",
+            "--clear-gc-interval",
+            "--json",
+            environment=env,
+        )
+        self.assertEqual(edit_a.returncode, 0, edit_a.stdout + edit_a.stderr)
+        show_a_after = json.loads(
+            self.invoke_raw("show", "auto_a", "--json", environment=env).stdout.decode("utf-8")
+        )
+        self.assertFalse(show_a_after["data"]["paused"])
+        self.assertIsNone(show_a_after["data"]["sync_interval_seconds"])
+        self.assertIsNone(show_a_after["data"]["gc_interval_hours"])
+
+        # Seed local_a & run initial sync before starting daemon
+        (local_a / "seed.txt").write_text("seed-v1", encoding="utf-8")
+        self.invoke("sync", "auto_a", environment=env)
+
+        # Memory-mode profile for unlock/lock IPC test
+        self.assertEqual(
+            self.invoke_raw(
+                "profile", "create", "mem_prof",
+                "--local", str(local_mem),
+                "--remote", str(remote_mem),
+                "--key-storage", "memory",
+                "--sync-interval", "0",
+                "--json",
+                environment=env,
+            ).returncode,
+            0,
+        )
+        self.invoke("sync", "mem_prof", environment=env)
+
+        # Test autostart install / status / uninstall under KASUMI_AUTOSTART_DIR
+        as_install = json.loads(
+            self.invoke_raw("daemon", "autostart", "install", "--json", environment=env).stdout.decode("utf-8")
+        )
+        self.assertTrue(as_install["data"]["installed"])
+        as_status = json.loads(
+            self.invoke_raw("daemon", "autostart", "status", "--json", environment=env).stdout.decode("utf-8")
+        )
+        self.assertTrue(as_status["data"]["installed"])
+        as_uninstall = json.loads(
+            self.invoke_raw("daemon", "autostart", "uninstall", "--json", environment=env).stdout.decode("utf-8")
+        )
+        self.assertFalse(as_uninstall["data"]["installed"])
+
+        # Launch background daemon and verify stop in finally
+        bg_started = self.invoke_raw("daemon", "run", "--background", "--json", environment=env)
+        self.assertEqual(bg_started.returncode, 0, bg_started.stdout + bg_started.stderr)
+        try:
+            bg_doc = json.loads(bg_started.stdout.decode("utf-8"))
+            self.assertTrue(bg_doc["data"]["running"])
+            self.assertGreater(bg_doc["data"]["ipc_port"], 0)
+
+            # Wait for auto_a watcher active and mem_prof locked
+            deadline = time.monotonic() + 15.0
+            ready = False
+            while time.monotonic() < deadline:
+                st = json.loads(
+                    self.invoke_raw("daemon", "status", "--json", environment=env).stdout.decode("utf-8")
+                )
+                by_name = {p["name"]: p for p in st["data"]["profiles"]}
+                if (
+                    "auto_a" in by_name
+                    and by_name["auto_a"]["watcher_active"]
+                    and "mem_prof" in by_name
+                    and by_name["mem_prof"]["state"] == "locked"
+                ):
+                    ready = True
+                    break
+                time.sleep(0.25)
+            self.assertTrue(ready)
+
+            # Write a new file and wait for watcher debounce to auto-sync it
+            before_runs = json.loads(
+                self.invoke_raw("daemon", "status", "auto_a", "--json", environment=env).stdout.decode("utf-8")
+            )["data"]["profiles"][0]["sync_runs"]
+            (local_a / "watched_note.txt").write_text("from-daemon-watcher", encoding="utf-8")
+            synced = False
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline:
+                st_a = json.loads(
+                    self.invoke_raw("daemon", "status", "auto_a", "--json", environment=env).stdout.decode("utf-8")
+                )
+                if st_a["data"]["profiles"][0]["sync_runs"] > before_runs:
+                    synced = True
+                    break
+                time.sleep(0.3)
+            self.assertTrue(synced)
+
+            # Verify remote received watched_note.txt by syncing peer auto_b
+            self.assertEqual(
+                self.invoke_raw(
+                    "profile", "create", "auto_b",
+                    "--local", str(local_b),
+                    "--remote", str(remote_shared),
+                    "--key-storage", "file",
+                    "--json",
+                    environment=env,
+                ).returncode,
+                0,
+            )
+            self.invoke("sync", "auto_b", environment=env)
+            self.assertEqual(
+                (local_b / "watched_note.txt").read_text(encoding="utf-8"),
+                "from-daemon-watcher",
+            )
+
+            # Pause / resume auto_a
+            self.assertEqual(
+                self.invoke_raw("daemon", "pause", "auto_a", "--json", environment=env).returncode,
+                0,
+            )
+            paused_doc = json.loads(
+                self.invoke_raw("daemon", "status", "auto_a", "--json", environment=env).stdout.decode("utf-8")
+            )
+            self.assertEqual(paused_doc["data"]["profiles"][0]["state"], "paused")
+            self.assertEqual(
+                self.invoke_raw("daemon", "resume", "auto_a", "--json", environment=env).returncode,
+                0,
+            )
+
+            # Unlock & lock memory-mode profile
+            self.assertEqual(
+                self.invoke_raw("daemon", "unlock", "mem_prof", "--json", environment=env).returncode,
+                0,
+            )
+            unlocked_doc = json.loads(
+                self.invoke_raw("daemon", "status", "mem_prof", "--json", environment=env).stdout.decode("utf-8")
+            )
+            self.assertFalse(unlocked_doc["data"]["profiles"][0]["locked"])
+            self.assertEqual(
+                self.invoke_raw("daemon", "lock", "mem_prof", "--json", environment=env).returncode,
+                0,
+            )
+            locked_doc = json.loads(
+                self.invoke_raw("daemon", "status", "mem_prof", "--json", environment=env).stdout.decode("utf-8")
+            )
+            self.assertEqual(locked_doc["data"]["profiles"][0]["state"], "locked")
+
+            # Verify diagnostics --json, show --json, daemon status --full --json, and daemon logs --json
+            full_st = json.loads(
+                self.invoke_raw("daemon", "status", "--full", "--json", environment=env).stdout.decode("utf-8")
+            )
+            self.assertGreaterEqual(full_st["data"]["api_version"], 1)
+            self.assertTrue(full_st["data"]["kasumi_version"])
+
+            show_auto = json.loads(
+                self.invoke_raw("show", "auto_a", "--json", environment=env).stdout.decode("utf-8")
+            )
+            self.assertIsNotNone(show_auto["data"]["daemon"])
+            self.assertEqual(show_auto["data"]["last_complete_sync"]["origin"], "daemon")
+
+            diag_doc = json.loads(
+                self.invoke_raw("diagnostics", "--json", environment=env).stdout.decode("utf-8")
+            )
+            self.assertTrue(diag_doc["data"]["daemon"]["running"])
+
+            logs_doc = json.loads(
+                self.invoke_raw("daemon", "logs", "--lines", "50", "--json", environment=env).stdout.decode("utf-8")
+            )
+            self.assertGreater(len(logs_doc["data"]["events"]), 0)
+            self.assertTrue(logs_doc["data"]["log_path"].endswith("daemon.log"))
+        finally:
+            stop_res = self.invoke_raw("daemon", "stop", "--json", environment=env)
+            self.assertEqual(stop_res.returncode, 0, stop_res.stdout + stop_res.stderr)
 
 
 if __name__ == "__main__":

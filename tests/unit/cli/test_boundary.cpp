@@ -1,3 +1,4 @@
+#include "application/daemon.hpp"
 #include "application/execute.hpp"
 #include "application/inspection/inspect.hpp"
 #include "cli/app.hpp"
@@ -267,6 +268,91 @@ inspect(InspectionInput input) {
     if (result.operation == InspectionOperation::RemoteGet)
         result.payload = RemoteFileReport{};
     return result;
+}
+
+std::string_view to_string(DaemonProfileState state) noexcept {
+    switch (state) {
+        case DaemonProfileState::Idle:
+            return "idle";
+        case DaemonProfileState::PendingDebounce:
+            return "pending_debounce";
+        case DaemonProfileState::RunningSync:
+            return "running_sync";
+        case DaemonProfileState::RunningGc:
+            return "running_gc";
+        case DaemonProfileState::Paused:
+            return "paused";
+        case DaemonProfileState::Locked:
+            return "locked";
+        case DaemonProfileState::Backoff:
+            return "backoff";
+        case DaemonProfileState::NeedsAttention:
+            return "needs_attention";
+    }
+    return "idle";
+}
+
+std::expected<void, DaemonError>
+run_daemon(ExecutionEnvironment, DaemonOptions, std::stop_token) {
+    return {};
+}
+bool is_daemon_running(const ExecutionEnvironment&) noexcept {
+    return false;
+}
+std::expected<DaemonStatusReport, DaemonError>
+query_daemon_status(const ExecutionEnvironment&,
+                    std::optional<std::string_view>) {
+    return DaemonStatusReport{};
+}
+std::expected<DaemonLogsReport, DaemonError>
+query_daemon_events(const ExecutionEnvironment&, const DaemonLogQuery&) {
+    return DaemonLogsReport{};
+}
+std::expected<void, DaemonError>
+cancel_daemon_profile(const ExecutionEnvironment&, std::string_view) {
+    return {};
+}
+std::expected<void, DaemonError>
+stop_running_daemon(const ExecutionEnvironment&) {
+    return {};
+}
+std::expected<DaemonSyncTriggerReport, DaemonError> trigger_daemon_sync(
+    const ExecutionEnvironment&, std::optional<std::string_view>, bool) {
+    return DaemonSyncTriggerReport{};
+}
+std::expected<void, DaemonError>
+pause_daemon_profile(const ExecutionEnvironment&, std::string_view) {
+    return {};
+}
+std::expected<void, DaemonError>
+resume_daemon_profile(const ExecutionEnvironment&, std::string_view) {
+    return {};
+}
+std::expected<void, DaemonError> unlock_daemon_profile(
+    const ExecutionEnvironment&, std::string_view, ProfileCredentials) {
+    return {};
+}
+std::expected<void, DaemonError>
+lock_daemon_profile(const ExecutionEnvironment&, std::string_view) {
+    return {};
+}
+std::expected<void, DaemonError>
+reload_running_daemon(const ExecutionEnvironment&) {
+    return {};
+}
+std::expected<DaemonStatusReport, DaemonError>
+spawn_background_daemon(const ExecutionEnvironment&,
+                        const std::optional<std::filesystem::path>&) {
+    return DaemonStatusReport{};
+}
+std::expected<DaemonAutostartStatus, DaemonError> install_daemon_autostart() {
+    return DaemonAutostartStatus{};
+}
+std::expected<DaemonAutostartStatus, DaemonError> uninstall_daemon_autostart() {
+    return DaemonAutostartStatus{};
+}
+std::expected<DaemonAutostartStatus, DaemonError> query_daemon_autostart() {
+    return DaemonAutostartStatus{};
 }
 
 } // namespace kasumi::application

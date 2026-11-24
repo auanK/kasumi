@@ -151,6 +151,16 @@ try_parse_network_flag(int& index,
     return NetworkFlagMatch::NotMatched;
 }
 
+std::optional<bool> parse_on_off(std::string_view value) noexcept {
+    if (value == "on" || value == "true" || value == "1") {
+        return true;
+    }
+    if (value == "off" || value == "false" || value == "0") {
+        return false;
+    }
+    return std::nullopt;
+}
+
 std::optional<application::IgnorePreset>
 parse_ignore_preset(std::string_view value) noexcept {
     if (value == "default") {
@@ -260,7 +270,8 @@ std::string help_topic(int argc, char* argv[]) {
         help_topics.end())
         return {};
     if ((command == "remote" || command == "gc" || command == "profile" ||
-         command == "conflicts" || command == "ignore") &&
+         command == "conflicts" || command == "ignore" ||
+         command == "daemon") &&
         argc > 2 && argv[2] != nullptr) {
         const auto topic = command + " " + argv[2];
         if (std::ranges::find(help_topics, topic, &HelpTopic::name) !=
@@ -412,6 +423,139 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         }
         return std::unexpected(ParseError{});
     }
+    if (command == "daemon") {
+        if (argc < 3 || argv[2] == nullptr) {
+            return std::unexpected(ParseError{});
+        }
+        const std::string_view sub{argv[2]};
+        if (sub == "run") {
+            DaemonInvocation inv{.action = DaemonAction::Run};
+            bool saw_foreground = false;
+            for (int i = 3; i < argc; ++i) {
+                const std::string_view arg{argv[i]};
+                if (arg == "--background") {
+                    if (inv.background || saw_foreground) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.background = true;
+                } else if (arg == "--foreground") {
+                    if (saw_foreground || inv.background) {
+                        return std::unexpected(ParseError{});
+                    }
+                    saw_foreground = true;
+                } else {
+                    return std::unexpected(ParseError{});
+                }
+            }
+            return inv;
+        }
+        if (sub == "stop") {
+            return argc == 3
+                       ? std::expected<Invocation, ParseError>{DaemonInvocation{
+                             .action = DaemonAction::Stop}}
+                       : std::unexpected(ParseError{});
+        }
+        if (sub == "reload") {
+            return argc == 3
+                       ? std::expected<Invocation, ParseError>{DaemonInvocation{
+                             .action = DaemonAction::Reload}}
+                       : std::unexpected(ParseError{});
+        }
+        if (sub == "status") {
+            if (argc == 3) {
+                return DaemonInvocation{.action = DaemonAction::Status};
+            }
+            if (argc == 4 && operand(argv[3])) {
+                return DaemonInvocation{
+                    .action = DaemonAction::Status,
+                    .profile_name = std::string{argv[3]},
+                };
+            }
+            return std::unexpected(ParseError{});
+        }
+        if (sub == "sync") {
+            DaemonInvocation inv{.action = DaemonAction::Sync};
+            for (int i = 3; i < argc; ++i) {
+                const std::string_view arg{argv[i]};
+                if (arg == "--wait") {
+                    if (inv.wait) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.wait = true;
+                } else if (operand(argv[i]) && !inv.profile_name.has_value()) {
+                    inv.profile_name = std::string{arg};
+                } else {
+                    return std::unexpected(ParseError{});
+                }
+            }
+            return inv;
+        }
+        if (sub == "pause" || sub == "resume" || sub == "unlock" ||
+            sub == "lock") {
+            if (argc != 4 || !operand(argv[3])) {
+                return std::unexpected(ParseError{});
+            }
+            const DaemonAction act = sub == "pause"    ? DaemonAction::Pause
+                                     : sub == "resume" ? DaemonAction::Resume
+                                     : sub == "unlock" ? DaemonAction::Unlock
+                                                       : DaemonAction::Lock;
+            return DaemonInvocation{
+                .action = act,
+                .profile_name = std::string{argv[3]},
+            };
+        }
+        if (sub == "logs") {
+            DaemonInvocation inv{.action = DaemonAction::Logs};
+            bool saw_lines = false;
+            for (int i = 3; i < argc; ++i) {
+                const std::string_view arg{argv[i]};
+                if (arg == "--lines" || arg.starts_with("--lines=")) {
+                    if (saw_lines) {
+                        return std::unexpected(ParseError{});
+                    }
+                    const auto val = read_flag_value(i, argc, argv, "--lines");
+                    if (!val) {
+                        return std::unexpected(ParseError{});
+                    }
+                    const auto parsed =
+                        parse_bounded_u32(val->value, 1U, 1000U);
+                    if (!parsed) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.log_lines = *parsed;
+                    saw_lines = true;
+                    if (val->consumed_next) {
+                        ++i;
+                    }
+                } else if (operand(argv[i]) && !inv.profile_name.has_value()) {
+                    inv.profile_name = std::string{arg};
+                } else {
+                    return std::unexpected(ParseError{});
+                }
+            }
+            return inv;
+        }
+        if (sub == "autostart") {
+            if (argc != 4 || argv[3] == nullptr) {
+                return std::unexpected(ParseError{});
+            }
+            const std::string_view act_str{argv[3]};
+            if (act_str == "install") {
+                return DaemonInvocation{.action =
+                                            DaemonAction::AutostartInstall};
+            }
+            if (act_str == "uninstall") {
+                return DaemonInvocation{.action =
+                                            DaemonAction::AutostartUninstall};
+            }
+            if (act_str == "status") {
+                return DaemonInvocation{.action =
+                                            DaemonAction::AutostartStatus};
+            }
+            return std::unexpected(ParseError{});
+        }
+        return std::unexpected(ParseError{});
+    }
     if (command == "completion") {
         if (argc != 3 || argv[2] == nullptr) {
             return std::unexpected(ParseError{});
@@ -560,6 +704,98 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                         return std::unexpected(ParseError{});
                     }
                     inv.clear_rclone_config = true;
+                } else if (arg == "--watch" || arg.starts_with("--watch=")) {
+                    if (inv.watch_enabled.has_value() ||
+                        inv.clear_watch_enabled) {
+                        return std::unexpected(ParseError{});
+                    }
+                    const auto val = read_flag_value(i, argc, argv, "--watch");
+                    if (!val) {
+                        return std::unexpected(ParseError{});
+                    }
+                    const auto parsed_watch = parse_on_off(val->value);
+                    if (!parsed_watch) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.watch_enabled = *parsed_watch;
+                    if (val->consumed_next) {
+                        ++i;
+                    }
+                } else if (!is_create && arg == "--clear-watch") {
+                    if (inv.watch_enabled.has_value() ||
+                        inv.clear_watch_enabled) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.clear_watch_enabled = true;
+                } else if (arg == "--sync-interval" ||
+                           arg.starts_with("--sync-interval=")) {
+                    if (inv.sync_interval_seconds.has_value() ||
+                        inv.clear_sync_interval_seconds) {
+                        return std::unexpected(ParseError{});
+                    }
+                    const auto val =
+                        read_flag_value(i, argc, argv, "--sync-interval");
+                    if (!val) {
+                        return std::unexpected(ParseError{});
+                    }
+                    const auto parsed_sec =
+                        parse_bounded_u32(val->value, 0U, 86400U);
+                    if (!parsed_sec ||
+                        (*parsed_sec != 0U && *parsed_sec < 10U)) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.sync_interval_seconds = *parsed_sec;
+                    if (val->consumed_next) {
+                        ++i;
+                    }
+                } else if (!is_create && arg == "--clear-sync-interval") {
+                    if (inv.sync_interval_seconds.has_value() ||
+                        inv.clear_sync_interval_seconds) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.clear_sync_interval_seconds = true;
+                } else if (arg == "--gc-interval" ||
+                           arg.starts_with("--gc-interval=")) {
+                    if (inv.gc_interval_hours.has_value() ||
+                        inv.clear_gc_interval_hours) {
+                        return std::unexpected(ParseError{});
+                    }
+                    const auto val =
+                        read_flag_value(i, argc, argv, "--gc-interval");
+                    if (!val) {
+                        return std::unexpected(ParseError{});
+                    }
+                    const auto parsed_hrs =
+                        parse_bounded_u32(val->value, 0U, 8760U);
+                    if (!parsed_hrs) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.gc_interval_hours = *parsed_hrs;
+                    if (val->consumed_next) {
+                        ++i;
+                    }
+                } else if (!is_create && arg == "--clear-gc-interval") {
+                    if (inv.gc_interval_hours.has_value() ||
+                        inv.clear_gc_interval_hours) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.clear_gc_interval_hours = true;
+                } else if (arg == "--paused" || arg.starts_with("--paused=")) {
+                    if (inv.paused.has_value()) {
+                        return std::unexpected(ParseError{});
+                    }
+                    const auto val = read_flag_value(i, argc, argv, "--paused");
+                    if (!val) {
+                        return std::unexpected(ParseError{});
+                    }
+                    const auto parsed_paused = parse_on_off(val->value);
+                    if (!parsed_paused) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.paused = *parsed_paused;
+                    if (val->consumed_next) {
+                        ++i;
+                    }
                 } else if (is_create && arg == "--verify") {
                     if (inv.verify) {
                         return std::unexpected(ParseError{});
@@ -581,7 +817,11 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 !inv.min_history_depth && !inv.min_history_age_hours &&
                 !inv.bandwidth_limit && !inv.clear_bandwidth_limit &&
                 !inv.transfer_concurrency && !inv.clear_transfer_concurrency &&
-                !inv.rclone_config && !inv.clear_rclone_config) {
+                !inv.rclone_config && !inv.clear_rclone_config &&
+                !inv.watch_enabled && !inv.clear_watch_enabled &&
+                !inv.sync_interval_seconds &&
+                !inv.clear_sync_interval_seconds && !inv.gc_interval_hours &&
+                !inv.clear_gc_interval_hours && !inv.paused) {
                 return std::unexpected(ParseError{});
             }
             return inv;

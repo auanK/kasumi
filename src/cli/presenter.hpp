@@ -1,6 +1,7 @@
 #ifndef KASUMI_CLI_PRESENTER_HPP
 #define KASUMI_CLI_PRESENTER_HPP
 
+#include "application/daemon.hpp"
 #include "application/execute.hpp"
 #include "application/inspection/result.hpp"
 #include "application/profile.hpp"
@@ -53,56 +54,50 @@ struct TransferMetricsState {
     std::string last_extra;
 };
 
-class ProgressDisplay {
-public:
+struct ProgressDisplay {
     explicit ProgressDisplay(
-        platform::Terminal terminal = platform::stdout_terminal(),
-        bool full = false)
-        : terminal_(terminal), full_(full) {
+        platform::Terminal terminal_value = platform::stdout_terminal(),
+        bool full_value = false)
+        : terminal(terminal_value), full(full_value) {
     }
     ~ProgressDisplay();
-    void
-    update(const application::ExecutionProgress& progress,
-           application::Operation operation = application::Operation::Sync);
-    void show(const application::ActivityProgress& progress,
-              std::string_view extra = {});
-    void heartbeat() noexcept;
-    void finish(bool keep = false) noexcept;
 
-private:
-    void clear_line() noexcept;
-    void render_line(std::string_view line, std::string_view detail = {});
-    std::string applying_line() const;
-    void render_event(const application::ActivityProgress& event,
-                      std::string_view extra,
-                      bool force_complete = false);
-    void flush_transfer(TransferMetricsState& state) noexcept;
-
-    platform::Terminal terminal_;
-    bool full_ = false;
-    bool indented_ = false;
-    bool in_applying_ = false;
-    std::optional<application::SyncProgress> apply_progress_;
-    std::optional<unsigned> plain_milestone_;
-    FsckProgressDisplayState fsck_;
-    GarbageCollectProgressDisplayState gc_;
-    TransferMetricsState upload_state_;
-    TransferMetricsState download_state_;
-    std::optional<application::Activity> activity_;
-    std::uint64_t stage_id_ = 0;
-    std::size_t rendered_width_ = 0;
-    bool rendered_detail_ = false;
-    std::uint64_t last_value_ = 0;
-    std::uint64_t last_objects_ = 0;
-    double rate_ = 0;
-    bool was_complete_ = false;
-    std::optional<application::ActivityProgress> last_event_;
-    std::string last_extra_;
-    bool rendered_last_ = true;
-    std::chrono::steady_clock::time_point started_ =
+    platform::Terminal terminal;
+    bool full = false;
+    bool indented = false;
+    bool in_applying = false;
+    std::optional<application::SyncProgress> apply_progress;
+    std::optional<unsigned> plain_milestone;
+    FsckProgressDisplayState fsck;
+    GarbageCollectProgressDisplayState gc;
+    TransferMetricsState upload_state;
+    TransferMetricsState download_state;
+    std::optional<application::Activity> activity;
+    std::uint64_t stage_id = 0;
+    std::size_t rendered_width = 0;
+    bool rendered_detail = false;
+    std::uint64_t last_value = 0;
+    std::uint64_t last_objects = 0;
+    double rate = 0;
+    bool was_complete = false;
+    std::optional<application::ActivityProgress> last_event;
+    std::string last_extra;
+    bool rendered_last = true;
+    std::chrono::steady_clock::time_point started =
         std::chrono::steady_clock::now();
-    std::chrono::steady_clock::time_point last_render_{};
+    std::chrono::steady_clock::time_point last_render{};
 };
+
+void update_progress_display(
+    ProgressDisplay& display,
+    const application::ExecutionProgress& progress,
+    application::Operation operation = application::Operation::Sync);
+void show_progress_display(ProgressDisplay& display,
+                           const application::ActivityProgress& progress,
+                           std::string_view extra = {});
+void heartbeat_progress_display(ProgressDisplay& display) noexcept;
+void finish_progress_display(ProgressDisplay& display,
+                             bool keep = false) noexcept;
 
 std::string format_eta(std::uint64_t seconds);
 
@@ -124,6 +119,10 @@ std::string
 format_compact_summary(const application::ResolveConflictReport& report);
 std::string
 format_compact_summary(const application::InspectionResponse& response);
+std::string
+format_compact_summary(const application::DaemonStatusReport& report);
+std::string
+format_compact_summary(const application::DaemonAutostartStatus& status);
 
 // Displays cancellation message and returns 130.
 int present_cancellation(
@@ -174,6 +173,18 @@ int present(const application::Error& error);
 
 // Displays the error of a remote inspection and returns 1.
 int present(const application::InspectionError& error);
+
+// Displays daemon status, sync triggers, autostart status, and errors.
+int present(const application::DaemonStatusReport& report,
+            bool full = false,
+            bool quiet = false);
+int present(const application::DaemonAutostartStatus& status,
+            bool quiet = false);
+int present(const application::DaemonSyncTriggerReport& report,
+            bool wait,
+            bool quiet = false);
+int present(const application::DaemonLogsReport& report, bool quiet = false);
+int present(const application::DaemonError& error);
 
 void print_ok_line(std::string_view message);
 void print_warning_line(std::string_view message);
