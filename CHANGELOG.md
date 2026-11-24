@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.27.1]
+
+### Changed
+
+- **Release & Windows CI Build Performance**:
+  - Switched the Windows Release workflow (`.github/workflows/release.yml`) from single-threaded-per-project MSBuild (`Visual Studio 17 2022`) to `Ninja` with `ccache` (`2G`, `CCACHE_BASEDIR`, `CCACHE_NOHASHDIR=1`) reusing CI caches.
+  - Added FetchContent and `ccache` caching to the Linux Release workflow (`release.yml`).
+  - Split Windows MSVC CI (`.github/workflows/ci-windows.yml`) into parallel `Debug` and `Release` matrix jobs with dedicated `2G` `ccache` caches and aligned Release flags with `release.yml`.
+
+### Upgrade Notes
+
+- 100% compatible with `v0.19.x`–`v0.27.0` encrypted repositories and local state (`KCOM` v4, `KACT` v1, `KPAK\x01`, `state.db` v2, `transaction.bin.enc`, and `config.toml`).
+
 ## [0.27.0]
 
 ### Added
