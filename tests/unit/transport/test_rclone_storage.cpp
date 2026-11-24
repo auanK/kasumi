@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <gtest/gtest.h>
 #include <httplib.h>
 #include <mutex>
@@ -2979,6 +2980,119 @@ TEST(RcloneRcClientTest, CheckRcHealthDetectsHealthyAndStoppedSessions) {
 
     stop_rc_server(remote);
     EXPECT_FALSE(rclone_detail::check_rc_health(remote.client).has_value());
+}
+
+TEST(RcloneRcClientTest, CheckRcHealthRecoversFromStaleKeepAliveConnection) {
+    RcServerState remote;
+    std::atomic<int> pid_calls{0};
+    remote.server.Post("/rc/core/pid", [&](const auto&, auto& response) {
+        const int call = pid_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+        // Call 1: wait_for_rc_readiness (200)
+        // Call 2: check_rc_health initial attempt -> 503 (transient error /
+        // dropped connection) Call 3: post_rc_read_only retry -> 200
+        if (call == 2) {
+            response.status = 503;
+            response.set_header("Connection", "close");
+            response.set_content(R"({"error":"temporary unavailable"})",
+                                 "application/json");
+            return;
+        }
+        response.set_content(R"({"pid":4242})", "application/json");
+    });
+    remote.server.Post("/rc/core/version", [](const auto&, auto& response) {
+        response.set_content(R"({"version":"v1.60.0","decomposed":[1,60,0]})",
+                             "application/json");
+    });
+    start_rc_server(remote);
+    configure_state(remote.client, remote.port);
+    remote.client.child_pid = 4242;
+    remote.client.process_started = true;
+    remote.client.ready = false;
+
+    ASSERT_TRUE(rclone_detail::establish_rc_connection(remote.client, 4242)
+                    .has_value());
+    const auto health = rclone_detail::check_rc_health(remote.client);
+    EXPECT_TRUE(health.has_value()) << (health ? "" : health.error().message);
+    EXPECT_TRUE(remote.client.ready);
+    EXPECT_GE(pid_calls.load(std::memory_order_relaxed), 3);
+
+    stop_rc_server(remote);
+}
+
+TEST(RcloneRcClientTest, CheckRcHealthFailsClosedOnPidMismatchAndStoppedState) {
+    RcServerState remote;
+    std::atomic<int> reported_pid{4242};
+    remote.server.Post("/rc/core/pid", [&](const auto&, auto& response) {
+        response.set_content(
+            R"({"pid":)" +
+                std::to_string(reported_pid.load(std::memory_order_relaxed)) +
+                "}",
+            "application/json");
+    });
+    remote.server.Post("/rc/core/version", [](const auto&, auto& response) {
+        response.set_content(R"({"version":"v1.60.0","decomposed":[1,60,0]})",
+                             "application/json");
+    });
+    start_rc_server(remote);
+    configure_state(remote.client, remote.port);
+    remote.client.child_pid = 4242;
+    remote.client.process_started = true;
+    remote.client.ready = false;
+
+    ASSERT_TRUE(rclone_detail::establish_rc_connection(remote.client, 4242)
+                    .has_value());
+
+    reported_pid.store(9999, std::memory_order_relaxed);
+    const auto mismatch = rclone_detail::check_rc_health(remote.client);
+    ASSERT_FALSE(mismatch.has_value());
+    EXPECT_EQ(mismatch.error().code,
+              kasumi::transport::ErrorCode::ProtocolFailure);
+
+    remote.client.process_started = false;
+    const auto not_started = rclone_detail::check_rc_health(remote.client);
+    ASSERT_FALSE(not_started.has_value());
+    EXPECT_EQ(not_started.error().code,
+              kasumi::transport::ErrorCode::InvalidContext);
+
+    remote.client.process_started = true;
+    remote.client.ready = false;
+    const auto not_ready = rclone_detail::check_rc_health(remote.client);
+    ASSERT_FALSE(not_ready.has_value());
+    EXPECT_EQ(not_ready.error().code,
+              kasumi::transport::ErrorCode::InvalidContext);
+
+    stop_rc_server(remote);
+}
+
+TEST(RcloneRcClientTest,
+     WaitForRcReadinessFailsFastWhenDrainCompletesOrProcessExits) {
+    RcServerState remote;
+    remote.server.Post("/rc/core/pid", [](const auto&, auto& response) {
+        response.status = 503;
+        response.set_content(R"({"error":"starting"})", "application/json");
+    });
+    start_rc_server(remote);
+    configure_state(remote.client, remote.port);
+    remote.client.child_pid = 4242;
+    remote.client.process_started = true;
+    remote.client.ready = false;
+#if defined(_WIN32)
+    remote.client.process_wait_handle = nullptr;
+#endif
+    std::promise<std::error_code> drain_promise;
+    drain_promise.set_value({});
+    remote.client.drain_future = drain_promise.get_future();
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto result =
+        rclone_detail::establish_rc_connection(remote.client, 4242);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    stop_rc_server(remote);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code,
+              kasumi::transport::ErrorCode::ProcessFailure);
+    EXPECT_LT(elapsed, std::chrono::seconds{1});
 }
 
 } // namespace

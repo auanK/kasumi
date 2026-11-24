@@ -74,6 +74,9 @@ std::expected<void, Error> establish_rc_connection(State& state, int child_pid);
 // Verifies an existing RC session child process and HTTP endpoint are healthy.
 Result check_rc_health(State& state);
 
+// Returns true if the rclone child process has actually exited.
+bool child_process_exited(const State& state) noexcept;
+
 // Requests shutdown and reports whether RC acknowledged the request.
 bool request_core_quit_best_effort(State& state) noexcept;
 
