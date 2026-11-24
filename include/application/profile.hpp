@@ -38,6 +38,11 @@ struct Profile {
     std::optional<std::string> bandwidth_limit = std::nullopt;
     std::optional<std::uint32_t> transfer_concurrency = std::nullopt;
     std::optional<std::filesystem::path> rclone_config = std::nullopt;
+    // Optional per-profile background daemon automation settings.
+    std::optional<bool> watch_enabled = std::nullopt;
+    std::optional<std::uint32_t> sync_interval_seconds = std::nullopt;
+    std::optional<std::uint32_t> gc_interval_hours = std::nullopt;
+    bool paused = false;
 };
 
 std::string_view to_string(KeyStorage storage) noexcept;
@@ -85,6 +90,13 @@ std::expected<void, ProfileError>
 update_profile(const ExecutionEnvironment& environment,
                Profile profile,
                bool allow_empty_local = false);
+
+// Updates only the persisted daemon paused flag under config.lock without
+// requiring the per-profile execution lock.
+std::expected<void, ProfileError>
+set_profile_paused(const ExecutionEnvironment& environment,
+                   std::string_view profile_name,
+                   bool paused);
 
 // Derives or decodes credentials and saves them to the profile's key storage.
 // Succeeds without rewriting when the stored key already matches. If a
@@ -188,6 +200,8 @@ enum class ProfileRemotePublishState : std::uint8_t {
 
 inline constexpr std::uint32_t profile_execution_flag_audit_failed_after_sync =
     1U << 8;
+inline constexpr std::uint32_t profile_execution_flag_published = 1U << 9;
+inline constexpr std::uint32_t profile_execution_flag_origin_daemon = 1U << 10;
 
 struct ProfileExecutionSummary {
     std::string execution_id;
@@ -287,6 +301,22 @@ struct ProfileDiagnostic {
     bool ignore_file_valid = true;
     std::optional<std::size_t> ignore_error_line;
     std::string ignore_error_detail;
+    std::optional<std::string> daemon_state;
+    std::string daemon_active_stage;
+    bool daemon_watcher_active = false;
+    std::string daemon_error;
+};
+
+struct DiagnosticsDaemonInfo {
+    bool running = false;
+    std::uint64_t pid = 0;
+    std::uint16_t ipc_port = 0;
+    bool control_metadata_valid = true;
+    bool secure_pages_locked = false;
+    bool autostart_supported = false;
+    bool autostart_installed = false;
+    std::string autostart_method;
+    std::string detail;
 };
 
 struct DiagnosticsReport {
@@ -296,6 +326,7 @@ struct DiagnosticsReport {
     bool config_exists = false;
     std::optional<std::uint64_t> app_data_free_bytes;
     DiagnosticsRcloneInfo rclone;
+    DiagnosticsDaemonInfo daemon;
     std::vector<ProfileDiagnostic> profiles;
     bool overall_ok = true;
 };

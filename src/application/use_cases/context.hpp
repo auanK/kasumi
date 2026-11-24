@@ -3,6 +3,7 @@
 
 #include "application/execute.hpp"
 #include "application/history_storage/activity.hpp"
+#include "application/observation/state.hpp"
 #include "core/history.hpp"
 #include "platform/profile_lock.hpp"
 #include "runtime/machine.hpp"
@@ -56,6 +57,14 @@ struct OperationContext {
     std::uint64_t maintenance_metric_secondary = 0;
     std::uint32_t maintenance_flags = 0;
     std::vector<history_storage::activity::LoadedActivity> gc_kept_activities;
+    observation::LocalObservationSession* warm_observation = nullptr;
+};
+
+struct WarmExecutionContext {
+    transport::Transport* borrowed_transport = nullptr;
+    observation::LocalObservationSession* warm_observation = nullptr;
+    std::function<void()> on_lock_acquired{};
+    bool origin_daemon = false;
 };
 
 [[nodiscard]] inline history::CommitAuthorship
@@ -95,8 +104,13 @@ inline Response make_response(const OperationContext& context,
 }
 
 // Validates input and prepares profile, key, and transport.
-std::expected<void, Error> prepare_operation(const ExecutionInput& input,
-                                             OperationContext& output);
+std::expected<void, Error>
+prepare_operation(const ExecutionInput& input,
+                  OperationContext& output,
+                  const WarmExecutionContext* warm = nullptr);
+
+std::expected<Response, Error> execute_warm(ExecutionInput input,
+                                            WarmExecutionContext& warm);
 
 // Wipes key material and releases the profile lock.
 void wipe_operation(OperationContext& context) noexcept;

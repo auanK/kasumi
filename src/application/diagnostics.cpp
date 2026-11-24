@@ -1,3 +1,4 @@
+#include "application/daemon.hpp"
 #include "application/detail.hpp"
 #include "application/profile.hpp"
 #include "core/ignore.hpp"
@@ -173,6 +174,40 @@ collect_diagnostics(const ExecutionEnvironment& environment,
         .detail = probed_rclone.detail,
     };
 
+    const bool daemon_lock_held = is_daemon_running(environment);
+    report.daemon.running = daemon_lock_held;
+    std::optional<DaemonStatusReport> daemon_status;
+    if (daemon_lock_held) {
+        if (auto st = query_daemon_status(environment); st && st->running) {
+            daemon_status = std::move(*st);
+            report.daemon.pid = daemon_status->pid;
+            report.daemon.ipc_port = daemon_status->ipc_port;
+            report.daemon.control_metadata_valid = true;
+            report.daemon.secure_pages_locked =
+                daemon_status->secure_pages_locked;
+            report.daemon.autostart_supported =
+                daemon_status->autostart.supported;
+            report.daemon.autostart_installed =
+                daemon_status->autostart.installed;
+            report.daemon.autostart_method = daemon_status->autostart.method;
+            report.daemon.detail = std::format("running (PID {}, port {})",
+                                               report.daemon.pid,
+                                               report.daemon.ipc_port);
+        } else {
+            report.daemon.control_metadata_valid = false;
+            report.daemon.detail =
+                st ? "daemon offline during query" : st.error().detail;
+            report.overall_ok = false;
+        }
+    } else {
+        if (const auto as = query_daemon_autostart(); as) {
+            report.daemon.autostart_supported = as->supported;
+            report.daemon.autostart_installed = as->installed;
+            report.daemon.autostart_method = as->method;
+        }
+        report.daemon.detail = "not running";
+    }
+
     report.profiles.reserve(selected.size());
     for (const auto& profile : selected) {
         ProfileDiagnostic diag;
@@ -278,16 +313,47 @@ collect_diagnostics(const ExecutionEnvironment& environment,
                                   diag.ignore_error_detail));
         }
 
+        if (daemon_status) {
+            for (const auto& dp : daemon_status->profiles) {
+                if (dp.name == profile.name) {
+                    diag.daemon_state = std::string{to_string(dp.state)};
+                    diag.daemon_active_stage = dp.active_stage;
+                    diag.daemon_watcher_active = dp.watcher_active;
+                    diag.daemon_error = dp.last_error;
+                    if (dp.state == DaemonProfileState::NeedsAttention) {
+                        append_reason(
+                            issues,
+                            dp.last_error.empty()
+                                ? "daemon marked profile as needs_attention"
+                                : "daemon needs attention: " + dp.last_error);
+                    }
+                    break;
+                }
+            }
+        }
+
         diag.healthy = issues.empty() &&
                        (diag.local_state == ProfileLocalState::Ready ||
                         diag.local_state == ProfileLocalState::Initialized ||
                         diag.local_state == ProfileLocalState::Running);
         if (diag.healthy) {
             if (diag.local_state == ProfileLocalState::Running) {
-                const auto active_op = active_profile_operation(diag.activity);
-                diag.detail = active_op
-                                  ? std::format("running ({})", *active_op)
-                                  : "running";
+                if (diag.daemon_state &&
+                    (*diag.daemon_state == "running_sync" ||
+                     *diag.daemon_state == "running_gc")) {
+                    diag.detail = diag.daemon_active_stage.empty()
+                                      ? std::format("running (daemon: {})",
+                                                    *diag.daemon_state)
+                                      : std::format("running (daemon: {} - {})",
+                                                    *diag.daemon_state,
+                                                    diag.daemon_active_stage);
+                } else {
+                    const auto active_op =
+                        active_profile_operation(diag.activity);
+                    diag.detail = active_op
+                                      ? std::format("running ({})", *active_op)
+                                      : "running";
+                }
             } else {
                 diag.detail = "ok";
             }

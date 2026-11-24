@@ -201,11 +201,18 @@ to_cached_activity(const history_storage::activity::ActivityRecord& record,
 
 } // namespace
 
-std::expected<Response, Error> execute(ExecutionInput input) {
+namespace detail {
+
+std::expected<Response, Error> execute_warm(ExecutionInput input,
+                                            WarmExecutionContext& warm) {
     const platform::cancellation::ScopedStopToken stop_scope{input.stop_token};
-    platform::perf_trace::reset();
-    const auto total_trace = platform::perf_trace::begin();
-    detail::OperationContext context{};
+    if (!warm.origin_daemon) {
+        platform::perf_trace::reset();
+    }
+    const auto total_trace = !warm.origin_daemon
+                                 ? platform::perf_trace::begin()
+                                 : platform::perf_trace::Token{};
+    OperationContext context{};
     const bool track_operation =
         input.request.operation != Operation::Status &&
         input.request.operation != Operation::Preview &&
@@ -217,290 +224,330 @@ std::expected<Response, Error> execute(ExecutionInput input) {
         std::unexpected(Error{.operation = input.request.operation,
                               .code = ErrorCode::RuntimeFailure,
                               .detail = "uninitialized execution"});
+    std::filesystem::path warm_db_path;
     try {
         std::optional<ScopedContentConcurrency> concurrency_scope;
-        auto prepared = detail::prepare_operation(input, context);
+        auto prepared = prepare_operation(input, context, &warm);
         if (!prepared) {
             result = std::unexpected(prepared.error());
-        } else if (!track_operation) {
-            concurrency_scope.emplace(
-                context.transfer_concurrency > 0
-                    ? std::optional<std::size_t>{context.transfer_concurrency}
-                    : std::nullopt);
-            result = detail::dispatch(context);
         } else {
-            concurrency_scope.emplace(
-                context.transfer_concurrency > 0
-                    ? std::optional<std::size_t>{context.transfer_concurrency}
-                    : std::nullopt);
-            const auto steady_started = std::chrono::steady_clock::now();
-            const auto started_at = platform::clock::unix_seconds().value_or(0);
-            auto eid = platform::random::hex_id(16);
-            const std::string execution_id =
-                (eid && !eid->empty()) ? std::move(*eid)
-                                       : ("exec-" + std::to_string(started_at));
-            state_storage::LocalExecutionRecord record{
-                .execution_id = execution_id,
-                .operation = to_local_op(context.operation),
-                .machine_id_hex = context.machine_identity
-                                      ? context.machine_identity->id_hex
-                                      : std::string{},
-                .machine_name = context.machine_identity
-                                    ? context.machine_identity->name
-                                    : std::string{},
-                .started_at = started_at,
-                .status = state_storage::LocalExecutionStatus::InProgress,
-                .remote_publish_state =
-                    is_remote_activity_operation(context.operation)
-                        ? state_storage::RemotePublishState::Pending
-                        : state_storage::RemotePublishState::NotApplicable,
-            };
-
-            bool start_recorded = false;
-            if (context.operation == Operation::Sync) {
-                context.on_sync_mutation_start = [&]() {
-                    if (db_ready_for_tracking(context.runtime.database_path)) {
-                        start_recorded = state_storage::record_execution_start(
-                            context.runtime.database_path, record);
-                    }
-                };
-            } else if (db_ready_for_tracking(context.runtime.database_path)) {
-                start_recorded = state_storage::record_execution_start(
-                    context.runtime.database_path, record);
-            }
-
-            result = detail::dispatch(context);
-
-            const auto finished_at =
-                platform::clock::unix_seconds().value_or(started_at);
-            const auto elapsed_ms =
-                static_cast<std::uint64_t>(std::max<std::int64_t>(
-                    0,
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - steady_started)
-                        .count()));
-            record.finished_at = finished_at;
-            record.duration_ms = elapsed_ms;
-            record.recovered = context.recovered_transaction;
-
-            using LS = state_storage::LocalExecutionStatus;
-            if (is_remote_activity_operation(context.operation)) {
-                history_storage::activity::ActivityRecord act{
-                    .event_id = execution_id,
-                    .operation = to_activity_op(context.operation),
-                    .machine_id = context.machine_identity
-                                      ? context.machine_identity->id
-                                      : std::array<std::uint8_t, 16>{},
-                    .machine_name = record.machine_name,
+            warm_db_path = context.runtime.database_path;
+            if (!track_operation) {
+                concurrency_scope.emplace(
+                    context.transfer_concurrency > 0
+                        ? std::optional<std::size_t>{context
+                                                         .transfer_concurrency}
+                        : std::nullopt);
+                result = dispatch(context);
+            } else {
+                concurrency_scope.emplace(
+                    context.transfer_concurrency > 0
+                        ? std::optional<std::size_t>{context
+                                                         .transfer_concurrency}
+                        : std::nullopt);
+                const auto steady_started = std::chrono::steady_clock::now();
+                const auto started_at =
+                    platform::clock::unix_seconds().value_or(0);
+                auto eid = platform::random::hex_id(16);
+                const std::string execution_id =
+                    (eid && !eid->empty())
+                        ? std::move(*eid)
+                        : ("exec-" + std::to_string(started_at));
+                const std::uint32_t origin_flags =
+                    warm.origin_daemon ? profile_execution_flag_origin_daemon
+                                       : 0U;
+                state_storage::LocalExecutionRecord record{
+                    .execution_id = execution_id,
+                    .operation = to_local_op(context.operation),
+                    .machine_id_hex = context.machine_identity
+                                          ? context.machine_identity->id_hex
+                                          : std::string{},
+                    .machine_name = context.machine_identity
+                                        ? context.machine_identity->name
+                                        : std::string{},
                     .started_at = started_at,
-                    .finished_at = finished_at,
-                    .duration_ms = elapsed_ms,
+                    .status = state_storage::LocalExecutionStatus::InProgress,
+                    .flags = origin_flags,
+                    .remote_publish_state =
+                        is_remote_activity_operation(context.operation)
+                            ? state_storage::RemotePublishState::Pending
+                            : state_storage::RemotePublishState::NotApplicable,
                 };
-                if (result) {
-                    act.outcome =
-                        history_storage::activity::ActivityOutcome::Succeeded;
-                    if (const auto* fc =
-                            std::get_if<FsckCompleted>(&result->data)) {
-                        act.metric_primary = fc->checked_objects;
-                        act.metric_bytes = fc->wire_download_bytes;
-                    } else if (const auto* gcc =
-                                   std::get_if<GarbageCollectCompleted>(
-                                       &result->data)) {
-                        act.metric_primary = gcc->candidate_objects;
-                        act.metric_secondary = gcc->removed_objects;
-                        if (gcc->analysis_only) {
-                            act.flags |=
-                                history_storage::activity::flag_analysis_only;
-                        }
-                    } else if (const auto* rwc =
-                                   std::get_if<ManualWriterRemovalCompleted>(
-                                       &result->data)) {
-                        act.detail = history_storage::activity::sanitize_text(
-                            rwc->identifier,
-                            history_storage::activity::maximum_detail_bytes);
-                    } else if (const auto* rbc =
-                                   std::get_if<ManualBarrierRemovalCompleted>(
-                                       &result->data)) {
-                        act.metric_primary = rbc->active_writers_count;
-                        if (rbc->outcome ==
-                            BarrierRemovalOutcome::AlreadyAbsent) {
-                            act.flags |= history_storage::activity::
-                                flag_barrier_already_absent;
-                        }
-                    }
-                } else {
-                    act.outcome = context.maintenance_failure_outcome.value_or(
-                        history_storage::activity::ActivityOutcome::Failed);
-                    act.metric_primary = context.maintenance_metric_primary;
-                    act.metric_secondary = context.maintenance_metric_secondary;
-                    act.flags = context.maintenance_flags;
-                    act.stage = history_storage::activity::sanitize_text(
-                        context.maintenance_failure_stage,
-                        history_storage::activity::maximum_stage_bytes);
-                    act.detail = history_storage::activity::sanitize_text(
-                        context.maintenance_failure_detail.empty()
-                            ? result.error().detail
-                            : context.maintenance_failure_detail,
-                        history_storage::activity::maximum_detail_bytes);
-                }
 
-                record.status = outcome_to_local_status(act.outcome);
-                record.stage = act.stage;
-                record.detail = act.detail;
-                record.summary_a = act.metric_primary;
-                record.summary_b = act.metric_secondary;
-                record.summary_bytes = act.metric_bytes;
-                record.flags = act.flags;
-
-                if (result.has_value() || context.remote_observed) {
-                    const auto layout =
-                        history_storage::derive_remote_layout(context.key);
-                    bool published = false;
-                    std::string pub_error;
-                    if (auto ws = platform::create_workspace("kasumi-activity");
-                        ws) {
-                        auto pub =
-                            history_storage::activity::publish(context.storage,
-                                                               layout,
-                                                               context.key,
-                                                               act,
-                                                               ws->root);
-                        platform::cleanup_workspace(*ws);
-                        if (pub) {
-                            published = true;
-                        } else {
-                            pub_error = pub.error().detail;
-                        }
-                    } else {
-                        pub_error = ws.error();
-                    }
-                    if (published) {
-                        record.remote_publish_state =
-                            state_storage::RemotePublishState::Published;
+                bool start_recorded = false;
+                if (context.operation == Operation::Sync) {
+                    context.on_sync_mutation_start = [&]() {
                         if (db_ready_for_tracking(
                                 context.runtime.database_path)) {
-                            std::vector<state_storage::CachedRemoteActivity>
-                                updated_cache;
-                            if (context.operation ==
-                                    Operation::GarbageCollect &&
-                                result.has_value()) {
-                                updated_cache.reserve(
-                                    context.gc_kept_activities.size() + 1U);
-                                for (const auto& kept :
-                                     context.gc_kept_activities) {
-                                    updated_cache.push_back(to_cached_activity(
-                                        kept.record, finished_at));
-                                }
-                            } else if (auto existing =
-                                           state_storage::load_local_activity(
-                                               context.runtime.database_path);
-                                       existing) {
-                                updated_cache = std::move(
-                                    existing->cached_remote_activities);
+                            start_recorded =
+                                state_storage::record_execution_start(
+                                    context.runtime.database_path, record);
+                        }
+                    };
+                } else if (db_ready_for_tracking(
+                               context.runtime.database_path)) {
+                    start_recorded = state_storage::record_execution_start(
+                        context.runtime.database_path, record);
+                }
+
+                result = dispatch(context);
+
+                const auto finished_at =
+                    platform::clock::unix_seconds().value_or(started_at);
+                const auto elapsed_ms =
+                    static_cast<std::uint64_t>(std::max<std::int64_t>(
+                        0,
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - steady_started)
+                            .count()));
+                record.finished_at = finished_at;
+                record.duration_ms = elapsed_ms;
+                record.recovered = context.recovered_transaction;
+
+                using LS = state_storage::LocalExecutionStatus;
+                if (is_remote_activity_operation(context.operation)) {
+                    history_storage::activity::ActivityRecord act{
+                        .event_id = execution_id,
+                        .operation = to_activity_op(context.operation),
+                        .machine_id = context.machine_identity
+                                          ? context.machine_identity->id
+                                          : std::array<std::uint8_t, 16>{},
+                        .machine_name = record.machine_name,
+                        .started_at = started_at,
+                        .finished_at = finished_at,
+                        .duration_ms = elapsed_ms,
+                    };
+                    if (result) {
+                        act.outcome = history_storage::activity::
+                            ActivityOutcome::Succeeded;
+                        if (const auto* fc =
+                                std::get_if<FsckCompleted>(&result->data)) {
+                            act.metric_primary = fc->checked_objects;
+                            act.metric_bytes = fc->wire_download_bytes;
+                        } else if (const auto* gcc =
+                                       std::get_if<GarbageCollectCompleted>(
+                                           &result->data)) {
+                            act.metric_primary = gcc->candidate_objects;
+                            act.metric_secondary = gcc->removed_objects;
+                            if (gcc->analysis_only) {
+                                act.flags |= history_storage::activity::
+                                    flag_analysis_only;
                             }
-                            updated_cache.push_back(
-                                to_cached_activity(act, finished_at));
-                            static_cast<void>(
-                                state_storage::save_remote_activity_cache(
-                                    context.runtime.database_path,
-                                    updated_cache));
+                        } else if (const auto* rwc = std::get_if<
+                                       ManualWriterRemovalCompleted>(
+                                       &result->data)) {
+                            act.detail =
+                                history_storage::activity::sanitize_text(
+                                    rwc->identifier,
+                                    history_storage::activity::
+                                        maximum_detail_bytes);
+                        } else if (const auto* rbc = std::get_if<
+                                       ManualBarrierRemovalCompleted>(
+                                       &result->data)) {
+                            act.metric_primary = rbc->active_writers_count;
+                            if (rbc->outcome ==
+                                BarrierRemovalOutcome::AlreadyAbsent) {
+                                act.flags |= history_storage::activity::
+                                    flag_barrier_already_absent;
+                            }
+                        }
+                    } else {
+                        act.outcome =
+                            context.maintenance_failure_outcome.value_or(
+                                history_storage::activity::ActivityOutcome::
+                                    Failed);
+                        act.metric_primary = context.maintenance_metric_primary;
+                        act.metric_secondary =
+                            context.maintenance_metric_secondary;
+                        act.flags = context.maintenance_flags;
+                        act.stage = history_storage::activity::sanitize_text(
+                            context.maintenance_failure_stage,
+                            history_storage::activity::maximum_stage_bytes);
+                        act.detail = history_storage::activity::sanitize_text(
+                            context.maintenance_failure_detail.empty()
+                                ? result.error().detail
+                                : context.maintenance_failure_detail,
+                            history_storage::activity::maximum_detail_bytes);
+                    }
+
+                    record.status = outcome_to_local_status(act.outcome);
+                    record.stage = act.stage;
+                    record.detail = act.detail;
+                    record.summary_a = act.metric_primary;
+                    record.summary_b = act.metric_secondary;
+                    record.summary_bytes = act.metric_bytes;
+                    record.flags |= act.flags;
+
+                    if (result.has_value() || context.remote_observed) {
+                        const auto layout =
+                            history_storage::derive_remote_layout(context.key);
+                        bool published = false;
+                        std::string pub_error;
+                        if (auto ws =
+                                platform::create_workspace("kasumi-activity");
+                            ws) {
+                            auto pub = history_storage::activity::publish(
+                                context.storage,
+                                layout,
+                                context.key,
+                                act,
+                                ws->root);
+                            platform::cleanup_workspace(*ws);
+                            if (pub) {
+                                published = true;
+                            } else {
+                                pub_error = pub.error().detail;
+                            }
+                        } else {
+                            pub_error = ws.error();
+                        }
+                        if (published) {
+                            record.remote_publish_state =
+                                state_storage::RemotePublishState::Published;
+                            if (db_ready_for_tracking(
+                                    context.runtime.database_path)) {
+                                std::vector<state_storage::CachedRemoteActivity>
+                                    updated_cache;
+                                if (context.operation ==
+                                        Operation::GarbageCollect &&
+                                    result.has_value()) {
+                                    updated_cache.reserve(
+                                        context.gc_kept_activities.size() + 1U);
+                                    for (const auto& kept :
+                                         context.gc_kept_activities) {
+                                        updated_cache.push_back(
+                                            to_cached_activity(kept.record,
+                                                               finished_at));
+                                    }
+                                } else if (auto existing = state_storage::
+                                               load_local_activity(
+                                                   context.runtime
+                                                       .database_path);
+                                           existing) {
+                                    updated_cache = std::move(
+                                        existing->cached_remote_activities);
+                                }
+                                updated_cache.push_back(
+                                    to_cached_activity(act, finished_at));
+                                static_cast<void>(
+                                    state_storage::save_remote_activity_cache(
+                                        context.runtime.database_path,
+                                        updated_cache));
+                            }
+                        } else {
+                            record.remote_publish_state =
+                                state_storage::RemotePublishState::Pending;
+                            if (result.has_value()) {
+                                result->activity_publish_warning =
+                                    std::move(pub_error);
+                            }
                         }
                     } else {
                         record.remote_publish_state =
-                            state_storage::RemotePublishState::Pending;
-                        if (result.has_value()) {
-                            result->activity_publish_warning =
-                                std::move(pub_error);
-                        }
+                            state_storage::RemotePublishState::NotApplicable;
                     }
                 } else {
                     record.remote_publish_state =
                         state_storage::RemotePublishState::NotApplicable;
-                }
-            } else {
-                record.remote_publish_state =
-                    state_storage::RemotePublishState::NotApplicable;
-                if (result) {
-                    if (const auto* sc =
-                            std::get_if<SyncCompleted>(&result->data)) {
-                        const bool had_changes =
-                            sc->published || sc->uploaded > 0 ||
-                            sc->downloaded > 0 || sc->removed > 0 ||
-                            sc->renamed > 0 || sc->created_dirs > 0 ||
-                            sc->removed_dirs > 0;
-                        record.status =
-                            sc->partial
-                                ? LS::Partial
-                                : (!had_changes
-                                       ? LS::SucceededNoChanges
-                                       : (!sc->published
-                                              ? LS::SucceededDownloadedOnly
-                                              : LS::Succeeded));
-                        record.summary_a = sc->uploaded;
-                        record.summary_b = sc->downloaded;
-                        record.summary_c = sc->removed + sc->renamed;
-                        record.summary_bytes =
-                            sc->upload_bytes + sc->download_bytes;
-                        record.flags = sc->published ? 1U : 0U;
-                        record.commit_id = context.accepted_commit_id;
-                    } else if (const auto* rc = std::get_if<RepackCompleted>(
-                                   &result->data)) {
-                        record.status = rc->published ? LS::Succeeded
-                                                      : LS::SucceededNoChanges;
-                        record.summary_a = rc->repacked_blobs;
-                        record.summary_b = rc->new_packs;
-                        record.summary_bytes = rc->repacked_plaintext_bytes;
-                        record.flags = rc->published ? 1U : 0U;
-                        record.commit_id = rc->published_commit_id;
-                    } else if (const auto* rmc =
-                                   std::get_if<ResolveMissingCompleted>(
-                                       &result->data)) {
-                        record.status = rmc->published ? LS::Succeeded
-                                                       : LS::SucceededNoChanges;
-                        record.summary_a = rmc->resolved_count;
-                        record.flags = rmc->published ? 1U : 0U;
-                        record.commit_id = context.accepted_commit_id;
-                    }
-                } else {
-                    const auto& err = result.error();
-                    if (err.code == ErrorCode::InventoryAuditFailure &&
-                        err.sync_completed.has_value()) {
-                        const auto& sc = *err.sync_completed;
-                        record.status = LS::Failed;
-                        record.stage = "audit";
-                        record
-                            .detail = history_storage::activity::sanitize_text(
-                            err.detail,
-                            history_storage::activity::maximum_detail_bytes);
-                        record.summary_a = sc.uploaded;
-                        record.summary_b = sc.downloaded;
-                        record.summary_c = sc.removed + sc.renamed;
-                        record.summary_bytes =
-                            sc.upload_bytes + sc.download_bytes;
-                        record.flags =
-                            (sc.published ? 1U : 0U) |
-                            profile_execution_flag_audit_failed_after_sync;
-                        record.commit_id = context.accepted_commit_id;
+                    if (result) {
+                        if (const auto* sc =
+                                std::get_if<SyncCompleted>(&result->data)) {
+                            const bool had_changes =
+                                sc->published || sc->uploaded > 0 ||
+                                sc->downloaded > 0 || sc->removed > 0 ||
+                                sc->renamed > 0 || sc->created_dirs > 0 ||
+                                sc->removed_dirs > 0;
+                            record.status =
+                                sc->partial
+                                    ? LS::Partial
+                                    : (!had_changes
+                                           ? LS::SucceededNoChanges
+                                           : (!sc->published
+                                                  ? LS::SucceededDownloadedOnly
+                                                  : LS::Succeeded));
+                            record.summary_a = sc->uploaded;
+                            record.summary_b = sc->downloaded;
+                            record.summary_c = sc->removed + sc->renamed;
+                            record.summary_bytes =
+                                sc->upload_bytes + sc->download_bytes;
+                            if (sc->published) {
+                                record.flags |=
+                                    profile_execution_flag_published;
+                            }
+                            record.commit_id = context.accepted_commit_id;
+                        } else if (const auto* rc =
+                                       std::get_if<RepackCompleted>(
+                                           &result->data)) {
+                            record.status = rc->published
+                                                ? LS::Succeeded
+                                                : LS::SucceededNoChanges;
+                            record.summary_a = rc->repacked_blobs;
+                            record.summary_b = rc->new_packs;
+                            record.summary_bytes = rc->repacked_plaintext_bytes;
+                            if (rc->published) {
+                                record.flags |=
+                                    profile_execution_flag_published;
+                            }
+                            record.commit_id = rc->published_commit_id;
+                        } else if (const auto* rmc =
+                                       std::get_if<ResolveMissingCompleted>(
+                                           &result->data)) {
+                            record.status = rmc->published
+                                                ? LS::Succeeded
+                                                : LS::SucceededNoChanges;
+                            record.summary_a = rmc->resolved_count;
+                            if (rmc->published) {
+                                record.flags |=
+                                    profile_execution_flag_published;
+                            }
+                            record.commit_id = context.accepted_commit_id;
+                        }
                     } else {
-                        record.status = platform::cancellation::requested()
-                                            ? LS::Cancelled
-                                            : LS::Failed;
-                        record.stage = sync_stage_label(err.stage);
-                        record
-                            .detail = history_storage::activity::sanitize_text(
-                            err.detail,
-                            history_storage::activity::maximum_detail_bytes);
+                        const auto& err = result.error();
+                        if (err.code == ErrorCode::InventoryAuditFailure &&
+                            err.sync_completed.has_value()) {
+                            const auto& sc = *err.sync_completed;
+                            record.status = LS::Failed;
+                            record.stage = "audit";
+                            record.detail =
+                                history_storage::activity::sanitize_text(
+                                    err.detail,
+                                    history_storage::activity::
+                                        maximum_detail_bytes);
+                            record.summary_a = sc.uploaded;
+                            record.summary_b = sc.downloaded;
+                            record.summary_c = sc.removed + sc.renamed;
+                            record.summary_bytes =
+                                sc.upload_bytes + sc.download_bytes;
+                            record.flags |=
+                                (sc.published ? profile_execution_flag_published
+                                              : 0U) |
+                                profile_execution_flag_audit_failed_after_sync;
+                            record.commit_id = context.accepted_commit_id;
+                        } else {
+                            record.status = platform::cancellation::requested()
+                                                ? LS::Cancelled
+                                                : LS::Failed;
+                            record.stage = sync_stage_label(err.stage);
+                            record.detail =
+                                history_storage::activity::sanitize_text(
+                                    err.detail,
+                                    history_storage::activity::
+                                        maximum_detail_bytes);
+                        }
                     }
                 }
-            }
 
-            if (db_ready_for_tracking(context.runtime.database_path)) {
-                if (start_recorded) {
-                    static_cast<void>(state_storage::record_execution_finish(
-                        context.runtime.database_path, record));
-                } else {
-                    static_cast<void>(state_storage::record_execution_complete(
-                        context.runtime.database_path, record));
+                if (db_ready_for_tracking(context.runtime.database_path)) {
+                    if (start_recorded) {
+                        static_cast<void>(
+                            state_storage::record_execution_finish(
+                                context.runtime.database_path, record));
+                    } else {
+                        static_cast<void>(
+                            state_storage::record_execution_complete(
+                                context.runtime.database_path, record));
+                    }
                 }
             }
         }
@@ -516,12 +563,33 @@ std::expected<Response, Error> execute(ExecutionInput input) {
         });
     }
 
+    if (warm.warm_observation != nullptr && !warm_db_path.empty() &&
+        context.operation == Operation::Sync) {
+        if (result) {
+            observation::refresh_warm_session_db_stamp(*warm.warm_observation,
+                                                       warm_db_path);
+        } else {
+            // Invalidate warm history frontier after any failed/partial sync so
+            // the next cycle re-reads truth from storage cleanly.
+            warm.warm_observation->has_db_stamp = false;
+            warm.warm_observation->history_reads = {};
+        }
+    }
     context.storage = {};
-    detail::wipe_operation(context);
+    wipe_operation(context);
     wipe_credentials(input.credentials);
-    platform::perf_trace::finish("total sync", total_trace);
-    platform::perf_trace::report(result ? "success" : "error");
+    if (!warm.origin_daemon) {
+        platform::perf_trace::finish("total sync", total_trace);
+        platform::perf_trace::report(result ? "success" : "error");
+    }
     return result;
+}
+
+} // namespace detail
+
+std::expected<Response, Error> execute(ExecutionInput input) {
+    detail::WarmExecutionContext warm{};
+    return detail::execute_warm(std::move(input), warm);
 }
 
 } // namespace kasumi::application

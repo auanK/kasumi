@@ -220,7 +220,78 @@ reconciliation::StorageState to_storage_state(history::StorageView& observed) {
     return result;
 }
 
+DatabaseMetadataStamp
+read_database_stamp(const std::filesystem::path& file_path) noexcept {
+    try {
+        std::error_code ec;
+        const auto st = std::filesystem::symlink_status(file_path, ec);
+        if (ec || st.type() == std::filesystem::file_type::not_found) {
+            return DatabaseMetadataStamp{};
+        }
+        const auto utf8 = platform::path::to_utf8(file_path);
+        const auto meta = cache::read_file_metadata(file_path, utf8);
+        if (!meta || !meta->has_value() || !(*meta)->identity.has_value()) {
+            return DatabaseMetadataStamp{.present = true};
+        }
+        const auto& m = **meta;
+        return DatabaseMetadataStamp{
+            .present = true,
+            .size = m.size,
+            .mtime_ns = m.mtime_nanoseconds,
+            .volume = m.identity->volume,
+            .file_low = m.identity->file_low,
+            .file_high = m.identity->file_high,
+        };
+    } catch (...) {
+        return DatabaseMetadataStamp{.present = true};
+    }
+}
+
+std::filesystem::path
+sidecar_path_with_suffix(const std::filesystem::path& database_path,
+                         std::string_view suffix) {
+    auto name = database_path.filename().native();
+    name += platform::path::from_utf8(suffix).native();
+    return database_path.parent_path() / std::filesystem::path{std::move(name)};
+}
+
 } // namespace
+
+bool warm_session_db_matches(
+    const LocalObservationSession& session,
+    const std::filesystem::path& database_path) noexcept {
+    try {
+        if (!session.has_db_stamp || session.database_path != database_path) {
+            return false;
+        }
+        const auto current_main = read_database_stamp(database_path);
+        const auto current_wal = read_database_stamp(
+            sidecar_path_with_suffix(database_path, "-wal"));
+        const auto current_journal = read_database_stamp(
+            sidecar_path_with_suffix(database_path, "-journal"));
+        return current_main.present && current_main == session.main_db_stamp &&
+               current_wal == session.wal_stamp &&
+               current_journal == session.journal_stamp;
+    } catch (...) {
+        return false;
+    }
+}
+
+void refresh_warm_session_db_stamp(
+    LocalObservationSession& session,
+    const std::filesystem::path& database_path) noexcept {
+    try {
+        session.database_path = database_path;
+        session.main_db_stamp = read_database_stamp(database_path);
+        session.wal_stamp = read_database_stamp(
+            sidecar_path_with_suffix(database_path, "-wal"));
+        session.journal_stamp = read_database_stamp(
+            sidecar_path_with_suffix(database_path, "-journal"));
+        session.has_db_stamp = session.main_db_stamp.present;
+    } catch (...) {
+        session.has_db_stamp = false;
+    }
+}
 
 std::expected<LocalTreeObservation, std::string>
 collect_local_observation(const std::filesystem::path& local_root,

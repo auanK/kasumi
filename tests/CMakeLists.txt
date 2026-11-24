@@ -103,11 +103,14 @@ kasumi_add_test_suite(
     kasumi_test_unit_platform
     "unit.platform"
     SOURCES
+        unit/platform/test_autostart.cpp
+        unit/platform/test_directory_watcher.cpp
         unit/platform/test_path.cpp
         unit/platform/test_metadata.cpp
         unit/platform/test_file_fingerprint.cpp
         unit/platform/test_private_storage.cpp
         unit/platform/test_machine_clock.cpp
+        unit/platform/test_secure_page.cpp
     LIBRARIES
         kasumi_platform
 )
@@ -415,6 +418,17 @@ kasumi_add_test_suite(
         integration/runtime_application/test_runtime_application.cpp
     LIBRARIES
         kasumi_application
+)
+
+kasumi_add_test_suite(
+    kasumi_test_integration_daemon
+    "integration.daemon"
+    SOURCES
+        integration/daemon/test_daemon_engine.cpp
+    LIBRARIES
+        kasumi_application
+        httplib::httplib
+        nlohmann_json::nlohmann_json
 )
 
 kasumi_add_test_suite(

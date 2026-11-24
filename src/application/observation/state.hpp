@@ -18,10 +18,21 @@
 #include <vector>
 
 namespace kasumi::application {
-class ProgressMeter;
+struct ProgressMeter;
 }
 
 namespace kasumi::application::observation {
+
+struct DatabaseMetadataStamp {
+    bool present = false;
+    std::uint64_t size = 0;
+    std::int64_t mtime_ns = 0;
+    std::uint64_t volume = 0;
+    std::uint64_t file_low = 0;
+    std::uint64_t file_high = 0;
+
+    bool operator==(const DatabaseMetadataStamp&) const noexcept = default;
+};
 
 // State reused across local observations.
 struct LocalObservationSession {
@@ -34,7 +45,18 @@ struct LocalObservationSession {
     std::string history_namespace;
     history_storage::KnownHistoryFrontier history_reads;
     ProgressMeter* progress = nullptr;
+    bool has_db_stamp = false;
+    DatabaseMetadataStamp main_db_stamp{};
+    DatabaseMetadataStamp wal_stamp{};
+    DatabaseMetadataStamp journal_stamp{};
 };
+
+bool warm_session_db_matches(
+    const LocalObservationSession& session,
+    const std::filesystem::path& database_path) noexcept;
+void refresh_warm_session_db_stamp(
+    LocalObservationSession& session,
+    const std::filesystem::path& database_path) noexcept;
 
 // Managed snapshot and transient physical facts from the same local scan.
 struct LocalTreeObservation {

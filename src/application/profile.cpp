@@ -1,5 +1,6 @@
 #include "application/profile.hpp"
 
+#include "application/daemon.hpp"
 #include "application/detail.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
@@ -92,95 +93,92 @@ ProfileError map_runtime_error(const runtime::Error& err) {
         .detail = err.detail,
     };
 }
-class ScopedConfigLock {
-public:
-    // Six-clone contention with OS vault RPCs can exceed 2 s under CI load;
-    // keep waits bounded at 10 s.
-    static std::expected<ScopedConfigLock, ProfileError>
-    acquire(const std::filesystem::path& app_data_dir,
-            std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
-        namespace storage = platform::private_storage;
-        std::error_code status_error;
-        auto status =
-            std::filesystem::symlink_status(app_data_dir, status_error);
-        const bool missing =
-            status_error == std::errc::no_such_file_or_directory ||
-            (!status_error &&
-             status.type() == std::filesystem::file_type::not_found);
-        if (status_error && !missing) {
-            return fail_profile(ProfileErrorCode::StorageFailure,
-                                "could not inspect configuration directory: " +
-                                    status_error.message());
-        }
-        if (missing) {
-            auto created = storage::create_directory(app_data_dir);
-            status_error.clear();
-            status =
-                std::filesystem::symlink_status(app_data_dir, status_error);
-            if (!created &&
-                (status_error ||
-                 status.type() != std::filesystem::file_type::directory)) {
-                return fail_profile(ProfileErrorCode::StorageFailure,
-                                    created.error());
-            }
-        }
-        if (status_error ||
-            status.type() != std::filesystem::file_type::directory) {
-            return fail_profile(ProfileErrorCode::StorageFailure,
-                                "configuration path is not a plain directory");
-        }
-#if defined(_WIN32)
-        if (!storage::query_directory_identity(app_data_dir).valid) {
-            return fail_profile(ProfileErrorCode::StorageFailure,
-                                "configuration path is not an accessible plain "
-                                "directory");
-        }
-#endif
-        const auto lock_path = app_data_dir / "config.lock";
-        const auto start = std::chrono::steady_clock::now();
-        std::string last_error;
-        while (true) {
-            auto lock_res = platform::acquire_profile_lock(lock_path);
-            if (lock_res) {
-                return ScopedConfigLock(*lock_res);
-            }
-            last_error = lock_res.error();
-            if (std::chrono::steady_clock::now() - start >= timeout) {
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        return fail_profile(ProfileErrorCode::LockFailure,
-                            "could not acquire configuration lock: " +
-                                last_error);
+struct ScopedConfigLock {
+    std::intptr_t handle = platform::invalid_profile_lock;
+
+    explicit ScopedConfigLock(
+        std::intptr_t lock_handle = platform::invalid_profile_lock) noexcept
+        : handle(lock_handle) {
     }
 
     ~ScopedConfigLock() {
-        platform::release_profile_lock(handle_);
+        platform::release_profile_lock(handle);
     }
 
     ScopedConfigLock(const ScopedConfigLock&) = delete;
     ScopedConfigLock& operator=(const ScopedConfigLock&) = delete;
 
     ScopedConfigLock(ScopedConfigLock&& other) noexcept
-        : handle_(
-              std::exchange(other.handle_, platform::invalid_profile_lock)) {
+        : handle(std::exchange(other.handle, platform::invalid_profile_lock)) {
     }
 
     ScopedConfigLock& operator=(ScopedConfigLock&& other) noexcept {
         if (this != &other) {
-            platform::release_profile_lock(handle_);
-            handle_ =
-                std::exchange(other.handle_, platform::invalid_profile_lock);
+            platform::release_profile_lock(handle);
+            handle =
+                std::exchange(other.handle, platform::invalid_profile_lock);
         }
         return *this;
     }
-
-private:
-    explicit ScopedConfigLock(std::intptr_t handle) noexcept : handle_(handle) {
-    }
-    std::intptr_t handle_ = platform::invalid_profile_lock;
 };
+
+// Six-clone contention with OS vault RPCs can exceed 2 s under CI load;
+// keep waits bounded at 10 s.
+std::expected<ScopedConfigLock, ProfileError> acquire_config_lock(
+    const std::filesystem::path& app_data_dir,
+    std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+    namespace storage = platform::private_storage;
+    std::error_code status_error;
+    auto status = std::filesystem::symlink_status(app_data_dir, status_error);
+    const bool missing =
+        status_error == std::errc::no_such_file_or_directory ||
+        (!status_error &&
+         status.type() == std::filesystem::file_type::not_found);
+    if (status_error && !missing) {
+        return fail_profile(ProfileErrorCode::StorageFailure,
+                            "could not inspect configuration directory: " +
+                                status_error.message());
+    }
+    if (missing) {
+        auto created = storage::create_directory(app_data_dir);
+        status_error.clear();
+        status = std::filesystem::symlink_status(app_data_dir, status_error);
+        if (!created &&
+            (status_error ||
+             status.type() != std::filesystem::file_type::directory)) {
+            return fail_profile(ProfileErrorCode::StorageFailure,
+                                created.error());
+        }
+    }
+    if (status_error ||
+        status.type() != std::filesystem::file_type::directory) {
+        return fail_profile(ProfileErrorCode::StorageFailure,
+                            "configuration path is not a plain directory");
+    }
+#if defined(_WIN32)
+    if (!storage::query_directory_identity(app_data_dir).valid) {
+        return fail_profile(
+            ProfileErrorCode::StorageFailure,
+            "configuration path is not an accessible plain directory");
+    }
+#endif
+    const auto lock_path = app_data_dir / "config.lock";
+    const auto start = std::chrono::steady_clock::now();
+    std::string last_error;
+    while (true) {
+        auto lock_res = platform::acquire_profile_lock(lock_path);
+        if (lock_res) {
+            return ScopedConfigLock(*lock_res);
+        }
+        last_error = lock_res.error();
+        if (std::chrono::steady_clock::now() - start >= timeout) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return fail_profile(ProfileErrorCode::LockFailure,
+                        "could not acquire configuration lock: " + last_error);
+}
 
 enum class EntryState {
     Absent,
@@ -194,14 +192,15 @@ struct EntryInfo {
     bool regular = false;
     bool link = false;
     std::uintmax_t size = 0;
-
-    bool is_plain_dir() const noexcept {
-        return state == EntryState::Present && directory && !link;
-    }
-    bool is_plain_file() const noexcept {
-        return state == EntryState::Present && regular && !link;
-    }
 };
+
+bool is_plain_dir(const EntryInfo& info) noexcept {
+    return info.state == EntryState::Present && info.directory && !info.link;
+}
+
+bool is_plain_file(const EntryInfo& info) noexcept {
+    return info.state == EntryState::Present && info.regular && !info.link;
+}
 
 bool path_missing(const std::error_code& error) noexcept {
     return error == std::errc::no_such_file_or_directory;
@@ -343,6 +342,9 @@ LockProbe probe_profile_lock(const std::filesystem::path& path) {
 #endif
 }
 
+struct InspectionTempDirectory;
+bool cleanup_inspection_temp_directory(InspectionTempDirectory& temp);
+
 struct InspectionTempDirectory {
     std::filesystem::path path;
     DirectoryIdentity identity;
@@ -352,95 +354,8 @@ struct InspectionTempDirectory {
         : path(value) {
     }
 
-    bool perform_cleanup() {
-        if (!owns) {
-            return true;
-        }
-#ifdef KASUMI_MUTATION_FAULT_TESTS
-        ++fault_test::g_inspect_cleanup_attempts;
-        if (fault_test::inject_cleanup_failure_once(
-                fault_test::InspectFaultStage::FailCleanup)) {
-            return false;
-        }
-#endif
-        std::error_code error;
-        const auto status = std::filesystem::symlink_status(path, error);
-        if (path_missing(error) ||
-            (!error &&
-             status.type() == std::filesystem::file_type::not_found)) {
-            owns = false;
-            return true;
-        }
-        if (error || !std::filesystem::is_directory(status) ||
-            std::filesystem::is_symlink(status) || has_reparse_point(path)) {
-            return false;
-        }
-        // Ownership is confirmed before deleting anything, so a substituted
-        // directory is preserved.
-        if (!(query_directory_identity(path) == identity)) {
-            return false;
-        }
-
-        bool safe = true;
-        std::vector<std::filesystem::path> removable;
-        std::filesystem::directory_iterator entry(path, error);
-        const std::filesystem::directory_iterator end;
-        while (!error && entry != end) {
-            const auto name = entry->path().filename().string();
-            const bool known = name == "db.sqlite" || name == "db.sqlite-wal" ||
-                               name == "db.sqlite-shm" ||
-                               name == "db.sqlite-journal";
-            const auto info = query_entry(entry->path());
-            if (!info.is_plain_file() || !known) {
-                safe = false;
-            } else {
-                removable.push_back(entry->path());
-            }
-            entry.increment(error);
-        }
-        if (error) {
-            safe = false;
-        }
-
-#ifdef KASUMI_MUTATION_FAULT_TESTS
-        if (fault_test::inject_cleanup_failure_once(
-                fault_test::InspectFaultStage::FailCleanupFileRemove)) {
-            return false;
-        }
-#endif
-
-        bool removed = true;
-        for (const auto& file : removable) {
-            std::error_code remove_error;
-            std::filesystem::remove(file, remove_error);
-            if (remove_error) {
-                removed = false;
-            }
-        }
-        if (!safe || !removed) {
-            return false;
-        }
-#ifdef KASUMI_MUTATION_FAULT_TESTS
-        if (fault_test::inject_cleanup_failure_once(
-                fault_test::InspectFaultStage::FailCleanupDirectoryRemove)) {
-            return false;
-        }
-#endif
-        std::error_code remove_error;
-        std::filesystem::remove(path, remove_error);
-        if (remove_error) {
-            return false;
-        }
-        std::error_code verify_error;
-        if (std::filesystem::exists(path, verify_error) || verify_error) {
-            return false;
-        }
-        owns = false;
-        return true;
-    }
-
     ~InspectionTempDirectory() {
-        static_cast<void>(perform_cleanup());
+        static_cast<void>(cleanup_inspection_temp_directory(*this));
     }
 
     InspectionTempDirectory(const InspectionTempDirectory&) = delete;
@@ -448,6 +363,92 @@ struct InspectionTempDirectory {
     InspectionTempDirectory(InspectionTempDirectory&&) = delete;
     InspectionTempDirectory& operator=(InspectionTempDirectory&&) = delete;
 };
+
+bool cleanup_inspection_temp_directory(InspectionTempDirectory& temp) {
+    if (!temp.owns) {
+        return true;
+    }
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    ++fault_test::g_inspect_cleanup_attempts;
+    if (fault_test::inject_cleanup_failure_once(
+            fault_test::InspectFaultStage::FailCleanup)) {
+        return false;
+    }
+#endif
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(temp.path, error);
+    if (path_missing(error) ||
+        (!error && status.type() == std::filesystem::file_type::not_found)) {
+        temp.owns = false;
+        return true;
+    }
+    if (error || !std::filesystem::is_directory(status) ||
+        std::filesystem::is_symlink(status) || has_reparse_point(temp.path)) {
+        return false;
+    }
+    // Ownership is confirmed before deleting anything, so a substituted
+    // directory is preserved.
+    if (!(query_directory_identity(temp.path) == temp.identity)) {
+        return false;
+    }
+
+    bool safe = true;
+    std::vector<std::filesystem::path> removable;
+    std::filesystem::directory_iterator entry(temp.path, error);
+    const std::filesystem::directory_iterator end;
+    while (!error && entry != end) {
+        const auto name = entry->path().filename().string();
+        const bool known = name == "db.sqlite" || name == "db.sqlite-wal" ||
+                           name == "db.sqlite-shm" ||
+                           name == "db.sqlite-journal";
+        const auto info = query_entry(entry->path());
+        if (!is_plain_file(info) || !known) {
+            safe = false;
+        } else {
+            removable.push_back(entry->path());
+        }
+        entry.increment(error);
+    }
+    if (error) {
+        safe = false;
+    }
+
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (fault_test::inject_cleanup_failure_once(
+            fault_test::InspectFaultStage::FailCleanupFileRemove)) {
+        return false;
+    }
+#endif
+
+    bool removed = true;
+    for (const auto& file : removable) {
+        std::error_code remove_error;
+        std::filesystem::remove(file, remove_error);
+        if (remove_error) {
+            removed = false;
+        }
+    }
+    if (!safe || !removed) {
+        return false;
+    }
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    if (fault_test::inject_cleanup_failure_once(
+            fault_test::InspectFaultStage::FailCleanupDirectoryRemove)) {
+        return false;
+    }
+#endif
+    std::error_code remove_error;
+    std::filesystem::remove(temp.path, remove_error);
+    if (remove_error) {
+        return false;
+    }
+    std::error_code verify_error;
+    if (std::filesystem::exists(temp.path, verify_error) || verify_error) {
+        return false;
+    }
+    temp.owns = false;
+    return true;
+}
 
 struct SnapshotFileMetadata {
     platform::private_storage::FileIdentity identity;
@@ -659,7 +660,7 @@ std::expected<LockedConfig, ProfileError>
 load_profiles_locked(const std::filesystem::path& app_data_dir,
                      bool not_found_as_empty = false,
                      std::string_view not_found_detail = {}) {
-    auto lock = ScopedConfigLock::acquire(app_data_dir);
+    auto lock = acquire_config_lock(app_data_dir);
     if (!lock) {
         return std::unexpected(lock.error());
     }
@@ -692,14 +693,25 @@ load_profiles_locked(const std::filesystem::path& app_data_dir,
 struct KeyBytesWiper {
     runtime::vault::KeyBytes& key;
     bool active = true;
-    void release() noexcept {
+    ~KeyBytesWiper() {
         if (active) {
             crypto::secure_memory::wipe(key.data(), key.size());
             active = false;
         }
     }
-    ~KeyBytesWiper() {
-        release();
+};
+
+void wipe_optional_key(std::optional<runtime::vault::KeyBytes>& key) noexcept {
+    if (key) {
+        crypto::secure_memory::wipe(key->data(), key->size());
+        key.reset();
+    }
+}
+
+struct OptionalKeyWiper {
+    std::optional<runtime::vault::KeyBytes>& key;
+    ~OptionalKeyWiper() noexcept {
+        wipe_optional_key(key);
     }
 };
 
@@ -807,6 +819,21 @@ validate_optional_profile_settings(const Profile& profile) {
             return valid;
         }
     }
+    if (profile.sync_interval_seconds &&
+        (*profile.sync_interval_seconds != 0U &&
+         (*profile.sync_interval_seconds < 10U ||
+          *profile.sync_interval_seconds > 86400U))) {
+        return fail_profile(
+            ProfileErrorCode::ConfigFailure,
+            "sync_interval_seconds must be 0 or between 10 and 86400");
+    }
+    if (profile.gc_interval_hours && (*profile.gc_interval_hours != 0U &&
+                                      (*profile.gc_interval_hours < 1U ||
+                                       *profile.gc_interval_hours > 8760U))) {
+        return fail_profile(
+            ProfileErrorCode::ConfigFailure,
+            "gc_interval_hours must be 0 or between 1 and 8760");
+    }
     return {};
 }
 
@@ -835,6 +862,10 @@ list_profiles(const ExecutionEnvironment& environment) {
             .bandwidth_limit = p.bandwidth_limit,
             .transfer_concurrency = p.transfer_concurrency,
             .rclone_config = p.rclone_config,
+            .watch_enabled = p.watch_enabled,
+            .sync_interval_seconds = p.sync_interval_seconds,
+            .gc_interval_hours = p.gc_interval_hours,
+            .paused = p.paused,
         });
     }
     return result;
@@ -940,6 +971,10 @@ create_profile(const ExecutionEnvironment& environment,
             profile.bandwidth_limit,
             profile.transfer_concurrency,
             profile.rclone_config,
+            profile.watch_enabled,
+            profile.sync_interval_seconds,
+            profile.gc_interval_hours,
+            profile.paused,
         });
         if (auto save_res = runtime::save_profiles(config_path, profiles);
             !save_res) {
@@ -991,6 +1026,26 @@ std::string format_profile_lock_error(const ExecutionEnvironment& environment,
                                       std::string_view profile_name,
                                       std::string_view lock_error) {
     if (lock_error == "profile is already in use by another execution") {
+        if (is_daemon_running(environment)) {
+            if (const auto st = query_daemon_status(environment, profile_name);
+                st && st->running && !st->profiles.empty()) {
+                const auto& dp = st->profiles.front();
+                if (dp.state == DaemonProfileState::RunningSync ||
+                    dp.state == DaemonProfileState::RunningGc) {
+                    if (!dp.active_stage.empty()) {
+                        return std::format("{} (daemon PID {}: {} - {})",
+                                           lock_error,
+                                           st->pid,
+                                           to_string(dp.state),
+                                           dp.active_stage);
+                    }
+                    return std::format("{} (daemon PID {}: {})",
+                                       lock_error,
+                                       st->pid,
+                                       to_string(dp.state));
+                }
+            }
+        }
         if (const auto active_op = active_profile_operation(
                 inspect_profile_activity(environment, profile_name))) {
             return std::format("{} (running {})", lock_error, *active_op);
@@ -1058,7 +1113,7 @@ update_profile(const ExecutionEnvironment& environment,
                 (*persisted)->tree.rows.size() > 1U) {
                 const auto entry = query_entry(profile.local_dir);
                 bool empty_target = entry.state == EntryState::Absent;
-                if (entry.is_plain_dir()) {
+                if (is_plain_dir(entry)) {
                     std::error_code dir_ec;
                     std::filesystem::directory_iterator dir_it(
                         profile.local_dir, dir_ec);
@@ -1086,6 +1141,10 @@ update_profile(const ExecutionEnvironment& environment,
     it->bandwidth_limit = profile.bandwidth_limit;
     it->transfer_concurrency = profile.transfer_concurrency;
     it->rclone_config = profile.rclone_config;
+    it->watch_enabled = profile.watch_enabled;
+    it->sync_interval_seconds = profile.sync_interval_seconds;
+    it->gc_interval_hours = profile.gc_interval_hours;
+    it->paused = profile.paused;
 
     auto save_res =
         runtime::save_profiles(loaded->config_path, loaded->profiles);
@@ -1111,6 +1170,34 @@ update_profile(const ExecutionEnvironment& environment,
         }
     }
 
+    return {};
+}
+
+std::expected<void, ProfileError>
+set_profile_paused(const ExecutionEnvironment& environment,
+                   std::string_view profile_name,
+                   bool paused) {
+    if (!runtime::is_valid_profile_name(profile_name)) {
+        return fail_profile(ProfileErrorCode::InvalidName,
+                            "invalid profile name");
+    }
+    auto loaded = load_profiles_locked(environment.app_data_dir);
+    if (!loaded) {
+        return std::unexpected(loaded.error());
+    }
+    auto it = find_profile(loaded->profiles, profile_name);
+    if (it == loaded->profiles.end()) {
+        return fail_profile(ProfileErrorCode::NotFound, "profile not found");
+    }
+    if (it->paused == paused) {
+        return {};
+    }
+    it->paused = paused;
+    auto save_res =
+        runtime::save_profiles(loaded->config_path, loaded->profiles);
+    if (!save_res) {
+        return std::unexpected(map_runtime_error(save_res.error()));
+    }
     return {};
 }
 
@@ -1210,6 +1297,9 @@ set_profile_key(const ExecutionEnvironment& environment,
     };
 
     auto result = do_set();
+    if (result && is_daemon_running(environment)) {
+        static_cast<void>(reload_running_daemon(environment));
+    }
     wipe_credentials(credentials);
     if (master_key_res) {
         crypto::secure_memory::wipe(master_key_res->data(),
@@ -1332,7 +1422,7 @@ rename_profile(const ExecutionEnvironment& environment,
 
     const auto destination = query_entry(new_paths_res->profile_dir);
     if (destination.state != EntryState::Absent &&
-        !(case_only && destination.is_plain_dir() &&
+        !(case_only && is_plain_dir(destination) &&
           std::filesystem::equivalent(
               old_paths_res->profile_dir, new_paths_res->profile_dir, ec))) {
         return fail_profile(ProfileErrorCode::StorageFailure,
@@ -1464,18 +1554,7 @@ clone_profile(const ExecutionEnvironment& environment,
     }
 
     std::optional<runtime::vault::KeyBytes> master_key;
-    struct OptionalKeyWiper {
-        std::optional<runtime::vault::KeyBytes>& key;
-        void release() noexcept {
-            if (key) {
-                crypto::secure_memory::wipe(key->data(), key->size());
-                key.reset();
-            }
-        }
-        ~OptionalKeyWiper() {
-            release();
-        }
-    } key_wiper{master_key};
+    OptionalKeyWiper key_wiper{master_key};
 
     if (source_it->key_storage == runtime::KeyStorage::File) {
         auto master_key_res =
@@ -1522,7 +1601,7 @@ clone_profile(const ExecutionEnvironment& environment,
         if (info.state == EntryState::Absent) {
             return !required;
         }
-        if (!info.is_plain_file()) {
+        if (!is_plain_file(info)) {
             return false;
         }
         const auto identity =
@@ -1557,7 +1636,7 @@ clone_profile(const ExecutionEnvironment& environment,
                                name == "db.sqlite-shm" ||
                                name == "db.sqlite-journal";
             const auto info = query_entry(path);
-            if (!known || !info.is_plain_file()) {
+            if (!known || !is_plain_file(info)) {
                 return std::unexpected("destination contains unknown data");
             }
             const auto owned =
@@ -1727,7 +1806,7 @@ clone_profile(const ExecutionEnvironment& environment,
             write_ok = true;
         }
     }
-    key_wiper.release();
+    wipe_optional_key(master_key);
     if (!write_ok) {
         return fail_with_rollback(source_it->key_storage ==
                                               runtime::KeyStorage::File &&
@@ -1852,7 +1931,7 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
     for (const auto& directory :
          {environment.app_data_dir, profiles_dir, paths->profile_dir}) {
         const auto entry = query_entry(directory);
-        if (!entry.is_plain_dir()) {
+        if (!is_plain_dir(entry)) {
             return fail_inspection(ProfileLocalProblem::Directory);
         }
     }
@@ -1864,18 +1943,11 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
     }
 
     std::optional<runtime::vault::KeyBytes> key_bytes;
-    struct OptionalKeyWiper {
-        std::optional<runtime::vault::KeyBytes>& key;
-        ~OptionalKeyWiper() noexcept {
-            if (key) {
-                crypto::secure_memory::wipe(key->data(), key->size());
-            }
-        }
-    } key_wiper{key_bytes};
+    OptionalKeyWiper key_wiper{key_bytes};
 
     if (key_storage == runtime::KeyStorage::File) {
         const auto key = query_entry(paths->key_path);
-        if (!key.is_plain_file() || key.size != crypto::KEY_SIZE) {
+        if (!is_plain_file(key) || key.size != crypto::KEY_SIZE) {
             return fail_inspection(ProfileLocalProblem::Key);
         }
         auto read_res = runtime::vault::read_only(paths->key_path);
@@ -1894,7 +1966,7 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
     }
 
     const auto database = query_entry(paths->database_path);
-    if (!database.is_plain_file()) {
+    if (!is_plain_file(database)) {
         return fail_inspection(ProfileLocalProblem::Database);
     }
 
@@ -1950,9 +2022,9 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
             return sync::journal::InspectionResult::Corrupted;
         }
         if ((active_dir.state == EntryState::Present &&
-             !active_dir.is_plain_dir()) ||
+             !is_plain_dir(active_dir)) ||
             (retired_dir.state == EntryState::Present &&
-             !retired_dir.is_plain_dir()) ||
+             !is_plain_dir(retired_dir)) ||
             (active_dir.state == EntryState::Present &&
              retired_dir.state == EntryState::Present)) {
             return sync::journal::InspectionResult::Corrupted;
@@ -1968,7 +2040,7 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
             journal_paths->final_path.parent_path() / "retired.enc");
         if (retired_marker.state == EntryState::Error ||
             (retired_marker.state == EntryState::Present &&
-             !retired_marker.is_plain_file())) {
+             !is_plain_file(retired_marker))) {
             return sync::journal::InspectionResult::Corrupted;
         }
         return retired_marker.state == EntryState::Present
@@ -2043,7 +2115,7 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
 #endif
     {
         const auto entry = query_entry(candidate);
-        if (!entry.is_plain_dir() ||
+        if (!is_plain_dir(entry) ||
             !(query_directory_identity(candidate) == temporary.identity)) {
             return fail_inspection(ProfileLocalProblem::Workspace);
         }
@@ -2093,7 +2165,7 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
                               (final_rollback.state == EntryState::Present &&
                                final_rollback.size > 0);
 
-    if (!temporary.perform_cleanup()) {
+    if (!cleanup_inspection_temp_directory(temporary)) {
         return fail_inspection(ProfileLocalProblem::Cleanup);
     }
 
@@ -2242,12 +2314,12 @@ inspect_profile_activity(const ExecutionEnvironment& environment,
     const auto profiles_dir = paths->profile_dir.parent_path();
     for (const auto& directory :
          {environment.app_data_dir, profiles_dir, paths->profile_dir}) {
-        if (!query_entry(directory).is_plain_dir()) {
+        if (!is_plain_dir(query_entry(directory))) {
             return report;
         }
     }
     const auto db_entry = query_entry(paths->database_path);
-    if (!db_entry.is_plain_file()) {
+    if (!is_plain_file(db_entry)) {
         return report;
     }
     const auto auxiliary_corrupt = [](const EntryInfo& entry) {
@@ -2292,7 +2364,7 @@ inspect_profile_activity(const ExecutionEnvironment& environment,
         return report;
     }
     auto loaded_activity = state_storage::load_local_activity(copy_path);
-    static_cast<void>(guard.perform_cleanup());
+    static_cast<void>(cleanup_inspection_temp_directory(guard));
     if (!loaded_activity) {
         return report;
     }
@@ -2442,6 +2514,52 @@ test_profile_connection(const ExecutionEnvironment& environment,
         return report;
     }
 
+    auto workspace = platform::create_workspace("kasumi-profile-test");
+    if (!workspace) {
+        return fail_profile(ProfileErrorCode::StorageFailure,
+                            "failed to prepare temporary workspace: " +
+                                workspace.error());
+    }
+    struct WorkspaceGuard {
+        platform::Workspace& ws;
+        ~WorkspaceGuard() noexcept {
+            platform::cleanup_workspace(ws);
+        }
+    } ws_guard{*workspace};
+
+    // Probe authenticated history via scoped prefix reads first so large
+    // authenticated vaults do not trigger a full object listing.
+    const auto observed =
+        observation::history::observe(*opened, key, workspace->root, false);
+    if (!observed) {
+        if (observed.error().code ==
+            observation::history::ErrorCode::TransportFailure) {
+            report.transport_ok = false;
+            report.ready = false;
+            report.vault_state = RemoteVaultState::TransportFailure;
+            report.detail = observed.error().detail;
+            return report;
+        }
+        report.transport_ok = true;
+        report.ready = false;
+        report.vault_state = RemoteVaultState::KeyMismatchOrInvalidHistory;
+        report.detail = observed.error().detail;
+        return report;
+    }
+
+    if (observed->history_present) {
+        report.transport_ok = true;
+        report.ready = true;
+        report.vault_state = RemoteVaultState::AuthenticatedVault;
+        report.head_count = observed->logical_heads.size();
+        if (observed->epoch && !observed->epoch->reference.epoch_id.empty()) {
+            report.epoch_sequence = observed->epoch->reference.sequence;
+            report.epoch_id = observed->epoch->reference.epoch_id;
+        }
+        report.detail = "authenticated existing remote vault";
+        return report;
+    }
+
     auto listed = transport::list(*opened);
     if (!listed) {
         if (listed.error().code == transport::ErrorCode::StorageNotFound) {
@@ -2471,39 +2589,12 @@ test_profile_connection(const ExecutionEnvironment& environment,
     }
 
     report.transport_ok = true;
-    auto workspace = platform::create_workspace("kasumi-profile-test");
-    if (!workspace) {
-        return fail_profile(ProfileErrorCode::StorageFailure,
-                            "failed to prepare temporary workspace: " +
-                                workspace.error());
-    }
-    struct WorkspaceGuard {
-        platform::Workspace& ws;
-        ~WorkspaceGuard() noexcept {
-            platform::cleanup_workspace(ws);
-        }
-    } ws_guard{*workspace};
-
-    const auto observed =
-        observation::history::observe(*opened, key, workspace->root, false);
-    if (!observed || !observed->history_present) {
-        report.ready = false;
-        report.vault_state = RemoteVaultState::KeyMismatchOrInvalidHistory;
-        report.detail =
-            "remote destination contains objects that could not be "
-            "authenticated with this profile's key (verify password/salt or "
-            "remote_dir)";
-        return report;
-    }
-
-    report.ready = true;
-    report.vault_state = RemoteVaultState::AuthenticatedVault;
-    report.head_count = observed->logical_heads.size();
-    if (observed->epoch && !observed->epoch->reference.epoch_id.empty()) {
-        report.epoch_sequence = observed->epoch->reference.sequence;
-        report.epoch_id = observed->epoch->reference.epoch_id;
-    }
-    report.detail = "authenticated existing remote vault";
+    report.ready = false;
+    report.vault_state = RemoteVaultState::KeyMismatchOrInvalidHistory;
+    report.detail =
+        "remote destination contains objects that could not be "
+        "authenticated with this profile's key (verify password/salt or "
+        "remote_dir)";
     return report;
 }
 
