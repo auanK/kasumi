@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.27.2]
+
+### Fixed
+
+- **Warm `rclone` Transport Shutdown & Idle Health (Windows & Linux)**:
+  - Bounded Windows `rclone rcd` process termination wait using `WaitForSingleObject` on the OS process handle before `reproc::wait` (avoiding indefinite hangs when loopback exit pipes signal EOF before process exit), forced safe `reproc::stop::kill` teardown, and cleared job handles cleanly.
+  - Added kernel-level child liveness checks (`child_process_exited`) and stale keep-alive retry handling in `check_rc_health`, eliminating false idle-eviction failures and ensuring automatic recovery after abrupt `rclone` exits.
+- **Daemon Concurrent Local Mutation Handling**:
+  - Classified concurrent local file mutations during an in-flight sync (`concurrent_modification` / materialization-tree divergence) as transient backoff rather than tripping `NeedsAttention`, preserving healthy warm `rclone` sessions while keeping true invariant/corruption errors fail-closed.
+  - Hardened native directory watcher error/restart handling and expanded daemon integration coverage (concurrent edits, two-daemon convergence/conflicts/deletes, `config.toml` hot-reload, CLI `fsck` contention, and in-flight cancel).
+- **Windows Credential Manager & Atomic File I/O Under Load**:
+  - Added verify-on-write and short retry loops on transient `ERROR_NOT_FOUND` in Windows Credential Manager (`write_vault` / `read_vault`) and expanded transient retry handling in atomic rename/copy operations under parallel load.
+
+### Changed
+
+- **CI & Release Build Optimization**:
+  - Added `KASUMI_ENABLE_IPO` CMake option (default `ON`), dropped redundant `Debug` builds across Ubuntu and Windows CI jobs, and disabled IPO for CI test targets while keeping full LTO/LTCG enabled for release binaries.
+
+### Upgrade Notes
+
+- 100% compatible with `v0.19.x`–`v0.27.1` encrypted repositories and local state (`KCOM` v4, `KACT` v1, `KPAK\x01`, `state.db` v2, `transaction.bin.enc`, and `config.toml`).
+
 ## [0.27.1]
 
 ### Changed
