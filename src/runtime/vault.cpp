@@ -396,50 +396,48 @@ struct SecretApi {
     PasswordFreeFn password_free = nullptr;
     ErrorFreeFn error_free = nullptr;
     bool loaded = false;
-
-    static const SecretApi& instance() noexcept {
-        static SecretApi api = []() {
-            SecretApi res;
-            void* handle = dlopen("libsecret-1.so.0", RTLD_LAZY | RTLD_LOCAL);
-            if (handle == nullptr) {
-                return res;
-            }
-            bool ok =
-                load_symbol(
-                    handle, "secret_password_store_sync", res.store_sync) &&
-                load_symbol(
-                    handle, "secret_password_lookup_sync", res.lookup_sync) &&
-                load_symbol(
-                    handle, "secret_password_clear_sync", res.clear_sync) &&
-                load_symbol(handle, "secret_password_free", res.password_free);
-            if (!load_symbol(handle, "g_error_free", res.error_free)) {
-                void* glib = dlopen("libglib-2.0.so.0", RTLD_LAZY | RTLD_LOCAL);
-                if (glib == nullptr ||
-                    !load_symbol(glib, "g_error_free", res.error_free)) {
-                    ok = false;
-                }
-            }
-            res.loaded = ok;
-            return res;
-        }();
-        return api;
-    }
-
-    static const SecretSchema* schema() noexcept {
-        static const SecretSchema kSchema{"io.github.kasumi.VaultKey",
-                                          0,
-                                          {{"target", 0}, {nullptr, 0}},
-                                          0,
-                                          nullptr,
-                                          nullptr,
-                                          nullptr,
-                                          nullptr,
-                                          nullptr,
-                                          nullptr,
-                                          nullptr};
-        return &kSchema;
-    }
 };
+
+const SecretApi& secret_api() noexcept {
+    static SecretApi api = []() {
+        SecretApi res;
+        void* handle = dlopen("libsecret-1.so.0", RTLD_LAZY | RTLD_LOCAL);
+        if (handle == nullptr) {
+            return res;
+        }
+        bool ok =
+            load_symbol(handle, "secret_password_store_sync", res.store_sync) &&
+            load_symbol(
+                handle, "secret_password_lookup_sync", res.lookup_sync) &&
+            load_symbol(handle, "secret_password_clear_sync", res.clear_sync) &&
+            load_symbol(handle, "secret_password_free", res.password_free);
+        if (!load_symbol(handle, "g_error_free", res.error_free)) {
+            void* glib = dlopen("libglib-2.0.so.0", RTLD_LAZY | RTLD_LOCAL);
+            if (glib == nullptr ||
+                !load_symbol(glib, "g_error_free", res.error_free)) {
+                ok = false;
+            }
+        }
+        res.loaded = ok;
+        return res;
+    }();
+    return api;
+}
+
+const SecretApi::SecretSchema* secret_schema() noexcept {
+    static const SecretApi::SecretSchema kSchema{"io.github.kasumi.VaultKey",
+                                                 0,
+                                                 {{"target", 0}, {nullptr, 0}},
+                                                 0,
+                                                 nullptr,
+                                                 nullptr,
+                                                 nullptr,
+                                                 nullptr,
+                                                 nullptr,
+                                                 nullptr,
+                                                 nullptr};
+    return &kSchema;
+}
 
 struct DbusApi {
     using dbus_bool_t = std::uint32_t;
@@ -505,53 +503,51 @@ struct DbusApi {
     ConnSendReplyFn conn_send_with_reply_and_block = nullptr;
     FreeStringArrayFn free_string_array = nullptr;
     bool loaded = false;
-
-    static const DbusApi& instance() noexcept {
-        static DbusApi api = []() {
-            DbusApi res;
-            void* handle = dlopen("libdbus-1.so.3", RTLD_LAZY | RTLD_LOCAL);
-            if (handle == nullptr) {
-                return res;
-            }
-            const bool ok =
-                load_symbol(handle,
-                            "dbus_threads_init_default",
-                            res.threads_init_default) &&
-                load_symbol(handle, "dbus_error_init", res.error_init) &&
-                load_symbol(handle, "dbus_error_free", res.error_free) &&
-                load_symbol(handle, "dbus_error_is_set", res.error_is_set) &&
-                load_symbol(handle, "dbus_bus_get", res.bus_get) &&
-                load_symbol(handle, "dbus_connection_unref", res.conn_unref) &&
-                load_symbol(handle,
-                            "dbus_connection_set_exit_on_disconnect",
-                            res.conn_set_exit_on_disconnect) &&
-                load_symbol(handle,
-                            "dbus_message_new_method_call",
-                            res.msg_new_method_call) &&
-                load_symbol(handle, "dbus_message_unref", res.msg_unref) &&
-                load_symbol(
-                    handle, "dbus_message_get_type", res.msg_get_type) &&
-                load_symbol(handle,
-                            "dbus_message_get_error_name",
-                            res.msg_get_error_name) &&
-                load_symbol(
-                    handle, "dbus_message_append_args", res.msg_append_args) &&
-                load_symbol(
-                    handle, "dbus_message_get_args", res.msg_get_args) &&
-                load_symbol(handle,
-                            "dbus_connection_send_with_reply_and_block",
-                            res.conn_send_with_reply_and_block) &&
-                load_symbol(
-                    handle, "dbus_free_string_array", res.free_string_array);
-            if (ok) {
-                res.threads_init_default();
-                res.loaded = true;
-            }
-            return res;
-        }();
-        return api;
-    }
 };
+
+const DbusApi& dbus_api() noexcept {
+    static DbusApi api = []() {
+        DbusApi res;
+        void* handle = dlopen("libdbus-1.so.3", RTLD_LAZY | RTLD_LOCAL);
+        if (handle == nullptr) {
+            return res;
+        }
+        const bool ok =
+            load_symbol(handle,
+                        "dbus_threads_init_default",
+                        res.threads_init_default) &&
+            load_symbol(handle, "dbus_error_init", res.error_init) &&
+            load_symbol(handle, "dbus_error_free", res.error_free) &&
+            load_symbol(handle, "dbus_error_is_set", res.error_is_set) &&
+            load_symbol(handle, "dbus_bus_get", res.bus_get) &&
+            load_symbol(handle, "dbus_connection_unref", res.conn_unref) &&
+            load_symbol(handle,
+                        "dbus_connection_set_exit_on_disconnect",
+                        res.conn_set_exit_on_disconnect) &&
+            load_symbol(handle,
+                        "dbus_message_new_method_call",
+                        res.msg_new_method_call) &&
+            load_symbol(handle, "dbus_message_unref", res.msg_unref) &&
+            load_symbol(handle, "dbus_message_get_type", res.msg_get_type) &&
+            load_symbol(handle,
+                        "dbus_message_get_error_name",
+                        res.msg_get_error_name) &&
+            load_symbol(
+                handle, "dbus_message_append_args", res.msg_append_args) &&
+            load_symbol(handle, "dbus_message_get_args", res.msg_get_args) &&
+            load_symbol(handle,
+                        "dbus_connection_send_with_reply_and_block",
+                        res.conn_send_with_reply_and_block) &&
+            load_symbol(
+                handle, "dbus_free_string_array", res.free_string_array);
+        if (ok) {
+            res.threads_init_default();
+            res.loaded = true;
+        }
+        return res;
+    }();
+    return api;
+}
 
 struct DbusErrorGuard {
     const DbusApi& dbus;
@@ -562,11 +558,13 @@ struct DbusErrorGuard {
     ~DbusErrorGuard() noexcept {
         dbus.error_free(&err);
     }
-    std::string message(std::string_view fallback) const {
-        return err.message != nullptr ? std::string{err.message}
-                                      : std::string{fallback};
-    }
 };
+
+std::string dbus_error_message(const DbusErrorGuard& guard,
+                               std::string_view fallback) {
+    return guard.err.message != nullptr ? std::string{guard.err.message}
+                                        : std::string{fallback};
+}
 
 struct DbusMsgGuard {
     const DbusApi& dbus;
@@ -597,8 +595,9 @@ connect_session_dbus(const DbusApi& dbus, ErrorCode err_code) {
     DbusApi::DbusConnection* conn =
         dbus.bus_get(DbusApi::kBusSession, &err.err);
     if (conn == nullptr || dbus.error_is_set(&err.err) != 0) {
-        return fail(err_code,
-                    err.message("failed to connect to D-Bus session bus"));
+        return fail(
+            err_code,
+            dbus_error_message(err, "failed to connect to D-Bus session bus"));
     }
     dbus.conn_set_exit_on_disconnect(conn, 0);
     return conn;
@@ -629,8 +628,8 @@ dbus_call(const DbusApi& dbus,
         if (reply != nullptr) {
             dbus.msg_unref(reply);
         }
-        return std::unexpected(
-            err.message(std::string{"D-Bus call failed: "} + method));
+        return std::unexpected(dbus_error_message(
+            err, std::string{"D-Bus call failed: "} + method));
     }
     if (dbus.msg_get_type(reply) == DbusApi::kMessageTypeError) {
         const char* ename = dbus.msg_get_error_name(reply);
@@ -934,7 +933,7 @@ kwallet_check_bool(const DbusApi& dbus,
 
 std::expected<KeyBytes, runtime::Error>
 kwallet_read(const std::string& target) {
-    const auto& dbus = DbusApi::instance();
+    const auto& dbus = dbus_api();
     auto conn_res = connect_session_dbus(dbus, ErrorCode::KeyNotFound);
     if (!conn_res) {
         return std::unexpected(conn_res.error());
@@ -1026,7 +1025,7 @@ kwallet_read(const std::string& target) {
 
 std::expected<void, runtime::Error> kwallet_write(const std::string& target,
                                                   const KeyBytes& clear_key) {
-    const auto& dbus = DbusApi::instance();
+    const auto& dbus = dbus_api();
     auto conn_res = connect_session_dbus(dbus, ErrorCode::KeyWriteFailure);
     if (!conn_res) {
         return std::unexpected(conn_res.error());
@@ -1129,7 +1128,7 @@ std::expected<void, runtime::Error> kwallet_write(const std::string& target,
 }
 
 std::expected<void, runtime::Error> kwallet_delete(const std::string& target) {
-    const auto& dbus = DbusApi::instance();
+    const auto& dbus = dbus_api();
     auto conn_res = connect_session_dbus(dbus, ErrorCode::IoFailure);
     if (!conn_res) {
         return std::unexpected(conn_res.error());
@@ -1224,13 +1223,13 @@ std::expected<void, runtime::Error> kwallet_delete(const std::string& target) {
 
 std::expected<KeyBytes, runtime::Error>
 secret_service_read(const std::string& target) {
-    const auto& secret = SecretApi::instance();
+    const auto& secret = secret_api();
     if (!secret.loaded) {
         return fail(ErrorCode::KeyNotFound,
                     "libsecret-1.so.0 is not available on this system");
     }
     SecretApi::GError* err = nullptr;
-    char* raw = secret.lookup_sync(SecretApi::schema(),
+    char* raw = secret.lookup_sync(secret_schema(),
                                    nullptr,
                                    &err,
                                    "target",
@@ -1260,7 +1259,7 @@ secret_service_read(const std::string& target) {
 
 std::expected<void, runtime::Error>
 secret_service_write(const std::string& target, const KeyBytes& clear_key) {
-    const auto& secret = SecretApi::instance();
+    const auto& secret = secret_api();
     if (!secret.loaded) {
         return fail(ErrorCode::KeyWriteFailure,
                     "libsecret-1.so.0 is not available on this system");
@@ -1268,7 +1267,7 @@ secret_service_write(const std::string& target, const KeyBytes& clear_key) {
     std::string hex = encode_obscured_hex(clear_key);
     StringWiper wiper{hex};
     SecretApi::GError* err = nullptr;
-    const int stored = secret.store_sync(SecretApi::schema(),
+    const int stored = secret.store_sync(secret_schema(),
                                          "default",
                                          target.c_str(),
                                          hex.c_str(),
@@ -1292,12 +1291,12 @@ secret_service_write(const std::string& target, const KeyBytes& clear_key) {
 
 std::expected<void, runtime::Error>
 secret_service_delete(const std::string& target) {
-    const auto& secret = SecretApi::instance();
+    const auto& secret = secret_api();
     if (!secret.loaded) {
         return {};
     }
     SecretApi::GError* err = nullptr;
-    static_cast<void>(secret.clear_sync(SecretApi::schema(),
+    static_cast<void>(secret.clear_sync(secret_schema(),
                                         nullptr,
                                         &err,
                                         "target",
@@ -1342,9 +1341,9 @@ LinuxBackend select_linux_backend(std::string& reason) {
         }
     }
 
-    const auto& dbus = DbusApi::instance();
+    const auto& dbus = dbus_api();
     if (!dbus.loaded) {
-        if (SecretApi::instance().loaded) {
+        if (secret_api().loaded) {
             return LinuxBackend::SecretService;
         }
         reason = "neither libdbus-1.so.3 nor libsecret-1.so.0 is available";
@@ -1359,7 +1358,7 @@ LinuxBackend select_linux_backend(std::string& reason) {
     DbusConnGuard conn{dbus, *conn_res};
 
     const bool prefer_kde = desktop_prefers_kde();
-    const bool secret_loaded = SecretApi::instance().loaded;
+    const bool secret_loaded = secret_api().loaded;
     const bool secret_owned =
         secret_loaded &&
         dbus_name_has_owner(dbus, conn.conn, "org.freedesktop.secrets");

@@ -569,6 +569,14 @@ void destroy_local_state(void* context) noexcept {
     delete static_cast<State*>(context);
 }
 
+Result local_health_check(void* context) {
+    auto state = ready_local(context);
+    if (!state) {
+        return std::unexpected(state.error());
+    }
+    return validate_destination((*state)->root);
+}
+
 } // namespace
 
 StorageOperations make_storage_operations() noexcept {
@@ -581,6 +589,7 @@ StorageOperations make_storage_operations() noexcept {
         .list_metadata = local_list_metadata,
         .list_prefix = local_list_prefix,
         .remove = local_remove,
+        .health_check = local_health_check,
         .put_with_progress = local_put_progress,
         .get_with_progress = local_get_progress,
     };

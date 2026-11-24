@@ -453,6 +453,10 @@ json serialize_execution_summary(
         {"summary_c", e.summary_c},
         {"summary_bytes", e.summary_bytes},
         {"flags", e.flags},
+        {"origin",
+         (e.flags & application::profile_execution_flag_origin_daemon) != 0U
+             ? "daemon"
+             : "cli"},
         {"remote_publish_state", remote_publish_name(e.remote_publish_state)},
     };
     if (e.finished_at.has_value()) {
@@ -482,15 +486,16 @@ profile_local_state_name(application::ProfileLocalState state) noexcept {
 
 } // namespace
 
-ScopedJsonLogFile::ScopedJsonLogFile(std::optional<std::filesystem::path> path)
-    : path_(std::move(path)), previous_(g_json_log_file) {
-    if (path_.has_value()) {
-        g_json_log_file = &*path_;
+ScopedJsonLogFile::ScopedJsonLogFile(
+    std::optional<std::filesystem::path> log_path)
+    : path(std::move(log_path)), previous(g_json_log_file) {
+    if (path.has_value()) {
+        g_json_log_file = &*path;
     }
 }
 
 ScopedJsonLogFile::~ScopedJsonLogFile() noexcept {
-    g_json_log_file = previous_;
+    g_json_log_file = previous;
 }
 
 int present_json_io_error(std::string_view command,
@@ -514,6 +519,33 @@ json_error_code(const application::InspectionError& error) noexcept {
 
 std::string_view json_error_code(application::ProfileErrorCode code) noexcept {
     return profile_error_code_string(code);
+}
+
+std::string_view json_error_code(application::DaemonErrorCode code) noexcept {
+    using C = application::DaemonErrorCode;
+    switch (code) {
+        case C::AlreadyRunning:
+            return "daemon_already_running";
+        case C::NotRunning:
+            return "daemon_not_running";
+        case C::ProfileNotFound:
+            return "profile_not_found";
+        case C::InvalidCredential:
+            return "credentials_invalid";
+        case C::LockBusy:
+            return "lock_busy";
+        case C::IpcFailure:
+            return "ipc_failure";
+        case C::ConfigFailure:
+            return "config_failure";
+        case C::StorageFailure:
+            return "storage_failure";
+        case C::Unsupported:
+            return "unsupported";
+        case C::Timeout:
+            return "timeout";
+    }
+    return "daemon_error";
 }
 
 int present_json_parse_error(std::string_view command,
@@ -542,17 +574,35 @@ int present_json_list(const std::vector<application::Profile>& profiles) {
     return 0;
 }
 
-int present_json_show(const application::Profile& profile,
-                      application::ProfileLocalState state,
-                      application::ProfileLocalProblem problem,
-                      const application::ProfileActivityReport& activity,
-                      bool full) {
+int present_json_show(
+    const application::Profile& profile,
+    application::ProfileLocalState state,
+    application::ProfileLocalProblem problem,
+    const application::ProfileActivityReport& activity,
+    bool full,
+    const std::optional<application::DaemonProfileStatus>& daemon_profile) {
     auto doc = make_envelope("show", profile.name, true, 0, std::nullopt);
     const std::string_view state_str = profile_local_state_name(state);
     const bool lock_active = state == application::ProfileLocalState::Running;
     const auto active_op = lock_active
                                ? application::active_profile_operation(activity)
                                : std::nullopt;
+    json daemon_json = nullptr;
+    if (daemon_profile.has_value()) {
+        daemon_json = json{
+            {"state", application::to_string(daemon_profile->state)},
+            {"active_stage", daemon_profile->active_stage},
+            {"watcher_active", daemon_profile->watcher_active},
+            {"watcher_degraded", daemon_profile->watcher_degraded},
+            {"dirty_paths_count", daemon_profile->dirty_paths_count},
+            {"paused", daemon_profile->paused},
+            {"locked", daemon_profile->locked},
+            {"warm_transport_active", daemon_profile->warm_transport_active},
+            {"sync_runs", daemon_profile->sync_runs},
+            {"gc_runs", daemon_profile->gc_runs},
+            {"last_error", daemon_profile->last_error},
+        };
+    }
 
     json data{
         {"name", profile.name},
@@ -575,6 +625,16 @@ int present_json_show(const application::Profile& profile,
          profile.rclone_config
              ? json(platform::path::to_utf8(*profile.rclone_config))
              : json(nullptr)},
+        {"watch_enabled",
+         profile.watch_enabled ? json(*profile.watch_enabled) : json(nullptr)},
+        {"sync_interval_seconds",
+         profile.sync_interval_seconds ? json(*profile.sync_interval_seconds)
+                                       : json(nullptr)},
+        {"gc_interval_hours",
+         profile.gc_interval_hours ? json(*profile.gc_interval_hours)
+                                   : json(nullptr)},
+        {"paused", profile.paused},
+        {"daemon", std::move(daemon_json)},
         {"database_present", activity.database_present},
     };
     if (activity.database_present) {
@@ -692,6 +752,11 @@ int present_json_diagnostics(const application::DiagnosticsReport& report,
             {"ignore_error_detail",
              item.ignore_error_detail.empty() ? json(nullptr)
                                               : json(item.ignore_error_detail)},
+            {"daemon_state",
+             item.daemon_state ? json(*item.daemon_state) : json(nullptr)},
+            {"daemon_active_stage", item.daemon_active_stage},
+            {"daemon_watcher_active", item.daemon_watcher_active},
+            {"daemon_error", item.daemon_error},
             {"healthy", item.healthy},
             {"detail", item.detail},
             {"last_attempt",
@@ -719,6 +784,18 @@ int present_json_diagnostics(const application::DiagnosticsReport& report,
          report.app_data_free_bytes ? json(*report.app_data_free_bytes)
                                     : json(nullptr)},
         {"rclone", std::move(rclone)},
+        {"daemon",
+         json{
+             {"running", report.daemon.running},
+             {"pid", report.daemon.pid},
+             {"ipc_port", report.daemon.ipc_port},
+             {"control_metadata_valid", report.daemon.control_metadata_valid},
+             {"secure_pages_locked", report.daemon.secure_pages_locked},
+             {"autostart_supported", report.daemon.autostart_supported},
+             {"autostart_installed", report.daemon.autostart_installed},
+             {"autostart_method", report.daemon.autostart_method},
+             {"detail", report.daemon.detail},
+         }},
         {"profiles", std::move(profiles)},
         {"overall_ok", report.overall_ok},
     };
@@ -825,6 +902,17 @@ int present_json_profile_action(std::string_view command,
              profile->rclone_config
                  ? json(platform::path::to_utf8(*profile->rclone_config))
                  : json(nullptr)},
+            {"watch_enabled",
+             profile->watch_enabled ? json(*profile->watch_enabled)
+                                    : json(nullptr)},
+            {"sync_interval_seconds",
+             profile->sync_interval_seconds
+                 ? json(*profile->sync_interval_seconds)
+                 : json(nullptr)},
+            {"gc_interval_hours",
+             profile->gc_interval_hours ? json(*profile->gc_interval_hours)
+                                        : json(nullptr)},
+            {"paused", profile->paused},
         };
     }
     doc["data"] = std::move(data);
@@ -1455,6 +1543,213 @@ int present_json(std::string_view profile_name,
                            profile_name,
                            1,
                            inspection_error_code_string(error),
+                           error.detail,
+                           duration);
+}
+
+namespace {
+
+json serialize_daemon_autostart(const application::DaemonAutostartStatus& s) {
+    return json{
+        {"supported", s.supported},
+        {"installed", s.installed},
+        {"systemd_enabled", s.systemd_enabled},
+        {"method", s.method},
+        {"location", s.location},
+        {"command", s.command},
+        {"detail", s.detail},
+    };
+}
+
+} // namespace
+
+int present_json_daemon_status(std::string_view command,
+                               const application::DaemonStatusReport& report,
+                               std::chrono::nanoseconds duration,
+                               std::optional<std::string_view> profile_name) {
+    auto doc = make_envelope(
+        command, profile_name.value_or(std::string_view{}), true, 0, duration);
+    json profiles = json::array();
+    for (const auto& p : report.profiles) {
+        profiles.push_back(json{
+            {"name", p.name},
+            {"local_dir", p.local_dir},
+            {"remote_dir", p.remote_dir},
+            {"key_storage", application::to_string(p.key_storage)},
+            {"state", application::to_string(p.state)},
+            {"paused", p.paused},
+            {"locked", p.locked},
+            {"watch_enabled", p.watch_enabled},
+            {"watcher_active", p.watcher_active},
+            {"watcher_degraded", p.watcher_degraded},
+            {"dirty_paths_count", p.dirty_paths_count},
+            {"warm_transport_active", p.warm_transport_active},
+            {"warm_cache_entries", p.warm_cache_entries},
+            {"sync_interval_seconds", p.sync_interval_seconds},
+            {"gc_interval_hours", p.gc_interval_hours},
+            {"active_stage", p.active_stage},
+            {"active_objects", p.active_objects},
+            {"active_total_objects",
+             p.active_total_objects ? json(*p.active_total_objects)
+                                    : json(nullptr)},
+            {"active_bytes", p.active_bytes},
+            {"active_total_bytes",
+             p.active_total_bytes ? json(*p.active_total_bytes)
+                                  : json(nullptr)},
+            {"last_sync_started_at",
+             p.last_sync_started_at ? json(*p.last_sync_started_at)
+                                    : json(nullptr)},
+            {"last_sync_finished_at",
+             p.last_sync_finished_at ? json(*p.last_sync_finished_at)
+                                     : json(nullptr)},
+            {"last_checked_at",
+             p.last_checked_at ? json(*p.last_checked_at) : json(nullptr)},
+            {"next_sync_at",
+             p.next_sync_at ? json(*p.next_sync_at) : json(nullptr)},
+            {"next_gc_at", p.next_gc_at ? json(*p.next_gc_at) : json(nullptr)},
+            {"backoff_seconds", p.backoff_seconds},
+            {"backoff_until_unix",
+             p.backoff_until_unix ? json(*p.backoff_until_unix)
+                                  : json(nullptr)},
+            {"consecutive_failures", p.consecutive_failures},
+            {"sync_runs", p.sync_runs},
+            {"fast_noop_polls", p.fast_noop_polls},
+            {"gc_runs", p.gc_runs},
+            {"last_outcome", p.last_outcome},
+            {"last_error", p.last_error},
+        });
+    }
+    doc["data"] = json{
+        {"summary", format_compact_summary(report)},
+        {"api_version", report.api_version},
+        {"kasumi_version", report.kasumi_version},
+        {"running", report.running},
+        {"pid", report.pid},
+        {"started_at_unix", report.started_at_unix},
+        {"uptime_seconds", report.uptime_seconds},
+        {"ipc_port", report.ipc_port},
+        {"secure_pages_locked", report.secure_pages_locked},
+        {"autostart", serialize_daemon_autostart(report.autostart)},
+        {"profiles", std::move(profiles)},
+    };
+    emit_json(doc);
+    return 0;
+}
+
+int present_json_daemon_sync(const application::DaemonSyncTriggerReport& report,
+                             std::optional<std::string_view> profile_name,
+                             bool wait,
+                             std::chrono::nanoseconds duration) {
+    const bool ok = report.failures.empty();
+    const int code = ok ? 0 : 1;
+    auto doc = make_envelope("daemon sync",
+                             profile_name.value_or(std::string_view{}),
+                             ok,
+                             code,
+                             duration);
+    json failures = json::array();
+    for (const auto& [pname, err] : report.failures) {
+        failures.push_back(json{{"profile", pname}, {"detail", err}});
+    }
+    doc["data"] = json{
+        {"summary",
+         std::format("profiles={}, completed={}, failures={}",
+                     report.profiles.size(),
+                     report.completed ? "yes" : "no",
+                     report.failures.size())},
+        {"wait", wait},
+        {"completed", report.completed},
+        {"profiles", report.profiles},
+        {"failures", std::move(failures)},
+    };
+    if (!ok) {
+        doc["error"] = json{
+            {"code", "sync_failed"},
+            {"message", report.failures.front().second},
+        };
+    }
+    emit_json(doc);
+    return code;
+}
+
+int present_json_daemon_autostart(
+    std::string_view command,
+    const application::DaemonAutostartStatus& status,
+    std::chrono::nanoseconds duration) {
+    auto doc = make_envelope(command, {}, true, 0, duration);
+    auto data = serialize_daemon_autostart(status);
+    data["summary"] = format_compact_summary(status);
+    doc["data"] = std::move(data);
+    emit_json(doc);
+    return 0;
+}
+
+int present_json_daemon_action(std::string_view command,
+                               std::string_view profile_name,
+                               std::string_view summary,
+                               std::chrono::nanoseconds duration) {
+    auto doc = make_envelope(command, profile_name, true, 0, duration);
+    doc["data"] = json{
+        {"summary", summary},
+    };
+    emit_json(doc);
+    return 0;
+}
+
+int present_json_daemon_logs(const application::DaemonLogsReport& report,
+                             std::optional<std::string_view> profile_name,
+                             std::chrono::nanoseconds duration) {
+    auto doc = make_envelope("daemon logs",
+                             profile_name.value_or(std::string_view{}),
+                             true,
+                             0,
+                             duration);
+    json events = json::array();
+    for (const auto& ev : report.events) {
+        events.push_back(json{
+            {"seq", ev.seq},
+            {"timestamp_unix", ev.timestamp_unix},
+            {"profile", ev.profile_name},
+            {"kind", ev.kind},
+            {"detail", ev.detail},
+        });
+    }
+    doc["data"] = json{
+        {"summary",
+         std::format("events={}, latest_seq={}",
+                     report.events.size(),
+                     report.latest_seq)},
+        {"log_path", report.log_path},
+        {"latest_seq", report.latest_seq},
+        {"events", std::move(events)},
+    };
+    emit_json(doc);
+    return 0;
+}
+
+void append_json_daemon_event(const std::filesystem::path& path,
+                              const application::DaemonEvent& event) {
+    auto doc =
+        make_envelope("daemon run", event.profile_name, true, 0, std::nullopt);
+    doc["event"] = json{
+        {"seq", event.seq},
+        {"timestamp_unix", event.timestamp_unix},
+        {"profile", event.profile_name},
+        {"kind", event.kind},
+        {"detail", event.detail},
+    };
+    (void)append_log_line(
+        path, doc.dump(-1, ' ', false, json::error_handler_t::replace));
+}
+
+int present_json_daemon_error(std::string_view command,
+                              std::string_view profile_name,
+                              const application::DaemonError& error,
+                              std::chrono::nanoseconds duration) {
+    return emit_json_error(command,
+                           profile_name,
+                           1,
+                           json_error_code(error.code),
                            error.detail,
                            duration);
 }

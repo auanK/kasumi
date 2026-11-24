@@ -283,12 +283,14 @@ mutation::MutationResult detail::apply_chunked_download(
 
                 if (!fetch.empty()) {
                     if (meter)
-                        meter->phase(Activity::Downloading,
-                                     fetch.size(),
-                                     0,
-                                     window.size() == entry.chunks.size()
-                                         ? &operation.path
-                                         : nullptr);
+                        begin_progress_phase(*meter,
+                                             Activity::Downloading,
+                                             fetch.size(),
+                                             0,
+                                             window.size() ==
+                                                     entry.chunks.size()
+                                                 ? &operation.path
+                                                 : nullptr);
                     batch_fetch_objects(
                         storage, session.chunk_dl_dir, ids, parallelism);
                     if (platform::cancellation::requested()) {
@@ -351,7 +353,8 @@ mutation::MutationResult detail::apply_chunked_download(
                 }
 
                 if (meter)
-                    meter->phase(Activity::Installing, window.size());
+                    begin_progress_phase(
+                        *meter, Activity::Installing, window.size());
                 mutation_fault_test::hit("fastcdc_chunks_ready",
                                          session.chunk_dl_dir);
                 for (const auto& chunk : window) {
@@ -366,7 +369,7 @@ mutation::MutationResult detail::apply_chunked_download(
                                 "staged");
                         }
                         if (meter)
-                            ProgressMeter::add(meter->bytes_reused, chunk.size);
+                            progress_add(meter->bytes_reused, chunk.size);
                     } else if (const auto cur_it =
                                    current_file_slices.find(chunk.hash);
                                cur_it != current_file_slices.end()) {
@@ -432,7 +435,7 @@ mutation::MutationResult detail::apply_chunked_download(
                     });
                     offset += chunk.size;
                     if (meter)
-                        ProgressMeter::add(meter->work);
+                        progress_add(meter->work);
                 }
             }
 
@@ -487,7 +490,7 @@ detail::apply_packed_downloads(
     const CheckpointCallback& checkpoint,
     const AppliedOpsCallback& on_applied,
     ProgressMeter* meter) {
-    if (manifest.empty() || op_indices.empty()) {
+    if (history::is_storage_manifest_empty(manifest) || op_indices.empty()) {
         return std::optional<mutation::MutationError>{};
     }
 
@@ -572,7 +575,7 @@ detail::apply_packed_downloads(
             ids.push_back(p.identifier);
         }
         if (meter) {
-            meter->phase(Activity::Downloading, ids.size());
+            begin_progress_phase(*meter, Activity::Downloading, ids.size());
         }
         const bool batch_ok =
             batch_fetch_objects(storage, dl_dir, ids, concurrency);
@@ -586,7 +589,7 @@ detail::apply_packed_downloads(
                     first_op)};
         }
         if (meter && batch_ok) {
-            meter->phase(Activity::Installing, window.size());
+            begin_progress_phase(*meter, Activity::Installing, window.size());
         }
 
         std::vector<std::optional<mutation::MutationError>> errors(
@@ -648,9 +651,10 @@ detail::apply_packed_downloads(
                 for (const auto op_idx : job.op_indices) {
                     const auto& op = record.plan.operations[op_idx];
                     const auto blob_hash = hash_from_hex(op.hash);
-                    const auto member = blob_hash
-                                            ? verified->member_bytes(*blob_hash)
-                                            : std::nullopt;
+                    const auto member =
+                        blob_hash ? crypto::pack::find_verified_pack_member(
+                                        *verified, *blob_hash)
+                                  : std::nullopt;
                     if (!member) {
                         errors[i] = mutation::detail::make_error(
                             mutation::MutationErrorCode::IntegrityMismatch,
@@ -679,7 +683,7 @@ detail::apply_packed_downloads(
                     installed[i].push_back(op_idx);
                 }
                 if (meter && batch_ok) {
-                    ProgressMeter::add(meter->work);
+                    progress_add(meter->work);
                 }
             });
 

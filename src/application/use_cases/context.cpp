@@ -1,6 +1,7 @@
 #include "application/use_cases/context.hpp"
 
 #include "application/concurrency.hpp"
+#include "application/daemon.hpp"
 #include "application/detail.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
@@ -27,7 +28,8 @@
 namespace kasumi::application::detail {
 
 std::expected<void, Error> prepare_operation(const ExecutionInput& input,
-                                             OperationContext& output) {
+                                             OperationContext& output,
+                                             const WarmExecutionContext* warm) {
     wipe_operation(output);
     const auto operation = input.request.operation;
     output.operation = operation;
@@ -188,11 +190,38 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         const bool is_lock_busy =
             lock_detail == "profile is already in use by another execution";
         if (is_lock_busy) {
-            if (const auto active_op =
-                    active_profile_operation(inspect_profile_activity(
-                        input.environment, input.request.profile_name))) {
-                lock_detail =
-                    std::format("{} (running {})", lock_detail, *active_op);
+            bool enriched_by_daemon = false;
+            if (is_daemon_running(input.environment)) {
+                if (const auto st = query_daemon_status(
+                        input.environment, input.request.profile_name);
+                    st && st->running && !st->profiles.empty()) {
+                    const auto& dp = st->profiles.front();
+                    if (dp.state == DaemonProfileState::RunningSync ||
+                        dp.state == DaemonProfileState::RunningGc) {
+                        enriched_by_daemon = true;
+                        if (!dp.active_stage.empty()) {
+                            lock_detail =
+                                std::format("{} (daemon PID {}: {} - {})",
+                                            lock_detail,
+                                            st->pid,
+                                            to_string(dp.state),
+                                            dp.active_stage);
+                        } else {
+                            lock_detail = std::format("{} (daemon PID {}: {})",
+                                                      lock_detail,
+                                                      st->pid,
+                                                      to_string(dp.state));
+                        }
+                    }
+                }
+            }
+            if (!enriched_by_daemon) {
+                if (const auto active_op =
+                        active_profile_operation(inspect_profile_activity(
+                            input.environment, input.request.profile_name))) {
+                    lock_detail =
+                        std::format("{} (running {})", lock_detail, *active_op);
+                }
             }
         }
         const auto summary = output.summary;
@@ -206,6 +235,9 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         });
     }
     output.profile_lock = *profile_lock;
+    if (warm != nullptr && warm->on_lock_acquired) {
+        warm->on_lock_acquired();
+    }
 
     if (guard_missing_local_root) {
         std::error_code local_ec;
@@ -393,15 +425,21 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         return std::unexpected(key.error());
     }
 
-    auto opened_storage = transport::open_transport(
-        runtime_data->storage_location,
-        transport::TransportOptions{
-            .forbidden_executable_root = runtime_data->local_dir,
-            .rclone_config = runtime_data->rclone_config,
-            .bandwidth_limit = input.request.bandwidth_limit
-                                   ? input.request.bandwidth_limit
-                                   : runtime_data->bandwidth_limit,
-        });
+    std::expected<transport::Transport, transport::Error> opened_storage =
+        (warm != nullptr && warm->borrowed_transport != nullptr &&
+         !input.request.initial && transport::valid(*warm->borrowed_transport))
+            ? std::expected<transport::Transport,
+                            transport::Error>{transport::borrow_transport(
+                  *warm->borrowed_transport)}
+            : transport::open_transport(
+                  runtime_data->storage_location,
+                  transport::TransportOptions{
+                      .forbidden_executable_root = runtime_data->local_dir,
+                      .rclone_config = runtime_data->rclone_config,
+                      .bandwidth_limit = input.request.bandwidth_limit
+                                             ? input.request.bandwidth_limit
+                                             : runtime_data->bandwidth_limit,
+                  });
     if (!opened_storage) {
         return fail(transport::describe(opened_storage.error()));
     }
@@ -446,6 +484,9 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     }
 
     output.storage = std::move(*opened_storage);
+    if (warm != nullptr) {
+        output.warm_observation = warm->warm_observation;
+    }
     return {};
 }
 
@@ -465,6 +506,7 @@ void wipe_operation(OperationContext& context) noexcept {
     context.maintenance_metric_secondary = 0;
     context.maintenance_flags = 0;
     context.gc_kept_activities.clear();
+    context.warm_observation = nullptr;
     platform::release_profile_lock(context.profile_lock);
 }
 

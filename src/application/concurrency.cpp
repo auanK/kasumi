@@ -63,7 +63,7 @@ std::optional<std::size_t> current_content_concurrency_override() noexcept {
 
 ScopedContentConcurrency::ScopedContentConcurrency(
     std::optional<std::size_t> override_value) noexcept
-    : previous_(std::exchange(
+    : previous(std::exchange(
           thread_concurrency_override,
           (override_value && *override_value > 0)
               ? std::optional<std::size_t>{clamp_concurrency(*override_value)}
@@ -71,7 +71,7 @@ ScopedContentConcurrency::ScopedContentConcurrency(
 }
 
 ScopedContentConcurrency::~ScopedContentConcurrency() noexcept {
-    thread_concurrency_override = previous_;
+    thread_concurrency_override = previous;
 }
 
 } // namespace kasumi::application

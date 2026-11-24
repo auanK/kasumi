@@ -291,8 +291,8 @@ std::expected<void, Error> observe_content_availability(
                              requested_physical.end());
 
     if (meter) {
-        meter->phase(Activity::CheckingRemoteContent,
-                     requested_physical.size());
+        begin_progress_phase(
+            *meter, Activity::CheckingRemoteContent, requested_physical.size());
     }
     std::vector<transport::Presence> presences;
     bool probed = false;
@@ -354,7 +354,7 @@ std::expected<void, Error> observe_content_availability(
             }
             presences.push_back(*observed);
             if (meter) {
-                ProgressMeter::add(meter->work);
+                progress_add(meter->work);
             }
         }
     }
@@ -374,7 +374,8 @@ std::expected<void, Error> observe_content_availability(
     HashSet absent_packs{0, hash_key};
     missing.reserve(logical_probes.size());
     if (meter) {
-        meter->phase(Activity::Verifying, logical_probes.size());
+        begin_progress_phase(
+            *meter, Activity::Verifying, logical_probes.size());
     }
     for (std::size_t index = 0; index < logical_probes.size(); ++index) {
         if (meter) {
@@ -468,7 +469,8 @@ stage_attempt(const runtime::RuntimeData& runtime_data,
               std::vector<transaction::OperationProgress>& out_progress,
               ProgressMeter* meter) {
     if (meter) {
-        meter->phase(Activity::PreparingPlan, result.plan.operations.size());
+        begin_progress_phase(
+            *meter, Activity::PreparingPlan, result.plan.operations.size());
     }
     auto record = journal::create_record(
         input.local_generation,
@@ -693,7 +695,7 @@ refresh_content_availability(
         return std::unexpected(availability.error());
     }
     if (meter) {
-        meter->phase(Activity::ComparingSnapshots);
+        begin_progress_phase(*meter, Activity::ComparingSnapshots);
     }
     auto available_result = reconciliation::reconcile(input);
     if (!available_result) {
@@ -726,7 +728,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
         [&](reconciliation::Input& target,
             bool allow_reuse) -> std::expected<reconciliation::Result, Error> {
         if (meter) {
-            meter->phase(Activity::ComparingSnapshots);
+            begin_progress_phase(*meter, Activity::ComparingSnapshots);
         }
         auto recalculated = reconciliation::reconcile(target);
         if (!recalculated) {
@@ -776,7 +778,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
         std::size_t verification_pass = 0;
         while (true) {
             if (meter && result.requires_local_mutation) {
-                meter->phase(Activity::Verifying);
+                begin_progress_phase(*meter, Activity::Verifying);
             }
             auto verification = verify_destructive_local_operations(
                 runtime_data, input, result, session);
@@ -832,7 +834,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
         }
 
         if (meter) {
-            meter->phase(Activity::Scanning);
+            begin_progress_phase(*meter, Activity::Scanning);
         }
         auto observed = observation::collect_reconciliation_input(
             runtime_data,
@@ -865,7 +867,7 @@ stabilize(const runtime::RuntimeData& runtime_data,
         mutation_fault_test::hit("before_final_local_observation",
                                  runtime_data.local_dir);
         if (meter) {
-            meter->phase(Activity::Scanning);
+            begin_progress_phase(*meter, Activity::Scanning);
         }
         auto local_after_storage = observation::collect_local_observation(
             runtime_data.local_dir, session, observed->ignore_list);

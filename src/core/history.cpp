@@ -841,7 +841,7 @@ bool valid_storage_manifest(const StorageManifest& manifest,
             manifest.chunked_files.size() > maximum_chunked_file_entries) {
             return false;
         }
-        if (manifest.empty()) {
+        if (is_storage_manifest_empty(manifest)) {
             return true;
         }
 
@@ -986,7 +986,7 @@ filter_and_merge_storage_manifests(const Snapshot& tree,
                                    std::span<const StorageManifest> manifests) {
     StorageManifest merged;
     if (std::ranges::all_of(manifests, [](const auto& m) {
-            return m.empty();
+            return is_storage_manifest_empty(m);
         })) {
         return merged;
     }
@@ -1673,8 +1673,8 @@ resolve_impl(std::span<const LoadedCommit> commits,
             for (const auto& ancestor_id : ancestor_sets.at(head)) {
                 if (seen_manifest_commits.insert(ancestor_id).second) {
                     const auto it = index.find(ancestor_id);
-                    if (it != index.end() &&
-                        !it->second->commit.storage.empty()) {
+                    if (it != index.end() && !is_storage_manifest_empty(
+                                                 it->second->commit.storage)) {
                         candidate_manifests.push_back(
                             it->second->commit.storage);
                     }

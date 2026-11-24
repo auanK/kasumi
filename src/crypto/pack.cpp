@@ -455,7 +455,8 @@ decrypt_and_verify_pack(const std::filesystem::path& encrypted_path,
                 content::verify_file(out_path, hex, loaded->members[i].size)) {
                 continue;
             }
-            const auto slice = loaded->member_bytes(loaded->members[i].hash);
+            const auto slice =
+                find_verified_pack_member(*loaded, loaded->members[i].hash);
             if (!slice) {
                 return std::unexpected("invalid KPAK member slice bounds");
             }

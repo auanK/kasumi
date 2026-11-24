@@ -59,49 +59,8 @@ enum class SessionState : std::uint8_t {
     Retired
 };
 
-// Owned cache of authenticated disk state; callers can only observe it.
+// Owned cache of authenticated disk state; callers observe via free functions.
 struct Session {
-    Session() = default;
-    Session(const Session&) = delete;
-    Session& operator=(const Session&) = delete;
-
-    SessionState status() const noexcept {
-        return state;
-    }
-    const transaction::Record* confirmed() const noexcept {
-        return confirmed_record ? &*confirmed_record : nullptr;
-    }
-    std::string_view operation() const noexcept {
-        return operation_id;
-    }
-    std::uint64_t confirmed_bytes() const noexcept {
-        return tip_bytes;
-    }
-    std::uint64_t confirmed_count() const noexcept {
-        return tip_count;
-    }
-    bool is_valid() const noexcept {
-        return state == SessionState::Confirmed && confirmed_record.has_value();
-    }
-    void invalidate() noexcept {
-        if (state != SessionState::Retired)
-            state = SessionState::Invalid;
-        confirmed_record.reset();
-        tip_bytes = 0;
-        tip_count = 0;
-        tip_chain.fill(std::byte{});
-        tip_snapshot.fill(std::byte{});
-        snapshot_fingerprint.reset();
-        log_fingerprint.reset();
-    }
-
-private:
-    bool bound_to(const Paths& requested,
-                  const std::array<std::byte, 32>& key) const noexcept {
-        return paths.final_path == requested.final_path &&
-               paths.temporary_path == requested.temporary_path &&
-               paths.log_path == requested.log_path && key_identity == key;
-    }
     SessionState state = SessionState::Uninitialized;
     Paths paths{};
     std::string operation_id{};
@@ -115,22 +74,53 @@ private:
     std::optional<platform::FileFingerprint> log_fingerprint{};
     std::uint64_t snapshot_bytes = 0;
 
-    friend std::expected<void, std::string>
-    save(const Paths&,
-         const transaction::Record&,
-         std::span<const std::uint8_t, crypto::KEY_SIZE>,
-         SaveMode,
-         Session*);
-    friend std::expected<std::optional<transaction::Record>, std::string>
-    load(const Paths&,
-         std::span<const std::uint8_t, crypto::KEY_SIZE>,
-         Session*);
-    friend std::expected<void, std::string>
-    clear(const Paths&,
-          std::span<const std::uint8_t, crypto::KEY_SIZE>,
-          Session*);
-    friend struct SessionAccess;
+    Session() = default;
+    Session(const Session&) = delete;
+    Session& operator=(const Session&) = delete;
 };
+
+[[nodiscard]] inline SessionState
+session_status(const Session& session) noexcept {
+    return session.state;
+}
+
+[[nodiscard]] inline const transaction::Record*
+confirmed_record(const Session& session) noexcept {
+    return session.confirmed_record ? &*session.confirmed_record : nullptr;
+}
+
+[[nodiscard]] inline std::string_view
+session_operation(const Session& session) noexcept {
+    return session.operation_id;
+}
+
+[[nodiscard]] inline std::uint64_t
+confirmed_bytes(const Session& session) noexcept {
+    return session.tip_bytes;
+}
+
+[[nodiscard]] inline std::uint64_t
+confirmed_count(const Session& session) noexcept {
+    return session.tip_count;
+}
+
+[[nodiscard]] inline bool is_session_valid(const Session& session) noexcept {
+    return session.state == SessionState::Confirmed &&
+           session.confirmed_record.has_value();
+}
+
+inline void invalidate_session(Session& session) noexcept {
+    if (session.state != SessionState::Retired) {
+        session.state = SessionState::Invalid;
+    }
+    session.confirmed_record.reset();
+    session.tip_bytes = 0;
+    session.tip_count = 0;
+    session.tip_chain.fill(std::byte{});
+    session.tip_snapshot.fill(std::byte{});
+    session.snapshot_fingerprint.reset();
+    session.log_fingerprint.reset();
+}
 
 // Confirms an authenticated snapshot or incremental delta.
 // If session is provided and valid, executes fast-path delta persistence

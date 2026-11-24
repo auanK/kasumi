@@ -43,9 +43,10 @@ Machine C ───┘
 
 - **Multi-master sync & conflict tooling**: Independent clients reconcile via an immutable Commit DAG without a central server or global sync lock; conflicting edits are preserved, listed via `kasumi conflicts`, and resolved in-place via `kasumi conflicts resolve`, while older retained versions can be queried with `kasumi remote log` and restored individually or in bulk via `kasumi remote get/restore --commit <id>`.
 - **Adaptive encrypted storage**: Combines loose objects, `KPAK\x01` Micro-Packs (`<= 256 KiB`), and FastCDC chunking (`> 8 MiB`) with Zstandard compression, **XChaCha20-Poly1305** AEAD, Argon2id key derivation, and a persistent BLAKE3 hash cache.
-- **Flexible key storage (`vault`, `file`, `memory`)**: Persist derived keys in Windows Credential Manager / Linux Secret Service & KWallet, local `key.bin`, or stateless RAM-only derivation.
+- **Flexible key storage (`vault`, `file`, `memory`)**: Persist derived keys in Windows Credential Manager / Linux Secret Service & KWallet, local `key.bin`, or stateless RAM-only derivation (kept pinned in non-swappable OS memory pages while unlocked in `kasumi daemon`).
+- **Continuous multi-profile daemon (`kasumi daemon`)**: Native file watchers (`ReadDirectoryChangesW` / `inotify`) with debounce and self-mutation suppression, warm `rclone` transport sessions, zero-walk remote fast polling, scheduled GC, user-session autostart, and authenticated loopback IPC.
 - **Crash-resilient & auditable**: Encrypted local transaction journals safely recover interrupted runs; built-in `diagnostics`, `sync --repair`, `fsck`, `repack`, `resolve-missing`, and hardened `gc` (6h remote-clock-clamped grace period, `remote_busy` backoff, multi-barrier checks, periodic mid-`Apply` revalidation) keep vaults healthy.
-- **Automation-ready CLI**: Non-interactive `kasumi profile ...` lifecycle commands, `kasumi completion <shell>`, live terminal progress, `--json` (`schema_version: 1` with stable `error.code`), `--quiet`, `--log-file <path>` (text or NDJSON), and `--full`.
+- **Automation-ready CLI**: Non-interactive `kasumi profile ...` lifecycle commands, `kasumi daemon ...` service controls, `kasumi completion <shell>`, live terminal progress, `--json` (`schema_version: 1` with stable `error.code`), `--quiet`, `--log-file <path>` (text or NDJSON), and `--full`.
 
 ---
 
@@ -104,6 +105,7 @@ cmake --preset default && cmake --build --preset default
 |---|---|
 | `kasumi config` | Interactive wizard (with `rclone` remote hints) to manage profiles and key storage |
 | `kasumi profile <subcommand>` | Non-interactive profile management (`create [--verify]`, `edit`, `clone`, `storage`, `rename`, `delete`, `test`) |
+| `kasumi daemon <subcommand>` | Run and control the multi-profile background daemon (`run [--background]`, `stop`, `status`, `sync`, `pause`, `resume`, `unlock`, `lock`, `reload`, `autostart`) |
 | `kasumi key <profile>` | Save or `--replace` the profile key (supports `--json` and `--quiet`) |
 | `kasumi ignore <subcommand>` | Inspect `.kasumiignore` rule matches (`check`) or generate preset templates (`init`) |
 | `kasumi status <profile>` | Preview synchronization changes read-only (`sync --dry-run`) |

@@ -1605,15 +1605,18 @@ TEST(CryptoPackTest, LoadVerifiedPackReturnsAuthenticatedMemberSlices) {
         return std::string{reinterpret_cast<const char*>(bytes.data()),
                            bytes.size()};
     };
-    const auto slice_a = verified->member_bytes(hash_a);
+    const auto slice_a =
+        kasumi::crypto::pack::find_verified_pack_member(*verified, hash_a);
     ASSERT_TRUE(slice_a.has_value());
     EXPECT_EQ(to_string(*slice_a), content_a);
 
-    const auto slice_b = verified->member_bytes(hash_b);
+    const auto slice_b =
+        kasumi::crypto::pack::find_verified_pack_member(*verified, hash_b);
     ASSERT_TRUE(slice_b.has_value());
     EXPECT_EQ(to_string(*slice_b), content_b);
 
-    EXPECT_FALSE(verified->member_bytes(kasumi::hasher::hash_string("missing"))
+    EXPECT_FALSE(kasumi::crypto::pack::find_verified_pack_member(
+                     *verified, kasumi::hasher::hash_string("missing"))
                      .has_value());
 
     auto wrong_hash = encrypted->pack_hash;

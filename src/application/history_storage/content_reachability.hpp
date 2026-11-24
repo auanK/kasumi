@@ -27,10 +27,8 @@ struct ContentReference {
     std::string path;
     std::uint64_t size = 0;
 
-    friend bool operator==(const ContentReference&,
-                           const ContentReference&) noexcept = default;
-    friend auto operator<=>(const ContentReference&,
-                            const ContentReference&) noexcept = default;
+    bool operator==(const ContentReference&) const noexcept = default;
+    auto operator<=>(const ContentReference&) const noexcept = default;
 };
 
 // State and references of a content object.

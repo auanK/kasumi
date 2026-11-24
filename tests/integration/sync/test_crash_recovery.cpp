@@ -125,8 +125,7 @@ Transport make_counting_storage(CountingStorageState& state) {
     };
 }
 
-class CrashFixture {
-public:
+struct CrashFixture {
     CrashFixture()
         : workspace_(kasumi::test::make_temp_workspace("sync-gc-crash")),
           profile_(kasumi::test::workspace_path(workspace_, "profile")),
@@ -324,7 +323,6 @@ public:
         counting_state_.content_puts = 0;
     }
 
-private:
     kasumi::test::TempWorkspace workspace_;
     std::filesystem::path profile_;
     std::filesystem::path local_;
@@ -369,8 +367,7 @@ std::optional<std::wstring> environment_value(const wchar_t* name) {
     return value;
 }
 
-class ScopedEnvironment {
-public:
+struct ScopedEnvironment {
     bool set(const wchar_t* name, std::wstring value) {
         previous_.emplace_back(name, environment_value(name));
         return SetEnvironmentVariableW(name, value.c_str()) != 0;
@@ -383,7 +380,6 @@ public:
         }
     }
 
-private:
     std::vector<std::pair<std::wstring, std::optional<std::wstring>>> previous_;
 };
 

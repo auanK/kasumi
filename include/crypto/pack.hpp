@@ -129,6 +129,9 @@ struct VerifiedPackSlice {
     std::uint32_t size = 0;
 };
 
+struct VerifiedPack;
+inline void wipe_verified_pack(VerifiedPack& pack) noexcept;
+
 struct VerifiedPack {
     Hash pack_hash{};
     std::vector<PackMemberDescriptor> members;
@@ -141,7 +144,7 @@ struct VerifiedPack {
     VerifiedPack(VerifiedPack&&) noexcept = default;
     VerifiedPack& operator=(VerifiedPack&& other) noexcept {
         if (this != &other) {
-            wipe();
+            wipe_verified_pack(*this);
             pack_hash = other.pack_hash;
             members = std::move(other.members);
             plaintext = std::move(other.plaintext);
@@ -150,32 +153,35 @@ struct VerifiedPack {
         return *this;
     }
     ~VerifiedPack() noexcept {
-        wipe();
-    }
-
-    [[nodiscard]] std::optional<std::span<const std::uint8_t>>
-    member_bytes(const Hash& member_hash) const noexcept {
-        const auto it = std::ranges::lower_bound(
-            members, member_hash, {}, &PackMemberDescriptor::hash);
-        if (it == members.end() || it->hash != member_hash) {
-            return std::nullopt;
-        }
-        const auto index = static_cast<std::size_t>(it - members.begin());
-        if (index >= slices.size() || slices[index].offset > plaintext.size() ||
-            slices[index].size > plaintext.size() - slices[index].offset) {
-            return std::nullopt;
-        }
-        return std::span<const std::uint8_t>{
-            plaintext.data() + slices[index].offset, slices[index].size};
-    }
-
-private:
-    void wipe() noexcept {
-        if (!plaintext.empty()) {
-            secure_memory::wipe(plaintext.data(), plaintext.size());
-        }
+        wipe_verified_pack(*this);
     }
 };
+
+inline void wipe_verified_pack(VerifiedPack& pack) noexcept {
+    if (!pack.plaintext.empty()) {
+        secure_memory::wipe(pack.plaintext.data(), pack.plaintext.size());
+    }
+}
+
+[[nodiscard]] inline std::optional<std::span<const std::uint8_t>>
+find_verified_pack_member(const VerifiedPack& pack,
+                          const Hash& member_hash) noexcept {
+    const auto it = std::ranges::lower_bound(
+        pack.members, member_hash, {}, &PackMemberDescriptor::hash);
+    if (it == pack.members.end() || it->hash != member_hash) {
+        return std::nullopt;
+    }
+    const auto index = static_cast<std::size_t>(it - pack.members.begin());
+    if (index >= pack.slices.size() ||
+        pack.slices[index].offset > pack.plaintext.size() ||
+        pack.slices[index].size >
+            pack.plaintext.size() - pack.slices[index].offset) {
+        return std::nullopt;
+    }
+    return std::span<const std::uint8_t>{pack.plaintext.data() +
+                                             pack.slices[index].offset,
+                                         pack.slices[index].size};
+}
 
 // Parses, validates, and verifies an authenticated KPAK v1 plaintext buffer
 // (magic, version, strict member hash ordering, bounds, pack_hash, and member

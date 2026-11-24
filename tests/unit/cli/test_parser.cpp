@@ -776,5 +776,158 @@ TEST(CliParserTest, ParsesProfileConflictsAndCompletionCommands) {
     EXPECT_TRUE(ign_init_inv.dry_run);
     EXPECT_FALSE(
         parse({"ignore", "init", "net", "--preset", "bogus"}).has_value());
+
+    // Profile create/edit daemon automation options.
+    const auto p_auto = parse({"profile",
+                               "create",
+                               "auto_p",
+                               "--local",
+                               "/data/auto",
+                               "--remote",
+                               "drive:auto",
+                               "--watch",
+                               "off",
+                               "--sync-interval",
+                               "120",
+                               "--gc-interval",
+                               "12",
+                               "--paused",
+                               "on"});
+    ASSERT_TRUE(p_auto.has_value());
+    const auto& p_auto_inv = std::get<kasumi::cli::ProfileInvocation>(*p_auto);
+    EXPECT_EQ(p_auto_inv.watch_enabled, false);
+    EXPECT_EQ(p_auto_inv.sync_interval_seconds, 120U);
+    EXPECT_EQ(p_auto_inv.gc_interval_hours, 12U);
+    EXPECT_EQ(p_auto_inv.paused, true);
+
+    const auto p_edit_auto = parse({"profile",
+                                    "edit",
+                                    "auto_p",
+                                    "--clear-watch",
+                                    "--clear-sync-interval",
+                                    "--clear-gc-interval",
+                                    "--paused=off"});
+    ASSERT_TRUE(p_edit_auto.has_value());
+    const auto& p_edit_auto_inv =
+        std::get<kasumi::cli::ProfileInvocation>(*p_edit_auto);
+    EXPECT_TRUE(p_edit_auto_inv.clear_watch_enabled);
+    EXPECT_TRUE(p_edit_auto_inv.clear_sync_interval_seconds);
+    EXPECT_TRUE(p_edit_auto_inv.clear_gc_interval_hours);
+    EXPECT_EQ(p_edit_auto_inv.paused, false);
+
+    EXPECT_FALSE(parse({"profile",
+                        "create",
+                        "auto_p",
+                        "--local",
+                        "/data/auto",
+                        "--remote",
+                        "drive:auto",
+                        "--sync-interval",
+                        "5"})
+                     .has_value());
+    EXPECT_FALSE(
+        parse({"profile", "edit", "auto_p", "--watch", "on", "--clear-watch"})
+            .has_value());
+
+    // Daemon subcommands.
+    const auto d_run = parse({"daemon", "run", "--background"});
+    ASSERT_TRUE(d_run.has_value());
+    EXPECT_EQ(std::get<kasumi::cli::DaemonInvocation>(*d_run).action,
+              kasumi::cli::DaemonAction::Run);
+    EXPECT_TRUE(std::get<kasumi::cli::DaemonInvocation>(*d_run).background);
+
+    const auto d_run_fg = parse({"daemon", "run", "--foreground"});
+    ASSERT_TRUE(d_run_fg.has_value());
+    EXPECT_FALSE(std::get<kasumi::cli::DaemonInvocation>(*d_run_fg).background);
+    EXPECT_FALSE(
+        parse({"daemon", "run", "--background", "--foreground"}).has_value());
+
+    const auto d_sync = parse({"daemon", "sync", "auto_p", "--wait"});
+    ASSERT_TRUE(d_sync.has_value());
+    const auto& d_sync_inv = std::get<kasumi::cli::DaemonInvocation>(*d_sync);
+    EXPECT_EQ(d_sync_inv.action, kasumi::cli::DaemonAction::Sync);
+    EXPECT_EQ(d_sync_inv.profile_name, "auto_p");
+    EXPECT_TRUE(d_sync_inv.wait);
+
+    const auto d_sync_all = parse({"daemon", "sync"});
+    ASSERT_TRUE(d_sync_all.has_value());
+    EXPECT_FALSE(std::get<kasumi::cli::DaemonInvocation>(*d_sync_all)
+                     .profile_name.has_value());
+
+    const auto d_status = parse({"daemon", "status", "auto_p"});
+    ASSERT_TRUE(d_status.has_value());
+    EXPECT_EQ(std::get<kasumi::cli::DaemonInvocation>(*d_status).action,
+              kasumi::cli::DaemonAction::Status);
+    EXPECT_EQ(std::get<kasumi::cli::DaemonInvocation>(*d_status).profile_name,
+              "auto_p");
+
+    EXPECT_EQ(
+        std::get<kasumi::cli::DaemonInvocation>(*parse({"daemon", "stop"}))
+            .action,
+        kasumi::cli::DaemonAction::Stop);
+    EXPECT_EQ(
+        std::get<kasumi::cli::DaemonInvocation>(*parse({"daemon", "reload"}))
+            .action,
+        kasumi::cli::DaemonAction::Reload);
+    EXPECT_EQ(std::get<kasumi::cli::DaemonInvocation>(
+                  *parse({"daemon", "pause", "auto_p"}))
+                  .action,
+              kasumi::cli::DaemonAction::Pause);
+    EXPECT_EQ(std::get<kasumi::cli::DaemonInvocation>(
+                  *parse({"daemon", "resume", "auto_p"}))
+                  .action,
+              kasumi::cli::DaemonAction::Resume);
+    EXPECT_EQ(std::get<kasumi::cli::DaemonInvocation>(
+                  *parse({"daemon", "unlock", "auto_p"}))
+                  .action,
+              kasumi::cli::DaemonAction::Unlock);
+    EXPECT_EQ(std::get<kasumi::cli::DaemonInvocation>(
+                  *parse({"daemon", "lock", "auto_p"}))
+                  .action,
+              kasumi::cli::DaemonAction::Lock);
+    EXPECT_EQ(std::get<kasumi::cli::DaemonInvocation>(
+                  *parse({"daemon", "autostart", "install"}))
+                  .action,
+              kasumi::cli::DaemonAction::AutostartInstall);
+    EXPECT_EQ(std::get<kasumi::cli::DaemonInvocation>(
+                  *parse({"daemon", "autostart", "uninstall"}))
+                  .action,
+              kasumi::cli::DaemonAction::AutostartUninstall);
+    EXPECT_EQ(std::get<kasumi::cli::DaemonInvocation>(
+                  *parse({"daemon", "autostart", "status"}))
+                  .action,
+              kasumi::cli::DaemonAction::AutostartStatus);
+
+    const auto d_logs = parse({"daemon", "logs"});
+    ASSERT_TRUE(d_logs.has_value());
+    EXPECT_EQ(std::get<kasumi::cli::DaemonInvocation>(*d_logs).action,
+              kasumi::cli::DaemonAction::Logs);
+    EXPECT_EQ(std::get<kasumi::cli::DaemonInvocation>(*d_logs).log_lines, 50U);
+
+    const auto d_logs_prof =
+        parse({"daemon", "logs", "auto_p", "--lines", "25"});
+    ASSERT_TRUE(d_logs_prof.has_value());
+    const auto& d_logs_inv =
+        std::get<kasumi::cli::DaemonInvocation>(*d_logs_prof);
+    EXPECT_EQ(d_logs_inv.action, kasumi::cli::DaemonAction::Logs);
+    EXPECT_EQ(d_logs_inv.profile_name, "auto_p");
+    EXPECT_EQ(d_logs_inv.log_lines, 25U);
+
+    const auto d_logs_eq = parse({"daemon", "logs", "--lines=100", "auto_p"});
+    ASSERT_TRUE(d_logs_eq.has_value());
+    EXPECT_EQ(std::get<kasumi::cli::DaemonInvocation>(*d_logs_eq).log_lines,
+              100U);
+    EXPECT_EQ(std::get<kasumi::cli::DaemonInvocation>(*d_logs_eq).profile_name,
+              "auto_p");
+
+    EXPECT_FALSE(parse({"daemon", "logs", "--lines", "0"}).has_value());
+    EXPECT_FALSE(parse({"daemon", "logs", "--lines", "1001"}).has_value());
+    EXPECT_FALSE(parse({"daemon", "logs", "--lines", "10", "--lines", "20"})
+                     .has_value());
+
+    EXPECT_FALSE(parse({"daemon"}).has_value());
+    EXPECT_FALSE(parse({"daemon", "pause"}).has_value());
+    EXPECT_FALSE(parse({"daemon", "autostart", "bogus"}).has_value());
+    EXPECT_FALSE(parse({"daemon", "stop", "--wait"}).has_value());
 }
 } // namespace

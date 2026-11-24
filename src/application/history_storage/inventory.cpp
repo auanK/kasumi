@@ -148,9 +148,9 @@ PublicationDelta publication_delta(const HistoryInventory& inventory,
                                    const HeadReference& reference,
                                    const RemoteLayout& layout) {
     const bool adds_commit_object =
-        !inventory.contains(commit_object(layout, reference));
+        !inventory_contains(inventory, commit_object(layout, reference));
     const bool adds_marker_object =
-        !inventory.contains(marker_object(layout, reference));
+        !inventory_contains(inventory, marker_object(layout, reference));
     return PublicationDelta{
         .adds_commit_object = adds_commit_object,
         .adds_marker_object = adds_marker_object,

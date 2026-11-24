@@ -218,8 +218,7 @@ make_counting_storage(CountingStorageState& state) {
     };
 }
 
-class SyncHarness {
-public:
+struct SyncHarness {
     explicit SyncHarness(std::string_view name,
                          std::filesystem::path shared_storage = {})
         : workspace_(kasumi::test::make_temp_workspace(name)),
@@ -587,7 +586,6 @@ public:
         return counting_state_.barrier_sync_content_puts;
     }
 
-private:
     kasumi::test::TempWorkspace workspace_;
     std::filesystem::path profile_;
     std::filesystem::path local_;

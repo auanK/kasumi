@@ -11,16 +11,14 @@ bool requested() noexcept;
 
 std::stop_token current_stop_token() noexcept;
 
-class ScopedStopToken {
-public:
+struct ScopedStopToken {
+    std::stop_token previous{};
+
     explicit ScopedStopToken(std::stop_token token) noexcept;
     ~ScopedStopToken() noexcept;
 
     ScopedStopToken(const ScopedStopToken&) = delete;
     ScopedStopToken& operator=(const ScopedStopToken&) = delete;
-
-private:
-    std::stop_token previous_;
 };
 
 } // namespace kasumi::platform::cancellation

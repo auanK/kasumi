@@ -571,7 +571,7 @@ run_content_window(
             if (!saved && !checkpoint_failure) {
                 checkpoint_failure = saved.error();
             } else if (saved && !checkpoint_failure && meter) {
-                meter->applied(applied);
+                record_progress_applied(*meter, applied);
             }
         }
 
@@ -1053,7 +1053,7 @@ execute(const runtime::RuntimeData& runtime_data,
                 !discarded) {
                 return discarded;
             }
-            journal_session.invalidate();
+            journal::invalidate_session(journal_session);
             existing->reset();
         }
     }
@@ -1100,7 +1100,7 @@ execute(const runtime::RuntimeData& runtime_data,
         for (std::size_t i = 0; i < record->plan.operations.size(); ++i) {
             const auto& op = record->plan.operations[i];
             if (op.action == Action::Upload && !content_upload_required[i]) {
-                ProgressMeter::add(meter->bytes_reused, op.size);
+                progress_add(meter->bytes_reused, op.size);
             }
         }
     }
@@ -1183,7 +1183,7 @@ execute(const runtime::RuntimeData& runtime_data,
         std::ranges::any_of(record->plan.operations, [](const auto& operation) {
             return operation.action == Action::Upload;
         })) {
-        meter->phase(Activity::Staging);
+        begin_progress_phase(*meter, Activity::Staging);
     }
     auto layout_plan = build_upload_layout_plan(runtime_data,
                                                 storage,
@@ -1335,7 +1335,8 @@ execute(const runtime::RuntimeData& runtime_data,
         for (const auto index : apply_order) {
             awaiting_apply_progress[index] = true;
         }
-        meter->applied(record->plan.operations.size() - apply_order.size());
+        record_progress_applied(
+            *meter, record->plan.operations.size() - apply_order.size());
     }
     const auto report_applied = [&](std::span<const std::size_t> indices) {
         if (meter) {
@@ -1346,7 +1347,7 @@ execute(const runtime::RuntimeData& runtime_data,
                     ++completed;
                 }
             }
-            meter->applied(completed);
+            record_progress_applied(*meter, completed);
         }
     };
 
@@ -1504,7 +1505,7 @@ execute(const runtime::RuntimeData& runtime_data,
             const auto& manifest = observed_input.storage.storage_manifest;
             for (std::size_t i = position; i < end; ++i) {
                 const auto op_idx = apply_order[i];
-                if (manifest.empty()) {
+                if (history::is_storage_manifest_empty(manifest)) {
                     loose_indices.push_back(op_idx);
                     continue;
                 }
@@ -1607,7 +1608,8 @@ execute(const runtime::RuntimeData& runtime_data,
                         std::span<const std::size_t>{loose_indices}.subspan(
                             loose_pos, batch_end - loose_pos);
                     if (meter)
-                        meter->phase(Activity::Downloading, window_span.size());
+                        begin_progress_phase(
+                            *meter, Activity::Downloading, window_span.size());
                     auto failure = run_content_window(window_span,
                                                       parallelism,
                                                       *record,
@@ -1631,7 +1633,7 @@ execute(const runtime::RuntimeData& runtime_data,
                         populated_downloads.insert(std::move(content_key));
                     }
                     if (meter)
-                        ProgressMeter::add(meter->work, window_span.size());
+                        progress_add(meter->work, window_span.size());
                     loose_pos = batch_end;
                     continue;
                 }
@@ -1649,11 +1651,12 @@ execute(const runtime::RuntimeData& runtime_data,
                 if (meter) {
                     const bool needs_download =
                         download_cache != mutation::DownloadCacheMode::Reuse;
-                    meter->phase(needs_download ? Activity::Downloading
-                                                : Activity::Installing,
-                                 1,
-                                 0,
-                                 &operation.path);
+                    begin_progress_phase(*meter,
+                                         needs_download ? Activity::Downloading
+                                                        : Activity::Installing,
+                                         1,
+                                         0,
+                                         &operation.path);
                 }
                 auto applied = mutation::apply_operation(
                     operation,
@@ -1673,7 +1676,7 @@ execute(const runtime::RuntimeData& runtime_data,
                     return std::unexpected(marked.error());
                 }
                 if (meter)
-                    ProgressMeter::add(meter->work);
+                    progress_add(meter->work);
                 report_applied({&op_idx, 1});
                 ++loose_pos;
             }
@@ -1698,11 +1701,12 @@ execute(const runtime::RuntimeData& runtime_data,
                 const bool needs_download =
                     operation.action == Action::Download &&
                     download_cache != mutation::DownloadCacheMode::Reuse;
-                meter->phase(needs_download ? Activity::Downloading
-                                            : Activity::Installing,
-                             1,
-                             0,
-                             &operation.path);
+                begin_progress_phase(*meter,
+                                     needs_download ? Activity::Downloading
+                                                    : Activity::Installing,
+                                     1,
+                                     0,
+                                     &operation.path);
             }
             auto applied = mutation::apply_operation(
                 record->plan.operations[first],
@@ -1722,7 +1726,7 @@ execute(const runtime::RuntimeData& runtime_data,
                 return std::unexpected(marked.error());
             }
             if (meter && is_content_install)
-                ProgressMeter::add(meter->work);
+                progress_add(meter->work);
             report_applied({&first, 1});
             ++position;
             continue;
@@ -1918,7 +1922,7 @@ execute(const runtime::RuntimeData& runtime_data,
     mutation_fault_test::hit("after-MoveLocal-consolidated-checkpoint");
 
     if (meter) {
-        meter->phase(Activity::Verifying);
+        begin_progress_phase(*meter, Activity::Verifying);
     }
     const auto& expected_tree =
         record->publication_required
@@ -2034,7 +2038,8 @@ execute(const runtime::RuntimeData& runtime_data,
             }
         }
         if (meter) {
-            meter->notify(SyncProgress{.stage = SyncStage::Finalizing});
+            notify_progress(*meter,
+                            SyncProgress{.stage = SyncStage::Finalizing});
         }
         std::optional<state_storage::AcceptedCommitMeta> accepted_meta;
         if (found->commit.created_at > 0 ||
@@ -2090,7 +2095,7 @@ execute(const runtime::RuntimeData& runtime_data,
             "speculative commit publication was not initialized"));
     }
     if (meter) {
-        meter->notify(SyncProgress{.stage = SyncStage::Publishing});
+        notify_progress(*meter, SyncProgress{.stage = SyncStage::Publishing});
     }
     record->commit_id = prepared_commit->commit_id;
     record->parent_ids = prepared_commit->commit.parents;
@@ -2275,7 +2280,7 @@ execute(const runtime::RuntimeData& runtime_data,
         return std::unexpected(epoch_reference.error());
     }
     if (meter) {
-        meter->notify(SyncProgress{.stage = SyncStage::Finalizing});
+        notify_progress(*meter, SyncProgress{.stage = SyncStage::Finalizing});
     }
     const auto accepted_meta = publication::make_accepted_commit_meta(
         prepared_commit->commit_id, prepared_commit->commit);

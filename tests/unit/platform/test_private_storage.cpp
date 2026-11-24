@@ -592,7 +592,7 @@ TEST(PrivateStorageTest, AtomicWritePreservesOpenReaderSnapshot) {
                          nullptr));
     const std::string snapshot{bytes.data(), read};
     EXPECT_EQ(snapshot, "old");
-    reader.close();
+    kasumi::platform::private_storage::close_private_handle(reader);
     if (!saved) {
         FAIL() << "failed to atomically replace config: " << saved.error();
     }
@@ -756,12 +756,12 @@ TEST(PrivateStorageTest, PrivateHandleMoveDoesNotLeakOrDoubleClose) {
     *f1 = std::move(*f2);
 
     // 1. Source f2 is invalidated after transfer
-    EXPECT_FALSE(f2->is_open());
+    EXPECT_FALSE(kasumi::platform::private_storage::is_private_file_open(*f2));
     EXPECT_EQ(f2->handle.value,
               kasumi::platform::private_storage::invalid_private_handle);
 
     // 2. Target f1 owns h2_raw
-    EXPECT_TRUE(f1->is_open());
+    EXPECT_TRUE(kasumi::platform::private_storage::is_private_file_open(*f1));
     EXPECT_EQ(f1->handle.value, h2_raw);
 
     // 3. Previously held h1_raw was closed and NOT abandoned/leaked
@@ -778,7 +778,7 @@ TEST(PrivateStorageTest, PrivateHandleMoveDoesNotLeakOrDoubleClose) {
 
     // 4. Closing f1 closes h2_raw
     kasumi::platform::private_storage::close_private_file(*f1);
-    EXPECT_FALSE(f1->is_open());
+    EXPECT_FALSE(kasumi::platform::private_storage::is_private_file_open(*f1));
 
     // 5. Calling close_private_file again is a no-op (no double close)
     kasumi::platform::private_storage::close_private_file(*f1);
@@ -793,7 +793,7 @@ TEST(PrivateStorageTest, PublicationRejectedWhenFileIdentityIsInvalid) {
 
     auto f = kasumi::platform::private_storage::create_private_file(temp_path);
     ASSERT_TRUE(f.has_value());
-    ASSERT_TRUE(f->is_open());
+    ASSERT_TRUE(kasumi::platform::private_storage::is_private_file_open(*f));
 
     f->identity.valid = false;
     auto pub_res = kasumi::platform::private_storage::publish_private_file(
@@ -811,7 +811,7 @@ TEST(PrivateStorageTest,
 
     auto f = kasumi::platform::private_storage::create_private_file(temp_path);
     ASSERT_TRUE(f.has_value());
-    ASSERT_TRUE(f->is_open());
+    ASSERT_TRUE(kasumi::platform::private_storage::is_private_file_open(*f));
 
     const std::string payload = "authenticated durable plaintext";
     auto written = kasumi::platform::private_storage::write_private_file(
@@ -830,8 +830,9 @@ TEST(PrivateStorageTest,
     EXPECT_FALSE(std::filesystem::exists(temp_path));
 
     // Ownership was cleanly relinquished
-    EXPECT_FALSE(f->is_open());
-    EXPECT_TRUE(f->is_published());
+    EXPECT_FALSE(kasumi::platform::private_storage::is_private_file_open(*f));
+    EXPECT_TRUE(
+        kasumi::platform::private_storage::is_private_file_published(*f));
     EXPECT_TRUE(f->path.empty());
     EXPECT_FALSE(f->identity.valid);
 
@@ -851,7 +852,7 @@ TEST(PrivateStorageTest,
     // 1. Criar um temporário exclusivo.
     auto f1 = kasumi::platform::private_storage::create_private_file(file_path);
     ASSERT_TRUE(f1.has_value());
-    ASSERT_TRUE(f1->is_open());
+    ASSERT_TRUE(kasumi::platform::private_storage::is_private_file_open(*f1));
 
     const std::string payload = "original content";
     auto write_res = kasumi::platform::private_storage::write_private_file(
@@ -869,7 +870,7 @@ TEST(PrivateStorageTest,
 
     // 5. Confirmar que o conteúdo e o handle da primeira operação permanecem
     // válidos.
-    EXPECT_TRUE(f1->is_open());
+    EXPECT_TRUE(kasumi::platform::private_storage::is_private_file_open(*f1));
     kasumi::platform::private_storage::close_private_file(*f1);
     EXPECT_EQ(kasumi::test::read_text(file_path), payload);
 
@@ -893,7 +894,7 @@ TEST(PrivateStorageTest, FlushAndCloseReleasesHandleAndPreservesContent) {
     ASSERT_TRUE(file.has_value());
 
     // 2. Confirmar que o handle está aberto.
-    EXPECT_TRUE(file->is_open());
+    EXPECT_TRUE(kasumi::platform::private_storage::is_private_file_open(*file));
     const auto raw_handle = file->handle.value;
     EXPECT_NE(raw_handle,
               kasumi::platform::private_storage::invalid_private_handle);
@@ -911,8 +912,9 @@ TEST(PrivateStorageTest, FlushAndCloseReleasesHandleAndPreservesContent) {
     // 5. Confirmar sucesso.
     EXPECT_TRUE(flush_res.has_value());
 
-    // 6. Confirmar is_open() == false.
-    EXPECT_FALSE(file->is_open());
+    // 6. Confirmar is_private_file_open() == false.
+    EXPECT_FALSE(
+        kasumi::platform::private_storage::is_private_file_open(*file));
 
     // 7. Confirmar handle.value == invalid_private_handle.
     EXPECT_EQ(file->handle.value,
@@ -925,7 +927,8 @@ TEST(PrivateStorageTest, FlushAndCloseReleasesHandleAndPreservesContent) {
     kasumi::platform::private_storage::close_private_file(*file);
 
     // 10. Confirmar que a operação não destrói outro recurso.
-    EXPECT_FALSE(file->is_open());
+    EXPECT_FALSE(
+        kasumi::platform::private_storage::is_private_file_open(*file));
     EXPECT_EQ(file->handle.value,
               kasumi::platform::private_storage::invalid_private_handle);
 }
@@ -938,7 +941,7 @@ TEST(PrivateStorageTest, FlushAndCloseRepeatedCallIsNoOp) {
     auto file =
         kasumi::platform::private_storage::create_private_file(file_path);
     ASSERT_TRUE(file.has_value());
-    EXPECT_TRUE(file->is_open());
+    EXPECT_TRUE(kasumi::platform::private_storage::is_private_file_open(*file));
 
     const std::string payload = "repeat call preservation test";
     auto write_res = kasumi::platform::private_storage::write_private_file(
@@ -949,7 +952,8 @@ TEST(PrivateStorageTest, FlushAndCloseRepeatedCallIsNoOp) {
     auto first_res =
         kasumi::platform::private_storage::flush_and_close_private_file(*file);
     EXPECT_TRUE(first_res.has_value());
-    EXPECT_FALSE(file->is_open());
+    EXPECT_FALSE(
+        kasumi::platform::private_storage::is_private_file_open(*file));
     EXPECT_EQ(file->handle.value,
               kasumi::platform::private_storage::invalid_private_handle);
 
@@ -958,11 +962,13 @@ TEST(PrivateStorageTest, FlushAndCloseRepeatedCallIsNoOp) {
     auto second_res =
         kasumi::platform::private_storage::flush_and_close_private_file(*file);
     EXPECT_TRUE(second_res.has_value());
-    EXPECT_FALSE(file->is_open());
+    EXPECT_FALSE(
+        kasumi::platform::private_storage::is_private_file_open(*file));
 
     // close_private_file() posterior permanece inofensivo.
     kasumi::platform::private_storage::close_private_file(*file);
-    EXPECT_FALSE(file->is_open());
+    EXPECT_FALSE(
+        kasumi::platform::private_storage::is_private_file_open(*file));
 
     // Conteúdo do arquivo permanece íntegro.
     EXPECT_EQ(kasumi::test::read_text(file_path), payload);

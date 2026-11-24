@@ -90,11 +90,13 @@ TEST(CliPresenterTest, FitsUtf8AndClosesInteractiveProgressBeforeErrors) {
     const auto output = kasumi::test::capture_stdout([] {
         kasumi::cli::ProgressDisplay display(
             {.interactive = true, .ansi = true, .fixed_width = 18});
-        display.show({.activity = Activity::Downloading, .total_bytes = 100});
-        display.show({.activity = Activity::Downloading,
-                      .bytes = 100,
-                      .total_bytes = 100});
-        display.finish();
+        kasumi::cli::show_progress_display(
+            display, {.activity = Activity::Downloading, .total_bytes = 100});
+        kasumi::cli::show_progress_display(display,
+                                           {.activity = Activity::Downloading,
+                                            .bytes = 100,
+                                            .total_bytes = 100});
+        kasumi::cli::finish_progress_display(display);
         kasumi::cli::print_error_line("failure");
     });
     EXPECT_NE(output.find("\r\x1b[2KDownloading"), std::string::npos);
@@ -108,11 +110,13 @@ TEST(CliPresenterTest, RedirectedProgressContainsOnlyPlainStageLines) {
     const ScopedLanguage lang{Language::English};
     const auto output = kasumi::test::capture_stdout([] {
         kasumi::cli::ProgressDisplay display(kasumi::platform::Terminal{});
-        display.show({.activity = Activity::Downloading, .total_bytes = 100});
-        display.show({.activity = Activity::Downloading,
-                      .bytes = 100,
-                      .total_bytes = 100});
-        display.finish();
+        kasumi::cli::show_progress_display(
+            display, {.activity = Activity::Downloading, .total_bytes = 100});
+        kasumi::cli::show_progress_display(display,
+                                           {.activity = Activity::Downloading,
+                                            .bytes = 100,
+                                            .total_bytes = 100});
+        kasumi::cli::finish_progress_display(display);
         kasumi::cli::print_error_line("failure");
     });
     EXPECT_EQ(output.find('\r'), std::string::npos);
@@ -144,44 +148,64 @@ TEST(CliPresenterTest, DefaultSyncProgressAggregatesApplyingAndHidesZeroStage) {
     const auto output = kasumi::test::capture_stdout([] {
         kasumi::cli::ProgressDisplay display(
             {.interactive = true, .ansi = true, .fixed_width = 120}, false);
-        display.update(SyncProgress{.stage = SyncStage::Observing},
-                       Operation::Sync);
-        display.update(ActivityProgress{.activity = Activity::Scanning,
-                                        .total_objects = 10,
-                                        .stage_id = 1},
-                       Operation::Sync);
-        display.update(SyncProgress{.stage = SyncStage::Calculating},
-                       Operation::Sync);
-        display.update(SyncProgress{.stage = SyncStage::Applying},
-                       Operation::Sync);
-        display.update(ActivityProgress{.activity = Activity::Staging,
-                                        .staged_bytes = 0,
-                                        .stage_id = 2},
-                       Operation::Sync);
-        display.update(ActivityProgress{.activity = Activity::Uploading,
-                                        .bytes = 100,
-                                        .total_bytes = 100,
-                                        .objects = 2,
-                                        .total_objects = 2,
-                                        .stage_id = 3},
-                       Operation::Sync);
-        display.update(ActivityProgress{.activity = Activity::Verifying,
-                                        .objects = 2,
-                                        .total_objects = 2,
-                                        .stage_id = 4},
-                       Operation::Sync);
-        display.update(ActivityProgress{.activity = Activity::Uploading,
-                                        .bytes = 200,
-                                        .total_bytes = 200,
-                                        .objects = 3,
-                                        .total_objects = 3,
-                                        .stage_id = 5},
-                       Operation::Sync);
+        kasumi::cli::update_progress_display(
+            display,
+            SyncProgress{.stage = SyncStage::Observing},
+            Operation::Sync);
+        kasumi::cli::update_progress_display(
+            display,
+            ActivityProgress{.activity = Activity::Scanning,
+                             .total_objects = 10,
+                             .stage_id = 1},
+            Operation::Sync);
+        kasumi::cli::update_progress_display(
+            display,
+            SyncProgress{.stage = SyncStage::Calculating},
+            Operation::Sync);
+        kasumi::cli::update_progress_display(
+            display,
+            SyncProgress{.stage = SyncStage::Applying},
+            Operation::Sync);
+        kasumi::cli::update_progress_display(
+            display,
+            ActivityProgress{.activity = Activity::Staging,
+                             .staged_bytes = 0,
+                             .stage_id = 2},
+            Operation::Sync);
+        kasumi::cli::update_progress_display(
+            display,
+            ActivityProgress{.activity = Activity::Uploading,
+                             .bytes = 100,
+                             .total_bytes = 100,
+                             .objects = 2,
+                             .total_objects = 2,
+                             .stage_id = 3},
+            Operation::Sync);
+        kasumi::cli::update_progress_display(
+            display,
+            ActivityProgress{.activity = Activity::Verifying,
+                             .objects = 2,
+                             .total_objects = 2,
+                             .stage_id = 4},
+            Operation::Sync);
+        kasumi::cli::update_progress_display(
+            display,
+            ActivityProgress{.activity = Activity::Uploading,
+                             .bytes = 200,
+                             .total_bytes = 200,
+                             .objects = 3,
+                             .total_objects = 3,
+                             .stage_id = 5},
+            Operation::Sync);
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        display.update(SyncProgress{.stage = SyncStage::Publishing},
-                       Operation::Sync);
-        display.update(SyncProgress{.stage = SyncStage::Finalizing},
-                       Operation::Sync);
+        kasumi::cli::update_progress_display(
+            display,
+            SyncProgress{.stage = SyncStage::Publishing},
+            Operation::Sync);
+        kasumi::cli::update_progress_display(
+            display,
+            SyncProgress{.stage = SyncStage::Finalizing},
+            Operation::Sync);
     });
     EXPECT_EQ(output.find("0 bytes → 0 bytes"), std::string::npos);
     EXPECT_EQ(output.find("Scanning local files\n"), std::string::npos);
@@ -200,28 +224,40 @@ TEST(CliPresenterTest, FullSyncProgressKeepsAllStagesAndPortugueseSpeed) {
     const auto output = kasumi::test::capture_stdout([] {
         kasumi::cli::ProgressDisplay display(
             {.interactive = true, .ansi = true, .fixed_width = 120}, true);
-        display.update(SyncProgress{.stage = SyncStage::Observing},
-                       Operation::Sync);
-        display.update(ActivityProgress{.activity = Activity::Scanning,
-                                        .total_objects = 3,
-                                        .cache_hits = 2,
-                                        .files_hashed = 1,
-                                        .stage_id = 1},
-                       Operation::Sync);
-        display.update(SyncProgress{.stage = SyncStage::Calculating},
-                       Operation::Sync);
-        display.update(SyncProgress{.stage = SyncStage::Applying},
-                       Operation::Sync);
-        display.update(ActivityProgress{.activity = Activity::Uploading,
-                                        .bytes = 100,
-                                        .total_bytes = 100,
-                                        .objects = 2,
-                                        .total_objects = 2,
-                                        .stage_id = 2},
-                       Operation::Sync);
+        kasumi::cli::update_progress_display(
+            display,
+            SyncProgress{.stage = SyncStage::Observing},
+            Operation::Sync);
+        kasumi::cli::update_progress_display(
+            display,
+            ActivityProgress{.activity = Activity::Scanning,
+                             .total_objects = 3,
+                             .cache_hits = 2,
+                             .files_hashed = 1,
+                             .stage_id = 1},
+            Operation::Sync);
+        kasumi::cli::update_progress_display(
+            display,
+            SyncProgress{.stage = SyncStage::Calculating},
+            Operation::Sync);
+        kasumi::cli::update_progress_display(
+            display,
+            SyncProgress{.stage = SyncStage::Applying},
+            Operation::Sync);
+        kasumi::cli::update_progress_display(
+            display,
+            ActivityProgress{.activity = Activity::Uploading,
+                             .bytes = 100,
+                             .total_bytes = 100,
+                             .objects = 2,
+                             .total_objects = 2,
+                             .stage_id = 2},
+            Operation::Sync);
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        display.update(SyncProgress{.stage = SyncStage::Publishing},
-                       Operation::Sync);
+        kasumi::cli::update_progress_display(
+            display,
+            SyncProgress{.stage = SyncStage::Publishing},
+            Operation::Sync);
     });
     EXPECT_NE(output.find("Verificando arquivos locais"), std::string::npos);
     EXPECT_NE(output.find("2/2 objetos"), std::string::npos);
@@ -2570,14 +2606,16 @@ TEST(CliPresenterTest, GcInteractiveProgressRendersSubStagesBytesAndDetails) {
     const auto interactive_out = kasumi::test::capture_stdout([] {
         kasumi::cli::ProgressDisplay display(
             {.interactive = true, .ansi = true, .fixed_width = 140}, false);
-        display.update(
+        kasumi::cli::update_progress_display(
+            display,
             GarbageCollectProgress{
                 .stage = GarbageCollectStage::Preparing,
                 .sub_stage = GarbageCollectSubStage::CheckingControls,
                 .min_age_hours = 6,
             },
             Operation::GarbageCollect);
-        display.update(
+        kasumi::cli::update_progress_display(
+            display,
             GarbageCollectProgress{
                 .stage = GarbageCollectStage::Analyzing,
                 .sub_stage = GarbageCollectSubStage::AuthenticatingHistory,
@@ -2587,7 +2625,8 @@ TEST(CliPresenterTest, GcInteractiveProgressRendersSubStagesBytesAndDetails) {
                 .min_age_hours = 6,
             },
             Operation::GarbageCollect);
-        display.update(
+        kasumi::cli::update_progress_display(
+            display,
             GarbageCollectProgress{
                 .stage = GarbageCollectStage::Applying,
                 .sub_stage = GarbageCollectSubStage::RemovingObjects,
@@ -2598,7 +2637,8 @@ TEST(CliPresenterTest, GcInteractiveProgressRendersSubStagesBytesAndDetails) {
                 .min_age_hours = 6,
             },
             Operation::GarbageCollect);
-        display.update(
+        kasumi::cli::update_progress_display(
+            display,
             GarbageCollectProgress{
                 .stage = GarbageCollectStage::Finalizing,
                 .sub_stage = GarbageCollectSubStage::ReleasingBarrier,
@@ -3043,5 +3083,80 @@ TEST(CliPresenterTest, PresentsV026JsonDiagnosticsIgnoreProfileTestAndKey) {
         const auto script = kasumi::cli::generate_completion_script(sh);
         EXPECT_NE(script.find("ignore"), std::string::npos);
         EXPECT_NE(script.find("test"), std::string::npos);
+        EXPECT_NE(script.find("logs"), std::string::npos);
+    }
+
+    // Real GarbageCollect removed counts: metric_primary=candidates,
+    // metric_secondary=removed.
+    {
+        const ScopedLanguage en_scope{Language::English};
+        const auto removed_metrics = kasumi::cli::format_activity_metrics(
+            static_cast<std::uint8_t>(RemoteActivityOperation::GarbageCollect),
+            5U,
+            2U,
+            0U,
+            0U);
+        EXPECT_EQ(removed_metrics, "removed 2/5");
+
+        const auto daemon_status_text = kasumi::test::capture_stdout([&] {
+            DaemonStatusReport st;
+            st.running = true;
+            st.pid = 4242U;
+            st.ipc_port = 51234U;
+            st.kasumi_version = "0.26.0";
+            DaemonProfileStatus dp;
+            dp.name = "inactive_prof";
+            dp.local_dir = "/tmp/a";
+            dp.remote_dir = "remote:a";
+            dp.state = DaemonProfileState::Idle;
+            dp.watch_enabled = true;
+            dp.watcher_active = false;
+            dp.watcher_degraded = false;
+            dp.dirty_paths_count = 0U;
+            dp.sync_interval_seconds = 0U;
+            dp.gc_interval_hours = 0U;
+            dp.active_stage = "Uploading";
+            dp.active_objects = 2U;
+            dp.active_total_objects = 5U;
+            st.profiles.push_back(std::move(dp));
+            EXPECT_EQ(kasumi::cli::present(st, true, false), 0);
+        });
+        EXPECT_NE(daemon_status_text.find("watch=inactive"), std::string::npos);
+        EXPECT_EQ(daemon_status_text.find("watch=degraded"), std::string::npos);
+        EXPECT_NE(daemon_status_text.find("interval=disabled gc=disabled"),
+                  std::string::npos);
+        EXPECT_NE(daemon_status_text.find("active=Uploading"),
+                  std::string::npos);
+    }
+
+    // Show JSON emits origin=daemon without colliding into remote analysis_only
+    {
+        Profile prof{
+            .name = "daemon_show",
+            .local_dir = "/tmp/dshow",
+            .remote_dir = "remote:dshow",
+            .key_storage = KeyStorage::File,
+        };
+        ProfileActivityReport act;
+        act.database_present = true;
+        act.last_complete_sync = ProfileExecutionSummary{
+            .execution_id = "e1",
+            .operation = ProfileOperationKind::Sync,
+            .status = ProfileExecutionStatus::Succeeded,
+            .summary_a = 3U,
+            .summary_b = 1U,
+            .flags = profile_execution_flag_published |
+                     profile_execution_flag_origin_daemon,
+        };
+        const auto daemon_show_json = kasumi::test::capture_stdout([&] {
+            EXPECT_EQ(kasumi::cli::present_json_show(prof,
+                                                     ProfileLocalState::Ready,
+                                                     ProfileLocalProblem::None,
+                                                     act,
+                                                     false),
+                      0);
+        });
+        EXPECT_NE(daemon_show_json.find("\"origin\":\"daemon\""),
+                  std::string::npos);
     }
 }

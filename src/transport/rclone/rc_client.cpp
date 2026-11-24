@@ -323,17 +323,22 @@ post_rc_impl(State& state,
     struct RequestGuard {
         RcRuntime& runtime;
         InFlightRequest* entry;
-        void unregister() noexcept {
+        ~RequestGuard() noexcept {
             if (entry != nullptr) {
                 std::lock_guard lock(runtime.watcher_mutex);
                 std::erase(runtime.active_requests, entry);
                 entry = nullptr;
             }
         }
-        ~RequestGuard() noexcept {
-            unregister();
-        }
     } request_guard{runtime, honour_cancellation ? &in_flight : nullptr};
+
+    const auto unregister_request = [&]() noexcept {
+        if (request_guard.entry != nullptr) {
+            std::lock_guard lock(runtime.watcher_mutex);
+            std::erase(runtime.active_requests, request_guard.entry);
+            request_guard.entry = nullptr;
+        }
+    };
 
     const auto trace = platform::perf_trace::begin();
     std::string body;
@@ -357,7 +362,7 @@ post_rc_impl(State& state,
             return !oversized;
         };
     const auto response = client->send(request);
-    request_guard.unregister();
+    unregister_request();
     if (trace.active) {
         platform::perf_trace::finish(
             std::string{"rc/"} + std::string{path_suffix}, trace);
@@ -620,6 +625,19 @@ std::expected<void, Error> establish_rc_connection(State& state,
     }
     state.ready = true;
     return {};
+}
+
+Result check_rc_health(State& state) {
+    if (!state.ready || !state.process_started || state.child_pid <= 0) {
+        return std::unexpected(
+            make_error(ErrorCode::InvalidContext, "RC session is not ready"));
+    }
+    if (drain_finished(state)) {
+        state.ready = false;
+        return std::unexpected(make_error(ErrorCode::BackendUnavailable,
+                                          "rclone RC process has exited"));
+    }
+    return validate_rc_handshake(state, state.child_pid);
 }
 
 bool request_core_quit_best_effort(State& state) noexcept {

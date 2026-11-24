@@ -143,26 +143,29 @@ struct ScopedMetrics {
             storage.metrics = nullptr;
         }
     }
-
-    std::uint64_t uploaded_bytes_delta() const noexcept {
-        if (storage.metrics == nullptr) {
-            return 0;
-        }
-        const auto now =
-            storage.metrics->upload.bytes.load(std::memory_order_relaxed);
-        return now >= initial_upload_bytes ? (now - initial_upload_bytes) : 0;
-    }
-
-    std::uint64_t uploaded_objects_delta() const noexcept {
-        if (storage.metrics == nullptr) {
-            return 0;
-        }
-        const auto now =
-            storage.metrics->upload.objects.load(std::memory_order_relaxed);
-        return now >= initial_upload_objects ? (now - initial_upload_objects)
-                                             : 0;
-    }
 };
+
+std::uint64_t uploaded_bytes_delta(const ScopedMetrics& scope) noexcept {
+    if (scope.storage.metrics == nullptr) {
+        return 0;
+    }
+    const auto now =
+        scope.storage.metrics->upload.bytes.load(std::memory_order_relaxed);
+    return now >= scope.initial_upload_bytes
+               ? (now - scope.initial_upload_bytes)
+               : 0;
+}
+
+std::uint64_t uploaded_objects_delta(const ScopedMetrics& scope) noexcept {
+    if (scope.storage.metrics == nullptr) {
+        return 0;
+    }
+    const auto now =
+        scope.storage.metrics->upload.objects.load(std::memory_order_relaxed);
+    return now >= scope.initial_upload_objects
+               ? (now - scope.initial_upload_objects)
+               : 0;
+}
 
 struct WriterGuard {
     protocol::RegistrationState state{};
@@ -260,7 +263,7 @@ verify_synchronized_state(reconciliation::Input& collected,
                        "sync first"));
     }
     if (meter) {
-        meter->phase(Activity::ComparingSnapshots);
+        begin_progress_phase(*meter, Activity::ComparingSnapshots);
     }
     auto reconciled = reconciliation::reconcile(collected);
     if (!reconciled) {
@@ -414,7 +417,7 @@ execute(const runtime::RuntimeData& runtime_data,
     } cache_guard{runtime_data.database_path, session, !options.dry_run};
 
     if (meter) {
-        meter->phase(Activity::Scanning);
+        begin_progress_phase(*meter, Activity::Scanning);
     }
     auto collected = observation::collect_reconciliation_input(
         runtime_data, storage, key, false, {}, &session);
@@ -445,8 +448,8 @@ execute(const runtime::RuntimeData& runtime_data,
             .plan = std::move(*planned),
             .dry_run = options.dry_run,
             .published = false,
-            .wire_upload_bytes = metrics_scope.uploaded_bytes_delta(),
-            .physical_objects_uploaded = metrics_scope.uploaded_objects_delta(),
+            .wire_upload_bytes = uploaded_bytes_delta(metrics_scope),
+            .physical_objects_uploaded = uploaded_objects_delta(metrics_scope),
             .duration = std::chrono::steady_clock::now() - started,
         };
     }
@@ -459,7 +462,7 @@ execute(const runtime::RuntimeData& runtime_data,
 
     const auto layout = history_storage::derive_remote_layout(key);
     if (meter) {
-        meter->phase(Activity::PreparingRemote);
+        begin_progress_phase(*meter, Activity::PreparingRemote);
     }
     auto registered = protocol::register_writer(storage, layout, profile_dir);
     if (!registered) {
@@ -501,7 +504,7 @@ execute(const runtime::RuntimeData& runtime_data,
         batch.objects.resize(count);
 
         if (meter) {
-            meter->phase(Activity::Staging, count);
+            begin_progress_phase(*meter, Activity::Staging, count);
         }
         std::vector<std::optional<integrity::Error>> stage_errors(count);
         application::parallel_for_indexed(
@@ -536,7 +539,8 @@ execute(const runtime::RuntimeData& runtime_data,
                     return;
                 }
                 if (meter) {
-                    meter->record_staged(dest, res->pack_plaintext_size);
+                    record_progress_staged(
+                        *meter, dest, res->pack_plaintext_size);
                 }
                 batch.objects[slot] = sync::mutation::StagedUploadObject{
                     .identifier = pack_id,
@@ -564,7 +568,8 @@ execute(const runtime::RuntimeData& runtime_data,
         }
 
         if (meter) {
-            meter->phase(Activity::Uploading, batch.objects.size());
+            begin_progress_phase(
+                *meter, Activity::Uploading, batch.objects.size());
         }
         auto transferred =
             sync::mutation::transfer_upload_batch(batch, storage, parallelism);
@@ -580,7 +585,8 @@ execute(const runtime::RuntimeData& runtime_data,
         }
 
         if (meter) {
-            meter->phase(Activity::Verifying, batch.objects.size());
+            begin_progress_phase(
+                *meter, Activity::Verifying, batch.objects.size());
         }
         if (auto verified =
                 sync::mutation::verify_upload_batch(batch,
@@ -720,8 +726,8 @@ execute(const runtime::RuntimeData& runtime_data,
         .published_commit_id = std::move(prepared->commit_id),
         .published_height = prepared->commit.height,
         .pruned_markers = pruned_markers,
-        .wire_upload_bytes = metrics_scope.uploaded_bytes_delta(),
-        .physical_objects_uploaded = metrics_scope.uploaded_objects_delta(),
+        .wire_upload_bytes = uploaded_bytes_delta(metrics_scope),
+        .physical_objects_uploaded = uploaded_objects_delta(metrics_scope),
         .duration = std::chrono::steady_clock::now() - started,
     };
 }

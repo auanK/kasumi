@@ -37,6 +37,12 @@ using DirectoryIdentity = FileIdentity;
 
 void close_raw_handle(std::intptr_t handle) noexcept;
 
+struct PrivateHandle;
+inline void close_private_handle(PrivateHandle& handle) noexcept;
+inline void
+reset_private_handle(PrivateHandle& handle,
+                     std::intptr_t next = invalid_private_handle) noexcept;
+
 struct PrivateHandle {
     std::intptr_t value{invalid_private_handle};
 
@@ -44,7 +50,7 @@ struct PrivateHandle {
     constexpr PrivateHandle(std::intptr_t v) noexcept : value(v) {
     }
     ~PrivateHandle() noexcept {
-        close();
+        close_private_handle(*this);
     }
     PrivateHandle(const PrivateHandle&) = delete;
     PrivateHandle& operator=(const PrivateHandle&) = delete;
@@ -53,24 +59,14 @@ struct PrivateHandle {
     }
     PrivateHandle& operator=(PrivateHandle&& other) noexcept {
         if (this != &other) {
-            close();
+            close_private_handle(*this);
             value = std::exchange(other.value, invalid_private_handle);
         }
         return *this;
     }
     PrivateHandle& operator=(std::intptr_t v) noexcept {
-        if (value != v) {
-            close();
-            value = v;
-        }
+        reset_private_handle(*this, v);
         return *this;
-    }
-
-    void close() noexcept {
-        if (value != invalid_private_handle) {
-            close_raw_handle(value);
-            value = invalid_private_handle;
-        }
     }
 
     constexpr operator std::intptr_t() const noexcept {
@@ -84,19 +80,37 @@ struct PrivateHandle {
     }
 };
 
+inline void close_private_handle(PrivateHandle& handle) noexcept {
+    if (handle.value != invalid_private_handle) {
+        close_raw_handle(handle.value);
+        handle.value = invalid_private_handle;
+    }
+}
+
+inline void reset_private_handle(PrivateHandle& handle,
+                                 std::intptr_t next) noexcept {
+    if (handle.value != next) {
+        close_private_handle(handle);
+        handle.value = next;
+    }
+}
+
 struct PrivateOutputFile {
     PrivateHandle handle{invalid_private_handle};
     std::filesystem::path path;
     FileIdentity identity{};
     bool published{false};
-
-    bool is_open() const noexcept {
-        return handle != invalid_private_handle;
-    }
-    bool is_published() const noexcept {
-        return published;
-    }
 };
+
+[[nodiscard]] inline bool
+is_private_file_open(const PrivateOutputFile& file) noexcept {
+    return file.handle != invalid_private_handle;
+}
+
+[[nodiscard]] inline bool
+is_private_file_published(const PrivateOutputFile& file) noexcept {
+    return file.published;
+}
 
 struct CreateFileError {
     std::string message;
@@ -168,12 +182,15 @@ struct FileSlice {
 struct RegularFileInput {
     PrivateHandle handle;
     std::uint64_t size;
-
-    bool seek(std::uint64_t offset) const noexcept;
-    std::expected<std::size_t, StreamError>
-    read(std::span<std::uint8_t> buffer) const;
-    bool read_exact(std::span<std::uint8_t> buffer) const;
 };
+
+bool seek_regular_file(const RegularFileInput& input,
+                       std::uint64_t offset) noexcept;
+std::expected<std::size_t, StreamError>
+read_regular_file(const RegularFileInput& input,
+                  std::span<std::uint8_t> buffer);
+bool read_regular_file_exact(const RegularFileInput& input,
+                             std::span<std::uint8_t> buffer);
 
 std::expected<RegularFileInput, StreamError>
 open_regular_file(const std::filesystem::path& path);
@@ -194,19 +211,17 @@ stream_regular_file(const std::filesystem::path& path,
                     Callback&& on_chunk,
                     std::optional<std::uint64_t> expected_size = std::nullopt,
                     std::optional<FileSlice> slice = std::nullopt) {
-    struct Adapter {
-        static bool invoke(void* ctx, std::span<const std::uint8_t> chunk) {
-            auto& fn = *static_cast<std::remove_reference_t<Callback>*>(ctx);
-            if constexpr (std::is_same_v<decltype(fn(chunk)), bool>) {
-                return fn(chunk);
-            } else {
-                fn(chunk);
-                return true;
-            }
+    const auto thunk = +[](void* ctx, std::span<const std::uint8_t> chunk) {
+        auto& fn = *static_cast<std::remove_reference_t<Callback>*>(ctx);
+        if constexpr (std::is_same_v<decltype(fn(chunk)), bool>) {
+            return fn(chunk);
+        } else {
+            fn(chunk);
+            return true;
         }
     };
     return stream_regular_file_raw(
-        path, scratch, &Adapter::invoke, &on_chunk, expected_size, slice);
+        path, scratch, thunk, &on_chunk, expected_size, slice);
 }
 
 // Returns true when path exists as a symlink, NTFS junction, or reparse point.

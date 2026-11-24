@@ -1451,8 +1451,7 @@ bool grant_everyone_read(const std::filesystem::path& path) {
 #endif
 }
 
-class ScopedDeniedDataRead {
-public:
+struct ScopedDeniedDataRead {
     explicit ScopedDeniedDataRead(std::filesystem::path path)
         : path_(std::move(path)) {
         deny();
@@ -1505,7 +1504,6 @@ public:
 #endif
     }
 
-private:
     void deny() {
 #if defined(_WIN32)
         HANDLE token = nullptr;
@@ -1594,8 +1592,7 @@ private:
 #endif
 };
 
-class ScopedTempRoot {
-public:
+struct ScopedTempRoot {
     explicit ScopedTempRoot(const TempWorkspace& workspace)
         : root_(kasumi::test::workspace_path(workspace, "inspect-temp")) {
         std::filesystem::create_directories(root_);
@@ -1641,7 +1638,6 @@ public:
         return result;
     }
 
-private:
     std::filesystem::path root_;
     kasumi::test::ScopedEnvironmentVariable tmp_{nullptr, nullptr};
     kasumi::test::ScopedEnvironmentVariable temp_{nullptr, nullptr};
@@ -2135,7 +2131,6 @@ struct InspectionWriterProcess {
         return 1;
     }
 
-private:
     bool exited() {
 #if defined(_WIN32)
         return handle == nullptr ||

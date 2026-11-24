@@ -16,8 +16,10 @@ _kasumi() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    local top_commands="config list show diagnostics key profile ignore sync status fsck gc repack resolve-missing conflicts remote completion"
+    local top_commands="config list show diagnostics key profile ignore sync status fsck gc repack resolve-missing conflicts remote daemon completion"
     local profile_cmds="create edit clone storage rename delete test"
+    local daemon_cmds="run stop status sync pause resume unlock lock reload logs autostart"
+    local autostart_cmds="install uninstall status"
     local ignore_cmds="check init"
     local conflicts_cmds="resolve"
     local gc_cmds="remove-writer remove-barrier"
@@ -48,6 +50,11 @@ _kasumi() {
         return 0
     fi
 
+    if [[ ${prev} == "--watch" || ${prev} == "--paused" ]]; then
+        COMPREPLY=( $(compgen -W "on off" -- "${cur}") )
+        return 0
+    fi
+
     local cmd="${COMP_WORDS[1]}"
     if [[ ${cmd} == "--lang" && ${COMP_CWORD} -ge 3 ]]; then
         cmd="${COMP_WORDS[3]}"
@@ -66,7 +73,39 @@ _kasumi() {
             elif [[ ${COMP_CWORD} -eq 4 && "${COMP_WORDS[2]}" == "storage" ]]; then
                 COMPREPLY=( $(compgen -W "vault file memory" -- "${cur}") )
             elif [[ ${cur} == -* ]]; then
-                COMPREPLY=( $(compgen -W "--local --remote --key-storage --min-depth --min-age --bwlimit --clear-bwlimit --concurrency --clear-concurrency --rclone-config --clear-rclone-config --verify --allow-empty-local --confirm --quiet --json --log-file --help" -- "${cur}") )
+                COMPREPLY=( $(compgen -W "--local --remote --key-storage --min-depth --min-age --bwlimit --clear-bwlimit --concurrency --clear-concurrency --rclone-config --clear-rclone-config --watch --clear-watch --sync-interval --clear-sync-interval --gc-interval --clear-gc-interval --paused --verify --allow-empty-local --confirm --quiet --json --log-file --help" -- "${cur}") )
+            fi
+            ;;
+        daemon)
+            if [[ ${COMP_CWORD} -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "${daemon_cmds}" -- "${cur}") )
+            elif [[ ${COMP_CWORD} -eq 3 && ${cur} != -* ]]; then
+                case "${COMP_WORDS[2]}" in
+                    autostart)
+                        COMPREPLY=( $(compgen -W "${autostart_cmds}" -- "${cur}") )
+                        ;;
+                    status|sync|pause|resume|unlock|lock|logs)
+                        COMPREPLY=( $(compgen -W "$(_kasumi_profiles)" -- "${cur}") )
+                        ;;
+                esac
+            elif [[ ${cur} == -* ]]; then
+                case "${COMP_WORDS[2]}" in
+                    run)
+                        COMPREPLY=( $(compgen -W "--background --foreground --quiet --json --log-file --help" -- "${cur}") )
+                        ;;
+                    status)
+                        COMPREPLY=( $(compgen -W "--full --quiet --json --log-file --help" -- "${cur}") )
+                        ;;
+                    sync)
+                        COMPREPLY=( $(compgen -W "--wait --quiet --json --log-file --help" -- "${cur}") )
+                        ;;
+                    logs)
+                        COMPREPLY=( $(compgen -W "--lines --quiet --json --log-file --help" -- "${cur}") )
+                        ;;
+                    *)
+                        COMPREPLY=( $(compgen -W "--quiet --json --log-file --help" -- "${cur}") )
+                        ;;
+                esac
             fi
             ;;
         ignore)
@@ -156,7 +195,7 @@ _kasumi_profiles() {
 }
 
 _kasumi() {
-    local -a top_commands profile_cmds ignore_cmds remote_cmds gc_cmds shells
+    local -a top_commands profile_cmds daemon_cmds autostart_cmds ignore_cmds remote_cmds gc_cmds shells
     top_commands=(
         'config:Interactive profile wizard'
         'list:List configured profile names'
@@ -164,6 +203,7 @@ _kasumi() {
         'diagnostics:Inspect local environment and profile health'
         'key:Re-enter and save profile key'
         'profile:Manage profiles non-interactively'
+        'daemon:Run or control continuous background sync daemon'
         'ignore:Inspect or initialize .kasumiignore rules'
         'sync:Synchronize with shared storage'
         'status:Show pending synchronization changes'
@@ -176,6 +216,8 @@ _kasumi() {
         'completion:Output shell completion script'
     )
     profile_cmds=(create edit clone storage rename delete test)
+    daemon_cmds=(run stop status sync pause resume unlock lock reload logs autostart)
+    autostart_cmds=(install uninstall status)
     ignore_cmds=(check init)
     remote_cmds=(heads tree commits summary stat log commit get restore epochs epoch contents content markers objects orphans writers health)
     conflicts_cmds=(resolve)
@@ -196,7 +238,18 @@ _kasumi() {
             elif (( CURRENT == 5 )) && [[ "${words[3]}" == "storage" ]]; then
                 compadd -- vault file memory
             else
-                compadd -- --local --remote --key-storage --min-depth --min-age --bwlimit --clear-bwlimit --concurrency --clear-concurrency --rclone-config --clear-rclone-config --verify --allow-empty-local --confirm --quiet --json --log-file --help
+                compadd -- --local --remote --key-storage --min-depth --min-age --bwlimit --clear-bwlimit --concurrency --clear-concurrency --rclone-config --clear-rclone-config --watch --clear-watch --sync-interval --clear-sync-interval --gc-interval --clear-gc-interval --paused --verify --allow-empty-local --confirm --quiet --json --log-file --help
+            fi
+            ;;
+        daemon)
+            if (( CURRENT == 3 )); then
+                compadd -- $daemon_cmds
+            elif (( CURRENT == 4 )) && [[ "${words[CURRENT]}" != -* ]] && [[ "${words[3]}" == "autostart" ]]; then
+                compadd -- $autostart_cmds
+            elif (( CURRENT == 4 )) && [[ "${words[CURRENT]}" != -* ]] && [[ "${words[3]}" == (status|sync|pause|resume|unlock|lock|logs) ]]; then
+                _kasumi_profiles
+            else
+                compadd -- --background --foreground --wait --lines --full --quiet --json --log-file --help
             fi
             ;;
         ignore)
@@ -259,13 +312,14 @@ function __kasumi_profiles
     command kasumi list 2>/dev/null
 end
 
-set -l top_cmds config list show diagnostics key profile ignore sync status fsck gc repack resolve-missing conflicts remote completion
+set -l top_cmds config list show diagnostics key profile daemon ignore sync status fsck gc repack resolve-missing conflicts remote completion
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "config" -d "Interactive profile wizard"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "list" -d "List profile names"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "show" -d "Show profile details"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "diagnostics" -d "Inspect environment and profile health"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "key" -d "Save or replace profile key"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "profile" -d "Manage profiles non-interactively"
+complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "daemon" -d "Run or control continuous background sync daemon"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "ignore" -d "Inspect or initialize .kasumiignore rules"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "sync" -d "Synchronize with shared storage"
 complete -c kasumi -f -n "not __fish_seen_subcommand_from $top_cmds" -a "status" -d "Show pending changes"
@@ -281,6 +335,9 @@ complete -c kasumi -f -n "__fish_seen_subcommand_from show diagnostics key sync 
 complete -c kasumi -f -n "__fish_seen_subcommand_from conflicts" -a "resolve (__kasumi_profiles)"
 complete -c kasumi -f -n "__fish_seen_subcommand_from profile; and not __fish_seen_subcommand_from create edit clone storage rename delete test" -a "create edit clone storage rename delete test"
 complete -c kasumi -f -n "__fish_seen_subcommand_from profile; and __fish_seen_subcommand_from edit clone storage rename delete test" -a "(__kasumi_profiles)"
+complete -c kasumi -f -n "__fish_seen_subcommand_from daemon; and not __fish_seen_subcommand_from run stop status sync pause resume unlock lock reload logs autostart" -a "run stop status sync pause resume unlock lock reload logs autostart"
+complete -c kasumi -f -n "__fish_seen_subcommand_from daemon; and __fish_seen_subcommand_from autostart" -a "install uninstall status"
+complete -c kasumi -f -n "__fish_seen_subcommand_from daemon; and __fish_seen_subcommand_from status sync pause resume unlock lock logs" -a "(__kasumi_profiles)"
 complete -c kasumi -f -n "__fish_seen_subcommand_from ignore; and not __fish_seen_subcommand_from check init" -a "check init"
 complete -c kasumi -f -n "__fish_seen_subcommand_from ignore; and __fish_seen_subcommand_from check init" -a "(__kasumi_profiles)"
 complete -c kasumi -f -n "__fish_seen_subcommand_from remote; and not __fish_seen_subcommand_from heads tree commits summary stat log commit get restore epochs epoch contents content markers objects orphans writers health" -a "heads tree commits summary stat log commit get restore epochs epoch contents content markers objects orphans writers health"
@@ -292,7 +349,19 @@ complete -c kasumi -l help -s h -d "Show help"
 complete -c kasumi -l version -s v -d "Show version"
 complete -c kasumi -l quiet -d "Suppress progress output"
 complete -c kasumi -l json -d "Emit JSON output"
+complete -c kasumi -l log-file -r -d "Append text or NDJSON logs to file"
 complete -c kasumi -l full -d "Show full details"
+complete -c kasumi -l background -d "Detach daemon into background"
+complete -c kasumi -l foreground -d "Run daemon in foreground"
+complete -c kasumi -l wait -d "Wait for triggered daemon sync completion"
+complete -c kasumi -l lines -r -d "Maximum daemon log events to display (1-1000)"
+complete -c kasumi -l watch -x -a "on off" -d "Enable or disable daemon directory watcher"
+complete -c kasumi -l clear-watch -d "Reset daemon watcher setting to default"
+complete -c kasumi -l sync-interval -r -d "Daemon fallback sync interval in seconds (0 or 10-86400)"
+complete -c kasumi -l clear-sync-interval -d "Reset daemon sync interval to default"
+complete -c kasumi -l gc-interval -r -d "Daemon scheduled GC interval in hours (0 or 1-8760)"
+complete -c kasumi -l clear-gc-interval -d "Reset daemon GC interval to default"
+complete -c kasumi -l paused -x -a "on off" -d "Pause or resume automated daemon cycles"
 complete -c kasumi -l dry-run -d "Preview without mutating"
 complete -c kasumi -l verify -d "Verify remote connectivity/auth after profile create"
 complete -c kasumi -l replace -d "Allow replacing an existing different key"
@@ -316,8 +385,10 @@ Register-ArgumentCompleter -Native -CommandName kasumi -ScriptBlock {
     $count = $tokens.Count
     if ($wordToComplete -eq '') { $count++ }
 
-    $topCommands = @('config', 'list', 'show', 'diagnostics', 'key', 'profile', 'ignore', 'sync', 'status', 'fsck', 'gc', 'repack', 'resolve-missing', 'conflicts', 'remote', 'completion')
+    $topCommands = @('config', 'list', 'show', 'diagnostics', 'key', 'profile', 'daemon', 'ignore', 'sync', 'status', 'fsck', 'gc', 'repack', 'resolve-missing', 'conflicts', 'remote', 'completion')
     $profileSubs = @('create', 'edit', 'clone', 'storage', 'rename', 'delete', 'test')
+    $daemonSubs = @('run', 'stop', 'status', 'sync', 'pause', 'resume', 'unlock', 'lock', 'reload', 'logs', 'autostart')
+    $autostartSubs = @('install', 'uninstall', 'status')
     $ignoreSubs = @('check', 'init')
     $remoteSubs = @('heads', 'tree', 'commits', 'summary', 'stat', 'log', 'commit', 'get', 'restore', 'epochs', 'epoch', 'contents', 'content', 'markers', 'objects', 'orphans', 'writers', 'health')
     $conflictsSubs = @('resolve')
@@ -346,7 +417,18 @@ Register-ArgumentCompleter -Native -CommandName kasumi -ScriptBlock {
                 } elseif ($count -eq 5 -and $tokens[2] -eq 'storage') {
                     $candidates = @('vault', 'file', 'memory')
                 } elseif ($wordToComplete -like '-*') {
-                    $candidates = @('--local', '--remote', '--key-storage', '--min-depth', '--min-age', '--bwlimit', '--clear-bwlimit', '--concurrency', '--clear-concurrency', '--rclone-config', '--clear-rclone-config', '--verify', '--allow-empty-local', '--confirm', '--quiet', '--json', '--log-file', '--help')
+                    $candidates = @('--local', '--remote', '--key-storage', '--min-depth', '--min-age', '--bwlimit', '--clear-bwlimit', '--concurrency', '--clear-concurrency', '--rclone-config', '--clear-rclone-config', '--watch', '--clear-watch', '--sync-interval', '--clear-sync-interval', '--gc-interval', '--clear-gc-interval', '--paused', '--verify', '--allow-empty-local', '--confirm', '--quiet', '--json', '--log-file', '--help')
+                }
+            }
+            'daemon' {
+                if ($count -eq 3) {
+                    $candidates = $daemonSubs
+                } elseif ($count -eq 4 -and -not ($wordToComplete -like '-*') -and $tokens[2] -eq 'autostart') {
+                    $candidates = $autostartSubs
+                } elseif ($count -eq 4 -and -not ($wordToComplete -like '-*') -and $tokens[2] -in @('status', 'sync', 'pause', 'resume', 'unlock', 'lock', 'logs')) {
+                    $candidates = & $getProfiles
+                } elseif ($wordToComplete -like '-*') {
+                    $candidates = @('--background', '--foreground', '--wait', '--lines', '--full', '--quiet', '--json', '--log-file', '--help')
                 }
             }
             'ignore' {

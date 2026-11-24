@@ -113,7 +113,8 @@ INSTANTIATE_TEST_SUITE_P(
         {"remote", "objects"},
         {"remote", "orphans"},
         {"remote", "writers"},
-        {"remote", "health"}}));
+        {"remote", "health"},
+        {"daemon"}}));
 TEST_F(CliInterfaceTest, ConfigHelpIncludesCloneInBothLanguages) {
     const auto english = run({"kasumi", "config", "--help"});
     EXPECT_NE(english.out.find("clone"), std::string::npos);
@@ -869,5 +870,118 @@ TEST_F(CliInterfaceTest, SignalCancelsBlockedWizardInput) {
         std::filesystem::is_empty(kasumi::test::workspace_root(workspace)));
 }
 #endif
+
+TEST_F(CliInterfaceTest, DaemonStatusJsonOfflineDoesNotCreateWorkspace) {
+    const auto output = run({"kasumi", "daemon", "status", "--json"});
+    EXPECT_EQ(output.code, 0);
+    EXPECT_TRUE(output.err.empty());
+    EXPECT_NE(output.out.find("\"running\":false"), std::string::npos);
+    EXPECT_NE(output.out.find("\"command\":\"daemon status\""),
+              std::string::npos);
+    EXPECT_TRUE(
+        std::filesystem::is_empty(kasumi::test::workspace_root(workspace)));
+}
+
+TEST_F(CliInterfaceTest, DaemonAutostartStatusJsonUsesScopedEnv) {
+    const auto autostart_dir =
+        kasumi::test::workspace_path(workspace, "autostart");
+    auto scoped_autostart = kasumi::test::scoped_environment_variable(
+        "KASUMI_AUTOSTART_DIR", autostart_dir.string());
+    const auto output =
+        run({"kasumi", "daemon", "autostart", "status", "--json"});
+    EXPECT_EQ(output.code, 0);
+    EXPECT_TRUE(output.err.empty());
+    EXPECT_NE(output.out.find("\"installed\":false"), std::string::npos);
+    EXPECT_NE(output.out.find("\"command\":\"daemon autostart status\""),
+              std::string::npos);
+}
+
+TEST_F(CliInterfaceTest, ShowJsonIncludesAutomationFields) {
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto remote = kasumi::test::workspace_path(workspace, "remote");
+    std::filesystem::create_directories(local);
+    std::filesystem::create_directories(remote);
+    const std::string hex_key(64, '2');
+    auto scoped_key =
+        kasumi::test::scoped_environment_variable("KASUMI_MASTER_KEY", hex_key);
+
+    const auto create_out = run({"kasumi",
+                                 "profile",
+                                 "create",
+                                 "auto_prof",
+                                 "--local",
+                                 local.string(),
+                                 "--remote",
+                                 remote.string(),
+                                 "--key-storage",
+                                 "file",
+                                 "--watch",
+                                 "off",
+                                 "--sync-interval",
+                                 "120",
+                                 "--gc-interval",
+                                 "48",
+                                 "--paused",
+                                 "on",
+                                 "--json"});
+    ASSERT_EQ(create_out.code, 0) << create_out.out << create_out.err;
+
+    const auto show_out = run({"kasumi", "show", "auto_prof", "--json"});
+    ASSERT_EQ(show_out.code, 0) << show_out.out << show_out.err;
+    EXPECT_NE(show_out.out.find("\"watch_enabled\":false"), std::string::npos);
+    EXPECT_NE(show_out.out.find("\"sync_interval_seconds\":120"),
+              std::string::npos);
+    EXPECT_NE(show_out.out.find("\"gc_interval_hours\":48"), std::string::npos);
+    EXPECT_NE(show_out.out.find("\"paused\":true"), std::string::npos);
+    EXPECT_NE(show_out.out.find("\"daemon\":null"), std::string::npos);
+}
+
+TEST_F(CliInterfaceTest, DaemonHelpLogsAndErrorContractsWork) {
+    for (const char* sub : {"run",
+                            "stop",
+                            "reload",
+                            "status",
+                            "sync",
+                            "pause",
+                            "resume",
+                            "unlock",
+                            "lock",
+                            "logs",
+                            "autostart"}) {
+        const auto help_out = run({"kasumi", "daemon", sub, "--help"});
+        EXPECT_EQ(help_out.code, 0) << "sub=" << sub << "\n" << help_out.err;
+        EXPECT_NE(help_out.out.find("kasumi daemon"), std::string::npos);
+    }
+
+    const auto logs_out = run({"kasumi", "daemon", "logs", "--json"});
+    ASSERT_EQ(logs_out.code, 0) << logs_out.out << logs_out.err;
+    EXPECT_NE(logs_out.out.find("\"command\":\"daemon logs\""),
+              std::string::npos);
+    EXPECT_NE(logs_out.out.find("\"events\":[]"), std::string::npos);
+
+    const auto diag_out = run({"kasumi", "diagnostics", "--json"});
+    ASSERT_EQ(diag_out.code, 0) << diag_out.out << diag_out.err;
+    EXPECT_NE(diag_out.out.find("\"daemon\":{"), std::string::npos);
+
+    const auto bad_log_dir = kasumi::test::workspace_path(workspace, "badlog");
+    std::filesystem::create_directories(bad_log_dir);
+    const auto err_log = run({"kasumi",
+                              "daemon",
+                              "autostart",
+                              "status",
+                              "--json",
+                              "--log-file",
+                              bad_log_dir.string()});
+    EXPECT_EQ(err_log.code, 1);
+    EXPECT_NE(err_log.out.find("\"command\":\"daemon autostart status\""),
+              std::string::npos);
+    EXPECT_EQ(err_log.out.find("\"profile\":"), std::string::npos);
+
+    const auto unlock_quiet =
+        run({"kasumi", "daemon", "unlock", "demo", "--quiet"});
+    EXPECT_EQ(unlock_quiet.code, 1);
+    EXPECT_FALSE(unlock_quiet.out.empty());
+    EXPECT_TRUE(unlock_quiet.err.empty());
+}
 
 } // namespace

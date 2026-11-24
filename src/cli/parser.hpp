@@ -64,9 +64,38 @@ struct ProfileInvocation {
     bool clear_transfer_concurrency = false;
     std::optional<std::string> rclone_config;
     bool clear_rclone_config = false;
+    std::optional<bool> watch_enabled;
+    bool clear_watch_enabled = false;
+    std::optional<std::uint32_t> sync_interval_seconds;
+    bool clear_sync_interval_seconds = false;
+    std::optional<std::uint32_t> gc_interval_hours;
+    bool clear_gc_interval_hours = false;
+    std::optional<bool> paused;
     bool verify = false;
     bool allow_empty_local = false;
     bool confirm = false;
+};
+enum class DaemonAction {
+    Run,
+    Stop,
+    Status,
+    Sync,
+    Pause,
+    Resume,
+    Unlock,
+    Lock,
+    Reload,
+    Logs,
+    AutostartInstall,
+    AutostartUninstall,
+    AutostartStatus,
+};
+struct DaemonInvocation {
+    DaemonAction action = DaemonAction::Status;
+    std::optional<std::string> profile_name;
+    bool background = false;
+    bool wait = false;
+    std::size_t log_lines = 50;
 };
 enum class IgnoreAction {
     Check,
@@ -95,6 +124,7 @@ using Invocation = std::variant<application::Request,
                                 ConflictsInvocation,
                                 CompletionInvocation,
                                 ProfileInvocation,
+                                DaemonInvocation,
                                 IgnoreInvocation,
                                 HelpInvocation>;
 

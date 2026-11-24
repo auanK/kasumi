@@ -166,8 +166,8 @@ check_sync_disk_space(const std::filesystem::path& local_dir,
 
 std::expected<Response, Error> run_plan(OperationContext& context) {
     ProgressMeter meter(context.on_progress, context.storage, false);
-    meter.notify(SyncProgress{.stage = SyncStage::Observing});
-    meter.phase(Activity::Scanning);
+    notify_progress(meter, SyncProgress{.stage = SyncStage::Observing});
+    begin_progress_phase(meter, Activity::Scanning);
     observation::LocalObservationSession observation_session;
     observation_session.database_path = context.runtime.database_path;
     observation_session.progress = &meter;
@@ -186,9 +186,9 @@ std::expected<Response, Error> run_plan(OperationContext& context) {
                         SyncStage::Observing);
     }
 
-    meter.notify(SyncProgress{.stage = SyncStage::Calculating});
+    notify_progress(meter, SyncProgress{.stage = SyncStage::Calculating});
 
-    meter.phase(Activity::ComparingSnapshots);
+    begin_progress_phase(meter, Activity::ComparingSnapshots);
     auto reconciled = reconciliation::reconcile(*collected);
     if (!reconciled) {
         return fail_app(context,
@@ -197,7 +197,7 @@ std::expected<Response, Error> run_plan(OperationContext& context) {
                         SyncStage::Calculating);
     }
 
-    meter.phase(Activity::PreparingPlan);
+    begin_progress_phase(meter, Activity::PreparingPlan);
     auto report = reconciliation_to_report(*collected, *reconciled);
     if (!report) {
         return fail_app(context,

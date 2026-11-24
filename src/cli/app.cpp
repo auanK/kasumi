@@ -1,5 +1,6 @@
 #include "cli/app.hpp"
 
+#include "application/daemon.hpp"
 #include "application/environment.hpp"
 #include "application/execute.hpp"
 #include "application/inspection/inspect.hpp"
@@ -18,11 +19,13 @@
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
+#include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <mutex>
 #include <optional>
 #include <print>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -40,24 +43,23 @@
 
 namespace {
 
-class CommandProgress {
-public:
+struct CommandProgress {
     explicit CommandProgress(bool full = false,
                              kasumi::platform::Terminal terminal =
                                  kasumi::platform::stdout_terminal())
-        : display_(terminal, full) {
+        : display(terminal, full) {
         if (!terminal.interactive) {
             return;
         }
         try {
-            ticker_ = std::jthread([this](std::stop_token stop) {
-                std::unique_lock lock(mutex_);
+            ticker = std::jthread([this](std::stop_token stop) {
+                std::unique_lock lock(mutex);
                 while (!stop.stop_requested()) {
-                    wake_.wait_for(lock, stop, std::chrono::seconds(1), [] {
+                    wake.wait_for(lock, stop, std::chrono::seconds(1), [] {
                         return false;
                     });
                     if (!stop.stop_requested()) {
-                        display_.heartbeat();
+                        kasumi::cli::heartbeat_progress_display(display);
                     }
                 }
             });
@@ -65,24 +67,25 @@ public:
         }
     }
 
-    void update(const kasumi::application::ExecutionProgress& progress,
-                kasumi::application::Operation operation =
-                    kasumi::application::Operation::Sync) {
-        std::lock_guard lock(mutex_);
-        display_.update(progress, operation);
-    }
-
-    void finish(bool keep) noexcept {
-        ticker_ = {};
-        display_.finish(keep);
-    }
-
-private:
-    kasumi::cli::ProgressDisplay display_;
-    std::mutex mutex_;
-    std::condition_variable_any wake_;
-    std::jthread ticker_;
+    kasumi::cli::ProgressDisplay display;
+    std::mutex mutex;
+    std::condition_variable_any wake;
+    std::jthread ticker;
 };
+
+void update_command_progress(
+    CommandProgress& cmd,
+    const kasumi::application::ExecutionProgress& progress,
+    kasumi::application::Operation operation =
+        kasumi::application::Operation::Sync) {
+    std::lock_guard lock(cmd.mutex);
+    kasumi::cli::update_progress_display(cmd.display, progress, operation);
+}
+
+void finish_command_progress(CommandProgress& cmd, bool keep) noexcept {
+    cmd.ticker = {};
+    kasumi::cli::finish_progress_display(cmd.display, keep);
+}
 
 void request_cancellation(int signal_number) {
     kasumi::platform::cancellation::request();
@@ -194,13 +197,24 @@ int run(int argc, char* argv[]) {
     const bool is_remote_sub = cmd == "remote" && sanitized.size() > 3 &&
                                !sanitized[3].empty() &&
                                sanitized[3].front() != '-';
+    const bool is_daemon_sub =
+        cmd == "daemon" && sanitized.size() > 2 && !sanitized[2].empty() &&
+        sanitized[2].front() != '-' &&
+        !(sanitized[2] == "autostart" && sanitized.size() < 4);
+    const bool is_daemon_profile_arg =
+        is_daemon_sub && sanitized.size() > 3 && !sanitized[3].empty() &&
+        sanitized[3].front() != '-' && sanitized[2] != "autostart" &&
+        sanitized[2] != "run";
+    const bool supports_daemon_full = is_daemon_sub && sanitized[2] == "status";
     const bool supports_command_full =
         has_profile_arg &&
         (cmd == "sync" || cmd == "status" || cmd == "repack" || cmd == "show");
     const bool supports_remote_full =
         is_remote_sub && (sanitized[2] == "summary" || sanitized[2] == "log");
-    const bool supports_full = supports_command_full || supports_remote_full;
-    const std::size_t full_start_index = supports_remote_full ? 4U : 3U;
+    const bool supports_full =
+        supports_command_full || supports_remote_full || supports_daemon_full;
+    const std::size_t full_start_index =
+        supports_remote_full ? 4U : (supports_daemon_full ? 3U : 3U);
 
     const bool supports_quiet =
         cmd == "list" || cmd == "diagnostics" ||
@@ -210,7 +224,7 @@ int run(int argc, char* argv[]) {
           (cmd == "conflicts" && !is_conflicts_sub_kw) ||
           (cmd == "gc" && !is_gc_sub_kw))) ||
         is_gc_subcommand || is_profile_subcommand || is_ignore_subcommand ||
-        is_conflicts_subcommand || is_remote_sub;
+        is_conflicts_subcommand || is_remote_sub || is_daemon_sub;
     const std::size_t quiet_start_index =
         (cmd == "list" || (cmd == "diagnostics" && !has_profile_arg))
             ? 2U
@@ -237,7 +251,7 @@ int run(int argc, char* argv[]) {
           (cmd == "gc" && !is_gc_sub_kw))) ||
         is_profile_subcommand || is_ignore_subcommand ||
         is_conflicts_subcommand || supports_remote_summary_or_writers ||
-        supports_gc_remove_barrier;
+        supports_gc_remove_barrier || is_daemon_sub;
     const std::size_t json_start_index =
         (cmd == "list" || (cmd == "diagnostics" && !has_profile_arg))
             ? 2U
@@ -390,18 +404,31 @@ int run(int argc, char* argv[]) {
         return 0;
     }
 
+    std::string log_command_storage;
+    if (is_daemon_sub) {
+        if (sanitized[2] == "autostart" && sanitized.size() > 3 &&
+            !sanitized[3].empty() && sanitized[3].front() != '-') {
+            log_command_storage =
+                std::format("daemon autostart {}", sanitized[3]);
+        } else {
+            log_command_storage = std::format("daemon {}", sanitized[2]);
+        }
+    }
     const std::string_view log_command_label =
-        cmd.empty() ? std::string_view{"kasumi"} : cmd;
+        !log_command_storage.empty()
+            ? std::string_view{log_command_storage}
+            : (cmd.empty() ? std::string_view{"kasumi"} : cmd);
     if (log_file.has_value()) {
         if (const auto valid = validate_log_file_path(*log_file); !valid) {
             if (json) {
                 const std::string_view err_profile =
                     (is_gc_subcommand || is_profile_subcommand ||
                      is_ignore_subcommand || is_conflicts_subcommand ||
-                     is_remote_sub)
+                     is_remote_sub || is_daemon_profile_arg)
                         ? std::string_view{sanitized[3]}
-                        : (has_profile_arg ? std::string_view{sanitized[2]}
-                                           : std::string_view{});
+                        : ((!is_daemon_sub && has_profile_arg)
+                               ? std::string_view{sanitized[2]}
+                               : std::string_view{});
                 return present_json_io_error(
                     log_command_label, err_profile, valid.error());
             }
@@ -566,6 +593,384 @@ int run(int argc, char* argv[]) {
         return complete_wizard_command(
             prof_cmd, prof_inv->profile_name, summary, code);
     }
+    if (const auto* daemon_inv =
+            std::get_if<DaemonInvocation>(&*parse_result)) {
+        const auto daemon_cmd_label = [&]() -> std::string {
+            switch (daemon_inv->action) {
+                case DaemonAction::Run:
+                    return "daemon run";
+                case DaemonAction::Stop:
+                    return "daemon stop";
+                case DaemonAction::Status:
+                    return "daemon status";
+                case DaemonAction::Sync:
+                    return "daemon sync";
+                case DaemonAction::Pause:
+                    return "daemon pause";
+                case DaemonAction::Resume:
+                    return "daemon resume";
+                case DaemonAction::Unlock:
+                    return "daemon unlock";
+                case DaemonAction::Lock:
+                    return "daemon lock";
+                case DaemonAction::Reload:
+                    return "daemon reload";
+                case DaemonAction::Logs:
+                    return "daemon logs";
+                case DaemonAction::AutostartInstall:
+                    return "daemon autostart install";
+                case DaemonAction::AutostartUninstall:
+                    return "daemon autostart uninstall";
+                case DaemonAction::AutostartStatus:
+                    return "daemon autostart status";
+            }
+            return "daemon";
+        };
+        const std::string cmd_str = daemon_cmd_label();
+        const std::string prof_str = daemon_inv->profile_name.value_or("");
+        const auto fail_daemon = [&](const application::DaemonError& err) {
+            if (json) {
+                return present_json_daemon_error(
+                    cmd_str, prof_str, err, elapsed());
+            }
+            return log_text_entry(
+                {.status = "ERROR",
+                 .command = cmd_str,
+                 .profile = prof_str,
+                 .summary = std::format(
+                     "[{}] {}", json_error_code(err.code), err.detail),
+                 .duration = elapsed()},
+                finish(present(err)));
+        };
+        const auto ok_action = [&](i18n::Key msg_key, std::string summary) {
+            if (json) {
+                return present_json_daemon_action(
+                    cmd_str, prof_str, summary, elapsed());
+            }
+            if (!quiet) {
+                if (prof_str.empty()) {
+                    print_ok_line(i18n::tr(msg_key));
+                } else {
+                    print_ok_line(i18n::format(
+                        msg_key, sanitize_terminal_text(prof_str)));
+                }
+            }
+            return log_text_entry({.status = "OK",
+                                   .command = cmd_str,
+                                   .profile = prof_str,
+                                   .summary = std::move(summary),
+                                   .duration = elapsed()},
+                                  finish(0));
+        };
+
+        switch (daemon_inv->action) {
+            case DaemonAction::Run: {
+                if (daemon_inv->background) {
+                    const auto bg = application::spawn_background_daemon(
+                        environment, log_file);
+                    if (!bg) {
+                        return fail_daemon(bg.error());
+                    }
+                    if (json) {
+                        return present_json_daemon_status(
+                            cmd_str, *bg, elapsed());
+                    }
+                    if (!quiet) {
+                        print_ok_line(
+                            i18n::format(i18n::Key::DaemonBackgroundStarted,
+                                         bg->pid,
+                                         bg->ipc_port));
+                    }
+                    return log_text_entry(
+                        {.status = "OK",
+                         .command = cmd_str,
+                         .profile = "",
+                         .summary = format_compact_summary(*bg),
+                         .duration = elapsed()},
+                        finish(0));
+                }
+                application::DaemonOptions opts;
+                std::mutex event_mu;
+                opts.on_event = [&](const application::DaemonEvent& ev) {
+                    std::lock_guard lock(event_mu);
+                    const std::string line =
+                        ev.profile_name.empty()
+                            ? std::format("[daemon] {}: {}", ev.kind, ev.detail)
+                            : std::format("[{}] {}: {}",
+                                          ev.profile_name,
+                                          ev.kind,
+                                          ev.detail);
+                    if (log_file.has_value()) {
+                        if (json) {
+                            append_json_daemon_event(*log_file, ev);
+                        } else {
+                            (void)append_text_log_entry(
+                                *log_file,
+                                {.status = "INFO",
+                                 .command = cmd_str,
+                                 .profile = ev.profile_name,
+                                 .summary = line,
+                                 .duration = elapsed()});
+                        }
+                    }
+                    if (!quiet && !json) {
+                        std::println("{}", sanitize_terminal_text(line));
+                    }
+                };
+                if (!quiet && !json) {
+                    print_ok_line(i18n::tr(i18n::Key::DaemonStarting));
+                }
+                std::stop_source stop_source;
+                std::jthread cancel_bridge([&](std::stop_token token) {
+                    while (!token.stop_requested()) {
+                        if (platform::cancellation::requested()) {
+                            stop_source.request_stop();
+                            break;
+                        }
+                        std::this_thread::sleep_for(
+                            std::chrono::milliseconds(50));
+                    }
+                });
+                const auto run_res = application::run_daemon(
+                    environment, std::move(opts), stop_source.get_token());
+                cancel_bridge.request_stop();
+                cancel_bridge = {};
+                if (!run_res) {
+                    return fail_daemon(run_res.error());
+                }
+                return ok_action(i18n::Key::DaemonStopped, "daemon stopped");
+            }
+            case DaemonAction::Stop: {
+                const auto stopped =
+                    application::stop_running_daemon(environment);
+                if (!stopped) {
+                    return fail_daemon(stopped.error());
+                }
+                return ok_action(i18n::Key::DaemonStopped, "daemon stopped");
+            }
+            case DaemonAction::Reload: {
+                const auto reloaded =
+                    application::reload_running_daemon(environment);
+                if (!reloaded) {
+                    return fail_daemon(reloaded.error());
+                }
+                return ok_action(i18n::Key::DaemonReloaded, "daemon reloaded");
+            }
+            case DaemonAction::Status: {
+                const std::optional<std::string_view> filter =
+                    daemon_inv->profile_name
+                        ? std::optional<std::string_view>{*daemon_inv
+                                                               ->profile_name}
+                        : std::nullopt;
+                const auto st =
+                    application::query_daemon_status(environment, filter);
+                if (!st) {
+                    return fail_daemon(st.error());
+                }
+                if (json) {
+                    return present_json_daemon_status(
+                        cmd_str, *st, elapsed(), filter);
+                }
+                const int code = finish(present(*st, full, quiet));
+                return log_text_entry({.status = "OK",
+                                       .command = cmd_str,
+                                       .profile = prof_str,
+                                       .summary = format_compact_summary(*st),
+                                       .duration = elapsed()},
+                                      code);
+            }
+            case DaemonAction::Sync: {
+                const std::optional<std::string_view> filter =
+                    daemon_inv->profile_name
+                        ? std::optional<std::string_view>{*daemon_inv
+                                                               ->profile_name}
+                        : std::nullopt;
+                const auto triggered = application::trigger_daemon_sync(
+                    environment, filter, daemon_inv->wait);
+                if (!triggered) {
+                    return fail_daemon(triggered.error());
+                }
+                if (json) {
+                    return present_json_daemon_sync(
+                        *triggered, filter, daemon_inv->wait, elapsed());
+                }
+                const int code =
+                    finish(present(*triggered, daemon_inv->wait, quiet));
+                return log_text_entry(
+                    {.status = code == 0 ? "OK" : "ERROR",
+                     .command = cmd_str,
+                     .profile = prof_str,
+                     .summary = std::format("profiles={}, failures={}",
+                                            triggered->profiles.size(),
+                                            triggered->failures.size()),
+                     .duration = elapsed()},
+                    code);
+            }
+            case DaemonAction::Pause: {
+                const auto res =
+                    application::pause_daemon_profile(environment, prof_str);
+                if (!res) {
+                    return fail_daemon(res.error());
+                }
+                return ok_action(i18n::Key::DaemonProfilePaused,
+                                 std::format("paused profile '{}'", prof_str));
+            }
+            case DaemonAction::Resume: {
+                const auto res =
+                    application::resume_daemon_profile(environment, prof_str);
+                if (!res) {
+                    return fail_daemon(res.error());
+                }
+                return ok_action(i18n::Key::DaemonProfileResumed,
+                                 std::format("resumed profile '{}'", prof_str));
+            }
+            case DaemonAction::Lock: {
+                const auto res =
+                    application::lock_daemon_profile(environment, prof_str);
+                if (!res) {
+                    return fail_daemon(res.error());
+                }
+                return ok_action(i18n::Key::DaemonProfileLocked,
+                                 std::format("locked profile '{}'", prof_str));
+            }
+            case DaemonAction::Unlock: {
+                std::optional<application::ProfileCredentials> profile_creds;
+                const char* master_env = std::getenv("KASUMI_MASTER_KEY");
+                const char* pw_env = std::getenv("KASUMI_PASSWORD");
+                const char* salt_env = std::getenv("KASUMI_PASSWORD2");
+                if (master_env != nullptr && master_env[0] != '\0') {
+                    profile_creds =
+                        application::MasterKeyHex{std::string{master_env}};
+                } else if (pw_env != nullptr && salt_env != nullptr) {
+                    profile_creds = application::PasswordPair{
+                        std::string{pw_env}, std::string{salt_env}};
+                } else if (json || quiet) {
+                    if (json) {
+                        return present_json_credentials_required(
+                            cmd_str,
+                            prof_str,
+                            i18n::tr(
+                                i18n::Key::WizardProfileCredentialsRequired),
+                            elapsed());
+                    }
+                    print_error_line(
+                        i18n::tr(i18n::Key::WizardProfileCredentialsRequired));
+                    return log_text_entry(
+                        {.status = "ERROR",
+                         .command = cmd_str,
+                         .profile = prof_str,
+                         .summary = "[credentials_required] missing env",
+                         .duration = elapsed()},
+                        finish(1));
+                } else {
+                    auto pw = credentials::read_secret(
+                        "KASUMI_PASSWORD",
+                        std::string{i18n::tr(i18n::Key::PromptPassword)});
+                    auto salt =
+                        platform::cancellation::requested()
+                            ? std::string{}
+                            : credentials::read_secret(
+                                  "KASUMI_PASSWORD2",
+                                  std::string{i18n::tr(i18n::Key::PromptSalt)});
+                    if (platform::cancellation::requested()) {
+                        application::ProfileCredentials cancelled_creds =
+                            application::PasswordPair{std::move(pw),
+                                                      std::move(salt)};
+                        application::wipe_credentials(cancelled_creds);
+                        const int code =
+                            json ? present_json_cancellation(cmd_str, prof_str)
+                                 : present_cancellation(
+                                       application::Operation::Sync);
+                        return log_text_entry(
+                            {.status = "CANCELLED",
+                             .command = cmd_str,
+                             .profile = prof_str,
+                             .summary = "operation cancelled by user",
+                             .duration = elapsed()},
+                            code);
+                    }
+                    profile_creds = application::PasswordPair{std::move(pw),
+                                                              std::move(salt)};
+                }
+                const auto unlocked = application::unlock_daemon_profile(
+                    environment, prof_str, std::move(*profile_creds));
+                application::wipe_credentials(*profile_creds);
+                if (!unlocked) {
+                    return fail_daemon(unlocked.error());
+                }
+                return ok_action(
+                    i18n::Key::DaemonProfileUnlocked,
+                    std::format("unlocked profile '{}'", prof_str));
+            }
+            case DaemonAction::Logs: {
+                const auto logs = application::query_daemon_events(
+                    environment,
+                    application::DaemonLogQuery{
+                        .profile_name = daemon_inv->profile_name,
+                        .max_lines = daemon_inv->log_lines,
+                    });
+                if (!logs) {
+                    return fail_daemon(logs.error());
+                }
+                if (json) {
+                    return present_json_daemon_logs(
+                        *logs, daemon_inv->profile_name, elapsed());
+                }
+                const int code = finish(present(*logs, quiet));
+                return log_text_entry(
+                    {.status = "OK",
+                     .command = cmd_str,
+                     .profile = prof_str,
+                     .summary = std::format("events={}, latest_seq={}",
+                                            logs->events.size(),
+                                            logs->latest_seq),
+                     .duration = elapsed()},
+                    code);
+            }
+            case DaemonAction::AutostartInstall:
+            case DaemonAction::AutostartUninstall:
+            case DaemonAction::AutostartStatus: {
+                const auto res =
+                    daemon_inv->action == DaemonAction::AutostartInstall
+                        ? application::install_daemon_autostart()
+                    : daemon_inv->action == DaemonAction::AutostartUninstall
+                        ? application::uninstall_daemon_autostart()
+                        : application::query_daemon_autostart();
+                if (!res) {
+                    return fail_daemon(res.error());
+                }
+                if (json) {
+                    return present_json_daemon_autostart(
+                        cmd_str, *res, elapsed());
+                }
+                int code = 0;
+                if (daemon_inv->action == DaemonAction::AutostartInstall &&
+                    res->supported && !quiet) {
+                    print_ok_line(
+                        i18n::format(i18n::Key::DaemonAutostartInstalled,
+                                     sanitize_terminal_text(res->method),
+                                     sanitize_terminal_text(res->location)));
+                    code = finish(0);
+                } else if (daemon_inv->action ==
+                               DaemonAction::AutostartUninstall &&
+                           res->supported && !quiet) {
+                    print_ok_line(
+                        i18n::format(i18n::Key::DaemonAutostartUninstalled,
+                                     sanitize_terminal_text(res->method)));
+                    code = finish(0);
+                } else {
+                    code = finish(present(*res, quiet));
+                }
+                return log_text_entry({.status = "OK",
+                                       .command = cmd_str,
+                                       .profile = "",
+                                       .summary = format_compact_summary(*res),
+                                       .duration = elapsed()},
+                                      code);
+            }
+        }
+        return 1;
+    }
     if (const auto* ign_inv = std::get_if<IgnoreInvocation>(&*parse_result)) {
         std::string summary;
         const int code =
@@ -684,7 +1089,7 @@ int run(int argc, char* argv[]) {
         if (!quiet && !json) {
             display.emplace(full);
             on_progress = [&](const auto& progress) {
-                display->update(progress);
+                update_command_progress(*display, progress);
             };
         }
         auto result = application::inspect({
@@ -694,8 +1099,9 @@ int run(int argc, char* argv[]) {
             .on_progress = std::move(on_progress),
         });
         if (display) {
-            display->finish(result.has_value() &&
-                            !platform::cancellation::requested());
+            finish_command_progress(*display,
+                                    result.has_value() &&
+                                        !platform::cancellation::requested());
         }
         application::wipe_credentials(creds);
 
@@ -877,7 +1283,7 @@ int run(int argc, char* argv[]) {
             preview_display.emplace(full);
             on_preview_progress = [operation = request.operation,
                                    &preview_display](const auto& progress) {
-                preview_display->update(progress, operation);
+                update_command_progress(*preview_display, progress, operation);
             };
         }
         auto preview_res = application::execute({
@@ -887,8 +1293,9 @@ int run(int argc, char* argv[]) {
             .on_progress = std::move(on_preview_progress),
         });
         if (preview_display) {
-            preview_display->finish(preview_res.has_value() &&
-                                    !platform::cancellation::requested());
+            finish_command_progress(*preview_display,
+                                    preview_res.has_value() &&
+                                        !platform::cancellation::requested());
         }
         application::wipe_credentials(preview_creds);
 
@@ -946,7 +1353,7 @@ int run(int argc, char* argv[]) {
         display.emplace(full);
         on_progress = [operation = request.operation,
                        &display](const auto& progress) {
-            display->update(progress, operation);
+            update_command_progress(*display, progress, operation);
         };
     }
     auto result = application::execute({.request = request,
@@ -954,8 +1361,9 @@ int run(int argc, char* argv[]) {
                                         .environment = environment,
                                         .on_progress = std::move(on_progress)});
     if (display) {
-        display->finish(result.has_value() &&
-                        !platform::cancellation::requested());
+        finish_command_progress(*display,
+                                result.has_value() &&
+                                    !platform::cancellation::requested());
     }
 
     if (platform::cancellation::requested()) {

@@ -386,4 +386,59 @@ TEST(RuntimeProfileTest, RoundTripsVersionAndOptionalNetworkSettings) {
     EXPECT_FALSE(kasumi::runtime::load_profiles(config).has_value());
 }
 
+TEST(RuntimeProfileTest, RoundTripsAndValidatesDaemonAutomationFields) {
+    auto workspace = kasumi::test::make_temp_workspace("runtime-daemon-cfg");
+    const auto config =
+        kasumi::test::workspace_path(workspace, "kasumi/config.toml");
+    const auto local_dir = kasumi::test::workspace_path(workspace, "data");
+    std::filesystem::create_directories(local_dir);
+
+    kasumi::runtime::ProfileData profile{
+        "auto",
+        local_dir,
+        "drive:auto",
+        5U,
+        6U,
+        kasumi::runtime::KeyStorage::Vault,
+    };
+    profile.watch_enabled = false;
+    profile.sync_interval_seconds = 120U;
+    profile.gc_interval_hours = 12U;
+    profile.paused = true;
+
+    const std::array<kasumi::runtime::ProfileData, 1> saved{profile};
+    ASSERT_TRUE(kasumi::runtime::save_profiles(config, saved).has_value());
+
+    const auto loaded = kasumi::runtime::load_profiles(config);
+    ASSERT_TRUE(loaded.has_value()) << loaded.error().detail;
+    ASSERT_EQ(loaded->size(), 1U);
+    EXPECT_EQ((*loaded)[0].watch_enabled, std::optional<bool>{false});
+    EXPECT_EQ((*loaded)[0].sync_interval_seconds,
+              std::optional<std::uint32_t>{120U});
+    EXPECT_EQ((*loaded)[0].gc_interval_hours,
+              std::optional<std::uint32_t>{12U});
+    EXPECT_TRUE((*loaded)[0].paused);
+
+    // Zero intervals (disabled) are accepted.
+    profile.sync_interval_seconds = 0U;
+    profile.gc_interval_hours = 0U;
+    profile.paused = false;
+    const std::array<kasumi::runtime::ProfileData, 1> disabled_saved{profile};
+    ASSERT_TRUE(
+        kasumi::runtime::save_profiles(config, disabled_saved).has_value());
+    const auto disabled_loaded = kasumi::runtime::load_profiles(config);
+    ASSERT_TRUE(disabled_loaded.has_value());
+    EXPECT_EQ((*disabled_loaded)[0].sync_interval_seconds,
+              std::optional<std::uint32_t>{0U});
+    EXPECT_EQ((*disabled_loaded)[0].gc_interval_hours,
+              std::optional<std::uint32_t>{0U});
+    EXPECT_FALSE((*disabled_loaded)[0].paused);
+
+    // Out-of-range interval (<10s when nonzero) fails closed.
+    profile.sync_interval_seconds = 5U;
+    const std::array<kasumi::runtime::ProfileData, 1> invalid_saved{profile};
+    EXPECT_FALSE(
+        kasumi::runtime::save_profiles(config, invalid_saved).has_value());
+}
+
 } // namespace

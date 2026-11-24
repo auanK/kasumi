@@ -171,8 +171,7 @@ struct ChildRun {
 
 #if defined(_WIN32)
 
-class ScopedEnvironmentHelper {
-public:
+struct ScopedEnvironmentHelper {
     bool set(const wchar_t* name, std::wstring value) {
         const DWORD required = GetEnvironmentVariableW(name, nullptr, 0);
         if (required > 0) {
@@ -194,7 +193,6 @@ public:
         }
     }
 
-private:
     std::vector<std::pair<std::wstring, std::optional<std::wstring>>> previous_;
 };
 
@@ -2140,7 +2138,7 @@ TEST(LocalCopyRollbackTest, CopyRollbackPropagatesMarkerRemovalFailure) {
     EXPECT_TRUE(std::filesystem::exists(marker));
     EXPECT_EQ(read_local_file(node, "src.txt"), "Payload");
 #if defined(_WIN32)
-    marker_lock.close();
+    kasumi::platform::private_storage::close_private_handle(marker_lock);
 #endif
     ASSERT_TRUE(rollback_local_copy(node, op, ws, progress));
     EXPECT_FALSE(std::filesystem::exists(marker));
@@ -2432,7 +2430,8 @@ TEST(LocalCopyRollbackTest,
     const auto res =
         kasumi::platform::private_storage::remove_private_file_if_owned(
             *priv_file);
-    EXPECT_FALSE(priv_file->is_open());
+    EXPECT_FALSE(
+        kasumi::platform::private_storage::is_private_file_open(*priv_file));
 
     // The foreign file MUST NOT be destroyed!
     EXPECT_TRUE(local_entry_exists(node, "staged.tmp"));

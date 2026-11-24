@@ -179,11 +179,13 @@ detail::transfer_and_verify_upload_batch(
     std::string_view progress_identifier) {
     const auto* single = progress_identifier.empty() ? item : nullptr;
     if (meter)
-        meter->phase(Activity::Uploading, batch.objects.size(), 0, single);
+        begin_progress_phase(
+            *meter, Activity::Uploading, batch.objects.size(), 0, single);
     transport::TransportProgressCallback progress;
-    if (meter && item && !progress_identifier.empty() && meter->observing()) {
+    if (meter && item && !progress_identifier.empty() &&
+        is_progress_observing(*meter)) {
         progress = [meter, item](const auto& event) {
-            meter->transfer_item(*item, event.item);
+            update_progress_transfer_item(*meter, *item, event.item);
         };
     }
     auto transferred = mutation::transfer_upload_batch(
@@ -202,7 +204,8 @@ detail::transfer_and_verify_upload_batch(
         });
     }
     if (meter)
-        meter->phase(Activity::Verifying, batch.objects.size(), 0, single);
+        begin_progress_phase(
+            *meter, Activity::Verifying, batch.objects.size(), 0, single);
     auto verified = mutation::verify_upload_batch(
         batch, storage, key, workspace, parallelism, meter);
     if (!verified) {
@@ -258,7 +261,8 @@ std::expected<UploadLayoutPlan, Error> detail::build_upload_layout_plan(
     const auto& observed_manifest = observed_input.storage.storage_manifest;
     const auto& missing = reconciliation_result.missing_objects;
     RepairOperations repair_ops_by_hash{0, hash_key};
-    if (!observed_manifest.empty() && !missing.empty()) {
+    if (!history::is_storage_manifest_empty(observed_manifest) &&
+        !missing.empty()) {
         for (std::size_t index = 0; index < record.plan.operations.size();
              ++index) {
             const auto& op = record.plan.operations[index];
@@ -459,7 +463,8 @@ std::expected<UploadLayoutPlan, Error> detail::build_upload_layout_plan(
         }
     } else if (!record.publication_required &&
                reconciliation_result.requires_storage_repair &&
-               !observed_input.storage.storage_manifest.empty()) {
+               !history::is_storage_manifest_empty(
+                   observed_input.storage.storage_manifest)) {
         if (auto planned = plan_manifest_repairs(
                 layout, observed_manifest, record, repair_ops_by_hash, key);
             !planned) {
@@ -502,7 +507,7 @@ detail::execute_packed_upload_batch(
         return {};
     }
     if (meter)
-        meter->phase(Activity::Staging, packs.size());
+        begin_progress_phase(*meter, Activity::Staging, packs.size());
     const auto first_op = packs.front()->operation_indices.front();
     auto staging = platform::create_workspace("pack-upload-batch");
     if (!staging) {
@@ -557,7 +562,7 @@ detail::execute_packed_upload_batch(
                 return;
             }
             if (meter) {
-                meter->record_staged(dest, res->pack_plaintext_size);
+                record_progress_staged(*meter, dest, res->pack_plaintext_size);
             }
             batch.objects[i] = mutation::StagedUploadObject{
                 .identifier = pack.pack_identifier,
@@ -723,7 +728,8 @@ detail::execute_chunked_upload_batch(
         }
         if (!orphan_candidates.empty()) {
             if (meter)
-                meter->phase(Activity::Verifying, orphan_candidates.size());
+                begin_progress_phase(
+                    *meter, Activity::Verifying, orphan_candidates.size());
             std::vector<std::uint8_t> verified(orphan_candidates.size());
             application::parallel_for_indexed(
                 orphan_candidates.size(), parallelism, [&](std::size_t i) {
@@ -742,7 +748,7 @@ detail::execute_chunked_upload_batch(
                         verified[i] = 1;
                     }
                     if (meter)
-                        ProgressMeter::add(meter->work);
+                        progress_add(meter->work);
                 });
             for (std::size_t i = 0; i < orphan_candidates.size(); ++i) {
                 if (!verified[i]) {
@@ -758,7 +764,7 @@ detail::execute_chunked_upload_batch(
         if (!present_chunk_ids.contains(chunk.chunk_id)) {
             to_upload.push_back(std::move(chunk));
         } else if (meter) {
-            ProgressMeter::add(meter->bytes_reused, chunk.size);
+            progress_add(meter->bytes_reused, chunk.size);
         }
     }
     if (to_upload.empty()) {
@@ -781,7 +787,7 @@ detail::execute_chunked_upload_batch(
             });
         }
         if (meter)
-            meter->phase(Activity::Staging, window.size());
+            begin_progress_phase(*meter, Activity::Staging, window.size());
         auto staging = platform::create_workspace("chunk-upload-batch");
         if (!staging) {
             return std::unexpected(detail::UploadBatchError{
@@ -828,7 +834,7 @@ detail::execute_chunked_upload_batch(
                     return;
                 }
                 if (meter) {
-                    meter->record_staged(dest, chunk.size);
+                    record_progress_staged(*meter, dest, chunk.size);
                 }
                 batch.objects[i] = mutation::StagedUploadObject{
                     .identifier = chunk.chunk_id,
@@ -884,7 +890,7 @@ std::expected<void, Error> detail::resume_manifest_repairs(
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const platform::Workspace& workspace) {
-    if (manifest.empty()) {
+    if (history::is_storage_manifest_empty(manifest)) {
         return {};
     }
 

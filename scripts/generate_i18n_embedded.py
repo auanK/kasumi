@@ -56,6 +56,7 @@ PREFIXES = sorted(
         ("WriterState", "writer_states."),
         ("HealthState", "health_states."),
         ("Wizard", "wizard."),
+        ("Daemon", "daemon."),
     ],
     key=lambda item: -len(item[0]),
 )

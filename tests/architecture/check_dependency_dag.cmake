@@ -55,6 +55,7 @@ file(GLOB_RECURSE public_application_headers LIST_DIRECTORIES false
 list(SORT public_application_headers)
 set(expected_public_application_headers
     credentials.hpp
+    daemon.hpp
     environment.hpp
     execute.hpp
     inspection/inspect.hpp
@@ -106,3 +107,30 @@ assert_file_excludes(
     src/state_storage/database.cpp
     "DELETE FROM nodes[ \t\r\n]*(;|\")"
     "authoritative node persistence must remain delta-based")
+
+function(assert_tree_no_oop root)
+    file(GLOB_RECURSE files LIST_DIRECTORIES false
+        "${PROJECT_SOURCE_DIR}/${root}/*.c"
+        "${PROJECT_SOURCE_DIR}/${root}/*.cpp"
+        "${PROJECT_SOURCE_DIR}/${root}/*.h"
+        "${PROJECT_SOURCE_DIR}/${root}/*.hpp")
+    foreach(path IN LISTS files)
+        file(READ "${path}" text)
+        string(REGEX REPLACE "//[^\n]*" "" cleaned "${text}")
+        string(REGEX REPLACE "\"([^\"\\\\]|\\\\.)*\"" "\"\"" cleaned "${cleaned}")
+        string(REGEX REPLACE "enum[ \t]+class" "enum__class" cleaned "${cleaned}")
+        file(RELATIVE_PATH relative "${PROJECT_SOURCE_DIR}" "${path}")
+        if(cleaned MATCHES "(^|[^A-Za-z0-9_])class[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t\r\n]*[:{;]")
+            message(FATAL_ERROR "OOP class declaration forbidden by DoD architecture: ${relative}")
+        endif()
+        if(cleaned MATCHES "(^|\n)[ \t]*(public|private|protected)[ \t]*:")
+            message(FATAL_ERROR "OOP visibility specifier forbidden by DoD architecture: ${relative}")
+        endif()
+        if(cleaned MATCHES "(^|[^A-Za-z0-9_])(virtual|friend)[ \t]+")
+            message(FATAL_ERROR "OOP virtual/friend keyword forbidden by DoD architecture: ${relative}")
+        endif()
+    endforeach()
+endfunction()
+
+assert_tree_no_oop(include)
+assert_tree_no_oop(src)

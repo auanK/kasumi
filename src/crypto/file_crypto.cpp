@@ -103,18 +103,19 @@ struct CryptoSession {
             platform::private_storage::close_private_file(file);
         }
     }
-
-    void resize_v3_encrypt_buffers(std::uint64_t total_size) {
-        const auto size = static_cast<std::size_t>(
-            std::min<std::uint64_t>(CHUNK_SIZE, total_size));
-        buffer_a.resize(size);
-        if (size > 0) {
-            const auto bound = ZSTD_compressBound(size);
-            buffer_b.resize(bound);
-            buffer_comp.resize(bound);
-        }
-    }
 };
+
+void resize_v3_encrypt_buffers(CryptoSession& session,
+                               std::uint64_t total_size) {
+    const auto size = static_cast<std::size_t>(
+        std::min<std::uint64_t>(CHUNK_SIZE, total_size));
+    session.buffer_a.resize(size);
+    if (size > 0) {
+        const auto bound = ZSTD_compressBound(size);
+        session.buffer_b.resize(bound);
+        session.buffer_comp.resize(bound);
+    }
+}
 
 std::nullopt_t fail_crypto(std::string* error_detail, std::string_view msg) {
     if (error_detail) {
@@ -126,7 +127,8 @@ std::nullopt_t fail_crypto(std::string* error_detail, std::string_view msg) {
 bool at_end(const platform::private_storage::RegularFileInput& input) {
     std::array<std::uint8_t, 1> trailing{};
     secure_memory::WipeGuard guard{trailing};
-    const auto count = input.read(trailing);
+    const auto count =
+        platform::private_storage::read_regular_file(input, trailing);
     return count && *count == 0;
 }
 
@@ -237,7 +239,7 @@ bool close_and_publish_temp(platform::private_storage::RegularFileInput& input,
         fail_crypto(error_detail, "checking input end failed");
         return false;
     }
-    input.handle.close();
+    platform::private_storage::close_private_handle(input.handle);
     if (!session.file.identity.valid) {
         fail_crypto(error_detail, "temporary file identity is invalid");
         return false;
@@ -536,7 +538,7 @@ encrypt_bytes(std::span<const std::uint8_t> plaintext,
                           header,
                           key.data(),
                           true);
-            session.resize_v3_encrypt_buffers(plaintext.size());
+            resize_v3_encrypt_buffers(session, plaintext.size());
 
             std::vector<std::uint8_t> output;
             output.reserve(FILE_HEADER_SIZE + plaintext.size());
@@ -665,7 +667,8 @@ encrypt_file_range(const std::filesystem::path& input_path,
                         return fail_crypto(
                             error_detail, "slice range is outside file bounds");
                     }
-                    if (!input.seek(offset)) {
+                    if (!platform::private_storage::seek_regular_file(input,
+                                                                      offset)) {
                         return fail_crypto(error_detail,
                                            "failed to seek to slice offset");
                     }
@@ -688,7 +691,7 @@ encrypt_file_range(const std::filesystem::path& input_path,
                               key.data(),
                               true);
 
-                session.resize_v3_encrypt_buffers(plaintext_size);
+                resize_v3_encrypt_buffers(session, plaintext_size);
                 if (!reserve_temp_output(
                         target_path, session.file, error_detail)) {
                     return std::nullopt;
@@ -728,7 +731,8 @@ encrypt_file_range(const std::filesystem::path& input_path,
                         static_cast<std::size_t>(std::min<std::uint64_t>(
                             CHUNK_SIZE, plaintext_size - total_read));
 
-                    if (!input.read_exact(
+                    if (!platform::private_storage::read_regular_file_exact(
+                            input,
                             std::span{session.buffer_a}.first(chunk_size))) {
                         return fail_crypto(error_detail,
                                            "reading plaintext chunk failed");
@@ -871,7 +875,8 @@ bool decrypt_file(const std::filesystem::path& input_path,
             auto& input = *opened;
 
             std::array<std::uint8_t, FILE_MAGIC_SIZE> magic{};
-            if (!input.read_exact(magic)) {
+            if (!platform::private_storage::read_regular_file_exact(input,
+                                                                    magic)) {
                 return false;
             }
 
@@ -880,7 +885,8 @@ bool decrypt_file(const std::filesystem::path& input_path,
             }
 
             const auto read_exact = [&](std::uint8_t* dst, std::size_t count) {
-                return input.read_exact({dst, count});
+                return platform::private_storage::read_regular_file_exact(
+                    input, {dst, count});
             };
             const auto write_exact = [&](const std::uint8_t* src,
                                          std::size_t count) {
@@ -944,7 +950,9 @@ bool decrypt_file_to_sink(const std::filesystem::path& input_path,
             }
 
             std::array<std::uint8_t, FILE_MAGIC_SIZE> magic{};
-            if (!input.read_exact(magic) || magic != format_magic_v3) {
+            if (!platform::private_storage::read_regular_file_exact(input,
+                                                                    magic) ||
+                magic != format_magic_v3) {
                 return false;
             }
 
@@ -954,7 +962,8 @@ bool decrypt_file_to_sink(const std::filesystem::path& input_path,
             std::uint64_t total_written = 0;
 
             const auto read_exact = [&](std::uint8_t* dst, std::size_t count) {
-                return input.read_exact({dst, count});
+                return platform::private_storage::read_regular_file_exact(
+                    input, {dst, count});
             };
             const auto write_exact = [&](const std::uint8_t* src,
                                          std::size_t count) {

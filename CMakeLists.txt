@@ -458,8 +458,10 @@ target_include_directories(monocypher PUBLIC ${monocypher_SOURCE_DIR}/src)
 target_link_libraries(monocypher PRIVATE kasumi_hardening)
 
 add_library(kasumi_platform STATIC
+    src/platform/autostart.cpp
     src/platform/cancellation.cpp
     src/platform/clock.cpp
+    src/platform/directory_watcher.cpp
     src/platform/durability.cpp
     src/platform/file_fingerprint.cpp
     src/platform/machine.cpp
@@ -468,6 +470,7 @@ add_library(kasumi_platform STATIC
     src/platform/private_storage.cpp
     src/platform/profile_lock.cpp
     src/platform/random.cpp
+    src/platform/secure_page.cpp
     src/platform/terminal.cpp
     src/platform/workspace.cpp
 )
@@ -595,6 +598,9 @@ add_library(kasumi_application STATIC
     src/application/integrity/garbage_collection.cpp
     src/application/integrity/repack_planner.cpp
     src/application/integrity/repack.cpp
+    src/application/daemon/engine.cpp
+    src/application/daemon/fast_poll.cpp
+    src/application/daemon/ipc_security.cpp
     src/application/inspection/inspect.cpp
     src/application/credentials.cpp
     src/application/concurrency.cpp
@@ -619,6 +625,7 @@ target_include_directories(
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
 )
 
+target_compile_definitions(kasumi_application PRIVATE "KASUMI_VERSION=\"${PROJECT_VERSION}\"")
 if(KASUMI_BUILD_JOURNAL_FAULT_TESTS)
     target_compile_definitions(kasumi_application PRIVATE KASUMI_JOURNAL_FAULT_TESTS)
 endif()
@@ -632,7 +639,9 @@ target_link_libraries(kasumi_application
     kasumi_crypto
     kasumi_state_storage
     blake3
+    httplib::httplib
     monocypher
+    nlohmann_json::nlohmann_json
     kasumi_warnings
     kasumi_release_optimizations
     kasumi_hardening

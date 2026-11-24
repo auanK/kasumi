@@ -524,10 +524,9 @@ Result run_copy(State& state,
         std::string_view group;
         bool running = true;
         bool cleanup_needed = true;
-
-        bool finish() noexcept {
+        ~JobCleanup() noexcept {
             if (!std::exchange(cleanup_needed, false)) {
-                return !running;
+                return;
             }
             try {
                 if (running) {
@@ -572,15 +571,60 @@ Result run_copy(State& state,
                 }
             } catch (...) {
             }
-            return !running;
-        }
-        ~JobCleanup() noexcept {
-            static_cast<void>(finish());
         }
     } cleanup{state, job, group};
 
+    const auto finish_cleanup = [&]() noexcept {
+        if (!std::exchange(cleanup.cleanup_needed, false)) {
+            return !cleanup.running;
+        }
+        try {
+            if (cleanup.running) {
+                (void)post_rc(cleanup.state,
+                              "job/stop",
+                              cleanup.job.dump(),
+                              maximum_response_size,
+                              1s,
+                              false);
+                const auto deadline = std::chrono::steady_clock::now() + 2s;
+                while (std::chrono::steady_clock::now() < deadline) {
+                    const auto status = request_json(cleanup.state,
+                                                     "job/status",
+                                                     cleanup.job,
+                                                     maximum_response_size,
+                                                     500ms,
+                                                     false,
+                                                     false);
+                    if (status) {
+                        const auto finished = status->find("finished");
+                        if (finished != status->end() &&
+                            finished->is_boolean() && finished->get<bool>()) {
+                            cleanup.running = false;
+                            break;
+                        }
+                    } else if (status.error().message.ends_with(
+                                   ": job not found")) {
+                        cleanup.running = false;
+                        break;
+                    }
+                    std::this_thread::sleep_for(50ms);
+                }
+            }
+            if (!cleanup.running) {
+                (void)post_rc(cleanup.state,
+                              "core/stats-delete",
+                              nlohmann::json{{"group", cleanup.group}}.dump(),
+                              maximum_response_size,
+                              1s,
+                              false);
+            }
+        } catch (...) {
+        }
+        return !cleanup.running;
+    };
+
     const auto fail = [&](Error error) -> Result {
-        if (!cleanup.finish()) {
+        if (!finish_cleanup()) {
             error.message += "; rclone job termination could not be confirmed";
         }
         return std::unexpected(std::move(error));
@@ -1562,12 +1606,12 @@ struct JobBatchItemStatus {
     int status{200};
     bool has_error{false};
     std::string error_message;
-
-    bool is_not_found() const noexcept {
-        return status == 404 ||
-               (status == 500 && missing_object(error_message));
-    }
 };
+
+bool is_job_batch_item_not_found(const JobBatchItemStatus& item) noexcept {
+    return item.status == 404 ||
+           (item.status == 500 && missing_object(item.error_message));
+}
 
 std::expected<JobBatchItemStatus, Error>
 parse_job_batch_item_status(const nlohmann::json& item,
@@ -1961,7 +2005,7 @@ RemoveBatchResult rclone_remove_batch(void* context, const RemoveBatch& batch) {
             if (!parsed) {
                 return uncertain_report(parsed.error().message);
             }
-            if (parsed->is_not_found()) {
+            if (is_job_batch_item_not_found(*parsed)) {
                 report.items[target_index].result = Removal::AlreadyAbsent;
             } else if (parsed->status >= 200 && parsed->status < 300 &&
                        !parsed->has_error) {
@@ -2038,6 +2082,18 @@ parse_list_metadata_response(std::string_view response_body) {
                                });
 }
 
+namespace {
+
+Result rclone_health_check(void* context) {
+    auto state = require_ready(context);
+    if (!state) {
+        return std::unexpected(state.error());
+    }
+    return check_rc_health(**state);
+}
+
+} // namespace
+
 StorageOperations make_storage_operations() noexcept {
     return StorageOperations{
         .initialize = rclone_initialize,
@@ -2054,6 +2110,7 @@ StorageOperations make_storage_operations() noexcept {
         .control_read_batch = rclone_control_read_batch,
         .remove = rclone_remove,
         .remove_batch = rclone_remove_batch,
+        .health_check = rclone_health_check,
         .physical_hash_batch_min_objects = 6,
         .put_with_progress = rclone_put_progress,
         .get_with_progress = rclone_get_progress,

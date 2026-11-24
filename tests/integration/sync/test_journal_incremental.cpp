@@ -915,7 +915,7 @@ TEST(JournalSessionOptimizationTest, SequentialCheckpointsReplayCountBounded) {
 
     sync::journal::Session session;
     ASSERT_TRUE(save_advance(*paths, *record, key, session));
-    ASSERT_TRUE(session.is_valid());
+    ASSERT_TRUE(sync::journal::is_session_valid(session));
 
     for (std::size_t i = 0; i < op_count; ++i) {
         record->progress[i].state =
@@ -973,20 +973,27 @@ TEST(JournalSessionOptimizationTest, SessionLifecycleTransitions) {
     ASSERT_TRUE(record.has_value());
 
     sync::journal::Session session;
-    EXPECT_EQ(session.status(), sync::journal::SessionState::Uninitialized);
-    EXPECT_FALSE(session.is_valid());
+    EXPECT_EQ(kasumi::application::sync::journal::session_status(session),
+              sync::journal::SessionState::Uninitialized);
+    EXPECT_FALSE(sync::journal::is_session_valid(session));
 
     ASSERT_TRUE(save_advance(*paths, *record, key, session));
-    EXPECT_EQ(session.status(), sync::journal::SessionState::Confirmed);
-    EXPECT_TRUE(session.is_valid());
-    EXPECT_EQ(session.operation(), record->operation_id);
-    EXPECT_EQ(session.confirmed()->local_generation, 0ULL);
-    EXPECT_EQ(session.confirmed()->storage_generation, 0ULL);
+    EXPECT_EQ(kasumi::application::sync::journal::session_status(session),
+              sync::journal::SessionState::Confirmed);
+    EXPECT_TRUE(sync::journal::is_session_valid(session));
+    EXPECT_EQ(sync::journal::session_operation(session), record->operation_id);
+    EXPECT_EQ(kasumi::application::sync::journal::confirmed_record(session)
+                  ->local_generation,
+              0ULL);
+    EXPECT_EQ(kasumi::application::sync::journal::confirmed_record(session)
+                  ->storage_generation,
+              0ULL);
 
     record->progress[0].state = kasumi::transaction::OperationState::Applied;
     ASSERT_TRUE(save_advance(*paths, *record, key, session));
-    EXPECT_EQ(session.status(), sync::journal::SessionState::Confirmed);
-    EXPECT_TRUE(session.is_valid());
+    EXPECT_EQ(kasumi::application::sync::journal::session_status(session),
+              sync::journal::SessionState::Confirmed);
+    EXPECT_TRUE(sync::journal::is_session_valid(session));
 
     record->phase = kasumi::transaction::Phase::Started;
     record->progress[0].state = kasumi::transaction::OperationState::Pending;
@@ -994,11 +1001,13 @@ TEST(JournalSessionOptimizationTest, SessionLifecycleTransitions) {
     record->progress[0].previous_hash.clear();
     ASSERT_TRUE(sync::journal::save(
         *paths, *record, key, sync::journal::SaveMode::Rollback, &session));
-    EXPECT_EQ(session.status(), sync::journal::SessionState::Confirmed);
+    EXPECT_EQ(kasumi::application::sync::journal::session_status(session),
+              sync::journal::SessionState::Confirmed);
 
     ASSERT_TRUE(sync::journal::clear(*paths, key, &session));
-    EXPECT_EQ(session.status(), sync::journal::SessionState::Retired);
-    EXPECT_FALSE(session.is_valid());
+    EXPECT_EQ(kasumi::application::sync::journal::session_status(session),
+              sync::journal::SessionState::Retired);
+    EXPECT_FALSE(sync::journal::is_session_valid(session));
 }
 
 TEST(JournalSessionOptimizationTest, IdentityMismatchRejection) {
@@ -1018,7 +1027,7 @@ TEST(JournalSessionOptimizationTest, IdentityMismatchRejection) {
 
     sync::journal::Session session;
     ASSERT_TRUE(save_advance(*paths, *record, key, session));
-    ASSERT_TRUE(session.is_valid());
+    ASSERT_TRUE(sync::journal::is_session_valid(session));
 
     auto tampered_record = *record;
     tampered_record.operation_id = std::string(32, 'f');
@@ -1029,8 +1038,9 @@ TEST(JournalSessionOptimizationTest, IdentityMismatchRejection) {
                                      sync::journal::SaveMode::Advance,
                                      &session);
     EXPECT_FALSE(saved);
-    EXPECT_EQ(session.status(), sync::journal::SessionState::Invalid);
-    EXPECT_FALSE(session.is_valid());
+    EXPECT_EQ(kasumi::application::sync::journal::session_status(session),
+              sync::journal::SessionState::Invalid);
+    EXPECT_FALSE(sync::journal::is_session_valid(session));
 }
 
 TEST(JournalSessionOptimizationTest, DiskAuthorityDivergenceFallback) {
@@ -1070,7 +1080,8 @@ TEST(JournalSessionOptimizationTest, DiskAuthorityDivergenceFallback) {
     auto result = sync::journal::save(
         *paths, *record, key, sync::journal::SaveMode::Advance, &session);
     EXPECT_FALSE(result);
-    EXPECT_EQ(session.status(), sync::journal::SessionState::Invalid);
+    EXPECT_EQ(kasumi::application::sync::journal::session_status(session),
+              sync::journal::SessionState::Invalid);
 }
 
 TEST(JournalSessionOptimizationTest, IdempotentCheckpoints) {
@@ -1090,13 +1101,17 @@ TEST(JournalSessionOptimizationTest, IdempotentCheckpoints) {
     sync::journal::Session session;
     ASSERT_TRUE(save_advance(*paths, *record, key, session));
 
-    const auto tip_bytes_before = session.confirmed_bytes();
-    const auto tip_count_before = session.confirmed_count();
+    const auto tip_bytes_before =
+        kasumi::application::sync::journal::confirmed_bytes(session);
+    const auto tip_count_before =
+        kasumi::application::sync::journal::confirmed_count(session);
 
     ASSERT_TRUE(save_advance(*paths, *record, key, session));
-    EXPECT_TRUE(session.is_valid());
-    EXPECT_EQ(session.confirmed_bytes(), tip_bytes_before);
-    EXPECT_EQ(session.confirmed_count(), tip_count_before);
+    EXPECT_TRUE(sync::journal::is_session_valid(session));
+    EXPECT_EQ(kasumi::application::sync::journal::confirmed_bytes(session),
+              tip_bytes_before);
+    EXPECT_EQ(kasumi::application::sync::journal::confirmed_count(session),
+              tip_count_before);
 }
 
 TEST(JournalSessionOptimizationTest, RollbackUpdatesSession) {
@@ -1118,8 +1133,9 @@ TEST(JournalSessionOptimizationTest, RollbackUpdatesSession) {
 
     record->phase = kasumi::transaction::Phase::FilesStaged;
     ASSERT_TRUE(save_advance(*paths, *record, key, session));
-    EXPECT_EQ(session.confirmed()->phase,
-              kasumi::transaction::Phase::FilesStaged);
+    EXPECT_EQ(
+        kasumi::application::sync::journal::confirmed_record(session)->phase,
+        kasumi::transaction::Phase::FilesStaged);
 
     record->phase = kasumi::transaction::Phase::Started;
     record->progress[0].state = kasumi::transaction::OperationState::Pending;
@@ -1127,8 +1143,10 @@ TEST(JournalSessionOptimizationTest, RollbackUpdatesSession) {
     record->progress[0].previous_hash.clear();
     ASSERT_TRUE(sync::journal::save(
         *paths, *record, key, sync::journal::SaveMode::Rollback, &session));
-    EXPECT_TRUE(session.is_valid());
-    EXPECT_EQ(session.confirmed()->phase, kasumi::transaction::Phase::Started);
+    EXPECT_TRUE(sync::journal::is_session_valid(session));
+    EXPECT_EQ(
+        kasumi::application::sync::journal::confirmed_record(session)->phase,
+        kasumi::transaction::Phase::Started);
 }
 
 TEST(JournalSessionOptimizationTest,
@@ -1215,14 +1233,19 @@ TEST(JournalSessionOptimizationTest, IndependentSessionsIsolation) {
     ASSERT_TRUE(save_advance(*paths1, *rec1, key, session1));
     ASSERT_TRUE(save_advance(*paths2, *rec2, key, session2));
 
-    EXPECT_NE(session1.operation(), session2.operation());
+    EXPECT_NE(sync::journal::session_operation(session1),
+              sync::journal::session_operation(session2));
 
     rec1->progress[0].state = kasumi::transaction::OperationState::Applied;
     ASSERT_TRUE(save_advance(*paths1, *rec1, key, session1));
 
-    EXPECT_EQ(session1.confirmed()->progress[0].state,
+    EXPECT_EQ(kasumi::application::sync::journal::confirmed_record(session1)
+                  ->progress[0]
+                  .state,
               kasumi::transaction::OperationState::Applied);
-    EXPECT_EQ(session2.confirmed()->progress[0].state,
+    EXPECT_EQ(kasumi::application::sync::journal::confirmed_record(session2)
+                  ->progress[0]
+                  .state,
               kasumi::transaction::OperationState::Pending);
 }
 
@@ -1241,11 +1264,12 @@ TEST(JournalSessionOptimizationTest, RetirementLifecycle) {
 
     sync::journal::Session session;
     ASSERT_TRUE(save_advance(*paths, *record, key, session));
-    EXPECT_TRUE(session.is_valid());
+    EXPECT_TRUE(sync::journal::is_session_valid(session));
 
     ASSERT_TRUE(sync::journal::clear(*paths, key, &session));
-    EXPECT_EQ(session.status(), sync::journal::SessionState::Retired);
-    EXPECT_FALSE(session.is_valid());
+    EXPECT_EQ(kasumi::application::sync::journal::session_status(session),
+              sync::journal::SessionState::Retired);
+    EXPECT_FALSE(sync::journal::is_session_valid(session));
 
     auto save_after_retire = sync::journal::save(
         *paths, *record, key, sync::journal::SaveMode::Advance, &session);
@@ -1322,7 +1346,7 @@ protected:
     void activate() {
         auto loaded = sync::journal::load(paths, key, &session);
         ASSERT_TRUE(loaded);
-        ASSERT_TRUE(session.is_valid());
+        ASSERT_TRUE(sync::journal::is_session_valid(session));
         record.phase = kasumi::transaction::Phase::FilesStaged;
         ASSERT_TRUE(sync::journal::save(
             paths, record, key, sync::journal::SaveMode::Advance, &session));
@@ -1340,7 +1364,7 @@ TEST_F(JournalSessionDurabilityTest,
     ASSERT_FALSE(kasumi::transaction::codec::validate(requested));
     EXPECT_FALSE(sync::journal::save(
         paths, requested, key, sync::journal::SaveMode::Advance, &session));
-    EXPECT_FALSE(session.is_valid());
+    EXPECT_FALSE(sync::journal::is_session_valid(session));
     EXPECT_EQ(kasumi::test::read_binary(paths.final_path.parent_path() /
                                         "confirmed.enc"),
               confirmed);
@@ -1355,7 +1379,7 @@ TEST_F(JournalSessionDurabilityTest, UnknownSaveModeInvalidatesActiveSession) {
                                      key,
                                      static_cast<sync::journal::SaveMode>(255),
                                      &session));
-    EXPECT_FALSE(session.is_valid());
+    EXPECT_FALSE(sync::journal::is_session_valid(session));
     expect_reload(record);
 }
 
@@ -1369,7 +1393,7 @@ TEST_F(JournalSessionDurabilityTest,
     record.progress[0].state = kasumi::transaction::OperationState::Applied;
     EXPECT_FALSE(sync::journal::save(
         paths, record, key, sync::journal::SaveMode::Advance, &session));
-    EXPECT_FALSE(session.is_valid());
+    EXPECT_FALSE(sync::journal::is_session_valid(session));
     EXPECT_EQ(kasumi::test::read_binary(tip_path), tip);
     EXPECT_EQ(kasumi::test::read_binary(paths.log_path), log);
     EXPECT_FALSE(sync::journal::load(paths, key));
@@ -1402,7 +1426,7 @@ TEST_F(JournalSessionDurabilityTest,
     record.progress[0].state = kasumi::transaction::OperationState::Applied;
     EXPECT_FALSE(sync::journal::save(
         paths, record, key, sync::journal::SaveMode::Advance, &session));
-    EXPECT_FALSE(session.is_valid());
+    EXPECT_FALSE(sync::journal::is_session_valid(session));
     EXPECT_EQ(kasumi::test::read_binary(tip_path), tip);
     EXPECT_EQ(kasumi::test::read_binary(paths.log_path), log);
     EXPECT_EQ(kasumi::test::read_binary(paths.final_path), bytes);
@@ -1418,7 +1442,7 @@ TEST_F(JournalSessionDurabilityTest, RetirementArtifactBlocksActiveSession) {
     record.progress[0].state = kasumi::transaction::OperationState::Applied;
     EXPECT_FALSE(sync::journal::save(
         paths, record, key, sync::journal::SaveMode::Advance, &session));
-    EXPECT_FALSE(session.is_valid());
+    EXPECT_FALSE(sync::journal::is_session_valid(session));
     EXPECT_EQ(kasumi::test::read_binary(tip_path), tip);
 }
 
@@ -1515,7 +1539,7 @@ TEST_P(JournalInputValidationTest, ActiveAndColdRejectSameInvalidRequest) {
     const auto tip = kasumi::test::read_binary(tip_path);
     EXPECT_FALSE(sync::journal::save(
         paths, requested, key, sync::journal::SaveMode::Advance, &session));
-    EXPECT_FALSE(session.is_valid());
+    EXPECT_FALSE(sync::journal::is_session_valid(session));
     EXPECT_FALSE(sync::journal::save(paths, requested, key));
     EXPECT_EQ(kasumi::test::read_binary(paths.final_path), snapshot);
     EXPECT_EQ(kasumi::test::read_binary(paths.log_path), log);
@@ -1566,7 +1590,7 @@ TEST_F(JournalSessionDurabilityTest, ActiveSessionCannotMoveToAnotherProfile) {
     ASSERT_TRUE(other);
     EXPECT_FALSE(sync::journal::save(
         *other, record, key, sync::journal::SaveMode::Advance, &session));
-    EXPECT_FALSE(session.is_valid());
+    EXPECT_FALSE(sync::journal::is_session_valid(session));
     EXPECT_FALSE(std::filesystem::exists(other->final_path.parent_path()));
     expect_reload(record);
 }
@@ -1574,19 +1598,31 @@ TEST_F(JournalSessionDurabilityTest, ActiveSessionCannotMoveToAnotherProfile) {
 TEST_F(JournalSessionDurabilityTest,
        ConfirmedCacheMovesOnlyChangedFieldsAndNoopPreservesState) {
     activate();
-    const auto* plan = session.confirmed()->plan.operations.data();
-    const auto* progress = session.confirmed()->progress.data();
+    const auto* plan =
+        kasumi::application::sync::journal::confirmed_record(session)
+            ->plan.operations.data();
+    const auto* progress =
+        kasumi::application::sync::journal::confirmed_record(session)
+            ->progress.data();
     record.progress[1].state = kasumi::transaction::OperationState::Applied;
     ASSERT_TRUE(sync::journal::save(
         paths, record, key, sync::journal::SaveMode::Advance, &session));
-    EXPECT_EQ(session.confirmed()->plan.operations.data(), plan);
-    EXPECT_EQ(session.confirmed()->progress.data(), progress);
-    EXPECT_EQ(kasumi::transaction::codec::encode(*session.confirmed()),
-              kasumi::transaction::codec::encode(record));
-    const auto count = session.confirmed_count();
+    EXPECT_EQ(kasumi::application::sync::journal::confirmed_record(session)
+                  ->plan.operations.data(),
+              plan);
+    EXPECT_EQ(kasumi::application::sync::journal::confirmed_record(session)
+                  ->progress.data(),
+              progress);
+    EXPECT_EQ(
+        kasumi::transaction::codec::encode(
+            *kasumi::application::sync::journal::confirmed_record(session)),
+        kasumi::transaction::codec::encode(record));
+    const auto count =
+        kasumi::application::sync::journal::confirmed_count(session);
     ASSERT_TRUE(sync::journal::save(
         paths, record, key, sync::journal::SaveMode::Advance, &session));
-    EXPECT_EQ(session.confirmed_count(), count);
+    EXPECT_EQ(kasumi::application::sync::journal::confirmed_count(session),
+              count);
     expect_reload(record);
 }
 
@@ -1600,7 +1636,7 @@ TEST_F(JournalSessionDurabilityTest,
     set_journal_fail_env(nullptr);
     if (saved)
         GTEST_SKIP() << "Requires dedicated fault build";
-    EXPECT_FALSE(session.is_valid());
+    EXPECT_FALSE(sync::journal::is_session_valid(session));
     expect_reload(record);
     const auto log = kasumi::test::read_binary(paths.log_path);
     const auto tip_path = paths.final_path.parent_path() / "confirmed.enc";
@@ -1609,8 +1645,10 @@ TEST_F(JournalSessionDurabilityTest,
         paths, record, key, sync::journal::SaveMode::Advance, &session));
     EXPECT_EQ(kasumi::test::read_binary(paths.log_path), log);
     EXPECT_EQ(kasumi::test::read_binary(tip_path), tip);
-    EXPECT_EQ(kasumi::transaction::codec::encode(*session.confirmed()),
-              kasumi::transaction::codec::encode(record));
+    EXPECT_EQ(
+        kasumi::transaction::codec::encode(
+            *kasumi::application::sync::journal::confirmed_record(session)),
+        kasumi::transaction::codec::encode(record));
 }
 
 TEST_F(JournalSessionDurabilityTest,
@@ -1638,7 +1676,7 @@ TEST_F(JournalSessionDurabilityTest,
         set_journal_fail_env(nullptr);
         if (saved)
             GTEST_SKIP() << "Requires dedicated fault build";
-        EXPECT_FALSE(session.is_valid());
+        EXPECT_FALSE(sync::journal::is_session_valid(session));
         auto loaded = sync::journal::load(paths, key);
         ASSERT_TRUE(loaded);
         ASSERT_TRUE(*loaded);
@@ -1690,8 +1728,9 @@ TEST_F(JournalSessionDurabilityTest,
     ASSERT_TRUE(sync::journal::save(
         paths, record, key, sync::journal::SaveMode::Rollback, &session));
     ASSERT_TRUE(sync::journal::clear(paths, key, &session));
-    session.invalidate();
-    EXPECT_EQ(session.status(), sync::journal::SessionState::Retired);
+    kasumi::application::sync::journal::invalidate_session(session);
+    EXPECT_EQ(kasumi::application::sync::journal::session_status(session),
+              sync::journal::SessionState::Retired);
     EXPECT_FALSE(sync::journal::load(paths, key, &session));
     EXPECT_FALSE(sync::journal::save(
         paths, record, key, sync::journal::SaveMode::Advance, &session));
@@ -1715,7 +1754,7 @@ TEST_F(JournalSessionDurabilityTest,
     const auto log = kasumi::test::read_binary(paths.log_path);
     EXPECT_FALSE(sync::journal::save(
         paths, requested, key, sync::journal::SaveMode::Advance, &session));
-    EXPECT_FALSE(session.is_valid());
+    EXPECT_FALSE(sync::journal::is_session_valid(session));
     EXPECT_EQ(kasumi::test::read_binary(tip_path), tip);
     EXPECT_EQ(kasumi::test::read_binary(paths.log_path), log);
     expect_reload(record);
@@ -1728,7 +1767,7 @@ TEST_F(JournalSessionDurabilityTest,
     wrong[0] = 1;
     EXPECT_FALSE(sync::journal::save(
         paths, record, wrong, sync::journal::SaveMode::Advance, &session));
-    EXPECT_FALSE(session.is_valid());
+    EXPECT_FALSE(sync::journal::is_session_valid(session));
     expect_reload(record);
     for (int index = 0; index < 3; ++index) {
         activate();
@@ -1741,7 +1780,7 @@ TEST_F(JournalSessionDurabilityTest,
             changed.log_path = profile / "foreign";
         EXPECT_FALSE(sync::journal::save(
             changed, record, key, sync::journal::SaveMode::Advance, &session));
-        EXPECT_FALSE(session.is_valid());
+        EXPECT_FALSE(sync::journal::is_session_valid(session));
         expect_reload(record);
     }
 }
@@ -1784,19 +1823,22 @@ TEST_F(JournalSessionDurabilityTest,
         kasumi::transaction::OperationState::Pending;
     ASSERT_TRUE(sync::journal::save(
         paths, record, key, sync::journal::SaveMode::Rollback, &session));
-    EXPECT_EQ(kasumi::transaction::codec::encode(*session.confirmed()),
-              kasumi::transaction::codec::encode(record));
+    EXPECT_EQ(
+        kasumi::transaction::codec::encode(
+            *kasumi::application::sync::journal::confirmed_record(session)),
+        kasumi::transaction::codec::encode(record));
     expect_reload(record);
 }
 
 TEST_F(JournalSessionDurabilityTest,
        RequestedRecordCannotAliasOwnedConfirmedCache) {
     activate();
-    const auto* aliased = session.confirmed();
+    const auto* aliased =
+        kasumi::application::sync::journal::confirmed_record(session);
     ASSERT_NE(aliased, nullptr);
     EXPECT_FALSE(sync::journal::save(
         paths, *aliased, key, sync::journal::SaveMode::Advance, &session));
-    EXPECT_FALSE(session.is_valid());
+    EXPECT_FALSE(sync::journal::is_session_valid(session));
     expect_reload(record);
 }
 
