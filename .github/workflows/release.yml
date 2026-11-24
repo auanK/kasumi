@@ -54,15 +54,39 @@ jobs:
             done
             return 1
           }
-          apt_install_missing cmake ninja-build gcc-14 g++-14 git \
+          apt_install_missing cmake ninja-build ccache gcc-14 g++-14 git \
             gnome-keyring libsecret-1-0 dbus-x11 dpkg-dev rpm file zstd
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 --slave /usr/bin/g++ g++ /usr/bin/g++-14
           sudo update-alternatives --set gcc /usr/bin/gcc-14
 
+      - name: Cache FetchContent sources
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/kasumi-fc-cache
+          key: fetchcontent-ubuntu-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Cache ccache (Release Linux)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ccache-release-linux
+          key: ccache-release-linux-${{ github.sha }}
+          restore-keys: |
+            ccache-release-linux-
+            ccache-ubuntu-gcc14-
+
       - name: Build (Release)
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/ccache-release-linux
+          CCACHE_BASEDIR: ${{ github.workspace }}
+          CCACHE_NOHASHDIR: "1"
+          CCACHE_MAXSIZE: 2G
         run: |
-          cmake --preset default -DBUILD_TESTING=ON
+          cmake --preset default -DBUILD_TESTING=ON \
+            -DKASUMI_FETCHCONTENT_CACHE_DIR="${RUNNER_TEMP}/kasumi-fc-cache" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build --preset default -j$(nproc)
+          ccache -s
 
       - name: Release Gate - Critical Tests
         run: |
@@ -212,22 +236,71 @@ jobs:
           path: ${{ runner.temp }}\kasumi-fc-cache
           key: fetchcontent-windows-${{ hashFiles('CMakeLists.txt') }}
 
+      - name: Cache ccache (Release MSVC)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\ccache-windows-msvc-release
+          key: ccache-windows-msvc-release-${{ github.sha }}
+          restore-keys: |
+            ccache-windows-msvc-release-
+            ccache-windows-msvc-
+
+      - name: Install ccache
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command ccache -CommandType Application -ErrorAction SilentlyContinue)) {
+            $zip = Join-Path $env:RUNNER_TEMP 'ccache-4.14.3-windows-x86_64.zip'
+            $url = 'https://github.com/ccache/ccache/releases/download/v4.14.3/ccache-4.14.3-windows-x86_64.zip'
+            $expected = 'c845c3d65be81954c75659145a522a793a27586bf940c5dcfe18af33fa1a67dd'
+            Invoke-WebRequest -Uri $url -OutFile $zip
+            $actual = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) {
+              throw "ccache SHA-256 mismatch: expected $expected, got $actual"
+            }
+            $extractDir = Join-Path $env:RUNNER_TEMP 'ccache-dist'
+            Expand-Archive -Path $zip -DestinationPath $extractDir -Force
+            $ccacheDir = (Get-ChildItem -Path $extractDir -Filter 'ccache.exe' -Recurse | Select-Object -First 1).Directory.FullName
+            $ccacheDir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
+
       - name: Build (Release MSVC)
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          & (Join-Path $vsPath "Common7\Tools\Launch-VsDevShell.ps1") -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $vsCmakeDir = Join-Path $vsPath "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin"
+          $vsNinjaDir = Join-Path $vsPath "Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja"
+          if (Test-Path $vsCmakeDir) { $env:PATH = "$vsCmakeDir;$vsNinjaDir;$env:PATH" }
           $fcCache = ($env:RUNNER_TEMP -replace '\\', '/') + '/kasumi-fc-cache'
-          cmake -S . -B build-release -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON "-DKASUMI_FETCHCONTENT_CACHE_DIR=$fcCache"
-          cmake --build build-release --config Release --parallel
+          $env:CCACHE_DIR = ($env:RUNNER_TEMP -replace '\\', '/') + '/ccache-windows-msvc-release'
+          $env:CCACHE_BASEDIR = ($env:GITHUB_WORKSPACE -replace '\\', '/')
+          $env:CCACHE_NOHASHDIR = '1'
+          $env:CCACHE_MAXSIZE = '2G'
+          cmake -S . -B build-release -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=cl `
+            -DCMAKE_CXX_COMPILER=cl `
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
+            "-DKASUMI_FETCHCONTENT_CACHE_DIR=$fcCache" `
+            -DBUILD_TESTING=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build-release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ccache -s
 
       - name: Release Gate - Critical Tests
         shell: powershell
         run: |
-          ctest --test-dir build-release -C Release -L release-critical --output-on-failure --no-tests=error --parallel $env:NUMBER_OF_PROCESSORS
+          ctest --test-dir build-release -L release-critical --output-on-failure --no-tests=error --parallel $env:NUMBER_OF_PROCESSORS
 
       - name: Release Gate - Smoke Test (Binary)
         shell: powershell
         run: |
-          $exe = ".\build-release\Release\kasumi.exe"
+          $exe = ".\build-release\kasumi.exe"
           & $exe --version
           if ($LASTEXITCODE -ne 0) { throw "Binary smoke test --version failed with code $LASTEXITCODE" }
           & $exe --help
@@ -236,7 +309,7 @@ jobs:
       - name: Release Gate - Verify Runtime Dependencies (Static MSVC)
         shell: powershell
         run: |
-          $exe = ".\build-release\Release\kasumi.exe"
+          $exe = ".\build-release\kasumi.exe"
           if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
               throw "Release executable not found: $exe"
           }
@@ -298,7 +371,7 @@ jobs:
           $msiName = "kasumi-v$version-windows-x86_64.msi"
 
           New-Item -ItemType Directory -Path package
-          Copy-Item build-release/Release/kasumi.exe package/
+          Copy-Item build-release/kasumi.exe package/
           Copy-Item LICENSE, THIRD_PARTY_NOTICES.md package/
           Compress-Archive -Path package/* -DestinationPath $zipName
           $hash = (Get-FileHash $zipName -Algorithm SHA256).Hash.ToLower()
@@ -310,7 +383,7 @@ jobs:
             -ext WixToolset.UI.wixext/5.0.2 `
             -loc packaging/wix/KasumiStrings.wxl `
             -d "ProductVersion=$version" `
-            -d "BinPath=build-release/Release/kasumi.exe" `
+            -d "BinPath=build-release/kasumi.exe" `
             -d "LicensePath=LICENSE" `
             -d "NoticesPath=THIRD_PARTY_NOTICES.md" `
             -d "LicenseRtf=packaging/wix/LICENSE.rtf" `

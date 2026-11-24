@@ -16,9 +16,17 @@ permissions:
 
 jobs:
   msvc:
-    name: MSVC 2022
+    name: MSVC 2022 (${{ matrix.build_type }})
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - build_type: Debug
+            cache_suffix: debug
+          - build_type: Release
+            cache_suffix: release
 
     steps:
       - name: Checkout repository
@@ -30,12 +38,13 @@ jobs:
           path: ${{ runner.temp }}\kasumi-fc-cache
           key: fetchcontent-windows-${{ hashFiles('CMakeLists.txt') }}
 
-      - name: Cache ccache (MSVC 2022)
+      - name: Cache ccache (MSVC 2022 ${{ matrix.build_type }})
         uses: actions/cache@v6
         with:
-          path: ${{ runner.temp }}\ccache-windows-msvc
-          key: ccache-windows-msvc-${{ github.sha }}
+          path: ${{ runner.temp }}\ccache-windows-msvc-${{ matrix.cache_suffix }}
+          key: ccache-windows-msvc-${{ matrix.cache_suffix }}-${{ github.sha }}
           restore-keys: |
+            ccache-windows-msvc-${{ matrix.cache_suffix }}-
             ccache-windows-msvc-
 
       - name: Install ccache
@@ -71,7 +80,7 @@ jobs:
           ninja --version
           ccache --version
 
-      - name: Build (Debug)
+      - name: Build (${{ matrix.build_type }})
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -82,59 +91,33 @@ jobs:
           $vsNinjaDir = Join-Path $vsPath "Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja"
           if (Test-Path $vsCmakeDir) { $env:PATH = "$vsCmakeDir;$vsNinjaDir;$env:PATH" }
           $fcCache = ($env:RUNNER_TEMP -replace '\\', '/') + '/kasumi-fc-cache'
-          $env:CCACHE_DIR = ($env:RUNNER_TEMP -replace '\\', '/') + '/ccache-windows-msvc'
-          $env:CCACHE_MAXSIZE = '1G'
-          cmake -S . -B build-ci-debug -G Ninja `
-            -DCMAKE_BUILD_TYPE=Debug `
+          $env:CCACHE_DIR = ($env:RUNNER_TEMP -replace '\\', '/') + '/ccache-windows-msvc-${{ matrix.cache_suffix }}'
+          $env:CCACHE_BASEDIR = ($env:GITHUB_WORKSPACE -replace '\\', '/')
+          $env:CCACHE_NOHASHDIR = '1'
+          $env:CCACHE_MAXSIZE = '2G'
+          $extraFlags = @()
+          if ('${{ matrix.build_type }}' -eq 'Debug') {
+            $extraFlags += '-DCMAKE_POLICY_DEFAULT_CMP0141=NEW'
+            $extraFlags += '-DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded'
+          }
+          cmake -S . -B build-ci-${{ matrix.cache_suffix }} -G Ninja `
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
             -DCMAKE_C_COMPILER=cl `
             -DCMAKE_CXX_COMPILER=cl `
-            -DCMAKE_POLICY_DEFAULT_CMP0141=NEW `
-            -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded `
+            @extraFlags `
             -DCMAKE_C_COMPILER_LAUNCHER=ccache `
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
             "-DKASUMI_FETCHCONTENT_CACHE_DIR=$fcCache" `
             -DBUILD_TESTING=ON
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build build-ci-debug --parallel
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Run Tests (Debug)
-        shell: powershell
-        run: |
-          ctest --test-dir build-ci-debug --output-on-failure --parallel $env:NUMBER_OF_PROCESSORS
-
-      - name: Build (Release)
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          & (Join-Path $vsPath "Common7\Tools\Launch-VsDevShell.ps1") -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
-          $vsCmakeDir = Join-Path $vsPath "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin"
-          $vsNinjaDir = Join-Path $vsPath "Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja"
-          if (Test-Path $vsCmakeDir) { $env:PATH = "$vsCmakeDir;$vsNinjaDir;$env:PATH" }
-          $fcCache = ($env:RUNNER_TEMP -replace '\\', '/') + '/kasumi-fc-cache'
-          $env:CCACHE_DIR = ($env:RUNNER_TEMP -replace '\\', '/') + '/ccache-windows-msvc'
-          $env:CCACHE_MAXSIZE = '1G'
-          cmake -S . -B build-ci-release -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_C_COMPILER=cl `
-            -DCMAKE_CXX_COMPILER=cl `
-            -DCMAKE_POLICY_DEFAULT_CMP0141=NEW `
-            -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded `
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache `
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
-            "-DKASUMI_FETCHCONTENT_CACHE_DIR=$fcCache" `
-            -DBUILD_TESTING=ON
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build build-ci-release --parallel
+          cmake --build build-ci-${{ matrix.cache_suffix }} --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ccache -s
 
-      - name: Run Tests (Release)
+      - name: Run Tests (${{ matrix.build_type }})
         shell: powershell
         run: |
-          ctest --test-dir build-ci-release --output-on-failure --parallel $env:NUMBER_OF_PROCESSORS
+          ctest --test-dir build-ci-${{ matrix.cache_suffix }} --output-on-failure --parallel $env:NUMBER_OF_PROCESSORS
 
   gcc:
     name: GCC (MSYS2 UCRT64)
