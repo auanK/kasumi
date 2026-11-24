@@ -16,12 +16,21 @@ int run_profile_query(const application::ExecutionEnvironment& environment,
                       bool full = false,
                       bool json = false);
 int run_profile_key(const application::ExecutionEnvironment& environment,
-                    std::string_view profile_name);
+                    std::string_view profile_name,
+                    bool replace = false,
+                    bool quiet = false,
+                    bool json = false,
+                    std::string* log_summary = nullptr);
 int run_profile_command(const application::ExecutionEnvironment& environment,
                         const ProfileInvocation& invocation,
                         bool quiet = false,
                         bool json = false,
                         std::string* log_summary = nullptr);
+int run_ignore_command(const application::ExecutionEnvironment& environment,
+                       const IgnoreInvocation& invocation,
+                       bool quiet = false,
+                       bool json = false,
+                       std::string* log_summary = nullptr);
 bool prompt_confirmation(std::string_view message);
 
 } // namespace kasumi::cli

@@ -160,6 +160,12 @@ int present(const application::LocalConflictsReport& report,
 int present(const application::ResolveConflictReport& report,
             bool quiet = false);
 
+// Displays `.kasumiignore` rule evaluation results and returns 0.
+int present(const application::IgnoreCheckReport& report, bool quiet = false);
+
+// Displays `.kasumiignore` initialization template or result and returns 0.
+int present(const application::IgnoreInitReport& report, bool quiet = false);
+
 // Displays the result of a remote inspection and returns 0.
 int present(const application::InspectionResponse& response, bool full = false);
 

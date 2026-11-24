@@ -86,6 +86,88 @@ read_flag_value(int index, int argc, char* argv[], std::string_view flag_name) {
     return std::nullopt;
 }
 
+enum class NetworkFlagMatch {
+    NotMatched,
+    Matched,
+    Error,
+};
+
+NetworkFlagMatch
+try_parse_network_flag(int& index,
+                       int argc,
+                       char* argv[],
+                       std::optional<std::string>& bandwidth_limit,
+                       bool& clear_bandwidth_limit,
+                       std::optional<std::uint32_t>& transfer_concurrency,
+                       bool& clear_transfer_concurrency,
+                       bool allow_clear) {
+    const std::string_view arg{argv[index]};
+    if (arg == "--bwlimit" || arg.starts_with("--bwlimit=")) {
+        if (bandwidth_limit.has_value() || clear_bandwidth_limit) {
+            return NetworkFlagMatch::Error;
+        }
+        const auto val = read_flag_value(index, argc, argv, "--bwlimit");
+        if (!val) {
+            return NetworkFlagMatch::Error;
+        }
+        bandwidth_limit = std::string{val->value};
+        if (val->consumed_next) {
+            ++index;
+        }
+        return NetworkFlagMatch::Matched;
+    }
+    if (allow_clear && arg == "--clear-bwlimit") {
+        if (bandwidth_limit.has_value() || clear_bandwidth_limit) {
+            return NetworkFlagMatch::Error;
+        }
+        clear_bandwidth_limit = true;
+        return NetworkFlagMatch::Matched;
+    }
+    if (arg == "--concurrency" || arg.starts_with("--concurrency=")) {
+        if (transfer_concurrency.has_value() || clear_transfer_concurrency) {
+            return NetworkFlagMatch::Error;
+        }
+        const auto val = read_flag_value(index, argc, argv, "--concurrency");
+        if (!val) {
+            return NetworkFlagMatch::Error;
+        }
+        const auto parsed = parse_bounded_u32(val->value, 1U, 16U);
+        if (!parsed) {
+            return NetworkFlagMatch::Error;
+        }
+        transfer_concurrency = *parsed;
+        if (val->consumed_next) {
+            ++index;
+        }
+        return NetworkFlagMatch::Matched;
+    }
+    if (allow_clear && arg == "--clear-concurrency") {
+        if (transfer_concurrency.has_value() || clear_transfer_concurrency) {
+            return NetworkFlagMatch::Error;
+        }
+        clear_transfer_concurrency = true;
+        return NetworkFlagMatch::Matched;
+    }
+    return NetworkFlagMatch::NotMatched;
+}
+
+std::optional<application::IgnorePreset>
+parse_ignore_preset(std::string_view value) noexcept {
+    if (value == "default") {
+        return application::IgnorePreset::Default;
+    }
+    if (value == "dev") {
+        return application::IgnorePreset::Dev;
+    }
+    if (value == "office") {
+        return application::IgnorePreset::Office;
+    }
+    if (value == "minimal") {
+        return application::IgnorePreset::Minimal;
+    }
+    return std::nullopt;
+}
+
 std::optional<PositionalsWithCommit>
 parse_positionals_with_commit(int start_index, int argc, char* argv[]) {
     PositionalsWithCommit parsed;
@@ -127,11 +209,30 @@ parse_positionals_with_commit(int start_index, int argc, char* argv[]) {
 
 std::expected<Invocation, ParseError>
 request(application::Operation operation, int argc, char* argv[]) {
-    if (argc != 3 || !operand(argv[2])) {
+    if (argc < 3 || !operand(argv[2])) {
         return std::unexpected(ParseError{});
     }
+    std::optional<std::string> bandwidth_limit;
+    std::optional<std::uint32_t> transfer_concurrency;
+    bool unused_clear_bw = false;
+    bool unused_clear_cc = false;
+    for (int i = 3; i < argc; ++i) {
+        const auto net = try_parse_network_flag(i,
+                                                argc,
+                                                argv,
+                                                bandwidth_limit,
+                                                unused_clear_bw,
+                                                transfer_concurrency,
+                                                unused_clear_cc,
+                                                false);
+        if (net != NetworkFlagMatch::Matched) {
+            return std::unexpected(ParseError{});
+        }
+    }
     return application::Request{.operation = operation,
-                                .profile_name = argv[2]};
+                                .profile_name = argv[2],
+                                .bandwidth_limit = std::move(bandwidth_limit),
+                                .transfer_concurrency = transfer_concurrency};
 }
 
 constexpr std::
@@ -159,7 +260,7 @@ std::string help_topic(int argc, char* argv[]) {
         help_topics.end())
         return {};
     if ((command == "remote" || command == "gc" || command == "profile" ||
-         command == "conflicts") &&
+         command == "conflicts" || command == "ignore") &&
         argc > 2 && argv[2] != nullptr) {
         const auto topic = command + " " + argv[2];
         if (std::ranges::find(help_topics, topic, &HelpTopic::name) !=
@@ -223,10 +324,17 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         return std::unexpected(ParseError{});
     }
     if (command == "key") {
-        return argc == 3 && operand(argv[2])
-                   ? std::expected<Invocation, ParseError>{KeyInvocation{
-                         argv[2]}}
-                   : std::unexpected(ParseError{});
+        if (argc < 3 || argc > 4 || !operand(argv[2])) {
+            return std::unexpected(ParseError{});
+        }
+        bool replace = false;
+        if (argc == 4) {
+            if (std::string_view{argv[3]} != "--replace") {
+                return std::unexpected(ParseError{});
+            }
+            replace = true;
+        }
+        return KeyInvocation{.profile_name = argv[2], .replace = replace};
     }
     if (command == "config") {
         return argc == 2 ? std::expected<Invocation,
@@ -337,6 +445,21 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 .profile_name = profile_name,
             };
             for (int i = 4; i < argc; ++i) {
+                const auto net =
+                    try_parse_network_flag(i,
+                                           argc,
+                                           argv,
+                                           inv.bandwidth_limit,
+                                           inv.clear_bandwidth_limit,
+                                           inv.transfer_concurrency,
+                                           inv.clear_transfer_concurrency,
+                                           !is_create);
+                if (net == NetworkFlagMatch::Error) {
+                    return std::unexpected(ParseError{});
+                }
+                if (net == NetworkFlagMatch::Matched) {
+                    continue;
+                }
                 const std::string_view arg{argv[i]};
                 if (arg == "--local" || arg.starts_with("--local=")) {
                     if (inv.local_dir.has_value()) {
@@ -416,6 +539,37 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                     if (val->consumed_next) {
                         ++i;
                     }
+                } else if (arg == "--rclone-config" ||
+                           arg.starts_with("--rclone-config=")) {
+                    if (inv.rclone_config.has_value() ||
+                        inv.clear_rclone_config) {
+                        return std::unexpected(ParseError{});
+                    }
+                    const auto val =
+                        read_flag_value(i, argc, argv, "--rclone-config");
+                    if (!val) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.rclone_config = std::string{val->value};
+                    if (val->consumed_next) {
+                        ++i;
+                    }
+                } else if (!is_create && arg == "--clear-rclone-config") {
+                    if (inv.rclone_config.has_value() ||
+                        inv.clear_rclone_config) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.clear_rclone_config = true;
+                } else if (is_create && arg == "--verify") {
+                    if (inv.verify) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.verify = true;
+                } else if (!is_create && arg == "--allow-empty-local") {
+                    if (inv.allow_empty_local) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.allow_empty_local = true;
                 } else {
                     return std::unexpected(ParseError{});
                 }
@@ -424,10 +578,22 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 return std::unexpected(ParseError{});
             }
             if (!is_create && !inv.local_dir && !inv.remote_dir &&
-                !inv.min_history_depth && !inv.min_history_age_hours) {
+                !inv.min_history_depth && !inv.min_history_age_hours &&
+                !inv.bandwidth_limit && !inv.clear_bandwidth_limit &&
+                !inv.transfer_concurrency && !inv.clear_transfer_concurrency &&
+                !inv.rclone_config && !inv.clear_rclone_config) {
                 return std::unexpected(ParseError{});
             }
             return inv;
+        }
+        if (sub == "test") {
+            if (argc != 4) {
+                return std::unexpected(ParseError{});
+            }
+            return ProfileInvocation{
+                .action = ProfileAction::Test,
+                .profile_name = profile_name,
+            };
         }
         if (sub == "clone" || sub == "rename") {
             if (argc != 5 || !operand(argv[4])) {
@@ -466,21 +632,114 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         }
         return std::unexpected(ParseError{});
     }
+    if (command == "ignore") {
+        if (argc < 4 || argv[2] == nullptr || !operand(argv[3])) {
+            return std::unexpected(ParseError{});
+        }
+        const std::string_view sub{argv[2]};
+        const std::string profile_name{argv[3]};
+        if (sub == "check") {
+            IgnoreInvocation inv{
+                .action = IgnoreAction::Check,
+                .profile_name = profile_name,
+            };
+            bool after_delimiter = false;
+            for (int i = 4; i < argc; ++i) {
+                const std::string_view arg{argv[i]};
+                if (!after_delimiter && arg == "--") {
+                    after_delimiter = true;
+                    continue;
+                }
+                if (after_delimiter ? literal_operand(argv[i])
+                                    : operand(argv[i])) {
+                    inv.paths.emplace_back(arg);
+                    continue;
+                }
+                return std::unexpected(ParseError{});
+            }
+            if (inv.paths.empty()) {
+                return std::unexpected(ParseError{});
+            }
+            return inv;
+        }
+        if (sub == "init") {
+            IgnoreInvocation inv{
+                .action = IgnoreAction::Init,
+                .profile_name = profile_name,
+            };
+            bool saw_preset = false;
+            for (int i = 4; i < argc; ++i) {
+                const std::string_view arg{argv[i]};
+                if (arg == "--preset" || arg.starts_with("--preset=")) {
+                    if (saw_preset) {
+                        return std::unexpected(ParseError{});
+                    }
+                    const auto val = read_flag_value(i, argc, argv, "--preset");
+                    if (!val) {
+                        return std::unexpected(ParseError{});
+                    }
+                    const auto preset = parse_ignore_preset(val->value);
+                    if (!preset) {
+                        return std::unexpected(ParseError{});
+                    }
+                    saw_preset = true;
+                    inv.preset = *preset;
+                    if (val->consumed_next) {
+                        ++i;
+                    }
+                } else if (arg == "--force") {
+                    if (inv.force) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.force = true;
+                } else if (arg == "--dry-run") {
+                    if (inv.dry_run) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.dry_run = true;
+                } else {
+                    return std::unexpected(ParseError{});
+                }
+            }
+            return inv;
+        }
+        return std::unexpected(ParseError{});
+    }
     if (command == "sync") {
-        if (argc < 3 || argc > 5 || !operand(argv[2])) {
+        if (argc < 3 || !operand(argv[2])) {
             return std::unexpected(ParseError{});
         }
         bool dry_run = false;
         bool initial = false;
         bool audit_inventory = false;
         bool repair = false;
-        const std::array<std::pair<std::string_view, bool*>, 4> sync_flags{{
+        bool allow_empty_local = false;
+        std::optional<std::string> bandwidth_limit;
+        std::optional<std::uint32_t> transfer_concurrency;
+        bool unused_clear_bw = false;
+        bool unused_clear_cc = false;
+        const std::array<std::pair<std::string_view, bool*>, 5> sync_flags{{
             {"--dry-run", &dry_run},
             {"--initial", &initial},
             {"--audit-inventory", &audit_inventory},
             {"--repair", &repair},
+            {"--allow-empty-local", &allow_empty_local},
         }};
         for (int i = 3; i < argc; ++i) {
+            const auto net = try_parse_network_flag(i,
+                                                    argc,
+                                                    argv,
+                                                    bandwidth_limit,
+                                                    unused_clear_bw,
+                                                    transfer_concurrency,
+                                                    unused_clear_cc,
+                                                    false);
+            if (net == NetworkFlagMatch::Error) {
+                return std::unexpected(ParseError{});
+            }
+            if (net == NetworkFlagMatch::Matched) {
+                continue;
+            }
             const std::string_view flag{argv[i]};
             const auto found = std::ranges::find(
                 sync_flags, flag, &std::pair<std::string_view, bool*>::first);
@@ -506,7 +765,10 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
             .profile_name = argv[2],
             .initial = initial,
             .audit_inventory = audit_inventory,
-            .repair = repair};
+            .repair = repair,
+            .allow_empty_local = allow_empty_local,
+            .bandwidth_limit = std::move(bandwidth_limit),
+            .transfer_concurrency = transfer_concurrency};
     }
     if (command == "status") {
         return request(application::Operation::Status, argc, argv);
@@ -560,6 +822,10 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         }
         bool dry_run = false;
         std::optional<std::uint32_t> min_age_hours;
+        std::optional<std::string> bandwidth_limit;
+        std::optional<std::uint32_t> transfer_concurrency;
+        bool unused_clear_bw = false;
+        bool unused_clear_cc = false;
         const auto parse_hours =
             [](std::string_view value) -> std::optional<std::uint32_t> {
             if (value.empty() || !std::ranges::all_of(value, [](char ch) {
@@ -577,6 +843,20 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
             return hours;
         };
         for (int i = 3; i < argc; ++i) {
+            const auto net = try_parse_network_flag(i,
+                                                    argc,
+                                                    argv,
+                                                    bandwidth_limit,
+                                                    unused_clear_bw,
+                                                    transfer_concurrency,
+                                                    unused_clear_cc,
+                                                    false);
+            if (net == NetworkFlagMatch::Error) {
+                return std::unexpected(ParseError{});
+            }
+            if (net == NetworkFlagMatch::Matched) {
+                continue;
+            }
             const std::string_view flag{argv[i]};
             if (flag == "--dry-run") {
                 if (dry_run) {
@@ -605,23 +885,43 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
                 return std::unexpected(ParseError{});
             }
         }
-        return application::Request{.operation =
-                                        application::Operation::GarbageCollect,
-                                    .profile_name = argv[2],
-                                    .dry_run = dry_run,
-                                    .gc_min_age_hours = min_age_hours};
+        return application::Request{
+            .operation = application::Operation::GarbageCollect,
+            .profile_name = argv[2],
+            .dry_run = dry_run,
+            .gc_min_age_hours = min_age_hours,
+            .bandwidth_limit = std::move(bandwidth_limit),
+            .transfer_concurrency = transfer_concurrency};
     }
     if (command == "repack") {
-        if (argc < 3 || argc > 5 || !operand(argv[2])) {
+        if (argc < 3 || !operand(argv[2])) {
             return std::unexpected(ParseError{});
         }
         bool dry_run = false;
         bool reclaim_dirty = false;
+        std::optional<std::string> bandwidth_limit;
+        std::optional<std::uint32_t> transfer_concurrency;
+        bool unused_clear_bw = false;
+        bool unused_clear_cc = false;
         const std::array<std::pair<std::string_view, bool*>, 2> repack_flags{{
             {"--dry-run", &dry_run},
             {"--reclaim-dirty", &reclaim_dirty},
         }};
         for (int i = 3; i < argc; ++i) {
+            const auto net = try_parse_network_flag(i,
+                                                    argc,
+                                                    argv,
+                                                    bandwidth_limit,
+                                                    unused_clear_bw,
+                                                    transfer_concurrency,
+                                                    unused_clear_cc,
+                                                    false);
+            if (net == NetworkFlagMatch::Error) {
+                return std::unexpected(ParseError{});
+            }
+            if (net == NetworkFlagMatch::Matched) {
+                continue;
+            }
             const std::string_view flag{argv[i]};
             const auto found = std::ranges::find(
                 repack_flags, flag, &std::pair<std::string_view, bool*>::first);
@@ -630,10 +930,13 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
             }
             *found->second = true;
         }
-        return application::Request{.operation = application::Operation::Repack,
-                                    .profile_name = argv[2],
-                                    .dry_run = dry_run,
-                                    .reclaim_dirty = reclaim_dirty};
+        return application::Request{
+            .operation = application::Operation::Repack,
+            .profile_name = argv[2],
+            .dry_run = dry_run,
+            .reclaim_dirty = reclaim_dirty,
+            .bandwidth_limit = std::move(bandwidth_limit),
+            .transfer_concurrency = transfer_concurrency};
     }
     if (command == "resolve-missing") {
         if (argc == 3 && operand(argv[2])) {
@@ -662,163 +965,215 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         if (argc < 4 || !operand(argv[3])) {
             return std::unexpected(ParseError{});
         }
-        const std::string_view inspection{argv[2]};
-        if (argc == 4) {
-            const auto found = std::ranges::find(
-                simple_remote_inspections,
-                inspection,
-                &std::pair<std::string_view,
-                           application::InspectionOperation>::first);
-            if (found != simple_remote_inspections.end()) {
+        std::optional<std::string> bandwidth_limit;
+        std::optional<std::uint32_t> transfer_concurrency;
+        bool unused_clear_bw = false;
+        bool unused_clear_cc = false;
+        std::vector<char*> filtered;
+        filtered.reserve(static_cast<std::size_t>(argc));
+        for (int i = 0; i < 4; ++i) {
+            filtered.push_back(argv[i]);
+        }
+        bool after_delimiter = false;
+        for (int i = 4; i < argc; ++i) {
+            const std::string_view arg{argv[i]};
+            if (!after_delimiter && arg == "--") {
+                after_delimiter = true;
+                filtered.push_back(argv[i]);
+                continue;
+            }
+            if (!after_delimiter) {
+                const auto net = try_parse_network_flag(i,
+                                                        argc,
+                                                        argv,
+                                                        bandwidth_limit,
+                                                        unused_clear_bw,
+                                                        transfer_concurrency,
+                                                        unused_clear_cc,
+                                                        false);
+                if (net == NetworkFlagMatch::Error) {
+                    return std::unexpected(ParseError{});
+                }
+                if (net == NetworkFlagMatch::Matched) {
+                    continue;
+                }
+            }
+            filtered.push_back(argv[i]);
+        }
+        const int rargc = static_cast<int>(filtered.size());
+        char** rargv = filtered.data();
+        const std::string_view inspection{rargv[2]};
+        const auto parse_remote =
+            [&]() -> std::optional<application::InspectionRequest> {
+            if (rargc == 4) {
+                const auto found = std::ranges::find(
+                    simple_remote_inspections,
+                    inspection,
+                    &std::pair<std::string_view,
+                               application::InspectionOperation>::first);
+                if (found != simple_remote_inspections.end()) {
+                    return application::InspectionRequest{
+                        .operation = found->second, .profile_name = rargv[3]};
+                }
+                return std::nullopt;
+            }
+            if (inspection == "tree" && rargc == 6 &&
+                std::string_view{rargv[4]} == "--head" && operand(rargv[5])) {
                 return application::InspectionRequest{
-                    .operation = found->second, .profile_name = argv[3]};
+                    .operation = application::InspectionOperation::RemoteTree,
+                    .profile_name = rargv[3],
+                    .head_commit_id = std::string{rargv[5]}};
             }
-            return std::unexpected(ParseError{});
-        }
-        if (inspection == "tree" && argc == 6 &&
-            std::string_view{argv[4]} == "--head" && operand(argv[5])) {
-            return application::InspectionRequest{
-                .operation = application::InspectionOperation::RemoteTree,
-                .profile_name = argv[3],
-                .head_commit_id = std::string{argv[5]}};
-        }
-        if (inspection == "stat") {
-            const auto parsed = parse_positionals_with_commit(4, argc, argv);
-            if (!parsed || parsed->positionals.size() != 1) {
-                return std::unexpected(ParseError{});
-            }
-            return application::InspectionRequest{
-                .operation = application::InspectionOperation::RemoteStat,
-                .profile_name = argv[3],
-                .logical_path = std::string{parsed->positionals[0]},
-                .commit_id = parsed->commit_id};
-        }
-        if (inspection == "log") {
-            std::vector<std::string_view> positionals;
-            bool after_delimiter = false;
-            for (int i = 4; i < argc; ++i) {
-                const std::string_view arg{argv[i]};
-                if (!after_delimiter && arg == "--") {
-                    after_delimiter = true;
-                    continue;
+            if (inspection == "stat") {
+                const auto parsed =
+                    parse_positionals_with_commit(4, rargc, rargv);
+                if (!parsed || parsed->positionals.size() != 1) {
+                    return std::nullopt;
                 }
-                if (after_delimiter ? literal_operand(argv[i])
-                                    : operand(argv[i])) {
-                    positionals.push_back(arg);
-                    continue;
-                }
-                return std::unexpected(ParseError{});
+                return application::InspectionRequest{
+                    .operation = application::InspectionOperation::RemoteStat,
+                    .profile_name = rargv[3],
+                    .logical_path = std::string{parsed->positionals[0]},
+                    .commit_id = parsed->commit_id};
             }
-            if (positionals.size() != 1U) {
-                return std::unexpected(ParseError{});
-            }
-            return application::InspectionRequest{
-                .operation = application::InspectionOperation::RemoteLog,
-                .profile_name = argv[3],
-                .logical_path = std::string{positionals[0]}};
-        }
-        if (inspection == "commit" && argc == 5 &&
-            application::history_storage::valid_hex_hash(argv[4])) {
-            return application::InspectionRequest{
-                .operation = application::InspectionOperation::RemoteCommit,
-                .profile_name = argv[3],
-                .commit_id = std::string{argv[4]}};
-        }
-        if (inspection == "get") {
-            const auto parsed = parse_positionals_with_commit(4, argc, argv);
-            if (!parsed || parsed->positionals.size() != 2) {
-                return std::unexpected(ParseError{});
-            }
-            return application::InspectionRequest{
-                .operation = application::InspectionOperation::RemoteGet,
-                .profile_name = argv[3],
-                .logical_path = std::string{parsed->positionals[0]},
-                .commit_id = parsed->commit_id,
-                .destination_path = std::string{parsed->positionals[1]}};
-        }
-        if (inspection == "restore") {
-            std::vector<std::string_view> positionals;
-            std::optional<std::string> commit_id;
-            bool dry_run = false;
-            bool after_delimiter = false;
-            for (int i = 4; i < argc; ++i) {
-                const std::string_view arg{argv[i]};
-                if (!after_delimiter && arg == "--") {
-                    after_delimiter = true;
-                    continue;
-                }
-                if (!after_delimiter &&
-                    (arg == "--commit" || arg.starts_with("--commit="))) {
-                    if (commit_id.has_value()) {
-                        return std::unexpected(ParseError{});
+            if (inspection == "log") {
+                std::vector<std::string_view> positionals;
+                bool log_after_delimiter = false;
+                for (int i = 4; i < rargc; ++i) {
+                    const std::string_view arg{rargv[i]};
+                    if (!log_after_delimiter && arg == "--") {
+                        log_after_delimiter = true;
+                        continue;
                     }
-                    const auto val = read_flag_value(i, argc, argv, "--commit");
-                    if (!val || !application::history_storage::valid_hex_hash(
-                                    val->value)) {
-                        return std::unexpected(ParseError{});
+                    if (log_after_delimiter ? literal_operand(rargv[i])
+                                            : operand(rargv[i])) {
+                        positionals.push_back(arg);
+                        continue;
                     }
-                    commit_id = std::string{val->value};
-                    if (val->consumed_next) {
-                        ++i;
-                    }
-                    continue;
+                    return std::nullopt;
                 }
-                if (!after_delimiter && arg == "--dry-run") {
-                    if (dry_run) {
-                        return std::unexpected(ParseError{});
-                    }
-                    dry_run = true;
-                    continue;
+                if (positionals.size() != 1U) {
+                    return std::nullopt;
                 }
-                if (after_delimiter ? literal_operand(argv[i])
-                                    : operand(argv[i])) {
-                    positionals.push_back(arg);
-                    continue;
-                }
-                return std::unexpected(ParseError{});
+                return application::InspectionRequest{
+                    .operation = application::InspectionOperation::RemoteLog,
+                    .profile_name = rargv[3],
+                    .logical_path = std::string{positionals[0]}};
             }
-            if (positionals.size() == 1U) {
+            if (inspection == "commit" && rargc == 5 &&
+                application::history_storage::valid_hex_hash(rargv[4])) {
+                return application::InspectionRequest{
+                    .operation = application::InspectionOperation::RemoteCommit,
+                    .profile_name = rargv[3],
+                    .commit_id = std::string{rargv[4]}};
+            }
+            if (inspection == "get") {
+                const auto parsed =
+                    parse_positionals_with_commit(4, rargc, rargv);
+                if (!parsed || parsed->positionals.size() != 2) {
+                    return std::nullopt;
+                }
+                return application::InspectionRequest{
+                    .operation = application::InspectionOperation::RemoteGet,
+                    .profile_name = rargv[3],
+                    .logical_path = std::string{parsed->positionals[0]},
+                    .commit_id = parsed->commit_id,
+                    .destination_path = std::string{parsed->positionals[1]}};
+            }
+            if (inspection == "restore") {
+                std::vector<std::string_view> positionals;
+                std::optional<std::string> commit_id;
+                bool dry_run = false;
+                bool restore_after_delimiter = false;
+                for (int i = 4; i < rargc; ++i) {
+                    const std::string_view arg{rargv[i]};
+                    if (!restore_after_delimiter && arg == "--") {
+                        restore_after_delimiter = true;
+                        continue;
+                    }
+                    if (!restore_after_delimiter &&
+                        (arg == "--commit" || arg.starts_with("--commit="))) {
+                        if (commit_id.has_value()) {
+                            return std::nullopt;
+                        }
+                        const auto val =
+                            read_flag_value(i, rargc, rargv, "--commit");
+                        if (!val ||
+                            !application::history_storage::valid_hex_hash(
+                                val->value)) {
+                            return std::nullopt;
+                        }
+                        commit_id = std::string{val->value};
+                        if (val->consumed_next) {
+                            ++i;
+                        }
+                        continue;
+                    }
+                    if (!restore_after_delimiter && arg == "--dry-run") {
+                        if (dry_run) {
+                            return std::nullopt;
+                        }
+                        dry_run = true;
+                        continue;
+                    }
+                    if (restore_after_delimiter ? literal_operand(rargv[i])
+                                                : operand(rargv[i])) {
+                        positionals.push_back(arg);
+                        continue;
+                    }
+                    return std::nullopt;
+                }
+                if (positionals.size() == 1U) {
+                    return application::InspectionRequest{
+                        .operation =
+                            application::InspectionOperation::RemoteRestore,
+                        .profile_name = rargv[3],
+                        .commit_id = commit_id,
+                        .destination_path = std::string{positionals[0]},
+                        .dry_run = dry_run};
+                }
+                if (positionals.size() == 2U) {
+                    return application::InspectionRequest{
+                        .operation =
+                            application::InspectionOperation::RemoteRestore,
+                        .profile_name = rargv[3],
+                        .logical_path = std::string{positionals[0]},
+                        .commit_id = commit_id,
+                        .destination_path = std::string{positionals[1]},
+                        .dry_run = dry_run};
+                }
+                return std::nullopt;
+            }
+            if (inspection == "epoch" && rargc == 5 && operand(rargv[4])) {
+                return application::InspectionRequest{
+                    .operation = application::InspectionOperation::RemoteEpoch,
+                    .profile_name = rargv[3],
+                    .epoch_selector = std::string{rargv[4]}};
+            }
+            if (inspection == "contents" && rargc == 5 &&
+                std::string_view{rargv[4]} == "--audit") {
                 return application::InspectionRequest{
                     .operation =
-                        application::InspectionOperation::RemoteRestore,
-                    .profile_name = argv[3],
-                    .commit_id = commit_id,
-                    .destination_path = std::string{positionals[0]},
-                    .dry_run = dry_run};
+                        application::InspectionOperation::RemoteContentsAudit,
+                    .profile_name = rargv[3]};
             }
-            if (positionals.size() == 2U) {
+            if (inspection == "content" && rargc == 5 &&
+                application::history_storage::valid_hex_hash(rargv[4])) {
                 return application::InspectionRequest{
                     .operation =
-                        application::InspectionOperation::RemoteRestore,
-                    .profile_name = argv[3],
-                    .logical_path = std::string{positionals[0]},
-                    .commit_id = commit_id,
-                    .destination_path = std::string{positionals[1]},
-                    .dry_run = dry_run};
+                        application::InspectionOperation::RemoteContent,
+                    .profile_name = rargv[3],
+                    .content_id = std::string{rargv[4]}};
             }
+            return std::nullopt;
+        };
+        auto parsed_remote = parse_remote();
+        if (!parsed_remote) {
             return std::unexpected(ParseError{});
         }
-        if (inspection == "epoch" && argc == 5 && operand(argv[4])) {
-            return application::InspectionRequest{
-                .operation = application::InspectionOperation::RemoteEpoch,
-                .profile_name = argv[3],
-                .epoch_selector = std::string{argv[4]}};
-        }
-        if (inspection == "contents" && argc == 5 &&
-            std::string_view{argv[4]} == "--audit") {
-            return application::InspectionRequest{
-                .operation =
-                    application::InspectionOperation::RemoteContentsAudit,
-                .profile_name = argv[3]};
-        }
-        if (inspection == "content" && argc == 5 &&
-            application::history_storage::valid_hex_hash(argv[4])) {
-            return application::InspectionRequest{
-                .operation = application::InspectionOperation::RemoteContent,
-                .profile_name = argv[3],
-                .content_id = std::string{argv[4]}};
-        }
-        return std::unexpected(ParseError{});
+        parsed_remote->bandwidth_limit = std::move(bandwidth_limit);
+        parsed_remote->transfer_concurrency = transfer_concurrency;
+        return *parsed_remote;
     }
     return std::unexpected(ParseError{});
 }
