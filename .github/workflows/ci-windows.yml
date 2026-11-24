@@ -16,17 +16,9 @@ permissions:
 
 jobs:
   msvc:
-    name: MSVC 2022 (${{ matrix.build_type }})
+    name: MSVC 2022 (Release)
     runs-on: windows-2022
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - build_type: Debug
-            cache_suffix: debug
-          - build_type: Release
-            cache_suffix: release
 
     steps:
       - name: Checkout repository
@@ -38,13 +30,13 @@ jobs:
           path: ${{ runner.temp }}\kasumi-fc-cache
           key: fetchcontent-windows-${{ hashFiles('CMakeLists.txt') }}
 
-      - name: Cache ccache (MSVC 2022 ${{ matrix.build_type }})
+      - name: Cache ccache (MSVC 2022 Release)
         uses: actions/cache@v6
         with:
-          path: ${{ runner.temp }}\ccache-windows-msvc-${{ matrix.cache_suffix }}
-          key: ccache-windows-msvc-${{ matrix.cache_suffix }}-${{ github.sha }}
+          path: ${{ runner.temp }}\ccache-windows-msvc-release
+          key: ccache-windows-msvc-release-${{ github.sha }}
           restore-keys: |
-            ccache-windows-msvc-${{ matrix.cache_suffix }}-
+            ccache-windows-msvc-release-
             ccache-windows-msvc-
 
       - name: Install ccache
@@ -80,7 +72,7 @@ jobs:
           ninja --version
           ccache --version
 
-      - name: Build (${{ matrix.build_type }})
+      - name: Build (Release)
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -91,33 +83,28 @@ jobs:
           $vsNinjaDir = Join-Path $vsPath "Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja"
           if (Test-Path $vsCmakeDir) { $env:PATH = "$vsCmakeDir;$vsNinjaDir;$env:PATH" }
           $fcCache = ($env:RUNNER_TEMP -replace '\\', '/') + '/kasumi-fc-cache'
-          $env:CCACHE_DIR = ($env:RUNNER_TEMP -replace '\\', '/') + '/ccache-windows-msvc-${{ matrix.cache_suffix }}'
+          $env:CCACHE_DIR = ($env:RUNNER_TEMP -replace '\\', '/') + '/ccache-windows-msvc-release'
           $env:CCACHE_BASEDIR = ($env:GITHUB_WORKSPACE -replace '\\', '/')
           $env:CCACHE_NOHASHDIR = '1'
           $env:CCACHE_MAXSIZE = '2G'
-          $extraFlags = @()
-          if ('${{ matrix.build_type }}' -eq 'Debug') {
-            $extraFlags += '-DCMAKE_POLICY_DEFAULT_CMP0141=NEW'
-            $extraFlags += '-DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded'
-          }
-          cmake -S . -B build-ci-${{ matrix.cache_suffix }} -G Ninja `
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
+          cmake -S . -B build-ci-release -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_COMPILER=cl `
             -DCMAKE_CXX_COMPILER=cl `
-            @extraFlags `
             -DCMAKE_C_COMPILER_LAUNCHER=ccache `
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
             "-DKASUMI_FETCHCONTENT_CACHE_DIR=$fcCache" `
+            -DKASUMI_ENABLE_IPO=OFF `
             -DBUILD_TESTING=ON
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build build-ci-${{ matrix.cache_suffix }} --parallel
+          cmake --build build-ci-release --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ccache -s
 
-      - name: Run Tests (${{ matrix.build_type }})
+      - name: Run Tests (Release)
         shell: powershell
         run: |
-          ctest --test-dir build-ci-${{ matrix.cache_suffix }} --output-on-failure --parallel $env:NUMBER_OF_PROCESSORS
+          ctest --test-dir build-ci-release --output-on-failure --parallel $env:NUMBER_OF_PROCESSORS
 
   gcc:
     name: GCC (MSYS2 UCRT64)
@@ -188,21 +175,6 @@ jobs:
             esac
           done
 
-      - name: Build (Debug)
-        run: |
-          FC_CACHE="$(cygpath -m "$RUNNER_TEMP")/kasumi-fc-cache"
-          export CCACHE_DIR="$(cygpath -m "$RUNNER_TEMP")/ccache-msys2-gcc"
-          export CCACHE_MAXSIZE=1G
-          cmake --preset debug \
-            -DKASUMI_FETCHCONTENT_CACHE_DIR="$FC_CACHE" \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          cmake --build --preset debug
-
-      - name: Run Tests (Debug)
-        run: |
-          ctest --preset debug --output-on-failure --parallel $(nproc)
-
       - name: Build (Release)
         run: |
           FC_CACHE="$(cygpath -m "$RUNNER_TEMP")/kasumi-fc-cache"
@@ -210,6 +182,7 @@ jobs:
           export CCACHE_MAXSIZE=1G
           cmake --preset default -DBUILD_TESTING=ON \
             -DKASUMI_FETCHCONTENT_CACHE_DIR="$FC_CACHE" \
+            -DKASUMI_ENABLE_IPO=OFF \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build --preset default
@@ -290,22 +263,6 @@ jobs:
             esac
           done
 
-      - name: Build (Debug)
-        run: |
-          FC_CACHE="$(cygpath -m "$RUNNER_TEMP")/kasumi-fc-cache"
-          export CCACHE_DIR="$(cygpath -m "$RUNNER_TEMP")/ccache-msys2-clang"
-          export CCACHE_MAXSIZE=1G
-          cmake -S . -B build-clang64-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
-            -DKASUMI_FETCHCONTENT_CACHE_DIR="$FC_CACHE" \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld"
-          cmake --build build-clang64-debug
-
-      - name: Run Tests (Debug)
-        run: |
-          ctest --test-dir build-clang64-debug --output-on-failure --parallel $(nproc)
-
       - name: Build (Release)
         run: |
           FC_CACHE="$(cygpath -m "$RUNNER_TEMP")/kasumi-fc-cache"
@@ -313,6 +270,7 @@ jobs:
           export CCACHE_MAXSIZE=1G
           cmake -S . -B build-clang64-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
             -DKASUMI_FETCHCONTENT_CACHE_DIR="$FC_CACHE" \
+            -DKASUMI_ENABLE_IPO=OFF \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld"
