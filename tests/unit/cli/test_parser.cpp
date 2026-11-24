@@ -930,4 +930,91 @@ TEST(CliParserTest, ParsesProfileConflictsAndCompletionCommands) {
     EXPECT_FALSE(parse({"daemon", "autostart", "bogus"}).has_value());
     EXPECT_FALSE(parse({"daemon", "stop", "--wait"}).has_value());
 }
+
+TEST(ParserTest, ParsesV028UnifiedCommandsAndHelpAll) {
+    const auto help_all = parse({"--help", "--all"});
+    ASSERT_TRUE(help_all.has_value());
+    ASSERT_TRUE(std::holds_alternative<kasumi::cli::HelpInvocation>(*help_all));
+    EXPECT_TRUE(std::get<kasumi::cli::HelpInvocation>(*help_all).all);
+
+    const auto all_help = parse({"--all", "--help"});
+    ASSERT_TRUE(all_help.has_value());
+    ASSERT_TRUE(std::holds_alternative<kasumi::cli::HelpInvocation>(*all_help));
+    EXPECT_TRUE(std::get<kasumi::cli::HelpInvocation>(*all_help).all);
+
+    EXPECT_FALSE(parse({"--all"}).has_value());
+
+    const auto bare_status = parse({"status"});
+    ASSERT_TRUE(bare_status.has_value());
+    EXPECT_TRUE(
+        std::holds_alternative<kasumi::cli::OverviewInvocation>(*bare_status));
+
+    const auto prof_status = parse({"status", "notes"});
+    ASSERT_TRUE(prof_status.has_value());
+    EXPECT_TRUE(std::holds_alternative<Request>(*prof_status));
+
+    const auto logs_default = parse({"logs"});
+    ASSERT_TRUE(logs_default.has_value());
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::cli::LogsInvocation>(*logs_default));
+    {
+        const auto& l = std::get<kasumi::cli::LogsInvocation>(*logs_default);
+        EXPECT_FALSE(l.profile_name.has_value());
+        EXPECT_FALSE(l.follow);
+        EXPECT_EQ(l.log_lines, 50U);
+    }
+
+    const auto logs_follow = parse({"logs", "notes", "-f", "--lines", "120"});
+    ASSERT_TRUE(logs_follow.has_value());
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::cli::LogsInvocation>(*logs_follow));
+    {
+        const auto& l = std::get<kasumi::cli::LogsInvocation>(*logs_follow);
+        EXPECT_EQ(l.profile_name, "notes");
+        EXPECT_TRUE(l.follow);
+        EXPECT_EQ(l.log_lines, 120U);
+    }
+
+    EXPECT_FALSE(parse({"logs", "--lines", "0"}).has_value());
+    EXPECT_FALSE(parse({"logs", "--lines", "1001"}).has_value());
+
+    const auto d_logs_follow = parse({"daemon", "logs", "notes", "--follow"});
+    ASSERT_TRUE(d_logs_follow.has_value());
+    EXPECT_TRUE(std::get<kasumi::cli::DaemonInvocation>(*d_logs_follow).follow);
+
+    const auto start_auto = parse({"start", "--autostart"});
+    ASSERT_TRUE(start_auto.has_value());
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::cli::StartInvocation>(*start_auto));
+    EXPECT_TRUE(
+        std::get<kasumi::cli::StartInvocation>(*start_auto).autostart);
+
+    const auto stop_cmd = parse({"stop"});
+    ASSERT_TRUE(stop_cmd.has_value());
+    EXPECT_TRUE(std::holds_alternative<kasumi::cli::StopInvocation>(*stop_cmd));
+
+    const auto pause_one = parse({"pause", "notes"});
+    ASSERT_TRUE(pause_one.has_value());
+    {
+        const auto& p =
+            std::get<kasumi::cli::ProfileToggleInvocation>(*pause_one);
+        EXPECT_TRUE(p.pause);
+        EXPECT_FALSE(p.all);
+        EXPECT_EQ(p.profile_name, "notes");
+    }
+
+    const auto resume_all = parse({"resume", "--all"});
+    ASSERT_TRUE(resume_all.has_value());
+    {
+        const auto& p =
+            std::get<kasumi::cli::ProfileToggleInvocation>(*resume_all);
+        EXPECT_FALSE(p.pause);
+        EXPECT_TRUE(p.all);
+        EXPECT_FALSE(p.profile_name.has_value());
+    }
+
+    EXPECT_FALSE(parse({"pause"}).has_value());
+    EXPECT_FALSE(parse({"pause", "notes", "--all"}).has_value());
+    EXPECT_FALSE(parse({"resume"}).has_value());
+}
 } // namespace

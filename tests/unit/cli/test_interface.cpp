@@ -131,7 +131,7 @@ TEST_F(CliInterfaceTest, GlobalLanguageAppliesToContextualHelpAndDiagnostics) {
               std::string::npos);
     EXPECT_NE(help.out.find("--head"), std::string::npos);
     EXPECT_NE(help.out.find("Exemplo"), std::string::npos);
-    const auto error = run({"kasumi", "--lang", "pt-BR", "status"});
+    const auto error = run({"kasumi", "--lang", "pt-BR", "sync"});
     EXPECT_EQ(error.code, 1);
     EXPECT_NE(error.err.find("[ERRO]"), std::string::npos);
     EXPECT_NE(error.err.find("Argumentos inválidos"), std::string::npos);
@@ -269,13 +269,17 @@ TEST_F(CliInterfaceTest, ShowOfflineRemoteSummaryAndConfigReflectTraceability) {
     std::filesystem::rename(parked_remote, remote);
 
     EXPECT_EQ(shown.code, 0) << shown.err;
-    EXPECT_NE(shown.out.find("Accepted state:"), std::string::npos);
-    EXPECT_NE(shown.out.find("Commit origin: sync"), std::string::npos);
     EXPECT_NE(shown.out.find("Last complete sync:"), std::string::npos);
-    EXPECT_NE(shown.out.find("Last local attempt:"), std::string::npos);
-    EXPECT_NE(shown.out.find("Recent local maintenance:"), std::string::npos);
+    EXPECT_NE(shown.out.find("--full"), std::string::npos);
+    EXPECT_EQ(shown.out.find("Accepted state:"), std::string::npos);
+    EXPECT_EQ(shown.out.find("Recent local executions (2):"), std::string::npos);
 
     EXPECT_EQ(shown_full.code, 0) << shown_full.err;
+    EXPECT_NE(shown_full.out.find("Accepted state:"), std::string::npos);
+    EXPECT_NE(shown_full.out.find("Commit origin: sync"), std::string::npos);
+    EXPECT_NE(shown_full.out.find("Last complete sync:"), std::string::npos);
+    EXPECT_NE(shown_full.out.find("Last local attempt:"), std::string::npos);
+    EXPECT_NE(shown_full.out.find("fsck"), std::string::npos);
     EXPECT_NE(shown_full.out.find("Recent local executions (2):"),
               std::string::npos);
 
@@ -600,10 +604,15 @@ TEST_P(GeneralOptionTest, ConventionalOptionsSucceedWithoutExecution) {
 INSTANTIATE_TEST_SUITE_P(Conventional,
                          GeneralOptionTest,
                          testing::Values("--help", "-h", "--version", "-v"));
-TEST_F(CliInterfaceTest, MissingCommandPrintsHelpAndFails) {
-    const auto output = run({"kasumi"});
-    EXPECT_EQ(output.code, 1);
-    EXPECT_NE(output.out.find("Usage:"), std::string::npos);
+TEST_F(CliInterfaceTest, BareCommandShowsQuickstartAndUnknownCommandFails) {
+    const auto bare = run({"kasumi"});
+    EXPECT_EQ(bare.code, 0) << bare.err;
+    EXPECT_NE(bare.out.find("kasumi config"), std::string::npos);
+    EXPECT_NE(bare.out.find("kasumi start"), std::string::npos);
+
+    const auto unknown = run({"kasumi", "unknowncmd"});
+    EXPECT_EQ(unknown.code, 1);
+    EXPECT_NE(unknown.err.find("[ERROR]"), std::string::npos);
 }
 
 TEST_F(CliInterfaceTest, InspectsLogicalPathsStartingWithHyphenUsingDelimiter) {
@@ -982,6 +991,183 @@ TEST_F(CliInterfaceTest, DaemonHelpLogsAndErrorContractsWork) {
     EXPECT_EQ(unlock_quiet.code, 1);
     EXPECT_FALSE(unlock_quiet.out.empty());
     EXPECT_TRUE(unlock_quiet.err.empty());
+}
+
+TEST_F(CliInterfaceTest, HelpTwoTierEnglishAndPortuguese) {
+    const auto compact_en = run({"kasumi", "--help"});
+    EXPECT_EQ(compact_en.code, 0);
+    EXPECT_NE(compact_en.out.find("kasumi start"), std::string::npos);
+    EXPECT_NE(compact_en.out.find("kasumi logs"), std::string::npos);
+    EXPECT_NE(compact_en.out.find("--help --all"), std::string::npos);
+    EXPECT_EQ(compact_en.out.find("kasumi remote contents <profile> --audit"),
+              std::string::npos);
+
+    const auto all_en = run({"kasumi", "--help", "--all"});
+    EXPECT_EQ(all_en.code, 0);
+    EXPECT_NE(all_en.out.find("kasumi remote contents <profile> --audit"),
+              std::string::npos);
+    EXPECT_NE(all_en.out.find("kasumi gc <profile>"), std::string::npos);
+
+    const auto all_pt = run({"kasumi", "--lang", "pt-BR", "--help", "--all"});
+    EXPECT_EQ(all_pt.code, 0);
+    EXPECT_NE(all_pt.out.find("kasumi gc <perfil>"), std::string::npos);
+}
+
+TEST_F(CliInterfaceTest, OverviewBareAndStatusFullJsonAndPtBr) {
+    const auto empty_en = run({"kasumi"});
+    EXPECT_EQ(empty_en.code, 0) << empty_en.err;
+    EXPECT_NE(empty_en.out.find("No profiles configured"), std::string::npos);
+
+    const auto empty_status = run({"kasumi", "status"});
+    EXPECT_EQ(empty_status.code, 0) << empty_status.err;
+    EXPECT_NE(empty_status.out.find("kasumi config"), std::string::npos);
+
+    const auto root = kasumi::test::workspace_root(workspace);
+    const kasumi::application::ExecutionEnvironment environment{root /
+                                                                "kasumi"};
+    const kasumi::application::Profile profile{
+        "notes", root / "local", (root / "remote").string()};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment,
+        profile,
+        kasumi::application::MasterKeyHex{std::string(64, '6')}));
+    std::filesystem::create_directories(profile.local_dir);
+
+    const auto overview = run({"kasumi"});
+    EXPECT_EQ(overview.code, 0) << overview.err;
+    EXPECT_NE(overview.out.find("Daemon: stopped"), std::string::npos);
+    EXPECT_NE(overview.out.find("notes"), std::string::npos);
+    EXPECT_NE(overview.out.find("--full"), std::string::npos);
+
+    const auto overview_full = run({"kasumi", "status", "--full"});
+    EXPECT_EQ(overview_full.code, 0) << overview_full.err;
+    EXPECT_NE(overview_full.out.find("Daemon: stopped"), std::string::npos);
+    EXPECT_NE(overview_full.out.find("notes"), std::string::npos);
+    EXPECT_NE(overview_full.out.find("local="), std::string::npos);
+
+    const auto overview_json = run({"kasumi", "status", "--json"});
+    EXPECT_EQ(overview_json.code, 0) << overview_json.err;
+    EXPECT_NE(overview_json.out.find("\"schema_version\":1"), std::string::npos);
+    EXPECT_NE(overview_json.out.find("\"command\":\"status\""),
+              std::string::npos);
+    EXPECT_NE(overview_json.out.find("\"profiles\":[{"), std::string::npos);
+    EXPECT_NE(overview_json.out.find("\"name\":\"notes\""), std::string::npos);
+
+    const auto overview_pt = run({"kasumi", "--lang", "pt-BR"});
+    EXPECT_EQ(overview_pt.code, 0) << overview_pt.err;
+    EXPECT_NE(overview_pt.out.find("Daemon: parado"), std::string::npos);
+    EXPECT_NE(overview_pt.out.find("notes"), std::string::npos);
+}
+
+TEST_F(CliInterfaceTest, LogsFiltersNoisyEventsAndHandlesOfflineFollow) {
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto app_dir = root / "kasumi";
+    std::filesystem::create_directories(app_dir);
+    {
+        std::ofstream log_out(app_dir / "daemon.log", std::ios::binary);
+        log_out << "{\"seq\":1,\"ts\":1700000000,\"profile\":\"notes\",\"kind\":\"fast_"
+                   "noop\",\"detail\":\"Fast poll: no changes\"}\n";
+        log_out << "{\"seq\":2,\"ts\":1700000010,\"profile\":\"notes\",\"kind\":\"warm_"
+                   "transport_opened\",\"detail\":\"Warm transport opened\"}\n";
+        log_out << "{\"seq\":3,\"ts\":1700000020,\"profile\":\"notes\",\"kind\":\"sync_"
+                   "completed\",\"detail\":\"Synchronization completed (1.2 s)\"}\n";
+    }
+
+    const auto filtered = run({"kasumi", "logs", "--lines", "20"});
+    EXPECT_EQ(filtered.code, 0) << filtered.err;
+    EXPECT_NE(filtered.out.find("Synchronization completed (1.2 s)"),
+              std::string::npos);
+    EXPECT_EQ(filtered.out.find("fast_noop"), std::string::npos);
+    EXPECT_EQ(filtered.out.find("warm_transport_opened"), std::string::npos);
+
+    const auto unfiltered = run({"kasumi", "logs", "--full", "--lines", "20"});
+    EXPECT_EQ(unfiltered.code, 0) << unfiltered.err;
+    EXPECT_NE(unfiltered.out.find("fast_noop"), std::string::npos);
+    EXPECT_NE(unfiltered.out.find("warm_transport_opened"), std::string::npos);
+
+    const auto logs_json = run({"kasumi", "logs", "--json"});
+    EXPECT_EQ(logs_json.code, 0) << logs_json.err;
+    EXPECT_NE(logs_json.out.find("\"command\":\"logs\""), std::string::npos);
+    EXPECT_NE(logs_json.out.find("Synchronization completed (1.2 s)"),
+              std::string::npos);
+    EXPECT_EQ(logs_json.out.find("\"kind\":\"fast_noop\""),
+              std::string::npos);
+
+    const auto follow_offline = run({"kasumi", "logs", "-f"});
+    EXPECT_EQ(follow_offline.code, 0) << follow_offline.err;
+    EXPECT_NE(follow_offline.out.find("kasumi start"), std::string::npos);
+}
+
+TEST_F(CliInterfaceTest, UnifiedDaemonErrorsAndListFullWorkCleanly) {
+    const auto root = kasumi::test::workspace_root(workspace);
+    const kasumi::application::ExecutionEnvironment environment{root /
+                                                                "kasumi"};
+    const kasumi::application::Profile profile{
+        "notes", root / "local", (root / "remote").string()};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment,
+        profile,
+        kasumi::application::MasterKeyHex{std::string(64, '7')}));
+    std::filesystem::create_directories(profile.local_dir);
+
+    const auto stop_offline = run({"kasumi", "stop", "--json"});
+    EXPECT_EQ(stop_offline.code, 0) << stop_offline.err;
+    EXPECT_NE(stop_offline.out.find("\"command\":\"stop\""), std::string::npos);
+    EXPECT_NE(stop_offline.out.find("daemon already stopped"),
+              std::string::npos);
+
+    const auto pause_one = run({"kasumi", "pause", "notes", "--json"});
+    EXPECT_EQ(pause_one.code, 0) << pause_one.err;
+    EXPECT_NE(pause_one.out.find("\"command\":\"pause\""), std::string::npos);
+
+    const auto resume_all = run({"kasumi", "resume", "--all", "--json"});
+    EXPECT_EQ(resume_all.code, 0) << resume_all.err;
+    EXPECT_NE(resume_all.out.find("\"command\":\"resume\""),
+              std::string::npos);
+    EXPECT_NE(resume_all.out.find("\"profile\":\"--all\""),
+              std::string::npos);
+
+    const auto list_compact = run({"kasumi", "list"});
+    EXPECT_EQ(list_compact.code, 0);
+    EXPECT_NE(list_compact.out.find("notes"), std::string::npos);
+    EXPECT_EQ(list_compact.out.find("->"), std::string::npos);
+
+    const auto list_full = run({"kasumi", "list", "--full"});
+    EXPECT_EQ(list_full.code, 0);
+    EXPECT_NE(list_full.out.find("notes"), std::string::npos);
+    EXPECT_NE(list_full.out.find("->"), std::string::npos);
+}
+
+TEST_F(CliInterfaceTest, ConfigAutomationSubmenuUpdatesProfileSchedule) {
+    const auto root = kasumi::test::workspace_root(workspace);
+    const kasumi::application::ExecutionEnvironment environment{root /
+                                                                "kasumi"};
+    const kasumi::application::Profile profile{
+        "notes", root / "local", (root / "remote").string()};
+    ASSERT_TRUE(kasumi::application::create_profile(
+        environment,
+        profile,
+        kasumi::application::MasterKeyHex{std::string(64, '8')}));
+    std::filesystem::create_directories(profile.local_dir);
+
+    std::istringstream wizard_input("a\n4\nnotes\noff\n120\n24\nb\nq\n");
+    auto* previous = std::cin.rdbuf(wizard_input.rdbuf());
+    const auto out = run({"kasumi", "config"});
+    std::cin.rdbuf(previous);
+    std::cin.clear();
+    EXPECT_EQ(out.code, 0) << out.err;
+    EXPECT_NE(out.out.find("Daemon & Automation"), std::string::npos);
+
+    const auto profiles = kasumi::application::list_profiles(environment);
+    ASSERT_TRUE(profiles.has_value());
+    ASSERT_EQ(profiles->size(), 1U);
+    const auto& updated = profiles->front();
+    ASSERT_TRUE(updated.watch_enabled.has_value());
+    EXPECT_FALSE(*updated.watch_enabled);
+    ASSERT_TRUE(updated.sync_interval_seconds.has_value());
+    EXPECT_EQ(*updated.sync_interval_seconds, 120U);
+    ASSERT_TRUE(updated.gc_interval_hours.has_value());
+    EXPECT_EQ(*updated.gc_interval_hours, 24U);
 }
 
 } // namespace

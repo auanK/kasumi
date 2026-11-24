@@ -27,9 +27,12 @@ TEST(CliI18nTest, DefaultLanguageIsEnglish) {
     EXPECT_EQ(format(Key::SyncPlanOmittedPlural, 5), "5 more items");
     EXPECT_EQ(format(Key::SyncPendingSingular, 1),
               "1 file is waiting for unavailable remote content.");
-    EXPECT_NE(tr(Key::HelpText).find("sync <profile> --initial"),
+    EXPECT_NE(tr(Key::HelpText).find("kasumi start"), std::string_view::npos);
+    EXPECT_NE(tr(Key::HelpText).find("kasumi logs"), std::string_view::npos);
+    EXPECT_NE(tr(Key::HelpText).find("--help --all"), std::string_view::npos);
+    EXPECT_NE(tr(Key::HelpTextAll).find("sync <profile> --initial"),
               std::string_view::npos);
-    EXPECT_NE(tr(Key::HelpText).find("repack <profile>"),
+    EXPECT_NE(tr(Key::HelpTextAll).find("repack <profile>"),
               std::string_view::npos);
 }
 
@@ -54,9 +57,12 @@ TEST(CliI18nTest, SwitchingToPortugueseUpdatesStrings) {
     EXPECT_EQ(format(Key::SyncPlanOmittedPlural, 5), "mais 5 itens");
     EXPECT_EQ(format(Key::SyncPendingPlural, 2),
               "2 arquivos aguardam conteúdo remoto indisponível.");
-    EXPECT_NE(tr(Key::HelpText).find("sync <perfil> --initial"),
+    EXPECT_NE(tr(Key::HelpText).find("kasumi start"), std::string_view::npos);
+    EXPECT_NE(tr(Key::HelpText).find("kasumi logs"), std::string_view::npos);
+    EXPECT_NE(tr(Key::HelpText).find("--help --all"), std::string_view::npos);
+    EXPECT_NE(tr(Key::HelpTextAll).find("sync <perfil> --initial"),
               std::string_view::npos);
-    EXPECT_NE(tr(Key::HelpText).find("repack <perfil>"),
+    EXPECT_NE(tr(Key::HelpTextAll).find("repack <perfil>"),
               std::string_view::npos);
     set_language(Language::English);
 }

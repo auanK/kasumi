@@ -152,27 +152,40 @@ TEST(CliAppTest, PrintsSynchronizationProgressOnce) {
 
 TEST(CliAppTest, PrintsMinimalHelpWithoutRuntimeAccess) {
     const auto output = run_cli_out({"kasumi", "--help"}, 0);
-    EXPECT_NE(output.find("kasumi sync <profile>"), std::string::npos);
-    EXPECT_NE(output.find("kasumi remote contents <profile> --audit"),
-              std::string::npos);
-    EXPECT_NE(output.find("does not run GC"), std::string::npos);
-    EXPECT_NE(output.find("health diagnostic"), std::string::npos);
-    EXPECT_NE(output.find("Analyze or run garbage collection on safe objects."),
-              std::string::npos);
+    EXPECT_NE(output.find("kasumi start"), std::string::npos);
+    EXPECT_NE(output.find("kasumi logs"), std::string::npos);
+    EXPECT_NE(output.find("--help --all"), std::string::npos);
     EXPECT_NE(output.find("--quiet"), std::string::npos);
     EXPECT_NE(output.find("--json"), std::string::npos);
+
+    const auto full_output = run_cli_out({"kasumi", "--help", "--all"}, 0);
+    EXPECT_NE(full_output.find("kasumi sync <profile>"), std::string::npos);
+    EXPECT_NE(full_output.find("kasumi remote contents <profile> --audit"),
+              std::string::npos);
+    EXPECT_NE(full_output.find("does not run GC"), std::string::npos);
+    EXPECT_NE(full_output.find("health diagnostic"), std::string::npos);
+    EXPECT_NE(full_output.find(
+                  "Analyze or run garbage collection on safe objects."),
+              std::string::npos);
 }
 
 TEST(CliAppTest, PrintsHelpInPortugueseWhenFlagProvided) {
     const auto output = run_cli_out({"kasumi", "--lang", "pt", "--help"}, 0);
-    EXPECT_NE(output.find("kasumi sync <perfil>"), std::string::npos);
-    EXPECT_NE(output.find("não executa GC"), std::string::npos);
-    EXPECT_NE(output.find("diagnóstico remoto completo"), std::string::npos);
-    EXPECT_NE(
-        output.find("Analisa ou executa a coleta de lixo de objetos seguros."),
-        std::string::npos);
+    EXPECT_NE(output.find("kasumi start"), std::string::npos);
+    EXPECT_NE(output.find("kasumi logs"), std::string::npos);
+    EXPECT_NE(output.find("--help --all"), std::string::npos);
     EXPECT_NE(output.find("--quiet"), std::string::npos);
     EXPECT_NE(output.find("--json"), std::string::npos);
+
+    const auto full_output =
+        run_cli_out({"kasumi", "--lang", "pt", "--help", "--all"}, 0);
+    EXPECT_NE(full_output.find("kasumi sync <perfil>"), std::string::npos);
+    EXPECT_NE(full_output.find("não executa GC"), std::string::npos);
+    EXPECT_NE(full_output.find("diagnóstico remoto completo"),
+              std::string::npos);
+    EXPECT_NE(full_output.find(
+                  "Analisa ou executa a coleta de lixo de objetos seguros."),
+              std::string::npos);
     kasumi::cli::i18n::set_language(kasumi::cli::i18n::Language::English);
 }
 

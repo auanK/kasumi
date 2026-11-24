@@ -52,29 +52,29 @@ Machine C ───┘
 
 ## Quick Start
 
-Create a profile named `work`, preview the plan, and synchronize:
+1. If syncing to cloud storage, configure a remote in `rclone` first (`rclone config`, e.g. `gdrive`).
+2. Create a profile in Kasumi (choose the local folder, remote path such as `gdrive:notes`, and password + salt):
 
 ```bash
 kasumi config
-kasumi status work
-kasumi sync work
+```
+
+3. Start continuous background sync and inspect status or live logs at any time:
+
+```bash
+kasumi start --autostart
+kasumi
+kasumi logs -f
 ```
 
 ```text
-$ kasumi sync work
-Synchronizing "work"...
-[1/5] Observing local and remote state...
-[2/5] Calculating changes...
-  3 changes | ↑ 2 (1.42 MiB) | ↓ 1 (312.0 KiB)
-[3/5] Applying changes...
-[4/5] Publishing new state...
-[5/5] Finalizing...
-Synchronization completed.
-Wire upload 684.5 KiB (2 objects) | wire download 198.2 KiB (1 object) | locally reused 0 B
-Duration: 1.842 s
+$ kasumi
+Kasumi Daemon: running | Autostart: installed
+Profiles (1):
+  work            ok (2m ago by desktop-1)
 ```
 
-On a second machine, run `kasumi config` with the same shared storage and **exact same Password and Password Salt**, then run `kasumi sync work`. See [Getting Started](docs/getting-started.md) for the complete two-machine walkthrough and download verification steps.
+On a second machine, run `kasumi config` with the same shared storage and **exact same Password and Password Salt**, then run `kasumi start --autostart` (or run a one-shot `kasumi sync work`). See [Getting Started](docs/getting-started.md) for the complete two-machine walkthrough and download verification steps.
 
 ---
 
@@ -103,24 +103,23 @@ cmake --preset default && cmake --build --preset default
 
 | Command | Purpose |
 |---|---|
-| `kasumi config` | Interactive wizard (with `rclone` remote hints) to manage profiles and key storage |
-| `kasumi profile <subcommand>` | Non-interactive profile management (`create [--verify]`, `edit`, `clone`, `storage`, `rename`, `delete`, `test`) |
-| `kasumi daemon <subcommand>` | Run and control the multi-profile background daemon (`run [--background]`, `stop`, `status`, `sync`, `pause`, `resume`, `unlock`, `lock`, `reload`, `autostart`) |
-| `kasumi key <profile>` | Save or `--replace` the profile key (supports `--json` and `--quiet`) |
-| `kasumi ignore <subcommand>` | Inspect `.kasumiignore` rule matches (`check`) or generate preset templates (`init`) |
+| `kasumi` / `kasumi status` | Show unified overview of daemon, profiles, last sync, and problems (`--full` expands details) |
+| `kasumi start [--autostart]` | Start the background daemon in one command (optionally install login autostart) |
+| `kasumi stop` | Stop the background daemon |
+| `kasumi logs [<profile>] [-f]` | Show recent daemon logs (or stream live updates with `-f` / `--follow`) |
+| `kasumi pause <profile \| --all>` | Pause automatic daemon sync for one profile or all profiles |
+| `kasumi resume <profile \| --all>` | Resume automatic daemon sync for one profile or all profiles |
+| `kasumi sync <profile> [--repair]` | Run manual bidirectional sync (or re-upload missing remote objects) |
 | `kasumi status <profile>` | Preview synchronization changes read-only (`sync --dry-run`) |
-| `kasumi sync <profile> [--repair]` | Synchronize bidirectionally or re-upload missing remote objects (supports `--bwlimit`, `--concurrency`, `--allow-empty-local`) |
-| `kasumi conflicts <profile>` | Scan local folder read-only and group preserved `.kasumiconflict_*` artifacts |
-| `kasumi conflicts resolve <profile> <path>` | Resolve a conflict group (`--keep-canonical` or `--keep <artifact>`, optional `--dry-run`) |
-| `kasumi diagnostics [<profile>]` | Inspect local environment, `rclone >= v1.60.0`, disk space, `.kasumiignore` syntax, and profile health |
-| `kasumi fsck <profile>` | Download and cryptographically audit every referenced payload |
-| `kasumi repack <profile> [--dry-run]` | Consolidate fragmented `KPAK\x01` Micro-Packs locally without remote downloads/deletions |
-| `kasumi gc <profile> [--dry-run] [--min-age <hours>]` | Reclaim eligible orphans, expired commits, redundant variants, and old activities |
-| `kasumi resolve-missing <profile> [--dry-run \| --confirm]` | Explicitly resolve permanently missing remote content as logical deletions |
-| `kasumi remote <subcommand> <profile>` | Read-only inspection & restore (`summary`, `heads`, `tree`, `log`, `stat`/`get`/`restore [--commit]`, `writers`, `health`, ...) |
-| `kasumi completion <shell>` | Output shell completion script (`bash`, `zsh`, `fish`, `powershell`) |
+| `kasumi show <profile> [--full]` | Inspect profile settings, last complete sync, and recent history (`--full` expands details) |
+| `kasumi config` | Interactive wizard (`rclone` remote hints, profiles, keys, and automation settings) |
+| `kasumi conflicts <profile>` | Scan local folder read-only or `resolve <profile> <path>` preserved conflicts |
+| `kasumi diagnostics [<profile>]` | Inspect local environment, `rclone >= v1.60.0`, disk space, and profile health |
+| `kasumi remote <subcommand> <profile>` | Read-only inspection & restore (`summary`, `heads`, `tree`, `log`, `stat`/`get`/`restore`, `writers`) |
 
-Run `kasumi --help` or `kasumi <command> --help` for full syntax and options.
+Advanced maintenance & scripting commands (`profile`, `daemon`, `key`, `ignore`, `fsck`, `repack`, `gc`, `resolve-missing`, `completion`) are documented in `kasumi --help --all` and [Configuration and Usage](docs/configuration-and-usage.md).
+
+Run `kasumi --help`, `kasumi --help --all`, or `kasumi <command> --help` for full syntax and options.
 
 ---
 

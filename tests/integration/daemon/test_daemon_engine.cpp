@@ -981,4 +981,80 @@ TEST(DaemonEngineTest,
     app::stop_daemon_session(*session);
 }
 
+#ifdef _WIN32
+TEST(DaemonEngineTest,
+     VaultProfileAutoUnlocksAndSyncsWhenKeyAppearsInOsVault) {
+    auto ws = kasumi::test::make_temp_workspace("kasumi-daemon-vault-recheck-");
+    const app::ExecutionEnvironment env{kasumi::test::workspace_path(ws, "app")};
+    const auto local_dir = kasumi::test::workspace_path(ws, "local");
+    const auto remote_dir = kasumi::test::workspace_path(ws, "remote");
+    std::filesystem::create_directories(local_dir);
+    std::filesystem::create_directories(remote_dir);
+    kasumi::test::write_text(local_dir / "hello.txt", "vault-recheck");
+
+    const std::string hex_key(64, 'a');
+    ASSERT_TRUE(app::create_profile(
+                    env,
+                    app::Profile{.name = "vault_auto",
+                                 .local_dir = local_dir,
+                                 .remote_dir = remote_dir.string(),
+                                 .key_storage = app::KeyStorage::Memory},
+                    app::MasterKeyHex{hex_key})
+                    .has_value());
+    ASSERT_TRUE(app::execute(app::ExecutionInput{
+                                 .request = {.operation = app::Operation::Sync,
+                                             .profile_name = "vault_auto"},
+                                 .credentials = app::MasterKeyHex{hex_key},
+                                 .environment = env})
+                    .has_value());
+
+    {
+        std::ofstream cfg(env.app_data_dir / "config.toml", std::ios::binary);
+        cfg << "version = 1\n\n"
+            << "[profiles.vault_auto]\n"
+            << "local_dir = '" << kasumi::platform::path::to_utf8(local_dir)
+            << "'\n"
+            << "remote_dir = '" << kasumi::platform::path::to_utf8(remote_dir)
+            << "'\n"
+            << "min_history_depth = 5\n"
+            << "min_history_age_hours = 6\n"
+            << "key_storage = \"vault\"\n"
+            << "sync_interval_seconds = 60\n";
+    }
+
+    app::DaemonOptions opts;
+    opts.watch_debounce = 50ms;
+    opts.config_poll_interval = 200ms;
+    auto session = app::start_daemon_session(env, opts);
+    ASSERT_TRUE(session.has_value()) << session.error().detail;
+
+    // Without a key in Windows Credential Manager, profile starts Locked.
+    ASSERT_TRUE(wait_until([&] {
+        const auto st = app::query_daemon_session_status(*session, "vault_auto");
+        return st && !st->profiles.empty() &&
+               st->profiles[0].state == app::DaemonProfileState::Locked &&
+               st->profiles[0].locked;
+    }));
+
+    // Write the key into OS Vault AFTER daemon startup without calling reload().
+    ASSERT_TRUE(
+        app::set_profile_key(env, "vault_auto", app::MasterKeyHex{hex_key}, true)
+            .has_value());
+
+    // Daemon must automatically re-check OS Vault (~3s backoff), unlock, and sync.
+    ASSERT_TRUE(wait_until(
+        [&] {
+            const auto st =
+                app::query_daemon_session_status(*session, "vault_auto");
+            return st && !st->profiles.empty() && !st->profiles[0].locked &&
+                   st->profiles[0].state == app::DaemonProfileState::Idle &&
+                   st->profiles[0].sync_runs >= 1U;
+        },
+        15s));
+
+    app::stop_daemon_session(*session);
+    static_cast<void>(app::delete_profile(env, "vault_auto"));
+}
+#endif
+
 } // namespace
