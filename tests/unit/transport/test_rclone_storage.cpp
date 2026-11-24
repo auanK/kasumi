@@ -3095,4 +3095,103 @@ TEST(RcloneRcClientTest,
     EXPECT_LT(elapsed, std::chrono::seconds{1});
 }
 
+TEST(RcloneRcClientTest,
+     PostRcReadOnlyRetriesRateLimit429And403AndRejectsAuth403) {
+    // 1. HTTP 429 rateLimitExceeded retries with backoff and succeeds on 3rd try.
+    {
+        RcServerState remote;
+        std::atomic<int> calls{0};
+        remote.server.Post("/rc/operations/list",
+                           [&](const auto&, auto& response) {
+                               const int attempt =
+                                   calls.fetch_add(1, std::memory_order_relaxed) +
+                                   1;
+                               if (attempt <= 2) {
+                                   response.status = 429;
+                                   response.set_content(
+                                       R"({"error":"googleapi: Error 429: rateLimitExceeded"})",
+                                       "application/json");
+                                   return;
+                               }
+                               response.set_content(R"({"list":[]})",
+                                                    "application/json");
+                           });
+        start_rc_server(remote);
+        configure_state(remote.client, remote.port);
+
+        const auto res = rclone_detail::post_rc_read_only(
+            remote.client,
+            "operations/list",
+            "{}",
+            65536U,
+            std::chrono::seconds{5});
+        stop_rc_server(remote);
+
+        ASSERT_TRUE(res.has_value())
+            << (res ? "" : res.error().message);
+        EXPECT_EQ(calls.load(std::memory_order_relaxed), 3);
+    }
+
+    // 2. Persistent HTTP 403 userRateLimitExceeded retries up to 4 times and
+    // classifies as BackendUnavailable (not PermissionDenied).
+    {
+        RcServerState remote;
+        std::atomic<int> calls{0};
+        remote.server.Post("/rc/operations/list",
+                           [&](const auto&, auto& response) {
+                               calls.fetch_add(1, std::memory_order_relaxed);
+                               response.status = 403;
+                               response.set_content(
+                                   R"({"error":"googleapi: Error 403: User Rate Limit Exceeded, userRateLimitExceeded"})",
+                                   "application/json");
+                           });
+        start_rc_server(remote);
+        configure_state(remote.client, remote.port);
+
+        const auto res = rclone_detail::post_rc_read_only(
+            remote.client,
+            "operations/list",
+            "{}",
+            65536U,
+            std::chrono::seconds{5});
+        stop_rc_server(remote);
+
+        ASSERT_FALSE(res.has_value());
+        EXPECT_EQ(res.error().code,
+                  kasumi::transport::ErrorCode::BackendUnavailable);
+        EXPECT_EQ(res.error().native_code, 403);
+        EXPECT_EQ(calls.load(std::memory_order_relaxed), 4);
+    }
+
+    // 3. Genuine HTTP 403 auth rejection fails immediately with PermissionDenied.
+    {
+        RcServerState remote;
+        std::atomic<int> calls{0};
+        remote.server.Post("/rc/operations/list",
+                           [&](const auto&, auto& response) {
+                               calls.fetch_add(1, std::memory_order_relaxed);
+                               response.status = 403;
+                               response.set_content(
+                                   R"({"error":"bad rc credentials"})",
+                                   "application/json");
+                           });
+        start_rc_server(remote);
+        configure_state(remote.client, remote.port);
+
+        const auto res = rclone_detail::post_rc_read_only(
+            remote.client,
+            "operations/list",
+            "{}",
+            65536U,
+            std::chrono::seconds{5});
+        stop_rc_server(remote);
+
+        ASSERT_FALSE(res.has_value());
+        EXPECT_EQ(res.error().code,
+                  kasumi::transport::ErrorCode::PermissionDenied);
+        EXPECT_EQ(res.error().native_code, 403);
+        EXPECT_EQ(calls.load(std::memory_order_relaxed), 1);
+    }
+}
+
 } // namespace
