@@ -70,6 +70,9 @@ resolve(const std::filesystem::path& app_data_dir,
         .min_history_depth = profile->min_history_depth,
         .min_history_age_hours = profile->min_history_age_hours,
         .key_storage = profile->key_storage,
+        .bandwidth_limit = profile->bandwidth_limit,
+        .transfer_concurrency = profile->transfer_concurrency,
+        .rclone_config = profile->rclone_config,
     };
 }
 

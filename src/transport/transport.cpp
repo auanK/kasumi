@@ -4,6 +4,7 @@
 #include "platform/path.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <unordered_set>
 #include <utility>
@@ -104,11 +105,42 @@ bool valid_storage_operations(const StorageOperations& operations) noexcept {
 using BackendConfiguration =
     std::variant<detail::LocalConfiguration, detail::RcloneConfiguration>;
 
-std::expected<BackendConfiguration, Error> parse_backend_configuration(
-    std::string_view location,
-    const std::filesystem::path& forbidden_executable_root = {}) {
+Result validate_rclone_config_path(const std::filesystem::path& config_path) {
+    if (config_path.empty()) {
+        return std::unexpected(
+            make_error(ErrorCode::InvalidContext,
+                       "rclone configuration path cannot be empty"));
+    }
+    const auto utf8 = platform::path::to_utf8(config_path);
+    if (utf8.empty() ||
+        std::any_of(utf8.begin(), utf8.end(), forbidden_character) ||
+        outer_whitespace(utf8) || !config_path.is_absolute()) {
+        return std::unexpected(make_error(
+            ErrorCode::InvalidContext,
+            "rclone configuration path must be a valid absolute path"));
+    }
+    return {};
+}
+
+std::expected<BackendConfiguration, Error>
+parse_backend_configuration(std::string_view location,
+                            const TransportOptions& options) {
     if (const auto valid_text = validate_location_text(location); !valid_text) {
         return std::unexpected(valid_text.error());
+    }
+    if (options.rclone_config) {
+        if (const auto valid_cfg =
+                validate_rclone_config_path(*options.rclone_config);
+            !valid_cfg) {
+            return std::unexpected(valid_cfg.error());
+        }
+    }
+    if (options.bandwidth_limit) {
+        if (const auto valid_bw =
+                validate_bandwidth_limit(*options.bandwidth_limit);
+            !valid_bw) {
+            return std::unexpected(valid_bw.error());
+        }
     }
 
     if (windows_drive_path(location) || location.starts_with("\\\\") ||
@@ -141,8 +173,9 @@ std::expected<BackendConfiguration, Error> parse_backend_configuration(
         .remote_name = std::string{remote_name},
         .remote_root = std::string{remote_root},
         .executable = std::filesystem::path{"rclone"},
-        .config_path = std::nullopt,
-        .forbidden_executable_root = forbidden_executable_root,
+        .config_path = options.rclone_config,
+        .forbidden_executable_root = options.forbidden_executable_root,
+        .bandwidth_limit = options.bandwidth_limit,
     };
 }
 
@@ -424,18 +457,113 @@ auto call_optional(Transport& transport,
 } // namespace
 
 Result validate_transport_location(std::string_view location) {
-    const auto configuration = parse_backend_configuration(location);
+    const auto configuration =
+        parse_backend_configuration(location, TransportOptions{});
     if (!configuration) {
         return std::unexpected(configuration.error());
     }
     return {};
 }
 
+Result validate_bandwidth_limit(std::string_view spec) {
+    const auto fail_bw = []() -> Result {
+        return std::unexpected(
+            make_error(ErrorCode::InvalidContext,
+                       "bandwidth limit specification is invalid"));
+    };
+    const auto ascii_lower = [](std::string_view s) {
+        std::string out;
+        out.reserve(s.size());
+        for (const char raw : s) {
+            unsigned char ch = static_cast<unsigned char>(raw);
+            if (ch >= 'A' && ch <= 'Z') {
+                ch = static_cast<unsigned char>(ch - 'A' + 'a');
+            }
+            out.push_back(static_cast<char>(ch));
+        }
+        return out;
+    };
+    const auto valid_token = [&](std::string_view token) {
+        if (token.empty()) {
+            return false;
+        }
+        const auto lower = ascii_lower(token);
+        if (lower == "off") {
+            return true;
+        }
+        std::size_t idx = 0;
+        bool saw_digit = false;
+        while (idx < lower.size() && lower[idx] >= '0' && lower[idx] <= '9') {
+            saw_digit = true;
+            ++idx;
+        }
+        if (idx < lower.size() && lower[idx] == '.') {
+            ++idx;
+            bool saw_frac = false;
+            while (idx < lower.size() && lower[idx] >= '0' &&
+                   lower[idx] <= '9') {
+                saw_frac = true;
+                ++idx;
+            }
+            if (!saw_frac) {
+                return false;
+            }
+        }
+        if (!saw_digit) {
+            return false;
+        }
+        const std::string_view suffix = std::string_view{lower}.substr(idx);
+        constexpr std::array<std::string_view, 16> valid_suffixes{"",
+                                                                  "b",
+                                                                  "k",
+                                                                  "m",
+                                                                  "g",
+                                                                  "t",
+                                                                  "p",
+                                                                  "kb",
+                                                                  "mb",
+                                                                  "gb",
+                                                                  "tb",
+                                                                  "pb",
+                                                                  "ki",
+                                                                  "mi",
+                                                                  "gi",
+                                                                  "ti"};
+        return std::ranges::find(valid_suffixes, suffix) !=
+               valid_suffixes.end();
+    };
+
+    if (spec.empty() || spec.size() > 256 || outer_whitespace(spec) ||
+        !std::ranges::all_of(spec, [](unsigned char ch) noexcept {
+            return ch > 0x20U && ch <= 0x7eU;
+        })) {
+        return fail_bw();
+    }
+    const auto colon = spec.find(':');
+    if (colon == std::string_view::npos) {
+        return valid_token(spec) ? Result{} : fail_bw();
+    }
+    const auto second = spec.find(':', colon + 1);
+    if (second != std::string_view::npos) {
+        return fail_bw();
+    }
+    return (valid_token(spec.substr(0, colon)) &&
+            valid_token(spec.substr(colon + 1)))
+               ? Result{}
+               : fail_bw();
+}
+
 std::expected<Transport, Error>
 open_transport(std::string_view location,
                const std::filesystem::path& forbidden_executable_root) {
-    const auto configuration =
-        parse_backend_configuration(location, forbidden_executable_root);
+    return open_transport(location,
+                          TransportOptions{.forbidden_executable_root =
+                                               forbidden_executable_root});
+}
+
+std::expected<Transport, Error>
+open_transport(std::string_view location, const TransportOptions& options) {
+    const auto configuration = parse_backend_configuration(location, options);
     if (!configuration) {
         return std::unexpected(configuration.error());
     }

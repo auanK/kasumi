@@ -157,7 +157,19 @@ load_profiles(const std::filesystem::path& config_path) {
         return std::vector<ProfileData>{};
     }
 
-    for (const auto& [name, _] : config) {
+    for (const auto& [name, val] : config) {
+        if (name == "version") {
+            if (!val.is_integer()) {
+                return fail(ErrorCode::ConfigInvalid,
+                            "configuration version must be an integer");
+            }
+            const auto ver = val.value_exact<std::int64_t>();
+            if (!ver || *ver != 1) {
+                return fail(ErrorCode::ConfigInvalid,
+                            "unsupported configuration version");
+            }
+            continue;
+        }
         if (name != "profiles") {
             return fail(ErrorCode::ConfigInvalid,
                         "unsupported top-level configuration field: " +
@@ -165,6 +177,9 @@ load_profiles(const std::filesystem::path& config_path) {
         }
     }
 
+    if (!config.contains("profiles")) {
+        return std::vector<ProfileData>{};
+    }
     auto* profiles = config["profiles"].as_table();
     if (profiles == nullptr) {
         return fail(ErrorCode::ConfigInvalid,
@@ -192,7 +207,9 @@ load_profiles(const std::filesystem::path& config_path) {
         for (const auto& [field, _] : *prof) {
             if (field != "local_dir" && field != "remote_dir" &&
                 field != "min_history_depth" &&
-                field != "min_history_age_hours" && field != "key_storage") {
+                field != "min_history_age_hours" && field != "key_storage" &&
+                field != "bandwidth_limit" && field != "transfer_concurrency" &&
+                field != "rclone_config") {
                 return fail(ErrorCode::ProfileInvalid,
                             "unsupported profile field: " +
                                 std::string{field.str()});
@@ -237,6 +254,49 @@ load_profiles(const std::filesystem::path& config_path) {
                 "'memory')");
         }
         pd.key_storage = *parsed;
+        if (const auto bw_field = (*prof)["bandwidth_limit"]) {
+            const auto bw = bw_field.value<std::string>();
+            if (!bw || bw->empty() || bw->size() > 256 ||
+                std::isspace(static_cast<unsigned char>(bw->front())) != 0 ||
+                std::isspace(static_cast<unsigned char>(bw->back())) != 0 ||
+                !std::ranges::all_of(*bw, [](unsigned char ch) {
+                    return ch >= 0x20U && ch <= 0x7eU;
+                })) {
+                return fail(ErrorCode::ProfileInvalid,
+                            "invalid bandwidth_limit value");
+            }
+            pd.bandwidth_limit = *bw;
+        }
+        if (const auto conc_field = (*prof)["transfer_concurrency"]) {
+            if (!conc_field.is_integer()) {
+                return fail(ErrorCode::ProfileInvalid,
+                            "transfer_concurrency must be an integer");
+            }
+            const auto conc = conc_field.value_exact<std::int64_t>();
+            if (!conc || *conc < 1 || *conc > 16) {
+                return fail(ErrorCode::ProfileInvalid,
+                            "transfer_concurrency must be between 1 and 16");
+            }
+            pd.transfer_concurrency = static_cast<std::uint32_t>(*conc);
+        }
+        if (const auto rc_field = (*prof)["rclone_config"]) {
+            const auto rc = rc_field.value<std::string>();
+            if (!rc || rc->empty() ||
+                std::isspace(static_cast<unsigned char>(rc->front())) != 0 ||
+                std::isspace(static_cast<unsigned char>(rc->back())) != 0 ||
+                std::ranges::any_of(*rc, [](unsigned char ch) {
+                    return ch <= 0x1fU || ch == 0x7fU;
+                })) {
+                return fail(ErrorCode::ProfileInvalid,
+                            "invalid rclone_config value");
+            }
+            const auto rc_path = platform::path::from_utf8(*rc);
+            if (!rc_path.is_absolute()) {
+                return fail(ErrorCode::ProfileInvalid,
+                            "rclone_config must be an absolute path");
+            }
+            pd.rclone_config = rc_path;
+        }
         result.push_back(std::move(pd));
     }
     return result;
@@ -257,6 +317,37 @@ save_profiles(const std::filesystem::path& config_path,
             return fail(ErrorCode::ProfileInvalid,
                         "retention policy must be positive");
         }
+        if (prof.bandwidth_limit) {
+            const auto& bw = *prof.bandwidth_limit;
+            if (bw.empty() || bw.size() > 256 ||
+                std::isspace(static_cast<unsigned char>(bw.front())) != 0 ||
+                std::isspace(static_cast<unsigned char>(bw.back())) != 0 ||
+                !std::ranges::all_of(bw, [](unsigned char ch) {
+                    return ch >= 0x20U && ch <= 0x7eU;
+                })) {
+                return fail(ErrorCode::ProfileInvalid,
+                            "invalid bandwidth_limit value");
+            }
+        }
+        if (prof.transfer_concurrency && (*prof.transfer_concurrency < 1 ||
+                                          *prof.transfer_concurrency > 16)) {
+            return fail(ErrorCode::ProfileInvalid,
+                        "transfer_concurrency must be between 1 and 16");
+        }
+        if (prof.rclone_config) {
+            const auto rc = platform::path::to_utf8(*prof.rclone_config);
+            if (rc.empty() ||
+                std::isspace(static_cast<unsigned char>(rc.front())) != 0 ||
+                std::isspace(static_cast<unsigned char>(rc.back())) != 0 ||
+                std::ranges::any_of(rc,
+                                    [](unsigned char ch) {
+                                        return ch <= 0x1fU || ch == 0x7fU;
+                                    }) ||
+                !prof.rclone_config->is_absolute()) {
+                return fail(ErrorCode::ProfileInvalid,
+                            "rclone_config must be an absolute path");
+            }
+        }
     }
     toml::table config;
     toml::table profiles_table;
@@ -267,8 +358,20 @@ save_profiles(const std::filesystem::path& config_path,
         prof_data.insert("min_history_depth", prof.min_history_depth);
         prof_data.insert("min_history_age_hours", prof.min_history_age_hours);
         prof_data.insert("key_storage", to_string(prof.key_storage));
+        if (prof.bandwidth_limit) {
+            prof_data.insert("bandwidth_limit", *prof.bandwidth_limit);
+        }
+        if (prof.transfer_concurrency) {
+            prof_data.insert("transfer_concurrency",
+                             *prof.transfer_concurrency);
+        }
+        if (prof.rclone_config) {
+            prof_data.insert("rclone_config",
+                             platform::path::to_utf8(*prof.rclone_config));
+        }
         profiles_table.insert(prof.name, prof_data);
     }
+    config.insert("version", 1);
     config.insert("profiles", profiles_table);
 
     const auto app_dir = config_path.parent_path();

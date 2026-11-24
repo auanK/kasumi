@@ -35,6 +35,7 @@ struct RcloneConfiguration {
     std::filesystem::path executable{"rclone"};
     std::optional<std::filesystem::path> config_path;
     std::filesystem::path forbidden_executable_root;
+    std::optional<std::string> bandwidth_limit;
 };
 
 // Opens a transport backed by the local filesystem.
