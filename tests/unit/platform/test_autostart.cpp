@@ -3,7 +3,9 @@
 #include "platform/autostart.hpp"
 
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
+#include <string>
 
 namespace {
 
@@ -32,6 +34,14 @@ TEST(AutostartTest, InstallQueryAndUninstallUseHermeticOverrideDirectory) {
     ASSERT_TRUE(installed.has_value()) << installed.error();
     EXPECT_TRUE(installed->installed);
     EXPECT_NE(installed->command.find("daemon run"), std::string::npos);
+
+    {
+        std::ifstream unit_in(override_dir / "kasumi-autostart.conf");
+        std::string unit_text((std::istreambuf_iterator<char>(unit_in)),
+                              std::istreambuf_iterator<char>());
+        EXPECT_NE(unit_text.find("network-online.target graphical-session.target"),
+                  std::string::npos);
+    }
 
     const auto queried = kasumi::platform::query_user_autostart();
     ASSERT_TRUE(queried.has_value()) << queried.error();

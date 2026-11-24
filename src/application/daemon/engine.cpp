@@ -411,7 +411,17 @@ struct ProfileHotSchedule {
     std::chrono::steady_clock::time_point next_gc_at{};
     std::chrono::steady_clock::time_point last_full_verify_at{};
     std::chrono::steady_clock::time_point backoff_until{};
+    std::uint32_t vault_recheck_attempts = 0;
+    std::chrono::steady_clock::time_point next_vault_recheck_at{};
 };
+
+constexpr std::chrono::seconds
+next_vault_recheck_delay(std::uint32_t attempts) noexcept {
+    constexpr std::array<int, 5> kDelaysSeconds{{3, 5, 10, 15, 30}};
+    const std::size_t idx =
+        std::min<std::size_t>(attempts, kDelaysSeconds.size() - 1U);
+    return std::chrono::seconds{kDelaysSeconds[idx]};
+}
 
 // Telemetry & status counters surfaced cleanly on /v1/status queries.
 struct ProfileTelemetryRow {
@@ -1106,6 +1116,8 @@ bool refresh_key_status_for_slot(DaemonSessionState& state,
         stored = runtime::vault::read_only(cold.key_path);
     }
     if (stored) {
+        hot.vault_recheck_attempts = 0;
+        hot.next_vault_recheck_at = {};
         detail::WipedBytes<runtime::vault::KEY_SIZE> existing_bytes;
         const bool had_existing = platform::read_secure_key(
             state.key_arena, name, existing_bytes.data);
@@ -1147,6 +1159,17 @@ bool refresh_key_status_for_slot(DaemonSessionState& state,
     hot.locked = true;
     hot.needs_attention = true;
     telemetry.last_error = stored.error().detail;
+    if (cold.config.key_storage == runtime::KeyStorage::Vault) {
+        hot.next_vault_recheck_at =
+            std::chrono::steady_clock::now() +
+            next_vault_recheck_delay(hot.vault_recheck_attempts);
+        if (hot.vault_recheck_attempts < 4U) {
+            ++hot.vault_recheck_attempts;
+        }
+    } else {
+        hot.vault_recheck_attempts = 0;
+        hot.next_vault_recheck_at = {};
+    }
     return has_arena;
 }
 
@@ -2140,6 +2163,7 @@ void run_profile_task(DaemonSessionState& state,
         .stop_token = task_stop.get_token(),
     };
 
+    const auto exec_started = std::chrono::steady_clock::now();
     auto res = detail::execute_warm(exec_input, warm_ctx);
 
     if (res) {
@@ -2285,7 +2309,14 @@ void run_profile_task(DaemonSessionState& state,
                             watcher_ctx_before,
                             watcher_healthy_before,
                             outcome);
-        emit_daemon_event(state, profile_name, "sync_completed", outcome);
+        const double exec_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          exec_started)
+                .count();
+        emit_daemon_event(state,
+                          profile_name,
+                          "sync_completed",
+                          std::format("{} ({:.1f} s)", outcome, exec_seconds));
         return;
     }
 
@@ -2613,6 +2644,100 @@ void scheduler_loop(DaemonSessionState& state) {
             lock.lock();
         }
 
+        // 2b. Re-check locked OS vault profiles (e.g. keyring unlocked after
+        // systemd/autostart boot) outside the scheduler mutex.
+        struct VaultRecheckCandidate {
+            std::string name;
+            std::filesystem::path key_path;
+            std::uint64_t config_generation = 0;
+        };
+        std::vector<VaultRecheckCandidate> vault_candidates;
+        for (std::size_t idx = 0; idx < state.profiles.names.size(); ++idx) {
+            const auto& hot = state.profiles.hot[idx];
+            const auto& cold = state.profiles.cold[idx];
+            if (!hot.in_flight && !hot.paused && hot.locked &&
+                cold.config.key_storage == runtime::KeyStorage::Vault &&
+                hot.next_vault_recheck_at !=
+                    std::chrono::steady_clock::time_point{} &&
+                now >= hot.next_vault_recheck_at) {
+                vault_candidates.push_back(VaultRecheckCandidate{
+                    .name = state.profiles.names[idx],
+                    .key_path = cold.key_path,
+                    .config_generation = hot.config_generation,
+                });
+            }
+        }
+        if (!vault_candidates.empty()) {
+            lock.unlock();
+            std::vector<
+                std::expected<runtime::vault::KeyBytes, runtime::Error>>
+                vault_results;
+            vault_results.reserve(vault_candidates.size());
+            for (const auto& cand : vault_candidates) {
+                vault_results.push_back(runtime::vault::read_vault(cand.key_path));
+            }
+            std::vector<std::string> unlocked_names;
+            {
+                lock.lock();
+                const auto check_now = std::chrono::steady_clock::now();
+                for (std::size_t i = 0; i < vault_candidates.size(); ++i) {
+                    const auto& cand = vault_candidates[i];
+                    auto& res = vault_results[i];
+                    const auto slot =
+                        find_profile_slot(state.profiles, cand.name);
+                    if (!slot) {
+                        if (res) {
+                            crypto::secure_memory::wipe(res->data(), res->size());
+                        }
+                        continue;
+                    }
+                    auto& hot = state.profiles.hot[*slot];
+                    auto& telemetry = state.profiles.telemetry[*slot];
+                    const auto& cold = state.profiles.cold[*slot];
+                    if (hot.config_generation != cand.config_generation ||
+                        hot.in_flight || hot.paused || !hot.locked ||
+                        cold.config.key_storage != runtime::KeyStorage::Vault) {
+                        if (res) {
+                            crypto::secure_memory::wipe(res->data(), res->size());
+                        }
+                        continue;
+                    }
+                    if (res) {
+                        const auto stored_ok = platform::store_secure_key(
+                            state.key_arena, cand.name, *res);
+                        crypto::secure_memory::wipe(res->data(), res->size());
+                        if (stored_ok) {
+                            hot.locked = false;
+                            hot.needs_attention = false;
+                            hot.vault_recheck_attempts = 0;
+                            hot.next_vault_recheck_at = {};
+                            telemetry.last_error.clear();
+                            hot.next_sync_at = check_now;
+                            unlocked_names.push_back(cand.name);
+                        }
+                    } else {
+                        telemetry.last_error = res.error().detail;
+                        hot.next_vault_recheck_at =
+                            check_now + next_vault_recheck_delay(
+                                            hot.vault_recheck_attempts);
+                        if (hot.vault_recheck_attempts < 4U) {
+                            ++hot.vault_recheck_attempts;
+                        }
+                    }
+                }
+            }
+            if (!unlocked_names.empty()) {
+                lock.unlock();
+                for (const auto& unlocked_name : unlocked_names) {
+                    emit_daemon_event(state,
+                                      unlocked_name,
+                                      "unlocked",
+                                      "profile key loaded from OS vault");
+                }
+                lock.lock();
+            }
+        }
+
         // 3. Scan hot SoA scheduling array contiguously up to
         // max_parallel_profiles.
         struct ScheduledJob {
@@ -2626,6 +2751,13 @@ void scheduler_loop(DaemonSessionState& state) {
 
         for (std::size_t idx = 0; idx < state.profiles.hot.size(); ++idx) {
             auto& hot = state.profiles.hot[idx];
+            const auto& cold = state.profiles.cold[idx];
+            if (hot.locked && !hot.paused && !hot.in_flight &&
+                cold.config.key_storage == runtime::KeyStorage::Vault &&
+                hot.next_vault_recheck_at !=
+                    std::chrono::steady_clock::time_point{}) {
+                next_wake = std::min(next_wake, hot.next_vault_recheck_at);
+            }
             if (hot.in_flight || hot.paused || hot.locked ||
                 hot.needs_attention) {
                 continue;

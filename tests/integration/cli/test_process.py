@@ -360,7 +360,7 @@ class CliProcessTest(unittest.TestCase):
         names = self.invoke_raw("list")
         self.assertEqual(names.returncode, 0, names.stderr)
         self.assertEqual(names.stdout.splitlines(), [b"demo"])
-        details = self.invoke_raw("show", "demo")
+        details = self.invoke_raw("show", "demo", "--full")
         self.assertEqual(details.returncode, 0, details.stderr)
         self.assertIn(str(local).encode(), details.stdout)
         self.assertIn(str(remote).encode(), details.stdout)
@@ -415,15 +415,15 @@ class CliProcessTest(unittest.TestCase):
         new_remote = self.root / "edited-remote"
         before_edit = self._tree_snapshot(data)
         # Unchanged input, rejected changes, and EOF must preserve profile data.
-        self.invoke("config", input=b"e\ndemo\n\n\nq\n")
+        self.invoke("config", input=b"e\ndemo\n\n\n\n\n\nq\n")
         self.assertEqual(self._tree_snapshot(data), before_edit)
         for confirmation in ("", "n"):
-            self.invoke("config", input=f"e\ndemo\n{new_local}\n{new_remote}\n{confirmation}\nq\n".encode())
+            self.invoke("config", input=f"e\ndemo\n{new_local}\n{new_remote}\n\n\n\n{confirmation}\nq\n".encode())
             self.assertEqual(self._tree_snapshot(data), before_edit)
-        self.invoke("config", input=f"e\ndemo\n{new_local}\n{new_remote}\n".encode(), expected=130)
+        self.invoke("config", input=f"e\ndemo\n{new_local}\n{new_remote}\n\n\n\n".encode(), expected=130)
         self.assertEqual(self._tree_snapshot(data), before_edit)
         edited = self.invoke(
-            "config", input=f"e\ndemo\n{new_local}\n{new_remote}\ny\nq\n".encode(),
+            "config", input=f"e\ndemo\n{new_local}\n{new_remote}\n\n\n\ny\nq\n".encode(),
         )
         self.assertIn(b"Profile 'demo' edited successfully.", edited)
         profiles = tomllib.loads(config.read_text(encoding="utf-8"))["profiles"]
@@ -479,7 +479,7 @@ class CliProcessTest(unittest.TestCase):
                 inputs.extend(("n", name, str(local), str(remote), ""))
             else:
                 inputs.extend(
-                    ("c", "initialized", name, "e", name, str(local), str(remote), "y")
+                    ("c", "initialized", name, "e", name, str(local), str(remote), "", "", "", "y")
                 )
         self.invoke("config", input=("\n".join((*inputs, "q", ""))).encode())
 
@@ -755,11 +755,14 @@ class CliProcessTest(unittest.TestCase):
         finally:
             parked.rename(remote)
 
-        self.assertIn(b"Accepted state:", shown)
-        self.assertIn(b"Commit origin: sync", shown)
         self.assertIn(b"Last complete sync:", shown)
-        self.assertIn(b"Last local attempt:", shown)
-        self.assertIn(b"Recent local maintenance:", shown)
+        self.assertIn(b"--full", shown)
+        self.assertNotIn(b"Recent local executions (2):", shown)
+        self.assertIn(b"Accepted state:", shown_full)
+        self.assertIn(b"Commit origin: sync", shown_full)
+        self.assertIn(b"Last complete sync:", shown_full)
+        self.assertIn(b"Last local attempt:", shown_full)
+        self.assertIn(b"fsck", shown_full)
         self.assertIn(b"Recent local executions (2):", shown_full)
 
         summary = self.invoke("remote", "summary", "demo")
@@ -1601,8 +1604,39 @@ class CliProcessTest(unittest.TestCase):
             )
             self.assertGreater(len(logs_doc["data"]["events"]), 0)
             self.assertTrue(logs_doc["data"]["log_path"].endswith("daemon.log"))
+
+            # v0.28.0 unified commands: bare overview, --help --all, status --json,
+            # logs --json, pause/resume --all, and unified stop
+            bare_overview = self.invoke_raw(environment=env)
+            self.assertEqual(bare_overview.returncode, 0, bare_overview.stdout + bare_overview.stderr)
+            self.assertIn(b"Daemon: running", bare_overview.stdout)
+
+            help_all = self.invoke_raw("--help", "--all", environment=env)
+            self.assertEqual(help_all.returncode, 0)
+            self.assertIn(b"kasumi repack", help_all.stdout)
+
+            status_json = json.loads(
+                self.invoke_raw("status", "--json", environment=env).stdout.decode("utf-8")
+            )
+            self.assertEqual(status_json["command"], "status")
+            self.assertTrue(status_json["data"]["daemon"]["running"])
+
+            unified_logs = json.loads(
+                self.invoke_raw("logs", "--json", environment=env).stdout.decode("utf-8")
+            )
+            self.assertEqual(unified_logs["command"], "logs")
+            self.assertNotIn("fast_noop", json.dumps(unified_logs["data"]["events"]))
+
+            self.assertEqual(
+                self.invoke_raw("pause", "--all", "--json", environment=env).returncode,
+                0,
+            )
+            self.assertEqual(
+                self.invoke_raw("resume", "--all", "--json", environment=env).returncode,
+                0,
+            )
         finally:
-            stop_res = self.invoke_raw("daemon", "stop", "--json", environment=env)
+            stop_res = self.invoke_raw("stop", "--json", environment=env)
             self.assertEqual(stop_res.returncode, 0, stop_res.stdout + stop_res.stderr)
 
 

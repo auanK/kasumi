@@ -16,6 +16,11 @@ struct HelpTopic {
 inline constexpr auto help_topics = std::to_array<HelpTopic>({
     {"sync", i18n::Key::HelpSync},
     {"status", i18n::Key::HelpStatus},
+    {"logs", i18n::Key::HelpLogs},
+    {"start", i18n::Key::HelpStart},
+    {"stop", i18n::Key::HelpStop},
+    {"pause", i18n::Key::HelpPause},
+    {"resume", i18n::Key::HelpResume},
     {"fsck", i18n::Key::HelpFsck},
     {"gc", i18n::Key::HelpGc},
     {"gc remove-writer", i18n::Key::HelpGcRemoveWriter},

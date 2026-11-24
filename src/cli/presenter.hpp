@@ -14,10 +14,22 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace kasumi::cli {
 
-int present_help(std::string_view topic);
+struct OverviewProfileRow {
+    application::Profile profile;
+    application::ProfileLocalState local_state =
+        application::ProfileLocalState::Initialized;
+    application::ProfileLocalProblem local_problem =
+        application::ProfileLocalProblem::None;
+    application::ProfileActivityReport activity;
+    std::size_t conflict_count = 0;
+    std::optional<application::DaemonProfileStatus> daemon_profile;
+};
+
+int present_help(std::string_view topic, bool all = false);
 int present_parse_error(std::string_view topic);
 
 struct FsckProgressDisplayState {
@@ -174,7 +186,13 @@ int present(const application::Error& error);
 // Displays the error of a remote inspection and returns 1.
 int present(const application::InspectionError& error);
 
-// Displays daemon status, sync triggers, autostart status, and errors.
+// Displays consolidated daemon + profile overview (for bare `kasumi` / `kasumi status`).
+int present_overview(const application::DaemonStatusReport& daemon,
+                     const std::vector<OverviewProfileRow>& rows,
+                     bool full = false,
+                     bool quiet = false);
+
+// Displays daemon status, sync triggers, autostart status, logs, and errors.
 int present(const application::DaemonStatusReport& report,
             bool full = false,
             bool quiet = false);
@@ -183,8 +201,15 @@ int present(const application::DaemonAutostartStatus& status,
 int present(const application::DaemonSyncTriggerReport& report,
             bool wait,
             bool quiet = false);
-int present(const application::DaemonLogsReport& report, bool quiet = false);
+bool is_noisy_daemon_event(const application::DaemonEvent& event) noexcept;
+void print_daemon_event_line(const application::DaemonEvent& event);
+int present(const application::DaemonLogsReport& report,
+            bool full = false,
+            bool quiet = false);
 int present(const application::DaemonError& error);
+std::string format_relative_time(std::int64_t unix_timestamp);
+std::string_view overview_problem_message(
+    application::ProfileLocalProblem problem);
 
 void print_ok_line(std::string_view message);
 void print_warning_line(std::string_view message);

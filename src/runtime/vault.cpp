@@ -1323,7 +1323,10 @@ std::mutex& linux_vault_mutex() noexcept {
     return instance;
 }
 
-LinuxBackend select_linux_backend(std::string& reason) {
+LinuxBackend select_linux_backend(std::string& reason, bool* explicit_override = nullptr) {
+    if (explicit_override != nullptr) {
+        *explicit_override = false;
+    }
     if (!has_session_dbus()) {
         reason = "no active D-Bus session bus for OS credential vault";
         return LinuxBackend::None;
@@ -1331,12 +1334,21 @@ LinuxBackend select_linux_backend(std::string& reason) {
     if (const char* override_env = std::getenv("KASUMI_LINUX_VAULT_BACKEND")) {
         const std::string_view mode{override_env};
         if (mode == "secret-service") {
+            if (explicit_override != nullptr) {
+                *explicit_override = true;
+            }
             return LinuxBackend::SecretService;
         }
         if (mode == "kwallet") {
+            if (explicit_override != nullptr) {
+                *explicit_override = true;
+            }
             return LinuxBackend::KWallet;
         }
         if (!mode.empty() && mode != "auto") {
+            if (explicit_override != nullptr) {
+                *explicit_override = true;
+            }
             reason = "invalid KASUMI_LINUX_VAULT_BACKEND value";
             return LinuxBackend::None;
         }
@@ -1416,6 +1428,34 @@ LinuxBackend select_linux_backend(std::string& reason) {
              "available in current session";
     return LinuxBackend::None;
 }
+
+bool linux_backend_available(LinuxBackend backend) noexcept {
+    if (backend == LinuxBackend::None || !has_session_dbus()) {
+        return false;
+    }
+    const auto& dbus = dbus_api();
+    if (!dbus.loaded) {
+        return backend == LinuxBackend::SecretService && secret_api().loaded;
+    }
+    auto conn_res = connect_session_dbus(dbus, ErrorCode::KeyNotFound);
+    if (!conn_res) {
+        return false;
+    }
+    DbusConnGuard conn{dbus, *conn_res};
+    if (backend == LinuxBackend::SecretService) {
+        return secret_api().loaded &&
+               (dbus_name_has_owner(dbus, conn.conn, "org.freedesktop.secrets") ||
+                dbus_name_activatable(dbus, conn.conn, "org.freedesktop.secrets"));
+    }
+    for (const auto& ep : kKWalletEndpoints) {
+        if (dbus_name_has_owner(dbus, conn.conn, ep.service) ||
+            dbus_name_activatable(dbus, conn.conn, ep.service)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 #endif
 
 } // namespace
@@ -1467,15 +1507,32 @@ read_vault(const std::filesystem::path& key_path) {
 #elif defined(__linux__)
     const std::lock_guard<std::mutex> lock{linux_vault_mutex()};
     std::string reason;
-    const auto backend = select_linux_backend(reason);
+    bool explicit_override = false;
+    const auto backend = select_linux_backend(reason, &explicit_override);
     const auto target = linux_vault_target_name(key_path);
-    if (backend == LinuxBackend::SecretService) {
-        return secret_service_read(target);
-    }
-    if (backend == LinuxBackend::KWallet) {
+    const auto read_from = [&](LinuxBackend b) {
+        if (b == LinuxBackend::SecretService) {
+            return secret_service_read(target);
+        }
         return kwallet_read(target);
+    };
+    if (backend == LinuxBackend::None) {
+        return fail(ErrorCode::KeyNotFound, std::move(reason));
     }
-    return fail(ErrorCode::KeyNotFound, std::move(reason));
+    auto primary = read_from(backend);
+    if (primary || explicit_override ||
+        primary.error().code != ErrorCode::KeyNotFound) {
+        return primary;
+    }
+    const LinuxBackend alternate = backend == LinuxBackend::SecretService
+                                       ? LinuxBackend::KWallet
+                                       : LinuxBackend::SecretService;
+    if (linux_backend_available(alternate)) {
+        if (auto secondary = read_from(alternate)) {
+            return secondary;
+        }
+    }
+    return primary;
 #else
     static_cast<void>(key_path);
     return fail(ErrorCode::KeyNotFound,

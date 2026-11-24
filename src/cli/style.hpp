@@ -6,6 +6,7 @@ namespace kasumi::cli::style {
 inline constexpr auto red = "\x1b[31m";
 inline constexpr auto green = "\x1b[32m";
 inline constexpr auto yellow = "\x1b[33m";
+inline constexpr auto cyan = "\x1b[36m";
 inline constexpr auto reset = "\x1b[0m";
 
 } // namespace kasumi::cli::style

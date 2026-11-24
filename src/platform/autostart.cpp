@@ -71,7 +71,7 @@ build_systemd_unit_text(const std::filesystem::path& executable) {
     }
     return std::format("[Unit]\n"
                        "Description=Kasumi Background Synchronization Daemon\n"
-                       "After=network-online.target\n"
+                       "After=network-online.target graphical-session.target\n"
                        "\n"
                        "[Service]\n"
                        "Type=simple\n"
