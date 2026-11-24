@@ -30,6 +30,12 @@ option(
     OFF
 )
 
+option(
+    KASUMI_ENABLE_IPO
+    "Enable interprocedural optimization (LTO/LTCG) for release builds"
+    ON
+)
+
 add_library(kasumi_warnings INTERFACE)
 if(WIN32)
     add_compile_definitions(NOMINMAX _CRT_SECURE_NO_WARNINGS)
@@ -273,11 +279,15 @@ include(CheckPIESupported)
 check_pie_supported(OUTPUT_VARIABLE pie_check_output LANGUAGES C CXX)
 set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
 
-include(CheckIPOSupported)
-check_ipo_supported(RESULT ipo_supported)
-if(ipo_supported AND NOT (CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND WIN32))
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
+set(kasumi_ipo_enabled FALSE)
+if(KASUMI_ENABLE_IPO AND NOT (CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND WIN32))
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT ipo_supported)
+    if(ipo_supported)
+        set(kasumi_ipo_enabled TRUE)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
+    endif()
 endif()
 
 FetchContent_Declare(
@@ -287,34 +297,12 @@ FetchContent_Declare(
     SYSTEM
 )
 
-include(CheckPIESupported)
-check_pie_supported(OUTPUT_VARIABLE pie_check_output LANGUAGES C CXX)
-set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
-
-include(CheckIPOSupported)
-check_ipo_supported(RESULT ipo_supported)
-if(ipo_supported AND NOT (CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND WIN32))
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
-endif()
-
 FetchContent_Declare(
     cpp_httplib
     GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
     GIT_TAG d66d9a95997d51a8ba9822a611d1267757741535
     SYSTEM
 )
-
-include(CheckPIESupported)
-check_pie_supported(OUTPUT_VARIABLE pie_check_output LANGUAGES C CXX)
-set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
-
-include(CheckIPOSupported)
-check_ipo_supported(RESULT ipo_supported)
-if(ipo_supported AND NOT (CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND WIN32))
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
-endif()
 
 FetchContent_Declare(
     nlohmann_json
@@ -341,17 +329,6 @@ endif()
 
 set(UTF8PROC_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
 set(UTF8PROC_INSTALL OFF CACHE BOOL "" FORCE)
-
-include(CheckPIESupported)
-check_pie_supported(OUTPUT_VARIABLE pie_check_output LANGUAGES C CXX)
-set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
-
-include(CheckIPOSupported)
-check_ipo_supported(RESULT ipo_supported)
-if(ipo_supported AND NOT (CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND WIN32))
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
-endif()
 
 FetchContent_Declare(
     utf8proc
@@ -787,11 +764,7 @@ set(KASUMI_FIRST_PARTY_TARGETS
 
 set_target_properties(${KASUMI_FIRST_PARTY_TARGETS} PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
 
-include(CheckIPOSupported)
-check_ipo_supported(RESULT ipo_supported)
-if(ipo_supported AND NOT (CMAKE_CXX_COMPILER_ID MATCHES "GNU" AND WIN32))
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE)
+if(kasumi_ipo_enabled)
     set_target_properties(${KASUMI_FIRST_PARTY_TARGETS} PROPERTIES
         INTERPROCEDURAL_OPTIMIZATION TRUE
         INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE

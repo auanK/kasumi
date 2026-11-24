@@ -222,10 +222,11 @@ template <typename Operation> DWORD credential_call(Operation operation) {
             return ERROR_SUCCESS;
         }
         const auto error = GetLastError();
-        if (attempt == 3 ||
+        if (attempt == 5 ||
             (error != ERROR_SHARING_VIOLATION &&
              error != ERROR_LOCK_VIOLATION && error != ERROR_BUSY &&
-             error != ERROR_ACCESS_DENIED)) {
+             error != ERROR_ACCESS_DENIED && error != ERROR_RETRY &&
+             error != RPC_S_SERVER_TOO_BUSY)) {
             return error;
         }
         Sleep(10UL << attempt);
@@ -1424,9 +1425,15 @@ read_vault(const std::filesystem::path& key_path) {
 #if defined(_WIN32)
     const auto target = vault_target_name(key_path);
     PCREDENTIALW cred = nullptr;
-    const auto error = credential_call([&] {
+    DWORD error = credential_call([&] {
         return CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &cred);
     });
+    if (error == ERROR_NOT_FOUND) {
+        Sleep(15);
+        error = credential_call([&] {
+            return CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &cred);
+        });
+    }
     if (error == ERROR_NOT_FOUND) {
         return fail(ErrorCode::KeyNotFound,
                     "profile key is missing in OS vault; run 'kasumi key "
@@ -1491,14 +1498,46 @@ write_vault(const std::filesystem::path& key_path, const KeyBytes& clear_key) {
     cred.CredentialBlob = stored.data();
     cred.Persist = CRED_PERSIST_LOCAL_MACHINE;
 
-    const auto error = credential_call([&] {
-        return CredWriteW(&cred, 0);
-    });
-    if (error != ERROR_SUCCESS) {
+    for (unsigned attempt = 0;; ++attempt) {
+        const auto error = credential_call([&] {
+            return CredWriteW(&cred, 0);
+        });
+        if (error != ERROR_SUCCESS) {
+            return fail(ErrorCode::KeyWriteFailure,
+                        credential_error("store key", error));
+        }
+        PCREDENTIALW verify = nullptr;
+        DWORD read_error = ERROR_SUCCESS;
+        const bool verified = [&] {
+            if (!CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &verify)) {
+                read_error = GetLastError();
+                return false;
+            }
+            const bool matched =
+                verify->CredentialBlob != nullptr &&
+                verify->CredentialBlobSize == static_cast<DWORD>(KEY_SIZE) &&
+                std::memcmp(verify->CredentialBlob, stored.data(), KEY_SIZE) ==
+                    0;
+            if (verify->CredentialBlob != nullptr &&
+                verify->CredentialBlobSize > 0) {
+                crypto_wipe(verify->CredentialBlob, verify->CredentialBlobSize);
+            }
+            CredFree(verify);
+            if (!matched) {
+                read_error = ERROR_INVALID_DATA;
+            }
+            return matched;
+        }();
+        if (verified) {
+            return {};
+        }
+        if (attempt < 5U) {
+            Sleep(10UL << attempt);
+            continue;
+        }
         return fail(ErrorCode::KeyWriteFailure,
-                    credential_error("store key", error));
+                    credential_error("verify stored key", read_error));
     }
-    return {};
 #elif defined(__linux__)
     const std::lock_guard<std::mutex> lock{linux_vault_mutex()};
     std::string reason;

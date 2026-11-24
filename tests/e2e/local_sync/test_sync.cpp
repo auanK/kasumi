@@ -1720,16 +1720,16 @@ TEST(H3LocalSyncTest, RemoteModifyAndLocalDeletePreservesRemoteContent) {
     const auto [a, b] = make_client_pair(scenario);
 
     kasumi::test::write_text(client_local_dir(a) / "file.txt", "BASE");
-    ASSERT_TRUE(sync(a));
-    ASSERT_TRUE(sync(b));
+    ASSERT_TRUE(sync_succeeds(a));
+    ASSERT_TRUE(sync_succeeds(b));
 
     kasumi::test::write_text(client_local_dir(a) / "file.txt",
                              "REMOTE-MODIFIED");
     const auto base_time = std::filesystem::file_time_type::clock::now();
     set_mtime(a, "file.txt", base_time + std::chrono::hours{2});
-    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync_succeeds(a));
     remove_file(b, "file.txt");
-    ASSERT_TRUE(sync(b));
+    ASSERT_TRUE(sync_succeeds(b));
 
     expect_file(a, "file.txt", "REMOTE-MODIFIED");
     expect_file(b, "file.txt", "REMOTE-MODIFIED");
@@ -1749,8 +1749,8 @@ TEST(H3LocalSyncTest, PersistentStateSurvivesIndependentApplicationExecutions) {
     const auto [a, b] = make_client_pair(scenario);
 
     kasumi::test::write_text(client_local_dir(a) / "before.txt", "before");
-    ASSERT_TRUE(sync(a));
-    ASSERT_TRUE(sync(b));
+    ASSERT_TRUE(sync_succeeds(a));
+    ASSERT_TRUE(sync_succeeds(b));
     expect_converged(scenario, {&a, &b});
     const auto independent_a = a;
     const auto independent_b = b;
@@ -1759,9 +1759,9 @@ TEST(H3LocalSyncTest, PersistentStateSurvivesIndependentApplicationExecutions) {
 
     kasumi::test::write_text(client_local_dir(independent_a) / "after.txt",
                              "after");
-    ASSERT_TRUE(sync(independent_a));
+    ASSERT_TRUE(sync_succeeds(independent_a));
     const auto independent_b_again = independent_b;
-    ASSERT_TRUE(sync(independent_b_again));
+    ASSERT_TRUE(sync_succeeds(independent_b_again));
     expect_converged(scenario, {&independent_a, &independent_b_again});
     expect_file(independent_b_again, "after.txt", "after");
 }
@@ -1772,19 +1772,19 @@ TEST(H3LocalSyncTest, StaleClientCatchesUpAcrossMultipleGenerations) {
 
     kasumi::test::write_text(client_local_dir(a) / "alpha.txt", "A1");
     kasumi::test::write_text(client_local_dir(a) / "old.txt", "old");
-    ASSERT_TRUE(sync(a));
-    ASSERT_TRUE(sync(b));
+    ASSERT_TRUE(sync_succeeds(a));
+    ASSERT_TRUE(sync_succeeds(b));
 
     kasumi::test::write_text(client_local_dir(a) / "alpha.txt", "A2");
     kasumi::test::write_text(client_local_dir(a) / "beta.txt", "B1");
-    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync_succeeds(a));
     kasumi::test::write_text(client_local_dir(a) / "alpha.txt", "A3");
     remove_file(a, "old.txt");
-    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync_succeeds(a));
     kasumi::test::write_text(client_local_dir(a) / "dir/gamma.txt", "G1");
-    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync_succeeds(a));
 
-    ASSERT_TRUE(sync(b));
+    ASSERT_TRUE(sync_succeeds(b));
     expect_file(b, "alpha.txt", "A3");
     expect_file(b, "beta.txt", "B1");
     expect_absent(b, "old.txt");
@@ -1799,18 +1799,18 @@ TEST(H3LocalSyncTest, ThreePersistentClientsConvergeBidirectionally) {
     const auto c = make_client(scenario, "c");
 
     kasumi::test::write_text(client_local_dir(a) / "base.txt", "base");
-    ASSERT_TRUE(sync(a));
-    ASSERT_TRUE(sync(b));
-    ASSERT_TRUE(sync(c));
+    ASSERT_TRUE(sync_succeeds(a));
+    ASSERT_TRUE(sync_succeeds(b));
+    ASSERT_TRUE(sync_succeeds(c));
 
     kasumi::test::write_text(client_local_dir(b) / "from-b.txt", "B");
-    ASSERT_TRUE(sync(b));
-    ASSERT_TRUE(sync(a));
-    ASSERT_TRUE(sync(c));
+    ASSERT_TRUE(sync_succeeds(b));
+    ASSERT_TRUE(sync_succeeds(a));
+    ASSERT_TRUE(sync_succeeds(c));
     kasumi::test::write_text(client_local_dir(c) / "from-c.txt", "C");
-    ASSERT_TRUE(sync(c)); // C publica a segunda alteração.
-    ASSERT_TRUE(sync(a)); // A consome a head de C.
-    ASSERT_TRUE(sync(b)); // B consome a head de C.
+    ASSERT_TRUE(sync_succeeds(c)); // C publica a segunda alteração.
+    ASSERT_TRUE(sync_succeeds(a)); // A consome a head de C.
+    ASSERT_TRUE(sync_succeeds(b)); // B consome a head de C.
 
     expect_file(a, "from-b.txt", "B");
     expect_file(a, "from-c.txt", "C");
@@ -1828,12 +1828,12 @@ TEST(H3LocalSyncTest, ConcurrentDirectoryDeletePreservesModifiedDescendant) {
                              "BASE-CHANGED");
     kasumi::test::write_text(client_local_dir(a) / "docs/obsolete.txt",
                              "BASE-OBSOLETE");
-    ASSERT_TRUE(sync(a));
-    ASSERT_TRUE(sync(b));
+    ASSERT_TRUE(sync_succeeds(a));
+    ASSERT_TRUE(sync_succeeds(b));
 
     kasumi::test::write_text(client_local_dir(a) / "docs/changed.txt",
                              "A-MODIFIED");
-    ASSERT_TRUE(sync(a));
+    ASSERT_TRUE(sync_succeeds(a));
 
     remove_file(b, "docs/changed.txt");
     remove_file(b, "docs/obsolete.txt");

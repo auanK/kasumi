@@ -278,12 +278,6 @@ void stop_rc_runtime(State& state) noexcept {
 
 namespace {
 
-bool drain_finished(const State& state) {
-    return state.drain_future.valid() &&
-           state.drain_future.wait_for(std::chrono::milliseconds(0)) ==
-               std::future_status::ready;
-}
-
 std::expected<std::string, Error>
 post_rc_impl(State& state,
              std::string_view path_suffix,
@@ -420,9 +414,18 @@ bool transient_read_failure(const Error& error) noexcept {
              error.native_code == 504));
 }
 
-std::expected<void, Error> validate_rc_handshake(State& state, int child_pid) {
-    const auto response = post_rc(
-        state, "core/pid", "{}", maximum_response_size, default_read_timeout);
+std::expected<void, Error>
+validate_rc_handshake(State& state, int child_pid, bool allow_retry = false) {
+    const auto response = allow_retry ? post_rc_read_only(state,
+                                                          "core/pid",
+                                                          "{}",
+                                                          maximum_response_size,
+                                                          default_read_timeout)
+                                      : post_rc(state,
+                                                "core/pid",
+                                                "{}",
+                                                maximum_response_size,
+                                                default_read_timeout);
     if (!response) {
         return std::unexpected(response.error());
     }
@@ -449,12 +452,12 @@ std::expected<void, Error> wait_for_rc_readiness(State& state, int child_pid) {
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds{5};
     while (std::chrono::steady_clock::now() < deadline) {
-        if (drain_finished(state)) {
+        if (child_process_exited(state)) {
             return std::unexpected(
                 make_error(ErrorCode::ProcessFailure,
-                           "rclone process drain finished during startup"));
+                           "rclone process exited during startup"));
         }
-        const auto handshake = validate_rc_handshake(state, child_pid);
+        const auto handshake = validate_rc_handshake(state, child_pid, false);
         if (handshake) {
             return {};
         }
@@ -632,12 +635,12 @@ Result check_rc_health(State& state) {
         return std::unexpected(
             make_error(ErrorCode::InvalidContext, "RC session is not ready"));
     }
-    if (drain_finished(state)) {
+    if (child_process_exited(state)) {
         state.ready = false;
         return std::unexpected(make_error(ErrorCode::BackendUnavailable,
                                           "rclone RC process has exited"));
     }
-    return validate_rc_handshake(state, state.child_pid);
+    return validate_rc_handshake(state, state.child_pid, true);
 }
 
 bool request_core_quit_best_effort(State& state) noexcept {

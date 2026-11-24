@@ -313,8 +313,12 @@ std::expected<std::uint16_t, Error> find_available_loopback_port() {
 
 std::error_code drain_process_output(State& state) {
     std::uint8_t buffer[4096]{};
+    bool poll_exit_event = true;
     for (;;) {
         if (state.stop_drain.load()) {
+            return {};
+        }
+        if (!poll_exit_event && child_process_exited(state)) {
             return {};
         }
         int events = 0;
@@ -322,10 +326,17 @@ std::error_code drain_process_output(State& state) {
         std::error_code read_error;
         {
             std::lock_guard process_lock(state.process_mutex);
-            std::tie(events, poll_error) = state.process.poll(
-                reproc::event::out | reproc::event::err | reproc::event::exit,
-                reproc::milliseconds(100));
+            const int interests = reproc::event::out | reproc::event::err |
+                                  (poll_exit_event ? reproc::event::exit : 0);
+            std::tie(events, poll_error) =
+                state.process.poll(interests, reproc::milliseconds(100));
             if (poll_error) {
+                if (poll_error == reproc::error::timed_out) {
+                    continue;
+                }
+                if (poll_error == reproc::error::broken_pipe) {
+                    return {};
+                }
                 return poll_error;
             }
             if ((events & (reproc::event::out | reproc::event::err)) != 0) {
@@ -342,7 +353,17 @@ std::error_code drain_process_output(State& state) {
         }
         if ((events & reproc::event::exit) != 0 &&
             (events & (reproc::event::out | reproc::event::err)) == 0) {
+#if defined(_WIN32)
+            if (child_process_exited(state)) {
+                return {};
+            }
+            // Guard against premature Windows pipe.exit notifications while
+            // rclone is still alive so the drain loop neither terminates early
+            // nor busy-spins on event::exit.
+            poll_exit_event = false;
+#else
             return {};
+#endif
         }
     }
 }
@@ -414,47 +435,85 @@ void wipe_secret_string(std::string& value) noexcept {
     value.clear();
 }
 
-bool stop_process(State& state) noexcept {
+bool stop_process(State& state, bool quit_acknowledged) noexcept {
     if (!state.process_started) {
         return true;
     }
-    const auto exited = [&]() noexcept {
+    bool stopped = false;
 #if defined(_WIN32)
-        // reproc reports Windows exit statuses with the high bit set as errors.
-        return state.process_wait_handle &&
-               WaitForSingleObject(state.process_wait_handle, 0) ==
-                   WAIT_OBJECT_0;
-#else
-        return false;
-#endif
+    const auto wait_os_process = [&](DWORD timeout_ms) noexcept {
+        return state.process_wait_handle != nullptr &&
+               WaitForSingleObject(
+                   static_cast<HANDLE>(state.process_wait_handle),
+                   timeout_ms) == WAIT_OBJECT_0;
     };
-    bool stopped = exited();
-    try {
-        if (!stopped) {
-            std::lock_guard process_lock(state.process_mutex);
-            const auto result = state.process.stop(reproc::stop_actions{
-                {reproc::stop::wait, reproc::milliseconds(2000)},
-                {reproc::stop::terminate, reproc::milliseconds(2000)},
-                {reproc::stop::kill, reproc::milliseconds(2000)},
-            });
-            stopped = !result.second || exited();
+    if (state.process_wait_handle != nullptr) {
+        stopped = wait_os_process(0);
+        if (!stopped && quit_acknowledged) {
+            // Give core/quit a brief bounded window to finish cleanly.
+            stopped = wait_os_process(250);
         }
+        if (!stopped) {
+            try {
+                std::lock_guard process_lock(state.process_mutex);
+                (void)state.process.kill();
+            } catch (...) {
+            }
+            stopped = wait_os_process(2000);
+        }
+        if (!stopped) {
+            close_job_handle(state);
+            stopped = wait_os_process(2000);
+        }
+        if (stopped) {
+            try {
+                std::lock_guard process_lock(state.process_mutex);
+                // Safe only after kernel signaled exit: avoids reproc_wait
+                // calling WaitForSingleObject(..., INFINITE) on a live child.
+                (void)state.process.wait(reproc::milliseconds(0));
+            } catch (...) {
+            }
+        }
+    } else {
+        try {
+            std::lock_guard process_lock(state.process_mutex);
+            (void)state.process.kill();
+            const auto waited = state.process.wait(reproc::milliseconds(2000));
+            stopped = !waited.second;
+        } catch (...) {
+            stopped = false;
+        }
+    }
+#else
+    try {
+        std::lock_guard process_lock(state.process_mutex);
+        const reproc::stop_actions actions =
+            quit_acknowledged
+                ? reproc::stop_actions{
+                      {reproc::stop::kill, reproc::milliseconds(2000)},
+                      {reproc::stop::noop, reproc::milliseconds(0)},
+                      {reproc::stop::noop, reproc::milliseconds(0)},
+                  }
+                : reproc::stop_actions{
+                      {reproc::stop::terminate, reproc::milliseconds(2000)},
+                      {reproc::stop::kill, reproc::milliseconds(2000)},
+                      {reproc::stop::noop, reproc::milliseconds(0)},
+                  };
+        const auto result = state.process.stop(actions);
+        stopped = !result.second;
     } catch (...) {
     }
     if (!stopped) {
         try {
             std::lock_guard process_lock(state.process_mutex);
             (void)state.process.kill();
-        } catch (...) {
-        }
-        try {
-            std::lock_guard process_lock(state.process_mutex);
             const auto waited = state.process.wait(reproc::milliseconds(2000));
-            stopped = !waited.second || exited();
+            stopped = !waited.second;
         } catch (...) {
             stopped = false;
         }
     }
+#endif
     try {
         std::lock_guard process_lock(state.process_mutex);
         (void)state.process.close(reproc::stream::out);
@@ -478,15 +537,7 @@ bool shutdown_state(State& state) noexcept {
     state.stop_drain.store(true);
     wait_for_drain(state);
     stop_rc_runtime(state);
-    if (quit_acknowledged && state.process_started) {
-        // rclone can linger after core/quit ack; kill now to avoid 2s wait.
-        try {
-            std::lock_guard process_lock(state.process_mutex);
-            (void)state.process.kill();
-        } catch (...) {
-        }
-    }
-    const bool stopped = stop_process(state);
+    const bool stopped = stop_process(state, quit_acknowledged);
     close_job_handle(state);
 #if defined(_WIN32)
     if (state.process_wait_handle) {
@@ -509,6 +560,11 @@ std::expected<int, Error> start_process(State& state) {
     options.redirect.in.type = reproc::redirect::discard;
     options.redirect.out.type = reproc::redirect::pipe;
     options.redirect.err.type = reproc::redirect::pipe;
+    options.stop = reproc::stop_actions{
+        {reproc::stop::kill, reproc::milliseconds(2000)},
+        {reproc::stop::noop, reproc::milliseconds(0)},
+        {reproc::stop::noop, reproc::milliseconds(0)},
+    };
     const std::vector<std::string> arguments{
         platform::path::to_utf8(state.configuration.executable), "rcd"};
     const auto result = state.process.start(arguments, options);
@@ -796,6 +852,22 @@ start_state(detail::RcloneConfiguration configuration) {
     return std::unexpected(std::move(last_error));
 }
 
+bool child_process_exited(const State& state) noexcept {
+    if (!state.process_started) {
+        return false;
+    }
+#if defined(_WIN32)
+    if (state.process_wait_handle != nullptr) {
+        return WaitForSingleObject(
+                   static_cast<HANDLE>(state.process_wait_handle), 0) ==
+               WAIT_OBJECT_0;
+    }
+#endif
+    return state.drain_future.valid() &&
+           state.drain_future.wait_for(std::chrono::milliseconds(0)) ==
+               std::future_status::ready;
+}
+
 void destroy_state(void* context) noexcept {
     auto* state = static_cast<State*>(context);
     if (state == nullptr) {
@@ -830,6 +902,11 @@ std::expected<std::string, std::string> run_rclone_readonly_cli(
     options.redirect.in.type = reproc::redirect::discard;
     options.redirect.out.type = reproc::redirect::pipe;
     options.redirect.err.type = reproc::redirect::discard;
+    options.stop = reproc::stop_actions{
+        {reproc::stop::kill, reproc::milliseconds(1000)},
+        {reproc::stop::noop, reproc::milliseconds(0)},
+        {reproc::stop::noop, reproc::milliseconds(0)},
+    };
     const std::vector<std::string> args{platform::path::to_utf8(executable),
                                         std::string{subcommand}};
     if (const auto err = proc.start(args, options)) {
@@ -837,15 +914,37 @@ std::expected<std::string, std::string> run_rclone_readonly_cli(
             "could not execute rclone {}: {}", subcommand, err.message()));
     }
 
+#if defined(_WIN32)
+    HANDLE wait_handle = nullptr;
+    if (const auto [pid, pid_err] = proc.pid(); !pid_err && pid > 0) {
+        wait_handle =
+            OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                        FALSE,
+                        static_cast<DWORD>(pid));
+    }
+#endif
+
     std::string output;
     std::uint8_t buffer[512]{};
+    bool poll_exit_event = true;
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds{5};
     while (std::chrono::steady_clock::now() < deadline &&
            output.size() < max_output_bytes) {
-        auto [events, poll_err] = proc.poll(
-            reproc::event::out | reproc::event::exit, reproc::milliseconds(50));
+#if defined(_WIN32)
+        if (!poll_exit_event && wait_handle != nullptr &&
+            WaitForSingleObject(wait_handle, 0) == WAIT_OBJECT_0) {
+            break;
+        }
+#endif
+        const int interests =
+            reproc::event::out | (poll_exit_event ? reproc::event::exit : 0);
+        auto [events, poll_err] =
+            proc.poll(interests, reproc::milliseconds(50));
         if (poll_err) {
+            if (poll_err == reproc::error::timed_out) {
+                continue;
+            }
             break;
         }
         if ((events & reproc::event::out) != 0) {
@@ -864,15 +963,56 @@ std::expected<std::string, std::string> run_rclone_readonly_cli(
         }
         if ((events & reproc::event::exit) != 0 &&
             (events & reproc::event::out) == 0) {
+#if defined(_WIN32)
+            if (wait_handle == nullptr ||
+                WaitForSingleObject(wait_handle, 0) == WAIT_OBJECT_0) {
+                break;
+            }
+            poll_exit_event = false;
+#else
             break;
+#endif
         }
     }
-    const auto [status, wait_err] = proc.stop(reproc::stop_actions{
+
+    int status = -1;
+    bool wait_failed = false;
+#if defined(_WIN32)
+    if (wait_handle != nullptr) {
+        bool exited = WaitForSingleObject(wait_handle, 1000) == WAIT_OBJECT_0;
+        if (!exited) {
+            (void)proc.kill();
+            exited = WaitForSingleObject(wait_handle, 500) == WAIT_OBJECT_0;
+        }
+        DWORD exit_code = 1;
+        if (exited && GetExitCodeProcess(wait_handle, &exit_code) != 0) {
+            status = static_cast<int>(exit_code);
+        } else {
+            wait_failed = true;
+        }
+        if (exited) {
+            (void)proc.wait(reproc::milliseconds(0));
+        }
+        CloseHandle(wait_handle);
+    } else {
+        const auto [stop_status, stop_err] = proc.stop(reproc::stop_actions{
+            {reproc::stop::wait, reproc::milliseconds(1000)},
+            {reproc::stop::terminate, reproc::milliseconds(500)},
+            {reproc::stop::kill, reproc::milliseconds(500)},
+        });
+        status = stop_status;
+        wait_failed = static_cast<bool>(stop_err);
+    }
+#else
+    const auto [stop_status, stop_err] = proc.stop(reproc::stop_actions{
         {reproc::stop::wait, reproc::milliseconds(1000)},
         {reproc::stop::terminate, reproc::milliseconds(500)},
         {reproc::stop::kill, reproc::milliseconds(500)},
     });
-    if (wait_err || status != 0) {
+    status = stop_status;
+    wait_failed = static_cast<bool>(stop_err);
+#endif
+    if (wait_failed || status != 0) {
         return std::unexpected(
             std::format("rclone {} exited with status {}", subcommand, status));
     }

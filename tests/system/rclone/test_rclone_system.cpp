@@ -1,3 +1,4 @@
+#include "application/daemon.hpp"
 #include "application/execute.hpp"
 #include "application/history_storage/content_reachability.hpp"
 #include "application/history_storage/detail.hpp"
@@ -27,6 +28,7 @@
 #include "transport/rclone/detail.hpp"
 #include "transport/transport.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -43,6 +45,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -1774,6 +1777,208 @@ TEST(RcloneSystemTest,
          Credentials{NoCredentials{}},
          client_a.environment});
     ASSERT_TRUE(audited.has_value()) << audited.error().detail;
+}
+
+TEST(RcloneSystemTest, WarmTransportStaysHealthyAfterIdleAndShutsDownCleanly) {
+    auto harness = make_rclone_harness();
+    auto storage = open_transport(harness);
+    ASSERT_TRUE(storage.has_value()) << storage.error().message;
+    ASSERT_TRUE(kasumi::transport::check_health(*storage).has_value());
+
+    const auto src_dir = harness_root(harness) / "warm-idle-src";
+    const auto dst_dir = harness_root(harness) / "warm-idle-dst";
+    std::filesystem::create_directories(src_dir);
+    std::filesystem::create_directories(dst_dir);
+
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{400});
+        const auto health = kasumi::transport::check_health(*storage);
+        ASSERT_TRUE(health.has_value())
+            << "cycle " << cycle << ": " << health.error().message;
+
+        const std::string id =
+            "warm-idle/item-" + std::to_string(cycle) + ".txt";
+        const std::string payload = "warm-payload-" + std::to_string(cycle);
+        kasumi::test::write_text(src_dir / ("in-" + std::to_string(cycle)),
+                                 payload);
+        const auto put_res = kasumi::transport::put(
+            *storage, src_dir / ("in-" + std::to_string(cycle)), id);
+        ASSERT_TRUE(put_res.has_value()) << put_res.error().message;
+
+        const auto listed = kasumi::transport::list(*storage);
+        ASSERT_TRUE(listed.has_value()) << listed.error().message;
+        EXPECT_TRUE(std::ranges::contains(*listed, id));
+
+        const auto pres = kasumi::transport::presence(*storage, id);
+        ASSERT_TRUE(pres.has_value()) << pres.error().message;
+        EXPECT_EQ(*pres, kasumi::transport::Presence::Present);
+
+        const auto out_file = dst_dir / ("out-" + std::to_string(cycle));
+        const auto get_res = kasumi::transport::get(*storage, id, out_file);
+        ASSERT_TRUE(get_res.has_value()) << get_res.error().message;
+        EXPECT_EQ(kasumi::test::read_text(out_file), payload);
+
+        const auto rm_res = kasumi::transport::remove(*storage, id);
+        ASSERT_TRUE(rm_res.has_value()) << rm_res.error().message;
+    }
+
+    const auto started_shutdown = std::chrono::steady_clock::now();
+    *storage = kasumi::transport::Transport{};
+    const auto elapsed = std::chrono::steady_clock::now() - started_shutdown;
+    EXPECT_LT(elapsed, std::chrono::seconds{5});
+}
+
+TEST(RcloneSystemTest, ShutdownWithoutCoreQuitCompletesBoundedWithoutHanging) {
+    auto harness = make_rclone_harness();
+    const auto config_path = harness_path(harness, "rclone.conf");
+
+    for (int iteration = 0; iteration < 5; ++iteration) {
+        const auto probe = kasumi::transport::probe_rclone_installation();
+        EXPECT_TRUE(probe.found) << probe.detail;
+        EXPECT_TRUE(probe.meets_minimum) << probe.detail;
+        const auto remotes =
+            kasumi::transport::list_rclone_remotes({}, config_path);
+        EXPECT_TRUE(remotes.available) << remotes.detail;
+        EXPECT_TRUE(
+            std::ranges::contains(remotes.remotes, std::string{remote_name}));
+    }
+
+    kasumi::transport::detail::RcloneConfiguration configuration{
+        .remote_name = std::string{remote_name},
+        .remote_root = std::string{remote_root},
+        .executable = std::filesystem::path{KASUMI_SYSTEM_RCLONE_EXECUTABLE},
+        .config_path = config_path};
+    auto started = kasumi::transport::rclone_detail::start_state(configuration);
+    ASSERT_TRUE(started.has_value()) << started.error().message;
+    auto* state = *started;
+    ASSERT_NE(state, nullptr);
+    ASSERT_TRUE(
+        kasumi::transport::rclone_detail::check_rc_health(*state).has_value());
+
+#if defined(_WIN32)
+    HANDLE check_handle =
+        OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(state->child_pid));
+    ASSERT_NE(check_handle, nullptr);
+#endif
+
+    // Simulate a state where core/quit is skipped while rclone is still alive.
+    state->ready = false;
+    const auto started_shutdown = std::chrono::steady_clock::now();
+    kasumi::transport::rclone_detail::destroy_state(state);
+    const auto elapsed = std::chrono::steady_clock::now() - started_shutdown;
+    EXPECT_LT(elapsed, std::chrono::seconds{5});
+
+#if defined(_WIN32)
+    const DWORD wait_result = WaitForSingleObject(check_handle, 2000);
+    CloseHandle(check_handle);
+    EXPECT_EQ(wait_result, WAIT_OBJECT_0);
+#endif
+}
+
+TEST(RcloneSystemTest,
+     DaemonWarmRcloneSessionSurvivesIdleMutationsAndStopsCleanly) {
+    using namespace std::chrono_literals;
+    namespace app = kasumi::application;
+
+    auto harness = make_rclone_harness();
+    const auto client = make_test_client(harness, "client-a");
+    ASSERT_TRUE(
+        app::create_profile(client.environment,
+                            Profile{.name = std::string{profile_name},
+                                    .local_dir = client.local_dir,
+                                    .remote_dir = remote_location(harness),
+                                    .sync_interval_seconds = 10U},
+                            MasterKeyHex{std::string(64, '2')}));
+    kasumi::test::write_text(client.local_dir / "seed.md", "seed-content");
+
+    app::DaemonOptions opts;
+    opts.watch_debounce = 150ms;
+    opts.watch_max_wait = 600ms;
+    opts.config_poll_interval = 200ms;
+    opts.full_scan_verification_interval = 10min;
+    opts.enable_ipc_server = false;
+
+    auto session = app::start_daemon_session(client.environment, opts);
+    ASSERT_TRUE(session.has_value()) << session.error().detail;
+
+    const auto wait_for = [&](auto pred, std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (pred()) {
+                return true;
+            }
+            std::this_thread::sleep_for(50ms);
+        }
+        return pred();
+    };
+
+    const auto profile_status =
+        [&]() -> std::optional<app::DaemonProfileStatus> {
+        const auto rep =
+            app::query_daemon_session_status(*session, profile_name);
+        if (!rep || rep->profiles.empty()) {
+            return std::nullopt;
+        }
+        return rep->profiles.front();
+    };
+
+    ASSERT_TRUE(wait_for(
+        [&] {
+            const auto st = profile_status();
+            return st && st->state == app::DaemonProfileState::Idle &&
+                   st->sync_runs >= 1U && st->warm_transport_active &&
+                   st->watcher_active;
+        },
+        30s));
+
+    // Wait past the 10s sync interval so timer-driven fast_noop executes
+    // while keeping warm rclone alive.
+    ASSERT_TRUE(wait_for(
+        [&] {
+            const auto st = profile_status();
+            return st && st->fast_noop_polls >= 1U && st->warm_transport_active;
+        },
+        25s));
+
+    auto wait_sync_delta = [&](std::uint64_t baseline) {
+        return wait_for(
+            [&] {
+                const auto st = profile_status();
+                return st && st->sync_runs > baseline &&
+                       st->state == app::DaemonProfileState::Idle &&
+                       st->dirty_paths_count == 0U;
+            },
+            30s);
+    };
+
+    // Create -> edit -> rename -> delete driven solely by native FS watcher.
+    const auto s0 = profile_status()->sync_runs;
+    kasumi::test::write_text(client.local_dir / "note-1.md", "v1");
+    ASSERT_TRUE(wait_sync_delta(s0));
+
+    const auto s1 = profile_status()->sync_runs;
+    kasumi::test::write_text(client.local_dir / "note-1.md", "v2-edited");
+    ASSERT_TRUE(wait_sync_delta(s1));
+
+    const auto s2 = profile_status()->sync_runs;
+    std::filesystem::rename(client.local_dir / "note-1.md",
+                            client.local_dir / "note-2.md");
+    ASSERT_TRUE(wait_sync_delta(s2));
+
+    const auto s3 = profile_status()->sync_runs;
+    std::filesystem::remove(client.local_dir / "note-2.md");
+    ASSERT_TRUE(wait_sync_delta(s3));
+
+    const auto final_st = profile_status();
+    ASSERT_TRUE(final_st.has_value());
+    EXPECT_TRUE(final_st->warm_transport_active);
+    EXPECT_NE(final_st->state, app::DaemonProfileState::NeedsAttention);
+
+    const auto started_stop = std::chrono::steady_clock::now();
+    app::stop_daemon_session(*session);
+    const auto stop_elapsed = std::chrono::steady_clock::now() - started_stop;
+    EXPECT_LT(stop_elapsed, 5s);
+    session->state.reset();
 }
 
 } // namespace

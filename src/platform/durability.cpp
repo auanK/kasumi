@@ -76,11 +76,16 @@ DWORD rename_windows_handle(HANDLE file,
 std::error_code rename_no_replace(const std::filesystem::path& source,
                                   const std::filesystem::path& destination) {
 #if defined(_WIN32)
-    if (MoveFileExW(
-            source.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
+    const DWORD error = retry_windows_file_operation([&] {
+        return MoveFileExW(
+                   source.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)
+                   ? ERROR_SUCCESS
+                   : GetLastError();
+    });
+    if (error == ERROR_SUCCESS) {
         return {};
     }
-    return {static_cast<int>(GetLastError()), std::system_category()};
+    return {static_cast<int>(error), std::system_category()};
 #elif defined(__linux__) && defined(SYS_renameat2)
     if (::syscall(SYS_renameat2,
                   AT_FDCWD,

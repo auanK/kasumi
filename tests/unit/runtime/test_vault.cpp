@@ -177,7 +177,13 @@ TEST(VaultTest, ProfileRemovalKeepsVaultKeyWhenDirectoryCannotBeRemoved) {
 
 TEST(VaultTest, ConcurrentOsVaultWritesAndDeletesSucceed) {
     auto workspace = kasumi::test::make_temp_workspace("vault-os-concurrent");
+#if defined(_WIN32)
+    constexpr std::size_t worker_count = 8;
+    constexpr std::size_t iterations = 25;
+#else
     constexpr std::size_t worker_count = 4;
+    constexpr std::size_t iterations = 10;
+#endif
     std::vector<std::filesystem::path> key_paths;
     key_paths.reserve(worker_count);
     for (std::size_t index = 0; index < worker_count; ++index) {
@@ -203,24 +209,29 @@ TEST(VaultTest, ConcurrentOsVaultWritesAndDeletesSucceed) {
 
     for (std::size_t index = 0; index < worker_count; ++index) {
         workers.emplace_back([&, index] {
-            KeyBytes key{};
-            key.fill(static_cast<std::uint8_t>(0x21U + index));
             ready.fetch_add(1, std::memory_order_acq_rel);
             while (!start.load(std::memory_order_acquire)) {
                 std::this_thread::yield();
             }
-            if (!kasumi::runtime::vault::write_vault(key_paths[index], key)) {
-                ok.store(false, std::memory_order_release);
-                return;
-            }
-            const auto restored =
-                kasumi::runtime::vault::read_vault(key_paths[index]);
-            if (!restored || *restored != key) {
-                ok.store(false, std::memory_order_release);
-                return;
-            }
-            if (!kasumi::runtime::vault::delete_vault(key_paths[index])) {
-                ok.store(false, std::memory_order_release);
+            for (std::size_t iter = 0; iter < iterations; ++iter) {
+                KeyBytes key{};
+                key.fill(
+                    static_cast<std::uint8_t>((0x21U + index + iter) & 0xFFU));
+                if (!kasumi::runtime::vault::write_vault(key_paths[index],
+                                                         key)) {
+                    ok.store(false, std::memory_order_release);
+                    return;
+                }
+                const auto restored =
+                    kasumi::runtime::vault::read_vault(key_paths[index]);
+                if (!restored || *restored != key) {
+                    ok.store(false, std::memory_order_release);
+                    return;
+                }
+                if (!kasumi::runtime::vault::delete_vault(key_paths[index])) {
+                    ok.store(false, std::memory_order_release);
+                    return;
+                }
             }
         });
     }
