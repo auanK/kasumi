@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.1]
+
+### Fixed
+
+- **Linux Boot `kwalletd6` / `kwalletd5` D-Bus Activation Crash**:
+  - Guarded D-Bus activation of KDE Wallet services (`org.kde.kwalletd6`, `org.kde.kwalletd5`, `org.kde.ksecretd`) in `src/runtime/vault.cpp` (`can_activate_kwallet_service()`) so early `systemd --user` startup does not trigger D-Bus activation of Qt GUI wallet daemons when `WAYLAND_DISPLAY`, `DISPLAY`, and `QT_QPA_PLATFORM` are absent. Running wallet daemons continue to be discovered via `NameHasOwner` so automatic vault unlock recovery works once the desktop session starts `kwalletd`.
+
 ## [0.29.0]
 
 ### Changed
