@@ -851,14 +851,115 @@ bool validate(const std::filesystem::path& database_path) {
     }
 }
 
-std::expected<std::optional<StoredState>, std::string>
-load_state(const std::filesystem::path& database_path) {
+namespace {
+
+struct ParsedStateMetadata {
+    bool present = false;
+    std::uint64_t height = 0;
+    std::string commit_id;
+    std::string ciphertext_id;
+    std::string epoch_id;
+    std::uint64_t epoch_sequence = 0;
+    std::string storage_manifest_hex;
+};
+
+std::expected<ParsedStateMetadata, std::string>
+read_state_metadata_in_txn(sqlite3* database) {
+    auto metadata =
+        prepare_stmt(database, "SELECT key, value FROM metadata ORDER BY key");
+    std::string generation;
+    std::string commit_id;
+    std::string ciphertext_id;
+    std::string epoch_id;
+    std::string epoch_sequence;
+    std::string storage_manifest_hex;
+    std::size_t metadata_count = 0;
+    const std::pair<std::string_view, std::string*> fields[]{
+        {"generation", &generation},
+        {"commit_id", &commit_id},
+        {"ciphertext_id", &ciphertext_id},
+        {"epoch_id", &epoch_id},
+        {"epoch_sequence", &epoch_sequence},
+        {"storage_manifest", &storage_manifest_hex},
+    };
+    while (step_stmt(metadata)) {
+        if (sqlite::is_null(metadata, 0) || sqlite::is_null(metadata, 1)) {
+            return std::unexpected("state.db contains NULL metadata");
+        }
+        const auto key = sqlite::text(metadata, 0);
+        ++metadata_count;
+        const auto it = std::ranges::find(
+            fields, key, &std::pair<std::string_view, std::string*>::first);
+        if (it == std::end(fields)) {
+            return std::unexpected("state.db contains unknown metadata");
+        }
+        if (!it->second->empty()) {
+            return std::unexpected(
+                "state.db contains duplicate metadata: " + std::string{key});
+        }
+        *it->second = sqlite::text(metadata, 1);
+    }
+    if (metadata_count == 0) {
+        auto nodes = prepare_stmt(database, "SELECT 1 FROM nodes LIMIT 1");
+        if (!step_stmt(nodes)) {
+            auto pending = prepare_stmt(
+                database, "SELECT 1 FROM pending_materializations LIMIT 1");
+            if (step_stmt(pending)) {
+                return std::unexpected(
+                    "state.db has pending rows without accepted state");
+            }
+            return ParsedStateMetadata{.present = false};
+        }
+        return std::unexpected("state.db state metadata is incomplete");
+    }
+    if (generation.empty()) {
+        return std::unexpected("state.db generation is missing");
+    }
+    if (epoch_id.empty() != epoch_sequence.empty()) {
+        return std::unexpected("state.db Epoch reference is incomplete");
+    }
+    const auto height = parse_canonical_u64(generation);
+    if (!height) {
+        return std::unexpected("state.db generation is invalid");
+    }
+    std::uint64_t parsed_epoch_sequence = 0;
+    if (!epoch_sequence.empty()) {
+        const auto parsed = parse_canonical_u64(epoch_sequence);
+        if (!parsed) {
+            return std::unexpected("state.db Epoch sequence is invalid");
+        }
+        parsed_epoch_sequence = *parsed;
+    }
+    if (!valid_state_metadata(*height,
+                              commit_id,
+                              ciphertext_id,
+                              epoch_id,
+                              parsed_epoch_sequence)) {
+        return std::unexpected("state.db state metadata is invalid");
+    }
+    return ParsedStateMetadata{
+        .present = true,
+        .height = *height,
+        .commit_id = std::move(commit_id),
+        .ciphertext_id = std::move(ciphertext_id),
+        .epoch_id = std::move(epoch_id),
+        .epoch_sequence = parsed_epoch_sequence,
+        .storage_manifest_hex = std::move(storage_manifest_hex),
+    };
+}
+
+template <typename Result, typename Fn>
+std::expected<Result, std::string>
+with_readonly_snapshot_txn(const std::filesystem::path& database_path,
+                           std::string_view error_prefix,
+                           Result empty_value,
+                           Fn&& fn) {
     try {
         std::error_code filesystem_error;
         const auto status =
             std::filesystem::symlink_status(database_path, filesystem_error);
         if (detail::missing_file(status, filesystem_error)) {
-            return std::optional<StoredState>{};
+            return empty_value;
         }
         auto opened = detail::open_state_database_readonly(database_path);
         if (!opened) {
@@ -871,116 +972,98 @@ load_state(const std::filesystem::path& database_path) {
         if (!valid_schema(opened->get())) {
             return std::unexpected("state.db schema is unsupported");
         }
-        auto metadata = prepare_stmt(
-            opened->get(), "SELECT key, value FROM metadata ORDER BY key");
-        std::string generation;
-        std::string commit_id;
-        std::string ciphertext_id;
-        std::string epoch_id;
-        std::string epoch_sequence;
-        std::string storage_manifest_hex;
-        std::size_t metadata_count = 0;
-        const std::pair<std::string_view, std::string*> fields[]{
-            {"generation", &generation},
-            {"commit_id", &commit_id},
-            {"ciphertext_id", &ciphertext_id},
-            {"epoch_id", &epoch_id},
-            {"epoch_sequence", &epoch_sequence},
-            {"storage_manifest", &storage_manifest_hex},
-        };
-        while (step_stmt(metadata)) {
-            if (sqlite::is_null(metadata, 0) || sqlite::is_null(metadata, 1)) {
-                return std::unexpected("state.db contains NULL metadata");
-            }
-            const auto key = sqlite::text(metadata, 0);
-            ++metadata_count;
-            const auto it = std::ranges::find(
-                fields, key, &std::pair<std::string_view, std::string*>::first);
-            if (it == std::end(fields)) {
-                return std::unexpected("state.db contains unknown metadata");
-            }
-            if (!it->second->empty()) {
-                return std::unexpected(
-                    "state.db contains duplicate metadata: " +
-                    std::string{key});
-            }
-            *it->second = sqlite::text(metadata, 1);
-        }
-        if (metadata_count == 0) {
-            auto nodes =
-                prepare_stmt(opened->get(), "SELECT 1 FROM nodes LIMIT 1");
-            if (!step_stmt(nodes)) {
-                auto pending = prepare_stmt(
-                    opened->get(),
-                    "SELECT 1 FROM pending_materializations LIMIT 1");
-                if (step_stmt(pending)) {
-                    return std::unexpected(
-                        "state.db has pending rows without accepted state");
-                }
-                require(sqlite::commit(*transaction));
-                return std::optional<StoredState>{};
-            }
-            return std::unexpected("state.db state metadata is incomplete");
-        }
-        if (generation.empty()) {
-            return std::unexpected("state.db generation is missing");
-        }
-        if (epoch_id.empty() != epoch_sequence.empty()) {
-            return std::unexpected("state.db Epoch reference is incomplete");
-        }
-        const auto height = parse_canonical_u64(generation);
-        if (!height) {
-            return std::unexpected("state.db generation is invalid");
-        }
-        std::uint64_t parsed_epoch_sequence = 0;
-        if (!epoch_sequence.empty()) {
-            const auto parsed = parse_canonical_u64(epoch_sequence);
-            if (!parsed) {
-                return std::unexpected("state.db Epoch sequence is invalid");
-            }
-            parsed_epoch_sequence = *parsed;
-        }
-        if (!valid_state_metadata(*height,
-                                  commit_id,
-                                  ciphertext_id,
-                                  epoch_id,
-                                  parsed_epoch_sequence)) {
-            return std::unexpected("state.db state metadata is invalid");
-        }
-        auto tree = load_tree(opened->get());
-        if (!tree) {
-            return std::unexpected(tree.error());
-        }
-        auto pending = load_pending_materializations(opened->get(), *tree);
-        if (!valid_snapshot(*tree, false)) {
-            return std::unexpected("state.db state is invalid");
-        }
-        history::StorageManifest manifest;
-        if (!storage_manifest_hex.empty()) {
-            auto decoded = decode_lowercase_hex(storage_manifest_hex);
-            if (!decoded) {
-                return std::unexpected("state.db storage_manifest is invalid");
-            }
-            auto parsed =
-                history::deserialize_storage_manifest(*decoded, *tree);
-            if (!parsed || history::is_storage_manifest_empty(*parsed)) {
-                return std::unexpected("state.db storage_manifest is invalid");
-            }
-            manifest = std::move(*parsed);
+        auto res = fn(opened->get());
+        if (!res) {
+            return std::unexpected(res.error());
         }
         require(sqlite::commit(*transaction));
-        return StoredState{.tree = std::move(*tree),
-                           .height = *height,
-                           .commit_id = std::move(commit_id),
-                           .ciphertext_id = std::move(ciphertext_id),
-                           .epoch_id = std::move(epoch_id),
-                           .epoch_sequence = parsed_epoch_sequence,
-                           .pending_materializations = std::move(pending),
-                           .storage_manifest = std::move(manifest)};
+        return *res;
     } catch (const std::exception& exception) {
-        return std::unexpected(std::string{"could not load state.db: "} +
-                               exception.what());
+        return std::unexpected(std::string{error_prefix} + exception.what());
     }
+}
+
+std::expected<LocalMappedEntry, std::string>
+decode_mapped_entry_row(sqlite::Statement& query) {
+    if (sqlite::is_null(query, 0) || sqlite::is_null(query, 1) ||
+        sqlite::is_null(query, 2) || sqlite::is_null(query, 3) ||
+        sqlite::is_null(query, 4)) {
+        return std::unexpected("node row contains NULL");
+    }
+    const auto path = sqlite::text(query, 0);
+    if (!valid_logical_path(path)) {
+        return std::unexpected("invalid node path");
+    }
+    const auto hash_str = sqlite::text(query, 1);
+    if (!hash_from_hex(hash_str)) {
+        return std::unexpected("invalid node hash");
+    }
+    const auto size = sqlite::integer(query, 2);
+    const auto is_directory = sqlite::integer(query, 4);
+    if (size < 0 || is_directory < 0 || is_directory > 1) {
+        return std::unexpected("invalid node fields");
+    }
+    return LocalMappedEntry{
+        .path = path,
+        .is_directory = is_directory == 1,
+        .size = static_cast<std::uint64_t>(size),
+        .mtime = sqlite::integer(query, 3),
+        .hash_hex = hash_str,
+    };
+}
+
+} // namespace
+
+std::expected<std::optional<StoredState>, std::string>
+load_state(const std::filesystem::path& database_path) {
+    return with_readonly_snapshot_txn<std::optional<StoredState>>(
+        database_path,
+        "could not load state.db: ",
+        std::optional<StoredState>{},
+        [](sqlite3* database) -> std::expected<std::optional<StoredState>,
+                                               std::string> {
+            auto meta = read_state_metadata_in_txn(database);
+            if (!meta) {
+                return std::unexpected(meta.error());
+            }
+            if (!meta->present) {
+                return std::optional<StoredState>{};
+            }
+            auto tree = load_tree(database);
+            if (!tree) {
+                return std::unexpected(tree.error());
+            }
+            auto pending = load_pending_materializations(database, *tree);
+            if (!valid_snapshot(*tree, false)) {
+                return std::unexpected("state.db state is invalid");
+            }
+            history::StorageManifest manifest;
+            if (!meta->storage_manifest_hex.empty()) {
+                auto decoded =
+                    decode_lowercase_hex(meta->storage_manifest_hex);
+                if (!decoded) {
+                    return std::unexpected(
+                        "state.db storage_manifest is invalid");
+                }
+                auto parsed =
+                    history::deserialize_storage_manifest(*decoded, *tree);
+                if (!parsed || history::is_storage_manifest_empty(*parsed)) {
+                    return std::unexpected(
+                        "state.db storage_manifest is invalid");
+                }
+                manifest = std::move(*parsed);
+            }
+            return std::optional<StoredState>{StoredState{
+                .tree = std::move(*tree),
+                .height = meta->height,
+                .commit_id = std::move(meta->commit_id),
+                .ciphertext_id = std::move(meta->ciphertext_id),
+                .epoch_id = std::move(meta->epoch_id),
+                .epoch_sequence = meta->epoch_sequence,
+                .pending_materializations = std::move(pending),
+                .storage_manifest = std::move(manifest),
+            }};
+        });
 }
 
 namespace {
@@ -1351,161 +1434,256 @@ bool save_remote_activity_cache(const std::filesystem::path& database_path,
     }
 }
 
+namespace {
+
+LocalActivitySnapshot read_local_activity_in_txn(sqlite3* database) {
+    LocalActivitySnapshot snapshot;
+    {
+        auto query = prepare_stmt(
+            database,
+            "SELECT execution_id, operation, machine_id, machine_name, "
+            "started_at, finished_at, duration_ms, status, recovered, "
+            "stage, detail, commit_id, summary_a, summary_b, summary_c, "
+            "summary_bytes, flags, remote_publish_state "
+            "FROM local_executions "
+            "ORDER BY COALESCE(finished_at, started_at) DESC, "
+            "started_at DESC, rowid DESC");
+        while (step_stmt(query)) {
+            const auto op_raw = sqlite::integer(query, 1);
+            const auto dur_raw = sqlite::integer(query, 6);
+            const auto status_raw = sqlite::integer(query, 7);
+            const auto recovered_raw = sqlite::integer(query, 8);
+            const auto sa = sqlite::integer(query, 12);
+            const auto sb = sqlite::integer(query, 13);
+            const auto sc = sqlite::integer(query, 14);
+            const auto sbytes = sqlite::integer(query, 15);
+            const auto flags_raw = sqlite::integer(query, 16);
+            const auto pub_raw = sqlite::integer(query, 17);
+            if (op_raw < 0 || op_raw > 255 ||
+                !valid_local_operation_kind(
+                    static_cast<std::uint8_t>(op_raw)) ||
+                status_raw < 0 || status_raw > 255 ||
+                !valid_local_execution_status(
+                    static_cast<std::uint8_t>(status_raw)) ||
+                pub_raw < 0 || pub_raw > 255 ||
+                !valid_remote_publish_state(
+                    static_cast<std::uint8_t>(pub_raw)) ||
+                dur_raw < 0 || sa < 0 || sb < 0 || sc < 0 || sbytes < 0 ||
+                flags_raw < 0 ||
+                flags_raw > std::numeric_limits<std::uint32_t>::max()) {
+                continue;
+            }
+            LocalExecutionRecord rec;
+            rec.execution_id = sqlite::text(query, 0);
+            rec.operation = static_cast<LocalOperationKind>(op_raw);
+            rec.machine_id_hex = sqlite::text(query, 2);
+            rec.machine_name = sqlite::text(query, 3);
+            rec.started_at = sqlite::integer(query, 4);
+            if (!sqlite::is_null(query, 5)) {
+                rec.finished_at = sqlite::integer(query, 5);
+            }
+            rec.duration_ms = static_cast<std::uint64_t>(dur_raw);
+            rec.status = static_cast<LocalExecutionStatus>(status_raw);
+            rec.recovered = recovered_raw != 0;
+            rec.stage = sqlite::text(query, 9);
+            rec.detail = sqlite::text(query, 10);
+            rec.commit_id = sqlite::text(query, 11);
+            rec.summary_a = static_cast<std::uint64_t>(sa);
+            rec.summary_b = static_cast<std::uint64_t>(sb);
+            rec.summary_c = static_cast<std::uint64_t>(sc);
+            rec.summary_bytes = static_cast<std::uint64_t>(sbytes);
+            rec.flags = static_cast<std::uint32_t>(flags_raw);
+            rec.remote_publish_state = static_cast<RemotePublishState>(pub_raw);
+            snapshot.executions.push_back(std::move(rec));
+        }
+    }
+    {
+        auto query = prepare_stmt(
+            database,
+            "SELECT commit_id, height, created_at, origin_operation, "
+            "machine_id, machine_name, accepted_at "
+            "FROM accepted_commit_meta LIMIT 1");
+        if (step_stmt(query)) {
+            const auto h_raw = sqlite::integer(query, 1);
+            const auto op_raw = sqlite::integer(query, 3);
+            if (h_raw >= 0 && op_raw >= 0 && op_raw <= 3) {
+                snapshot.accepted_commit = AcceptedCommitMeta{
+                    .commit_id = sqlite::text(query, 0),
+                    .height = static_cast<std::uint64_t>(h_raw),
+                    .created_at = sqlite::integer(query, 2),
+                    .origin_operation =
+                        static_cast<history::CommitOriginOperation>(op_raw),
+                    .machine_id_hex = sqlite::text(query, 4),
+                    .machine_name = sqlite::text(query, 5),
+                    .accepted_at = sqlite::integer(query, 6),
+                };
+            }
+        }
+    }
+    {
+        auto query = prepare_stmt(
+            database,
+            "SELECT event_id, operation, outcome, machine_id, "
+            "machine_name, "
+            "started_at, finished_at, duration_ms, metric_primary, "
+            "metric_secondary, metric_bytes, flags, stage, detail, "
+            "cached_at FROM remote_activity_cache "
+            "ORDER BY finished_at DESC, event_id ASC");
+        while (step_stmt(query)) {
+            const auto op_raw = sqlite::integer(query, 1);
+            const auto out_raw = sqlite::integer(query, 2);
+            const auto dur_raw = sqlite::integer(query, 7);
+            const auto mp = sqlite::integer(query, 8);
+            const auto ms = sqlite::integer(query, 9);
+            const auto mb = sqlite::integer(query, 10);
+            const auto flags_raw = sqlite::integer(query, 11);
+            if (op_raw < 0 || op_raw > 255 || out_raw < 0 || out_raw > 255 ||
+                dur_raw < 0 || mp < 0 || ms < 0 || mb < 0 || flags_raw < 0 ||
+                flags_raw > std::numeric_limits<std::uint32_t>::max()) {
+                continue;
+            }
+            snapshot.cached_remote_activities.push_back(CachedRemoteActivity{
+                .event_id = sqlite::text(query, 0),
+                .operation = static_cast<std::uint8_t>(op_raw),
+                .outcome = static_cast<std::uint8_t>(out_raw),
+                .machine_id_hex = sqlite::text(query, 3),
+                .machine_name = sqlite::text(query, 4),
+                .started_at = sqlite::integer(query, 5),
+                .finished_at = sqlite::integer(query, 6),
+                .duration_ms = static_cast<std::uint64_t>(dur_raw),
+                .metric_primary = static_cast<std::uint64_t>(mp),
+                .metric_secondary = static_cast<std::uint64_t>(ms),
+                .metric_bytes = static_cast<std::uint64_t>(mb),
+                .flags = static_cast<std::uint32_t>(flags_raw),
+                .stage = sqlite::text(query, 12),
+                .detail = sqlite::text(query, 13),
+                .cached_at = sqlite::integer(query, 14),
+            });
+        }
+    }
+    return snapshot;
+}
+
+} // namespace
+
 std::expected<LocalActivitySnapshot, std::string>
 load_local_activity(const std::filesystem::path& database_path) {
-    try {
-        std::error_code filesystem_error;
-        const auto status =
-            std::filesystem::symlink_status(database_path, filesystem_error);
-        if (detail::missing_file(status, filesystem_error)) {
-            return LocalActivitySnapshot{};
-        }
-        auto opened = detail::open_state_database_readonly(database_path);
-        if (!opened) {
-            return std::unexpected(opened.error());
-        }
-        auto transaction = sqlite::begin(opened->get(), "BEGIN");
-        if (!transaction) {
-            return std::unexpected(transaction.error());
-        }
-        if (!valid_schema(opened->get())) {
-            return std::unexpected("state.db schema is unsupported");
-        }
+    return with_readonly_snapshot_txn<LocalActivitySnapshot>(
+        database_path,
+        "could not load local activity from state.db: ",
+        LocalActivitySnapshot{},
+        [](sqlite3* database)
+            -> std::expected<LocalActivitySnapshot, std::string> {
+            return read_local_activity_in_txn(database);
+        });
+}
 
-        LocalActivitySnapshot snapshot;
-        {
+std::expected<LocalStateAndActivitySummary, std::string>
+load_state_and_activity_summary(const std::filesystem::path& database_path) {
+    return with_readonly_snapshot_txn<LocalStateAndActivitySummary>(
+        database_path,
+        "could not load local summary from state.db: ",
+        LocalStateAndActivitySummary{},
+        [](sqlite3* database)
+            -> std::expected<LocalStateAndActivitySummary, std::string> {
+            auto meta = read_state_metadata_in_txn(database);
+            if (!meta) {
+                return std::unexpected(meta.error());
+            }
+            bool has_pending = false;
+            if (meta->present) {
+                auto pending = prepare_stmt(
+                    database, "SELECT 1 FROM pending_materializations LIMIT 1");
+                has_pending = step_stmt(pending);
+            }
+            return LocalStateAndActivitySummary{
+                .has_state = meta->present,
+                .has_pending_materializations = has_pending,
+                .activity = read_local_activity_in_txn(database),
+            };
+        });
+}
+
+std::expected<LocalTreeSnapshot, std::string>
+load_local_tree_snapshot(const std::filesystem::path& database_path) {
+    return with_readonly_snapshot_txn<LocalTreeSnapshot>(
+        database_path,
+        "could not load local tree from state.db: ",
+        LocalTreeSnapshot{},
+        [](sqlite3* database)
+            -> std::expected<LocalTreeSnapshot, std::string> {
+            auto meta = read_state_metadata_in_txn(database);
+            if (!meta) {
+                return std::unexpected(meta.error());
+            }
+            if (!meta->present) {
+                return LocalTreeSnapshot{};
+            }
+            LocalTreeSnapshot result{
+                .has_state = true,
+                .height = meta->height,
+                .commit_id = std::move(meta->commit_id),
+            };
             auto query = prepare_stmt(
-                opened->get(),
-                "SELECT execution_id, operation, machine_id, machine_name, "
-                "started_at, finished_at, duration_ms, status, recovered, "
-                "stage, detail, commit_id, summary_a, summary_b, summary_c, "
-                "summary_bytes, flags, remote_publish_state "
-                "FROM local_executions "
-                "ORDER BY COALESCE(finished_at, started_at) DESC, "
-                "started_at DESC, rowid DESC");
+                database,
+                "SELECT n.path, n.hash, n.size, n.mtime, n.is_dir "
+                "FROM nodes n "
+                "WHERE n.path <> '' "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM pending_materializations p WHERE p.path = n.path"
+                ")");
             while (step_stmt(query)) {
-                const auto op_raw = sqlite::integer(query, 1);
-                const auto dur_raw = sqlite::integer(query, 6);
-                const auto status_raw = sqlite::integer(query, 7);
-                const auto recovered_raw = sqlite::integer(query, 8);
-                const auto sa = sqlite::integer(query, 12);
-                const auto sb = sqlite::integer(query, 13);
-                const auto sc = sqlite::integer(query, 14);
-                const auto sbytes = sqlite::integer(query, 15);
-                const auto flags_raw = sqlite::integer(query, 16);
-                const auto pub_raw = sqlite::integer(query, 17);
-                if (op_raw < 0 || op_raw > 255 ||
-                    !valid_local_operation_kind(
-                        static_cast<std::uint8_t>(op_raw)) ||
-                    status_raw < 0 || status_raw > 255 ||
-                    !valid_local_execution_status(
-                        static_cast<std::uint8_t>(status_raw)) ||
-                    pub_raw < 0 || pub_raw > 255 ||
-                    !valid_remote_publish_state(
-                        static_cast<std::uint8_t>(pub_raw)) ||
-                    dur_raw < 0 || sa < 0 || sb < 0 || sc < 0 || sbytes < 0 ||
-                    flags_raw < 0 ||
-                    flags_raw > std::numeric_limits<std::uint32_t>::max()) {
-                    continue;
+                auto row = decode_mapped_entry_row(query);
+                if (!row) {
+                    return std::unexpected(row.error());
                 }
-                LocalExecutionRecord rec;
-                rec.execution_id = sqlite::text(query, 0);
-                rec.operation = static_cast<LocalOperationKind>(op_raw);
-                rec.machine_id_hex = sqlite::text(query, 2);
-                rec.machine_name = sqlite::text(query, 3);
-                rec.started_at = sqlite::integer(query, 4);
-                if (!sqlite::is_null(query, 5)) {
-                    rec.finished_at = sqlite::integer(query, 5);
-                }
-                rec.duration_ms = static_cast<std::uint64_t>(dur_raw);
-                rec.status = static_cast<LocalExecutionStatus>(status_raw);
-                rec.recovered = recovered_raw != 0;
-                rec.stage = sqlite::text(query, 9);
-                rec.detail = sqlite::text(query, 10);
-                rec.commit_id = sqlite::text(query, 11);
-                rec.summary_a = static_cast<std::uint64_t>(sa);
-                rec.summary_b = static_cast<std::uint64_t>(sb);
-                rec.summary_c = static_cast<std::uint64_t>(sc);
-                rec.summary_bytes = static_cast<std::uint64_t>(sbytes);
-                rec.flags = static_cast<std::uint32_t>(flags_raw);
-                rec.remote_publish_state =
-                    static_cast<RemotePublishState>(pub_raw);
-                snapshot.executions.push_back(std::move(rec));
+                result.entries.push_back(std::move(*row));
             }
-        }
-        {
-            auto query = prepare_stmt(
-                opened->get(),
-                "SELECT commit_id, height, created_at, origin_operation, "
-                "machine_id, machine_name, accepted_at "
-                "FROM accepted_commit_meta LIMIT 1");
-            if (step_stmt(query)) {
-                const auto h_raw = sqlite::integer(query, 1);
-                const auto op_raw = sqlite::integer(query, 3);
-                if (h_raw >= 0 && op_raw >= 0 && op_raw <= 3) {
-                    snapshot.accepted_commit = AcceptedCommitMeta{
-                        .commit_id = sqlite::text(query, 0),
-                        .height = static_cast<std::uint64_t>(h_raw),
-                        .created_at = sqlite::integer(query, 2),
-                        .origin_operation =
-                            static_cast<history::CommitOriginOperation>(op_raw),
-                        .machine_id_hex = sqlite::text(query, 4),
-                        .machine_name = sqlite::text(query, 5),
-                        .accepted_at = sqlite::integer(query, 6),
-                    };
-                }
-            }
-        }
-        {
-            auto query = prepare_stmt(
-                opened->get(),
-                "SELECT event_id, operation, outcome, machine_id, "
-                "machine_name, "
-                "started_at, finished_at, duration_ms, metric_primary, "
-                "metric_secondary, metric_bytes, flags, stage, detail, "
-                "cached_at FROM remote_activity_cache "
-                "ORDER BY finished_at DESC, event_id ASC");
-            while (step_stmt(query)) {
-                const auto op_raw = sqlite::integer(query, 1);
-                const auto out_raw = sqlite::integer(query, 2);
-                const auto dur_raw = sqlite::integer(query, 7);
-                const auto mp = sqlite::integer(query, 8);
-                const auto ms = sqlite::integer(query, 9);
-                const auto mb = sqlite::integer(query, 10);
-                const auto flags_raw = sqlite::integer(query, 11);
-                if (op_raw < 0 || op_raw > 255 || out_raw < 0 ||
-                    out_raw > 255 || dur_raw < 0 || mp < 0 || ms < 0 ||
-                    mb < 0 || flags_raw < 0 ||
-                    flags_raw > std::numeric_limits<std::uint32_t>::max()) {
-                    continue;
-                }
-                snapshot.cached_remote_activities.push_back(
-                    CachedRemoteActivity{
-                        .event_id = sqlite::text(query, 0),
-                        .operation = static_cast<std::uint8_t>(op_raw),
-                        .outcome = static_cast<std::uint8_t>(out_raw),
-                        .machine_id_hex = sqlite::text(query, 3),
-                        .machine_name = sqlite::text(query, 4),
-                        .started_at = sqlite::integer(query, 5),
-                        .finished_at = sqlite::integer(query, 6),
-                        .duration_ms = static_cast<std::uint64_t>(dur_raw),
-                        .metric_primary = static_cast<std::uint64_t>(mp),
-                        .metric_secondary = static_cast<std::uint64_t>(ms),
-                        .metric_bytes = static_cast<std::uint64_t>(mb),
-                        .flags = static_cast<std::uint32_t>(flags_raw),
-                        .stage = sqlite::text(query, 12),
-                        .detail = sqlite::text(query, 13),
-                        .cached_at = sqlite::integer(query, 14),
-                    });
-            }
-        }
-        require(sqlite::commit(*transaction));
-        return snapshot;
-    } catch (const std::exception& exception) {
-        return std::unexpected(
-            std::string{"could not load local activity from state.db: "} +
-            exception.what());
+            std::ranges::sort(
+                result.entries, path_less, &LocalMappedEntry::path);
+            result.activity = read_local_activity_in_txn(database);
+            return result;
+        });
+}
+
+std::expected<std::optional<LocalMappedEntry>, std::string>
+lookup_mapped_path(const std::filesystem::path& database_path,
+                   std::string_view logical_path) {
+    if (!valid_logical_path(logical_path)) {
+        return std::optional<LocalMappedEntry>{std::nullopt};
     }
+    return with_readonly_snapshot_txn<std::optional<LocalMappedEntry>>(
+        database_path,
+        "could not look up mapped path in state.db: ",
+        std::optional<LocalMappedEntry>{std::nullopt},
+        [logical_path](sqlite3* database)
+            -> std::expected<std::optional<LocalMappedEntry>, std::string> {
+            auto meta = read_state_metadata_in_txn(database);
+            if (!meta) {
+                return std::unexpected(meta.error());
+            }
+            if (!meta->present) {
+                return std::optional<LocalMappedEntry>{std::nullopt};
+            }
+            auto query = prepare_stmt(
+                database,
+                "SELECT n.path, n.hash, n.size, n.mtime, n.is_dir "
+                "FROM nodes n "
+                "WHERE n.path = ? AND n.path <> '' "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM pending_materializations p WHERE p.path = n.path"
+                ") "
+                "LIMIT 1");
+            require(sqlite::bind(query, 1, logical_path));
+            if (!step_stmt(query)) {
+                return std::optional<LocalMappedEntry>{std::nullopt};
+            }
+            auto row = decode_mapped_entry_row(query);
+            if (!row) {
+                return std::unexpected(row.error());
+            }
+            return std::optional<LocalMappedEntry>{std::move(*row)};
+        });
 }
 
 } // namespace kasumi::state_storage
