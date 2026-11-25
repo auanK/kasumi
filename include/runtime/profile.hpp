@@ -41,10 +41,12 @@ struct ProfileData {
     std::optional<bool> watch_enabled = std::nullopt;
     std::optional<std::uint32_t> sync_interval_seconds = std::nullopt;
     bool paused = false;
+    std::string icon = {};
 };
 
 std::string_view to_string(KeyStorage storage) noexcept;
 std::optional<KeyStorage> parse_key_storage(std::string_view value) noexcept;
+bool is_valid_profile_icon(std::string_view icon) noexcept;
 
 // Accepts alphanumeric characters, '-', and '_', excluding empty, ".", and
 // "..".

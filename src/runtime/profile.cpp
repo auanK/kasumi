@@ -83,6 +83,32 @@ std::optional<KeyStorage> parse_key_storage(std::string_view value) noexcept {
     return std::nullopt;
 }
 
+bool is_valid_profile_icon(std::string_view icon) noexcept {
+    if (icon.empty() || icon == "auto") {
+        return true;
+    }
+    if (icon.starts_with("custom:")) {
+        const auto hex = icon.substr(7);
+        return hex.size() >= 8 && hex.size() <= 32 &&
+               std::ranges::all_of(hex, [](unsigned char ch) {
+                   return (ch >= '0' && ch <= '9') ||
+                          (ch >= 'a' && ch <= 'f');
+               });
+    }
+    static constexpr std::array<std::string_view, 9> kPresets{
+        "preset:default",
+        "preset:vault",
+        "preset:folder",
+        "preset:code",
+        "preset:docs",
+        "preset:photos",
+        "preset:music",
+        "preset:archive",
+        "preset:shield",
+    };
+    return std::ranges::find(kPresets, icon) != kPresets.end();
+}
+
 std::expected<ProfileData, Error>
 load_profile(const std::filesystem::path& config_path,
              std::string_view profile_name) {
@@ -211,7 +237,8 @@ load_profiles(const std::filesystem::path& config_path) {
                 field != "bandwidth_limit" && field != "transfer_concurrency" &&
                 field != "rclone_config" && field != "watch_enabled" &&
                 field != "sync_interval_seconds" &&
-                field != "gc_interval_hours" && field != "paused") {
+                field != "gc_interval_hours" && field != "paused" &&
+                field != "icon") {
                 return fail(ErrorCode::ProfileInvalid,
                             "unsupported profile field: " +
                                 std::string{field.str()});
@@ -328,6 +355,13 @@ load_profiles(const std::filesystem::path& config_path) {
             }
             pd.paused = paused_field.value<bool>().value_or(false);
         }
+        if (const auto icon_field = (*prof)["icon"]) {
+            const auto icon_val = icon_field.value<std::string>();
+            if (!icon_val || !is_valid_profile_icon(*icon_val)) {
+                return fail(ErrorCode::ProfileInvalid, "invalid profile icon");
+            }
+            pd.icon = *icon_val;
+        }
         result.push_back(std::move(pd));
     }
     return result;
@@ -387,6 +421,9 @@ save_profiles(const std::filesystem::path& config_path,
                 ErrorCode::ProfileInvalid,
                 "sync_interval_seconds must be 0 or between 10 and 86400");
         }
+        if (!is_valid_profile_icon(prof.icon)) {
+            return fail(ErrorCode::ProfileInvalid, "invalid profile icon");
+        }
     }
     toml::table config;
     toml::table profiles_table;
@@ -417,6 +454,9 @@ save_profiles(const std::filesystem::path& config_path,
         }
         if (prof.paused) {
             prof_data.insert("paused", true);
+        }
+        if (!prof.icon.empty()) {
+            prof_data.insert("icon", prof.icon);
         }
         profiles_table.insert(prof.name, prof_data);
     }

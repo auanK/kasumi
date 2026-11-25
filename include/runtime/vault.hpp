@@ -64,6 +64,11 @@ delete_vault(const std::filesystem::path& key_path);
 std::expected<KeyBytes, runtime::Error> derive(std::string_view password,
                                                std::string_view salt_password);
 
+// Uses the same Argon2id parameters as existing Web UI verifiers.
+inline constexpr std::size_t MINIMUM_WEB_PASSWORD_SIZE = 8;
+std::expected<KeyBytes, runtime::Error>
+derive_web_password_verifier(std::string_view password, std::string_view salt);
+
 // Reversible XOR masking; does not encrypt the key on disk.
 void obscure(std::span<std::uint8_t, KEY_SIZE> key);
 

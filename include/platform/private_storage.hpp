@@ -195,6 +195,11 @@ bool read_regular_file_exact(const RegularFileInput& input,
 std::expected<RegularFileInput, StreamError>
 open_regular_file(const std::filesystem::path& path);
 
+// Resolves relative components without following symlinks or reparse points.
+std::expected<RegularFileInput, StreamError>
+open_browsed_file(const std::filesystem::path& root,
+                  const std::filesystem::path& relative);
+
 // Streams a whole regular file, or exactly the requested slice if provided.
 std::expected<std::uint64_t, StreamError> stream_regular_file_raw(
     const std::filesystem::path& path,
