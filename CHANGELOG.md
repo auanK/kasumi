@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.29.2]
+
+### Fixed
+
+- **Cloned Profiles Start Paused**:
+  - Updated `clone_profile()` in `src/application/profile.cpp` to set `paused = true` on cloned profiles (and updated `en` / `pt-BR` clone confirmation messages) so a running `kasumi daemon` never starts watching or syncing a freshly cloned profile on top of the source profile's directories before paths are edited.
+- **Fail-Fast OS Vault Check Before Password Prompts**:
+  - Added `runtime::vault::check_vault_available()` / `application::check_os_vault_available()` and checked availability immediately in `kasumi config` (`[n] New`, `[s] Storage`, `[k] Key`), `kasumi key`, and `kasumi profile create/storage` so headless/server environments report missing OS vault support right away instead of after entering Password and Salt.
+- **Windows Credential Manager Read & Delete Resilience**:
+  - Expanded transient `ERROR_NOT_FOUND` retry backoff in `read_vault()` (`10ms`–`80ms`, up to 4 retries) and added verify-on-delete retries in `delete_vault()` (`10ms`–`320ms`, up to 6 attempts confirming `CredReadW == ERROR_NOT_FOUND`) on Windows under concurrent Credential Manager activity.
+
 ## [0.29.1]
 
 ### Fixed
