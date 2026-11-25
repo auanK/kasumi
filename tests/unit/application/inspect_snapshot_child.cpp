@@ -78,9 +78,19 @@ bool spill_rollback_transaction(sqlite3* database) {
 }
 
 bool signal_status(const std::filesystem::path& path, const char* status) {
-    std::ofstream stream(path, std::ios::binary);
-    stream << status;
-    return static_cast<bool>(stream);
+    auto temp = path;
+    temp += ".tmp";
+    {
+        std::ofstream stream(temp, std::ios::binary | std::ios::trunc);
+        stream << status;
+        stream.flush();
+        if (!stream) {
+            return false;
+        }
+    }
+    std::error_code error;
+    std::filesystem::rename(temp, path, error);
+    return !error;
 }
 
 } // namespace
