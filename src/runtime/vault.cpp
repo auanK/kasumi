@@ -1659,14 +1659,32 @@ std::expected<void, runtime::Error>
 delete_vault(const std::filesystem::path& key_path) {
 #if defined(_WIN32)
     const auto target = vault_target_name(key_path);
-    const auto error = credential_call([&] {
-        return CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0);
-    });
-    if (error != ERROR_SUCCESS && error != ERROR_NOT_FOUND) {
-        return fail(ErrorCode::IoFailure,
-                    credential_error("delete key", error));
+    for (unsigned attempt = 0; attempt < 6U; ++attempt) {
+        const auto error = credential_call([&] {
+            return CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0);
+        });
+        if (error != ERROR_SUCCESS && error != ERROR_NOT_FOUND) {
+            return fail(ErrorCode::IoFailure,
+                        credential_error("delete key", error));
+        }
+        PCREDENTIALW verify = nullptr;
+        if (!CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &verify)) {
+            if (GetLastError() == ERROR_NOT_FOUND) {
+                return {};
+            }
+        } else {
+            if (verify->CredentialBlob != nullptr &&
+                verify->CredentialBlobSize > 0) {
+                crypto_wipe(verify->CredentialBlob, verify->CredentialBlobSize);
+            }
+            CredFree(verify);
+        }
+        if (attempt < 5U) {
+            Sleep(10UL << attempt);
+        }
     }
-    return {};
+    return fail(ErrorCode::IoFailure,
+                "failed to verify deleted key in Windows Credential Manager");
 #elif defined(__linux__)
     const std::lock_guard<std::mutex> lock{linux_vault_mutex()};
     std::string reason;

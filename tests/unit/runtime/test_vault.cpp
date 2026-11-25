@@ -126,8 +126,9 @@ TEST(VaultTest, OsVaultRoundTripsOverwritesAndDeletes) {
         kasumi::test::workspace_path(workspace, "app/profiles/demo/key.bin");
     const ScopedVaultEntry cleanup{key_path};
 
-    EXPECT_EQ(kasumi::runtime::vault::read_vault(key_path).error().code,
-              kasumi::runtime::ErrorCode::KeyNotFound);
+    const auto initial = kasumi::runtime::vault::read_vault(key_path);
+    ASSERT_FALSE(initial.has_value());
+    EXPECT_EQ(initial.error().code, kasumi::runtime::ErrorCode::KeyNotFound);
 
     KeyBytes key{};
     key.fill(0x3c);
@@ -145,7 +146,9 @@ TEST(VaultTest, OsVaultRoundTripsOverwritesAndDeletes) {
     EXPECT_EQ(*restored_updated, updated);
 
     ASSERT_TRUE(kasumi::runtime::vault::delete_vault(key_path));
-    EXPECT_EQ(kasumi::runtime::vault::read_vault(key_path).error().code,
+    const auto after_delete = kasumi::runtime::vault::read_vault(key_path);
+    ASSERT_FALSE(after_delete.has_value());
+    EXPECT_EQ(after_delete.error().code,
               kasumi::runtime::ErrorCode::KeyNotFound);
     EXPECT_TRUE(kasumi::runtime::vault::delete_vault(key_path));
 }
