@@ -1831,6 +1831,7 @@ clone_profile(const ExecutionEnvironment& environment,
 
     auto cloned_profile = *source_it;
     cloned_profile.name = std::string(destination_profile_name);
+    cloned_profile.paused = true;
     loaded->profiles.push_back(std::move(cloned_profile));
 
     std::expected<void, runtime::Error> save_res;
@@ -2585,6 +2586,16 @@ test_profile_connection(const ExecutionEnvironment& environment,
         "authenticated with this profile's key (verify password/salt or "
         "remote_dir)";
     return report;
+}
+
+std::expected<void, ProfileError> check_os_vault_available() {
+    auto res = runtime::vault::check_vault_available();
+    if (!res) {
+        return std::unexpected(
+            ProfileError{.code = ProfileErrorCode::CredentialFailure,
+                         .detail = std::move(res.error().detail)});
+    }
+    return {};
 }
 
 } // namespace kasumi::application

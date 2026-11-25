@@ -421,9 +421,9 @@ TEST_F(CliInterfaceTest, JsonOutputsStructuredSchemaLockBusyAndErrorCodes) {
               std::string::npos);
 
     const auto diag_quiet = run({"kasumi", "diagnostics", "--quiet"});
-    EXPECT_EQ(diag_quiet.code, 0);
-    EXPECT_TRUE(diag_quiet.out.empty());
-    EXPECT_TRUE(diag_quiet.err.empty());
+    EXPECT_EQ(diag_quiet.code, 0) << diag_quiet.err;
+    EXPECT_TRUE(diag_quiet.out.empty()) << diag_quiet.out;
+    EXPECT_TRUE(diag_quiet.err.empty()) << diag_quiet.err;
 }
 
 TEST_F(CliInterfaceTest,

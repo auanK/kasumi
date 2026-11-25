@@ -717,6 +717,16 @@ TEST(ApplicationProfileTest, CloneInitializesIndependentDatabaseSchema) {
     ASSERT_TRUE(clone_profile(env.environment, "source", "destination"));
     EXPECT_TRUE(kasumi::state_storage::validate(
         env.resolve("destination").database_path));
+
+    const auto profiles = list_profiles(env.environment);
+    ASSERT_TRUE(profiles.has_value());
+    const auto src = std::ranges::find(*profiles, "source", &Profile::name);
+    const auto dst =
+        std::ranges::find(*profiles, "destination", &Profile::name);
+    ASSERT_NE(src, profiles->end());
+    ASSERT_NE(dst, profiles->end());
+    EXPECT_FALSE(src->paused);
+    EXPECT_TRUE(dst->paused);
 }
 
 TEST(ApplicationProfileTest, CloneRollbackPreservesSubstitutedKey) {

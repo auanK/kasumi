@@ -109,7 +109,7 @@ jobs:
           trap 'rm -rf "$tmp"' EXIT
           mkdir -p "$tmp/local" "$tmp/storage" "$tmp/cfg"
           printf 'x' > "$tmp/local/item.txt"
-          vault_err="$(printf "n\nsmoke\n%s\n%s\n\nq\n" "$tmp/local" "$tmp/storage" | \
+          vault_err="$(printf "n\nsmoke\n%s\n%s\n\n:back\nq\n" "$tmp/local" "$tmp/storage" | \
             env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR="$tmp/no-bus" XDG_CONFIG_HOME="$tmp/cfg" \
             KASUMI_LANG=en KASUMI_PASSWORD="smoke-password-123" KASUMI_PASSWORD2="smoke-salt-value-16" \
             ./build/kasumi config 2>&1)"

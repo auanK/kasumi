@@ -74,6 +74,9 @@ enum class ProfileField {
 std::expected<void, ProfileError>
 validate_profile_field(ProfileField field, std::string_view value);
 
+// Checks whether the OS credential vault is available in the current session.
+std::expected<void, ProfileError> check_os_vault_available();
+
 // Lists configured profiles.
 std::expected<std::vector<Profile>, ProfileError>
 list_profiles(const ExecutionEnvironment& environment);

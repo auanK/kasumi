@@ -458,7 +458,7 @@
     "invalid_option": "Opção inválida.",
     "config_read_failed": "Falha ao ler config: {}",
     "prompt_source_profile": "Perfil de origem: ",
-    "profile_cloned": "Perfil \"{}\" criado a partir de \"{}\".",
+    "profile_cloned": "Perfil \"{}\" criado a partir de \"{}\" (pausado; edite os caminhos e rode 'kasumi resume' quando estiver pronto).",
     "profile_list_header": "Nome                     Estado           Último sync",
     "profile_details": "Perfil: {}\nLocal: {}\nDestino: {}\nEstado: {}\nArmazenamento da chave: {}\nProfundidade do histórico: {}\nIdade do histórico: {} h",
     "show_accepted_commit": "\nEstado aceito:\n  Commit: {} (altura {})\n  Commit criado em: {}\n  Origem do commit: {}\n  Publicado por: {}\n  Aceito localmente em: {}",

@@ -785,6 +785,14 @@ int run_profile_command(const application::ExecutionEnvironment& environment,
                 return present_json_credentials_required(
                     cmd, invocation.profile_name, msg, elapsed());
             }
+            const auto requested_storage = invocation.key_storage.value_or(
+                application::KeyStorage::Vault);
+            if (requested_storage == application::KeyStorage::Vault) {
+                if (const auto avail = application::check_os_vault_available();
+                    !avail) {
+                    return fail_error(avail.error());
+                }
+            }
             application::ProfileCredentials creds =
                 env_creds ? *env_creds
                           : application::ProfileCredentials{
@@ -971,6 +979,13 @@ int run_profile_command(const application::ExecutionEnvironment& environment,
             }
             const auto target_storage =
                 invocation.key_storage.value_or(it->key_storage);
+            if (target_storage == application::KeyStorage::Vault &&
+                target_storage != it->key_storage) {
+                if (const auto avail = application::check_os_vault_available();
+                    !avail) {
+                    return fail_error(avail.error());
+                }
+            }
             const bool needs_key =
                 target_storage != application::KeyStorage::Memory &&
                 target_storage != it->key_storage;
@@ -1469,6 +1484,12 @@ int run_profile_key(const application::ExecutionEnvironment& environment,
             .detail = i18n::format(i18n::Key::WizardKeyStorageMemoryNoPersist,
                                    profile_name)});
     }
+    if (it->key_storage == application::KeyStorage::Vault) {
+        if (const auto avail = application::check_os_vault_available();
+            !avail) {
+            return fail_error(avail.error());
+        }
+    }
     const auto env_creds = read_profile_env_credentials();
     if (!env_creds.has_value() && json) {
         const auto msg = i18n::tr(i18n::Key::WizardProfileCredentialsRequired);
@@ -1567,22 +1588,36 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
         std::string mode;
         while (prompt_form_line(prompt, mode)) {
             const auto first = mode.find_first_not_of(" \t\r\n");
+            std::optional<application::KeyStorage> chosen;
             if (first == std::string::npos) {
-                return default_mode;
-            }
-            const auto last = mode.find_last_not_of(" \t\r\n");
-            mode = mode.substr(first, last - first + 1);
-            std::ranges::transform(mode, mode.begin(), [](unsigned char c) {
-                return static_cast<char>(std::tolower(c));
-            });
-            for (const auto storage : {application::KeyStorage::Vault,
-                                       application::KeyStorage::File,
-                                       application::KeyStorage::Memory}) {
-                if (mode == application::to_string(storage)) {
-                    return storage;
+                chosen = default_mode;
+            } else {
+                const auto last = mode.find_last_not_of(" \t\r\n");
+                mode = mode.substr(first, last - first + 1);
+                std::ranges::transform(mode, mode.begin(), [](unsigned char c) {
+                    return static_cast<char>(std::tolower(c));
+                });
+                for (const auto storage : {application::KeyStorage::Vault,
+                                           application::KeyStorage::File,
+                                           application::KeyStorage::Memory}) {
+                    if (mode == application::to_string(storage)) {
+                        chosen = storage;
+                        break;
+                    }
                 }
             }
-            print_error_line(i18n::tr(i18n::Key::WizardInvalidKeyStorage));
+            if (!chosen) {
+                print_error_line(i18n::tr(i18n::Key::WizardInvalidKeyStorage));
+                continue;
+            }
+            if (*chosen == application::KeyStorage::Vault) {
+                if (const auto avail = application::check_os_vault_available();
+                    !avail) {
+                    print_error_line(avail.error().detail);
+                    continue;
+                }
+            }
+            return *chosen;
         }
         return std::nullopt;
     };
@@ -1938,6 +1973,13 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 print_error_line(i18n::format(
                     i18n::Key::WizardKeyStorageMemoryNoPersist, target));
                 continue;
+            }
+            if (selected->key_storage == application::KeyStorage::Vault) {
+                if (const auto avail = application::check_os_vault_available();
+                    !avail) {
+                    print_error_line(avail.error().detail);
+                    continue;
+                }
             }
             application::ProfileCredentials creds =
                 credentials::read_password_pair();

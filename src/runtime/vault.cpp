@@ -1482,6 +1482,23 @@ bool linux_backend_available(LinuxBackend backend) noexcept {
 
 } // namespace
 
+std::expected<void, runtime::Error> check_vault_available() {
+#if defined(_WIN32)
+    return {};
+#elif defined(__linux__)
+    const std::lock_guard<std::mutex> lock{linux_vault_mutex()};
+    std::string reason;
+    const auto backend = select_linux_backend(reason);
+    if (backend == LinuxBackend::None) {
+        return fail(ErrorCode::KeyWriteFailure, std::move(reason));
+    }
+    return {};
+#else
+    return fail(ErrorCode::KeyWriteFailure,
+                "OS credential vault is not supported on this platform yet");
+#endif
+}
+
 std::expected<KeyBytes, runtime::Error>
 read_vault(const std::filesystem::path& key_path) {
 #if defined(_WIN32)
@@ -1490,8 +1507,9 @@ read_vault(const std::filesystem::path& key_path) {
     DWORD error = credential_call([&] {
         return CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &cred);
     });
-    if (error == ERROR_NOT_FOUND) {
-        Sleep(15);
+    for (unsigned attempt = 0; error == ERROR_NOT_FOUND && attempt < 4U;
+         ++attempt) {
+        Sleep(10UL << attempt);
         error = credential_call([&] {
             return CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &cred);
         });
@@ -1641,14 +1659,32 @@ std::expected<void, runtime::Error>
 delete_vault(const std::filesystem::path& key_path) {
 #if defined(_WIN32)
     const auto target = vault_target_name(key_path);
-    const auto error = credential_call([&] {
-        return CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0);
-    });
-    if (error != ERROR_SUCCESS && error != ERROR_NOT_FOUND) {
-        return fail(ErrorCode::IoFailure,
-                    credential_error("delete key", error));
+    for (unsigned attempt = 0; attempt < 6U; ++attempt) {
+        const auto error = credential_call([&] {
+            return CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0);
+        });
+        if (error != ERROR_SUCCESS && error != ERROR_NOT_FOUND) {
+            return fail(ErrorCode::IoFailure,
+                        credential_error("delete key", error));
+        }
+        PCREDENTIALW verify = nullptr;
+        if (!CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &verify)) {
+            if (GetLastError() == ERROR_NOT_FOUND) {
+                return {};
+            }
+        } else {
+            if (verify->CredentialBlob != nullptr &&
+                verify->CredentialBlobSize > 0) {
+                crypto_wipe(verify->CredentialBlob, verify->CredentialBlobSize);
+            }
+            CredFree(verify);
+        }
+        if (attempt < 5U) {
+            Sleep(10UL << attempt);
+        }
     }
-    return {};
+    return fail(ErrorCode::IoFailure,
+                "failed to verify deleted key in Windows Credential Manager");
 #elif defined(__linux__)
     const std::lock_guard<std::mutex> lock{linux_vault_mutex()};
     std::string reason;
