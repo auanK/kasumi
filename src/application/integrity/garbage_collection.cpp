@@ -597,11 +597,11 @@ observe(transport::Transport& storage,
         if (!commit.valid) {
             continue;
         }
-        const std::optional<std::int64_t> expired_created_at =
-            commit.reachable
-                ? std::nullopt
-                : (commit.tree ? std::optional{commit.tree->created_at}
-                               : std::optional<std::int64_t>{0});
+        std::optional<std::int64_t> expired_created_at;
+        if (!commit.reachable) {
+            expired_created_at =
+                commit.tree ? commit.tree->created_at : std::int64_t{0};
+        }
         for (const auto& variant : commit.variants) {
             if (variant.identifier.empty() ||
                 variant.state != history_storage::detail::VariantState::Valid ||

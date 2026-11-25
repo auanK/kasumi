@@ -912,8 +912,10 @@ scan_result(const std::filesystem::path& local_root,
                     continue;
                 }
                 if (ignored) {
-                    const auto bulk_id =
-                        entry_type.regular_file ? entry.identity : std::nullopt;
+                    std::optional<cache::FileIdentity> bulk_id;
+                    if (entry_type.regular_file) {
+                        bulk_id = entry.identity;
+                    }
                     auto ignored_result =
                         handle_ignored_entry(entry_path,
                                              relative,

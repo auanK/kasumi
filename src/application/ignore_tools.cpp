@@ -84,11 +84,10 @@ normalize_check_path(const std::filesystem::path& local_dir,
     const auto input_path = platform::path::from_utf8(text);
     std::filesystem::path rel;
     if (input_path.is_absolute()) {
-        std::error_code ec;
         const auto lex_local = local_dir.lexically_normal();
         const auto lex_input = input_path.lexically_normal();
         rel = lex_input.lexically_relative(lex_local);
-        if (ec || rel.empty()) {
+        if (rel.empty()) {
             return fail_ignore(
                 ProfileErrorCode::ConfigFailure,
                 "absolute path must reside inside the profile local_dir");
@@ -278,7 +277,7 @@ init_profile_ignore(const ExecutionEnvironment& environment,
         return fail_ignore(ProfileErrorCode::StorageFailure,
                            ".kasumiignore must be a regular non-symlink file");
     }
-    if (exists && !force) {
+    if (exists && !force && !dry_run) {
         return fail_ignore(
             ProfileErrorCode::AlreadyExists,
             ".kasumiignore already exists; pass --force to overwrite");

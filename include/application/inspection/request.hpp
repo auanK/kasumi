@@ -9,6 +9,10 @@
 #include <stop_token>
 #include <string>
 
+namespace kasumi::transport {
+struct Transport;
+}
+
 namespace kasumi::application {
 
 // Read-only inspection query provided by Application.
@@ -34,6 +38,11 @@ enum class InspectionOperation {
     RemoteRestore,
 };
 
+struct DownloadSlice {
+    std::uint64_t offset;
+    std::uint64_t length;
+};
+
 struct InspectionRequest {
     InspectionOperation operation = InspectionOperation::RemoteHeads;
     std::string profile_name;
@@ -46,6 +55,8 @@ struct InspectionRequest {
     bool dry_run = false;
     std::optional<std::string> bandwidth_limit = std::nullopt;
     std::optional<std::uint32_t> transfer_concurrency = std::nullopt;
+    std::optional<DownloadSlice> download_slice = std::nullopt;
+    bool include_space_usage = false;
 };
 
 struct InspectionInput {
@@ -54,6 +65,8 @@ struct InspectionInput {
     ExecutionEnvironment environment;
     ProgressCallback on_progress{};
     std::stop_token stop_token{};
+    // Optional transport owned exclusively by the caller for this profile.
+    transport::Transport* transport_cache = nullptr;
 };
 
 } // namespace kasumi::application
