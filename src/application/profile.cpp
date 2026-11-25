@@ -1831,6 +1831,7 @@ clone_profile(const ExecutionEnvironment& environment,
 
     auto cloned_profile = *source_it;
     cloned_profile.name = std::string(destination_profile_name);
+    cloned_profile.paused = true;
     loaded->profiles.push_back(std::move(cloned_profile));
 
     std::expected<void, runtime::Error> save_res;
