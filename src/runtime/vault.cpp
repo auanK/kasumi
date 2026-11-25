@@ -1507,8 +1507,9 @@ read_vault(const std::filesystem::path& key_path) {
     DWORD error = credential_call([&] {
         return CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &cred);
     });
-    if (error == ERROR_NOT_FOUND) {
-        Sleep(15);
+    for (unsigned attempt = 0; error == ERROR_NOT_FOUND && attempt < 4U;
+         ++attempt) {
+        Sleep(10UL << attempt);
         error = credential_call([&] {
             return CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &cred);
         });
