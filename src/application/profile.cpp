@@ -2587,4 +2587,14 @@ test_profile_connection(const ExecutionEnvironment& environment,
     return report;
 }
 
+std::expected<void, ProfileError> check_os_vault_available() {
+    auto res = runtime::vault::check_vault_available();
+    if (!res) {
+        return std::unexpected(
+            ProfileError{.code = ProfileErrorCode::CredentialFailure,
+                         .detail = std::move(res.error().detail)});
+    }
+    return {};
+}
+
 } // namespace kasumi::application

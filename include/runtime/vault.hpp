@@ -45,6 +45,9 @@ write_new(const std::filesystem::path& path,
           const KeyBytes& clear_key,
           platform::private_storage::FileIdentity& identity);
 
+// Checks whether the OS credential vault is available in the current session.
+std::expected<void, runtime::Error> check_vault_available();
+
 // Reads and unmasks the key from the OS credential vault.
 std::expected<KeyBytes, runtime::Error>
 read_vault(const std::filesystem::path& key_path);

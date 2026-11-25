@@ -1482,6 +1482,23 @@ bool linux_backend_available(LinuxBackend backend) noexcept {
 
 } // namespace
 
+std::expected<void, runtime::Error> check_vault_available() {
+#if defined(_WIN32)
+    return {};
+#elif defined(__linux__)
+    const std::lock_guard<std::mutex> lock{linux_vault_mutex()};
+    std::string reason;
+    const auto backend = select_linux_backend(reason);
+    if (backend == LinuxBackend::None) {
+        return fail(ErrorCode::KeyWriteFailure, std::move(reason));
+    }
+    return {};
+#else
+    return fail(ErrorCode::KeyWriteFailure,
+                "OS credential vault is not supported on this platform yet");
+#endif
+}
+
 std::expected<KeyBytes, runtime::Error>
 read_vault(const std::filesystem::path& key_path) {
 #if defined(_WIN32)

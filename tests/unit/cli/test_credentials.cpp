@@ -503,3 +503,26 @@ TEST(CliWizardTest, ChangesProfileKeyStorageAndCleansPreviousKey) {
                                                                "storage_demo"),
               kasumi::application::ProfileLocalState::Initialized);
 }
+
+#if defined(__linux__)
+TEST(CliWizardTest, RejectsUnavailableOsVaultBeforePromptingForPassword) {
+    auto workspace = kasumi::test::make_temp_workspace("cli-no-vault");
+    const kasumi::application::ExecutionEnvironment environment{
+        kasumi::test::workspace_path(workspace, "app")};
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto remote = kasumi::test::workspace_path(workspace, "remote");
+    ASSERT_TRUE(std::filesystem::create_directory(local));
+
+    auto no_dbus = kasumi::test::scoped_environment_variable(
+        "DBUS_SESSION_BUS_ADDRESS", "");
+    const auto output = run_wizard_out(
+        environment,
+        "n\nheadless\n" + local.string() + "\n" + remote.string() +
+            "\n\n:back\nq\n");
+    EXPECT_NE(output.find("no active D-Bus session bus"), std::string::npos);
+    EXPECT_EQ(output.find("Password:"), std::string::npos);
+    const auto profiles = kasumi::application::list_profiles(environment);
+    ASSERT_TRUE(profiles.has_value());
+    EXPECT_TRUE(profiles->empty());
+}
+#endif
