@@ -9,7 +9,7 @@
 
 **Client-side encrypted, multi-master bidirectional file synchronization over local paths, network shares, or [rclone](https://rclone.org/)-compatible shared storage — with no dedicated server.**
 
-Written in C++23 for **Linux and Windows**, Kasumi lets every machine synchronize independently through passive shared storage — no dedicated server, background daemon, or simultaneous online connection required.
+Written in C++23 for **Linux and Windows**, Kasumi lets every machine synchronize independently through passive shared storage — with no dedicated server or simultaneous online connection required, either on demand from the CLI or continuously via its built-in background daemon.
 
 ```text
 Machine A ───┐
@@ -28,14 +28,14 @@ Machine C ───┘
 | Capability | **Kasumi** | **Syncthing** | **`rclone bisync`** | **`restic` / `borg`** |
 |---|---|---|---|---|
 | **Primary model** | Multi-master bidirectional sync | Multi-master P2P sync | 2-path bidirectional sync | Snapshot backup & restore |
-| **Syncs when devices are offline at different times** | Yes (passive shared storage) | No (peers must be online together) | Yes (rclone remotes) | Yes (passive storage) |
+| **Syncs when devices are offline at different times** | Yes (passive shared storage) | No (requires an online peer / always-on node) | Yes (rclone remotes) | Yes (passive storage) |
 | **Multi-device (`3+` clients) reconciliation** | Yes (immutable Commit DAG) | Yes (P2P sync protocol) | Not designed for it (pairwise state) | N/A (backup snapshots) |
 | **Built-in client-side AEAD encryption** | Yes (XChaCha20-Poly1305) | TLS in transit; optional untrusted device | Optional via separate `crypt` remote | Yes |
 | **Content-defined chunking & deduplication** | Yes (FastCDC + Micro-Packs) | Block-level delta transfer | No | Yes |
 | **Crash-safe transaction recovery** | Yes (encrypted local journal) | Continuous daemon reconciliation | No (`--resync` after interrupted state) | Append-only repo transactions |
-| **Background daemon required** | No (on-demand / cron) | Yes | No (on-demand / cron) | No (on-demand / cron) |
+| **Execution mode** | Optional (real-time daemon or on-demand CLI) | Required (continuous daemon) | On-demand / external scheduler | On-demand / external scheduler |
 
-*Each tool excels at its own model — Kasumi specifically targets encrypted, on-demand multi-device synchronization over passive storage without a dedicated server.*
+*Each tool excels at its own model — Kasumi specifically targets encrypted multi-device synchronization over passive storage without a dedicated server, either on demand or via its built-in real-time daemon.*
 
 ---
 
@@ -52,14 +52,30 @@ Machine C ───┘
 
 ## Quick Start
 
-1. If syncing to cloud storage, configure a remote in `rclone` first (`rclone config`, e.g. `gdrive`).
-2. Create a profile in Kasumi (choose the local folder, remote path such as `gdrive:notes`, and password + salt):
+1. **Set up your shared storage remote** — for cloud storage (Google Drive, OneDrive, S3, Dropbox, SFTP, etc.), configure a remote in `rclone` first (skip this step if syncing over a local folder or mounted SMB/NFS share):
+
+```bash
+rclone config            # create a remote (e.g. named "gdrive")
+rclone listremotes       # confirm it is listed (e.g. gdrive:)
+```
+
+2. **Create your first profile** linking a local folder to that remote:
 
 ```bash
 kasumi config
+# Choose [n] New -> name: work
+# Local path:  ~/Work (or D:/Work)
+# Remote path: gdrive:kasumi/work (or a local/SMB path like /mnt/share/kasumi/work)
+# Then set your Password and Password Salt
 ```
 
-3. Start continuous background sync and inspect status or live logs at any time:
+3. **Run your first sync** to initialize the encrypted vault on the remote and verify everything works:
+
+```bash
+kasumi sync work
+```
+
+4. *(Optional)* **Enable continuous real-time sync** in the background and inspect status or live logs at any time:
 
 ```bash
 kasumi start --autostart
@@ -72,13 +88,13 @@ $ kasumi
 Daemon: running (autostart on)
 
 work [Ready]
-  Last sync:   2026-11-24 19:21 -03:00 (no changes)
-  Last change: 2026-11-24 18:56 -03:00 by desktop-1
+  Last sync:   2026-04-15 14:20 +00:00 (no changes)
+  Last change: 2026-04-15 13:55 +00:00 by desktop-1
 
 Run 'kasumi --full' for detailed daemon metrics and paths.
 ```
 
-On a second machine, run `kasumi config` with the same shared storage and **exact same Password and Password Salt**, then run `kasumi start --autostart` (or run a one-shot `kasumi sync work`). See [Getting Started](docs/getting-started.md) for the complete two-machine walkthrough and download verification steps.
+On a second machine, run `kasumi config` with the same shared storage and **exact same Password and Password Salt**, run `kasumi sync work`, and optionally enable the background daemon with `kasumi start --autostart`. See [Getting Started](docs/getting-started.md) for the complete two-machine walkthrough and download verification steps.
 
 ---
 
@@ -121,9 +137,9 @@ cmake --preset default && cmake --build --preset default
 | `kasumi diagnostics [<profile>]` | Inspect local environment, `rclone >= v1.60.0`, disk space, and profile health |
 | `kasumi remote <subcommand> <profile>` | Read-only inspection & restore (`summary`, `heads`, `tree`, `log`, `stat`/`get`/`restore`, `writers`) |
 
-Advanced maintenance & scripting commands (`profile`, `daemon`, `key`, `ignore`, `fsck`, `repack`, `gc`, `resolve-missing`, `completion`) are documented in `kasumi --help --all` and [Configuration and Usage](docs/configuration-and-usage.md).
+Advanced maintenance & scripting commands (`profile`, `daemon`, `key`, `ignore`, `fsck`, `repack`, `gc`, `resolve-missing`, `completion`) are documented in `kasumi help --all` (or `kasumi --help --all`) and [Configuration and Usage](docs/configuration-and-usage.md).
 
-Run `kasumi --help`, `kasumi --help --all`, or `kasumi <command> --help` for full syntax and options.
+Run `kasumi help`, `kasumi help --all`, `kasumi help <command>` (or `--help`), and `kasumi version` (or `--version`) for syntax, options, and version info.
 
 ---
 
