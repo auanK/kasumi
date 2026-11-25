@@ -355,6 +355,21 @@ bool desktop_prefers_kde() noexcept {
     return false;
 }
 
+bool can_activate_kwallet_service() noexcept {
+    // kwalletd5/kwalletd6 are Qt GUI applications (QApplication). Triggering
+    // D-Bus activation before a graphical session exports DISPLAY or
+    // WAYLAND_DISPLAY causes Qt platform integration to abort (SIGABRT) during
+    // early systemd --user boot. Already-running daemons are still discovered
+    // via NameHasOwner regardless of display variables.
+    for (const char* var : {"WAYLAND_DISPLAY", "DISPLAY", "QT_QPA_PLATFORM"}) {
+        const char* val = std::getenv(var);
+        if (val != nullptr && *val != '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
 struct SecretApi {
     struct GError {
         std::uint32_t domain;
@@ -839,11 +854,14 @@ open_kwallet_session(const DbusApi& dbus,
             queued[i] = true;
         }
     }
-    for (std::size_t i = 0; i < kKWalletEndpoints.size(); ++i) {
-        if (!queued[i] &&
-            dbus_name_activatable(dbus, conn, kKWalletEndpoints[i].service)) {
-            candidates.push_back(kKWalletEndpoints[i]);
-            queued[i] = true;
+    if (can_activate_kwallet_service()) {
+        for (std::size_t i = 0; i < kKWalletEndpoints.size(); ++i) {
+            if (!queued[i] &&
+                dbus_name_activatable(
+                    dbus, conn, kKWalletEndpoints[i].service)) {
+                candidates.push_back(kKWalletEndpoints[i]);
+                queued[i] = true;
+            }
         }
     }
     if (candidates.empty()) {
@@ -1402,10 +1420,12 @@ LinuxBackend select_linux_backend(std::string& reason, bool* explicit_override =
         secret_loaded &&
         dbus_name_activatable(dbus, conn.conn, "org.freedesktop.secrets");
     bool kwallet_act = false;
-    for (const auto& ep : kKWalletEndpoints) {
-        if (dbus_name_activatable(dbus, conn.conn, ep.service)) {
-            kwallet_act = true;
-            break;
+    if (can_activate_kwallet_service()) {
+        for (const auto& ep : kKWalletEndpoints) {
+            if (dbus_name_activatable(dbus, conn.conn, ep.service)) {
+                kwallet_act = true;
+                break;
+            }
         }
     }
     if (prefer_kde) {
@@ -1447,9 +1467,11 @@ bool linux_backend_available(LinuxBackend backend) noexcept {
                (dbus_name_has_owner(dbus, conn.conn, "org.freedesktop.secrets") ||
                 dbus_name_activatable(dbus, conn.conn, "org.freedesktop.secrets"));
     }
+    const bool can_activate_kwallet = can_activate_kwallet_service();
     for (const auto& ep : kKWalletEndpoints) {
         if (dbus_name_has_owner(dbus, conn.conn, ep.service) ||
-            dbus_name_activatable(dbus, conn.conn, ep.service)) {
+            (can_activate_kwallet &&
+             dbus_name_activatable(dbus, conn.conn, ep.service))) {
             return true;
         }
     }
