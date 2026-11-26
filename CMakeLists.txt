@@ -36,6 +36,12 @@ option(
     ON
 )
 
+option(
+    KASUMI_ENABLE_WEBUI
+    "Embed built Web UI static assets from web/dist into the daemon binary"
+    ON
+)
+
 add_library(kasumi_warnings INTERFACE)
 if(WIN32)
     add_compile_definitions(NOMINMAX _CRT_SECURE_NO_WARNINGS)
@@ -441,6 +447,7 @@ add_library(kasumi_platform STATIC
     src/platform/directory_watcher.cpp
     src/platform/durability.cpp
     src/platform/file_fingerprint.cpp
+    src/platform/folder_icon.cpp
     src/platform/machine.cpp
     src/platform/metadata.cpp
     src/platform/perf_trace.cpp
@@ -474,6 +481,11 @@ if(WIN32)
         PRIVATE
         advapi32
         bcrypt
+        gdi32
+        ole32
+        shell32
+        user32
+        windowscodecs
     )
 endif()
 
@@ -541,6 +553,52 @@ if(KASUMI_FETCHCONTENT_CACHE_DIR)
 endif()
 set(CMAKE_WARN_DEPRECATED ON)
 
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(NOT Python3_Interpreter_FOUND)
+    find_program(Python3_EXECUTABLE NAMES python3 python py REQUIRED)
+endif()
+
+set(WEBUI_GENERATOR "${PROJECT_SOURCE_DIR}/scripts/generate_webui_embedded.py")
+set(WEBUI_DIST_DIR "${PROJECT_SOURCE_DIR}/web/dist")
+set(WEBUI_EMBEDDED_HEADER "${PROJECT_BINARY_DIR}/generated/application/webui_embedded.hpp")
+set(WEBUI_ENABLED_FLAG "0")
+if(KASUMI_ENABLE_WEBUI)
+    set(WEBUI_ENABLED_FLAG "1")
+endif()
+
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${WEBUI_GENERATOR}"
+)
+if(EXISTS "${WEBUI_DIST_DIR}/index.html")
+    file(GLOB_RECURSE WEBUI_DIST_FILES CONFIGURE_DEPENDS "${WEBUI_DIST_DIR}/*")
+else()
+    set(WEBUI_DIST_FILES "")
+endif()
+
+execute_process(
+    COMMAND "${Python3_EXECUTABLE}" "${WEBUI_GENERATOR}"
+            "--dist" "${WEBUI_DIST_DIR}"
+            "--output" "${WEBUI_EMBEDDED_HEADER}"
+            "--enabled" "${WEBUI_ENABLED_FLAG}"
+    RESULT_VARIABLE WEBUI_GEN_RESULT
+)
+if(NOT WEBUI_GEN_RESULT EQUAL 0)
+    message(FATAL_ERROR "Failed to generate ${WEBUI_EMBEDDED_HEADER}")
+endif()
+
+add_custom_command(
+    OUTPUT "${WEBUI_EMBEDDED_HEADER}"
+    COMMAND "${Python3_EXECUTABLE}" "${WEBUI_GENERATOR}"
+            "--dist" "${WEBUI_DIST_DIR}"
+            "--output" "${WEBUI_EMBEDDED_HEADER}"
+            "--enabled" "${WEBUI_ENABLED_FLAG}"
+    DEPENDS
+        "${WEBUI_GENERATOR}"
+        ${WEBUI_DIST_FILES}
+    COMMENT "Generating embedded Web UI header"
+    VERBATIM
+)
+
 add_library(kasumi_application STATIC
     src/application/history_storage/activity.cpp
     src/application/history_storage/epoch.cpp
@@ -575,7 +633,20 @@ add_library(kasumi_application STATIC
     src/application/integrity/garbage_collection.cpp
     src/application/integrity/repack_planner.cpp
     src/application/integrity/repack.cpp
+    src/application/daemon/web_remote.cpp
+    src/application/daemon/web_local.cpp
+    src/application/daemon/web_jobs.cpp
+    src/application/daemon/web_icons.cpp
+    src/application/daemon/web_profiles.cpp
+    src/application/daemon/web_auth.cpp
+    src/application/daemon/web_static.cpp
+    src/application/daemon/client.cpp
     src/application/daemon/engine.cpp
+    src/application/daemon/error_classification.cpp
+    src/application/daemon/event_log.cpp
+    src/application/daemon/profile_state.cpp
+    src/application/daemon/scheduler.cpp
+    src/application/daemon/server.cpp
     src/application/daemon/fast_poll.cpp
     src/application/daemon/ipc_security.cpp
     src/application/inspection/inspect.cpp
@@ -592,6 +663,7 @@ add_library(kasumi_application STATIC
     src/application/use_cases/plan.cpp
     src/application/use_cases/sync.cpp
     src/application/use_cases/resolve_missing.cpp
+    "${WEBUI_EMBEDDED_HEADER}"
 )
 
 target_include_directories(
@@ -600,6 +672,7 @@ target_include_directories(
     include
     PRIVATE
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
+    ${PROJECT_BINARY_DIR}/generated
 )
 
 target_compile_definitions(kasumi_application PRIVATE "KASUMI_VERSION=\"${PROJECT_VERSION}\"")
@@ -644,14 +717,11 @@ target_link_libraries(kasumi_runtime
     kasumi_hardening
 )
 if(WIN32)
+    target_sources(kasumi_runtime PRIVATE src/runtime/vault_windows.cpp)
     target_link_libraries(kasumi_runtime PRIVATE advapi32)
-elseif(UNIX AND NOT APPLE)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(kasumi_runtime PRIVATE src/runtime/vault_linux.cpp)
     target_link_libraries(kasumi_runtime PRIVATE ${CMAKE_DL_LIBS})
-endif()
-
-find_package(Python3 COMPONENTS Interpreter QUIET)
-if(NOT Python3_Interpreter_FOUND)
-    find_program(Python3_EXECUTABLE NAMES python3 python py REQUIRED)
 endif()
 
 set(I18N_GENERATOR "${PROJECT_SOURCE_DIR}/scripts/generate_i18n_embedded.py")
@@ -726,6 +796,9 @@ target_link_libraries(
     kasumi_release_optimizations
     kasumi_hardening
 )
+if(WIN32)
+    target_link_libraries(kasumi_cli PRIVATE shell32)
+endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
     target_link_libraries(kasumi_cli PRIVATE stdc++exp)
 endif()
