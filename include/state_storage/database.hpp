@@ -137,6 +137,28 @@ struct LocalActivitySnapshot {
     std::vector<CachedRemoteActivity> cached_remote_activities;
 };
 
+struct LocalStateAndActivitySummary {
+    bool has_state = false;
+    bool has_pending_materializations = false;
+    LocalActivitySnapshot activity;
+};
+
+struct LocalMappedEntry {
+    std::string path;
+    bool is_directory = false;
+    std::uint64_t size = 0;
+    std::int64_t mtime = 0;
+    std::string hash_hex;
+};
+
+struct LocalTreeSnapshot {
+    bool has_state = false;
+    std::uint64_t height = 0;
+    std::string commit_id;
+    std::vector<LocalMappedEntry> entries;
+    std::optional<LocalActivitySnapshot> activity;
+};
+
 // Creates or validates the canonical v2 database schema.
 bool initialize(const std::filesystem::path& database_path);
 
@@ -191,6 +213,22 @@ bool save_remote_activity_cache(const std::filesystem::path& database_path,
 // cached remote activities read-only (returns empty when DB is absent).
 std::expected<LocalActivitySnapshot, std::string>
 load_local_activity(const std::filesystem::path& database_path);
+
+// Loads lightweight state existence flags and local activity in a single
+// read-only SQLite transaction without loading the full nodes tree.
+std::expected<LocalStateAndActivitySummary, std::string>
+load_state_and_activity_summary(const std::filesystem::path& database_path);
+
+// Loads non-pending tree entries, state version, and local activity in a single
+// read-only SQLite transaction without decoding storage_manifest.
+std::expected<LocalTreeSnapshot, std::string>
+load_local_tree_snapshot(const std::filesystem::path& database_path);
+
+// Looks up a single non-pending mapped entry by logical path without loading
+// the full tree or storage_manifest.
+std::expected<std::optional<LocalMappedEntry>, std::string>
+lookup_mapped_path(const std::filesystem::path& database_path,
+                   std::string_view logical_path);
 
 } // namespace kasumi::state_storage
 

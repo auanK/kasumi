@@ -1466,6 +1466,100 @@ bool is_reparse_or_symlink(const std::filesystem::path& path) noexcept {
 #endif
 }
 
+namespace {
+bool browse_relative_path(const std::filesystem::path& relative) {
+    if (relative.has_root_path())
+        return false;
+    return std::ranges::all_of(relative, [](const auto& part) {
+        return !part.empty() && part != "." && part != ".." &&
+               !part.has_root_path();
+    });
+}
+
+auto browse_path_error() {
+    return make_stream_error(StreamErrorKind::NotFound,
+                             "local path is unavailable");
+}
+
+#if defined(_WIN32)
+std::expected<std::vector<PrivateHandle>, StreamError>
+hold_browse_directories(std::filesystem::path path,
+                        const std::filesystem::path& relative) {
+    std::vector<PrivateHandle> guards;
+    auto hold = [&] {
+        // Excluding FILE_SHARE_DELETE keeps the validated path stable while
+        // the next component is opened by name.
+        auto handle = CreateFileW(
+            path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr, OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (handle == INVALID_HANDLE_VALUE)
+            return false;
+        PrivateHandle guard{reinterpret_cast<std::intptr_t>(handle)};
+        FILE_ATTRIBUTE_TAG_INFO info{};
+        if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo,
+                                          &info, sizeof(info)) ||
+            !(info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+            (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            return false;
+        guards.push_back(std::move(guard));
+        return true;
+    };
+    if (!hold())
+        return browse_path_error();
+    for (const auto& part : relative) {
+        path /= part;
+        if (!hold())
+            return browse_path_error();
+    }
+    return guards;
+}
+#else
+std::expected<PrivateHandle, StreamError>
+open_browse_directory(const std::filesystem::path& root,
+                      const std::filesystem::path& relative) {
+    constexpr int flags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
+    PrivateHandle fd{::open(root.c_str(), flags)};
+    if (fd == invalid_private_handle)
+        return browse_path_error();
+    for (const auto& part : relative) {
+        PrivateHandle next{::openat(static_cast<int>(fd.value), part.c_str(), flags)};
+        if (next == invalid_private_handle)
+            return browse_path_error();
+        fd = std::move(next);
+    }
+    return fd;
+}
+#endif
+} // namespace
+
+std::expected<RegularFileInput, StreamError>
+open_browsed_file(const std::filesystem::path& root,
+                  const std::filesystem::path& relative) {
+    if (relative.empty() || !browse_relative_path(relative))
+        return browse_path_error();
+#if defined(_WIN32)
+    auto parents = hold_browse_directories(root, relative.parent_path());
+    if (!parents)
+        return std::unexpected(parents.error());
+    return open_regular_file(root / relative);
+#else
+    auto parent = open_browse_directory(root, relative.parent_path());
+    if (!parent)
+        return std::unexpected(parent.error());
+    constexpr int flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK;
+    PrivateHandle file{::openat(static_cast<int>(parent->value),
+                                relative.filename().c_str(), flags)};
+    if (file == invalid_private_handle)
+        return browse_path_error();
+    struct stat st{};
+    if (::fstat(static_cast<int>(file.value), &st) || !S_ISREG(st.st_mode))
+        return browse_path_error();
+    return RegularFileInput{std::move(file),
+                            static_cast<std::uint64_t>(st.st_size)};
+#endif
+}
+
 } // namespace kasumi::platform::private_storage
 
 namespace kasumi::platform::path {

@@ -206,7 +206,6 @@ TEST(VaultTest, ConcurrentOsVaultWritesAndDeletesSucceed) {
 
     std::atomic<std::size_t> ready{0};
     std::atomic<bool> start{false};
-    std::atomic<bool> ok{true};
     std::vector<std::thread> workers;
     workers.reserve(worker_count);
 
@@ -220,19 +219,30 @@ TEST(VaultTest, ConcurrentOsVaultWritesAndDeletesSucceed) {
                 KeyBytes key{};
                 key.fill(
                     static_cast<std::uint8_t>((0x21U + index + iter) & 0xFFU));
-                if (!kasumi::runtime::vault::write_vault(key_paths[index],
-                                                         key)) {
-                    ok.store(false, std::memory_order_release);
+                const auto stored =
+                    kasumi::runtime::vault::write_vault(key_paths[index], key);
+                if (!stored) {
+                    ADD_FAILURE() << "worker " << index << ", iteration " << iter
+                                  << ", write: " << stored.error().detail;
                     return;
                 }
                 const auto restored =
                     kasumi::runtime::vault::read_vault(key_paths[index]);
-                if (!restored || *restored != key) {
-                    ok.store(false, std::memory_order_release);
+                if (!restored) {
+                    ADD_FAILURE() << "worker " << index << ", iteration " << iter
+                                  << ", read: " << restored.error().detail;
                     return;
                 }
-                if (!kasumi::runtime::vault::delete_vault(key_paths[index])) {
-                    ok.store(false, std::memory_order_release);
+                if (*restored != key) {
+                    ADD_FAILURE() << "worker " << index << ", iteration " << iter
+                                  << ", read returned a different key";
+                    return;
+                }
+                const auto deleted =
+                    kasumi::runtime::vault::delete_vault(key_paths[index]);
+                if (!deleted) {
+                    ADD_FAILURE() << "worker " << index << ", iteration " << iter
+                                  << ", delete: " << deleted.error().detail;
                     return;
                 }
             }
@@ -246,8 +256,45 @@ TEST(VaultTest, ConcurrentOsVaultWritesAndDeletesSucceed) {
     for (auto& worker : workers) {
         worker.join();
     }
-    EXPECT_TRUE(ok.load(std::memory_order_acquire));
 }
+
+#if defined(_WIN32)
+TEST(VaultTest, ConcurrentWritesToTheSameCredentialAreVerified) {
+    auto workspace = kasumi::test::make_temp_workspace("vault-one-target");
+    const auto path = kasumi::test::workspace_path(
+        workspace, "app/profiles/shared/key.bin");
+    const ScopedVaultEntry cleanup{path};
+    std::array<KeyBytes, 8> keys{};
+    std::atomic<std::size_t> ready{0};
+    std::atomic<bool> start{false};
+    std::vector<std::thread> workers;
+    workers.reserve(keys.size());
+    for (std::size_t index = 0; index < keys.size(); ++index) {
+        keys[index].fill(static_cast<std::uint8_t>(index + 1U));
+        workers.emplace_back([&, index] {
+            ready.fetch_add(1, std::memory_order_release);
+            start.wait(false, std::memory_order_acquire);
+            for (unsigned iteration = 0; iteration < 4; ++iteration) {
+                const auto written =
+                    kasumi::runtime::vault::write_vault(path, keys[index]);
+                ASSERT_TRUE(written) << written.error().detail;
+            }
+        });
+    }
+
+    while (ready.load(std::memory_order_acquire) < keys.size()) {
+        std::this_thread::yield();
+    }
+    start.store(true, std::memory_order_release);
+    start.notify_all();
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    const auto final = kasumi::runtime::vault::read_vault(path);
+    ASSERT_TRUE(final) << final.error().detail;
+    EXPECT_NE(std::ranges::find(keys, *final), keys.end());
+}
+#endif
 #endif
 
 } // namespace

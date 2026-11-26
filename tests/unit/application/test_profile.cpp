@@ -71,6 +71,7 @@ using kasumi::application::MasterKeyHex;
 using kasumi::application::Profile;
 using kasumi::application::ProfileCredentials;
 using kasumi::application::ProfileErrorCode;
+using kasumi::application::ProfileLocalProblem;
 using kasumi::application::ProfileLocalState;
 using kasumi::test::TempWorkspace;
 
@@ -4237,6 +4238,88 @@ TEST(ApplicationProfileTest, IgnoreInitCheckAndDiagnosticsSyntaxValidation) {
     EXPECT_FALSE(diag->profiles[0].ignore_error_detail.empty());
     EXPECT_FALSE(diag->profiles[0].healthy);
     EXPECT_FALSE(diag->overall_ok);
+}
+
+TEST(ApplicationProfileTest,
+     InspectProfileLocalSummaryMatchesLocalStateAndActivityCoherently) {
+    const auto ws = kasumi::test::make_temp_workspace("app-profile-summary");
+    const ExecutionEnvironment env{kasumi::test::workspace_path(ws, "app")};
+    const auto local_dir = kasumi::test::workspace_path(ws, "local");
+    const auto remote_dir = kasumi::test::workspace_path(ws, "remote");
+    std::filesystem::create_directories(local_dir);
+    std::filesystem::create_directories(remote_dir);
+    ASSERT_TRUE(kasumi::application::create_profile(
+        env,
+        Profile{
+            .name = "sum",
+            .local_dir = local_dir,
+            .remote_dir = kasumi::platform::path::to_utf8(remote_dir),
+            .key_storage = KeyStorage::File,
+        },
+        key()));
+
+    const auto init_sum =
+        kasumi::application::inspect_profile_local_summary(env, "sum");
+    EXPECT_EQ(init_sum.state, ProfileLocalState::Initialized);
+    EXPECT_EQ(init_sum.problem, ProfileLocalProblem::None);
+    EXPECT_TRUE(init_sum.activity.database_present);
+    EXPECT_TRUE(init_sum.activity.recent_executions.empty());
+
+    const auto db_path =
+        env.app_data_dir / "profiles" / "sum" / "db.sqlite";
+    const auto lock_path = env.app_data_dir / "profile-sum.lock";
+    kasumi::Snapshot snap{{
+        {.path = "", .is_directory = true},
+        {.path = "note.txt", .size = 4, .is_directory = false},
+    }};
+    kasumi::finalize_snapshot(snap);
+    ASSERT_TRUE(kasumi::state_storage::save_state(
+        db_path,
+        kasumi::state_storage::StoredState{
+            .tree = snap,
+            .height = 1,
+            .commit_id = std::string(64, 'a'),
+        },
+        kasumi::state_storage::AcceptedCommitMeta{
+            .commit_id = std::string(64, 'a'),
+            .height = 1,
+            .created_at = 1700000100,
+            .origin_operation = kasumi::history::CommitOriginOperation::Sync,
+            .machine_id_hex = std::string(32, 'b'),
+            .machine_name = "Host",
+            .accepted_at = 1700000105,
+        }));
+    ASSERT_TRUE(kasumi::state_storage::record_execution_start(
+        db_path,
+        kasumi::state_storage::LocalExecutionRecord{
+            .execution_id = "run-1",
+            .operation = kasumi::state_storage::LocalOperationKind::Sync,
+            .machine_id_hex = std::string(32, 'b'),
+            .machine_name = "Host",
+            .started_at = 1700000200,
+        }));
+
+    const auto offline_sum =
+        kasumi::application::inspect_profile_local_summary(env, "sum");
+    EXPECT_EQ(offline_sum.state, ProfileLocalState::Ready);
+    EXPECT_EQ(offline_sum.problem, ProfileLocalProblem::None);
+    ASSERT_TRUE(offline_sum.activity.accepted_commit.has_value());
+    EXPECT_EQ(offline_sum.activity.accepted_commit->commit_id,
+              std::string(64, 'a'));
+    ASSERT_TRUE(offline_sum.activity.last_attempt.has_value());
+    EXPECT_EQ(offline_sum.activity.last_attempt->status,
+              kasumi::application::ProfileExecutionStatus::Interrupted);
+
+    auto held = kasumi::platform::acquire_profile_lock(lock_path);
+    ASSERT_TRUE(held.has_value()) << held.error();
+    const auto running_sum =
+        kasumi::application::inspect_profile_local_summary(env, "sum");
+    EXPECT_EQ(running_sum.state, ProfileLocalState::Running);
+    EXPECT_EQ(running_sum.problem, ProfileLocalProblem::None);
+    ASSERT_TRUE(running_sum.activity.last_attempt.has_value());
+    EXPECT_EQ(running_sum.activity.last_attempt->status,
+              kasumi::application::ProfileExecutionStatus::InProgress);
+    kasumi::platform::release_profile_lock(*held);
 }
 
 } // namespace

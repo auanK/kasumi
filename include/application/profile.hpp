@@ -42,6 +42,7 @@ struct Profile {
     std::optional<bool> watch_enabled = std::nullopt;
     std::optional<std::uint32_t> sync_interval_seconds = std::nullopt;
     bool paused = false;
+    std::string icon = {};
 };
 
 std::string_view to_string(KeyStorage storage) noexcept;
@@ -85,13 +86,16 @@ list_profiles(const ExecutionEnvironment& environment);
 std::expected<void, ProfileError>
 create_profile(const ExecutionEnvironment& environment,
                Profile profile,
-               ProfileCredentials credentials);
+               ProfileCredentials credentials,
+               bool verify = false,
+               std::stop_token stop_token = {});
 
 // Updates profile directories, retention policy, and optional settings.
 std::expected<void, ProfileError>
 update_profile(const ExecutionEnvironment& environment,
                Profile profile,
-               bool allow_empty_local = false);
+               bool allow_empty_local = false,
+               const Profile* expected = nullptr);
 
 // Updates only the persisted daemon paused flag under config.lock without
 // requiring the per-profile execution lock.
@@ -264,6 +268,18 @@ struct ProfileActivityReport {
     std::vector<ProfileCachedRemoteActivity> cached_remote_activities;
 };
 
+struct ProfileLocalSummary {
+    ProfileLocalState state = ProfileLocalState::Problem;
+    ProfileLocalProblem problem = ProfileLocalProblem::None;
+    ProfileActivityReport activity;
+};
+
+// Inspects local state and offline activity coherently using a single SQLite
+// snapshot without accessing remote storage or modifying state.
+ProfileLocalSummary
+inspect_profile_local_summary(const ExecutionEnvironment& environment,
+                              std::string_view profile_name);
+
 // Inspects offline local traceability and cached remote activity for a
 // profile without accessing remote storage, initializing SQLite, or
 // creating lock files.
@@ -335,9 +351,11 @@ struct DiagnosticsReport {
 
 // Inspects local environment, rclone toolchain, and profile health without
 // modifying state, exposing secrets, or contacting remote storage.
+struct DaemonStatusReport;
 std::expected<DiagnosticsReport, ProfileError>
 collect_diagnostics(const ExecutionEnvironment& environment,
-                    std::string_view profile_name = {});
+                    std::string_view profile_name = {},
+                    const DaemonStatusReport* live = nullptr);
 
 struct RcloneRemotesInfo {
     bool available = false;

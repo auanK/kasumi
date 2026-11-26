@@ -114,7 +114,8 @@ void append_reason(std::string& detail, std::string_view reason) {
 
 std::expected<DiagnosticsReport, ProfileError>
 collect_diagnostics(const ExecutionEnvironment& environment,
-                    std::string_view profile_name) {
+                    std::string_view profile_name,
+                    const DaemonStatusReport* live) {
     if (!profile_name.empty() &&
         !runtime::is_valid_profile_name(profile_name)) {
         return std::unexpected(ProfileError{
@@ -174,11 +175,14 @@ collect_diagnostics(const ExecutionEnvironment& environment,
         .detail = probed_rclone.detail,
     };
 
-    const bool daemon_lock_held = is_daemon_running(environment);
+    const bool daemon_lock_held = live || is_daemon_running(environment);
     report.daemon.running = daemon_lock_held;
     std::optional<DaemonStatusReport> daemon_status;
     if (daemon_lock_held) {
-        if (auto st = query_daemon_status(environment); st && st->running) {
+        if (auto st =
+                live ? std::expected<DaemonStatusReport, DaemonError>(*live)
+                     : query_daemon_status(environment);
+            st && st->running) {
             daemon_status = std::move(*st);
             report.daemon.pid = daemon_status->pid;
             report.daemon.ipc_port = daemon_status->ipc_port;

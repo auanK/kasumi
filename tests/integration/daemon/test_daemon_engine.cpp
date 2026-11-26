@@ -7,6 +7,7 @@
 #include "platform/path.hpp"
 #include "platform/profile_lock.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -105,6 +106,38 @@ struct TwoPeerSetup {
     }
 };
 
+auto start_test_daemon(const app::ExecutionEnvironment& env,
+                       app::DaemonOptions opts = {}) {
+    const auto config = env.app_data_dir / "web.json";
+    if (!std::filesystem::exists(config))
+        kasumi::test::write_text(config, R"({"port":0})");
+    return app::start_daemon_session(env, opts);
+}
+
+TEST(DaemonEngineTest, LogCursorContinuesAfterRestart) {
+    auto workspace = kasumi::test::make_temp_workspace("kasumi-log-restart-");
+    const app::ExecutionEnvironment env{
+        .app_data_dir = kasumi::test::workspace_path(workspace, "app")};
+
+    auto first = start_test_daemon(env);
+    ASSERT_TRUE(first) << first.error().detail;
+    app::stop_daemon_session(*first);
+    const auto offline = app::query_daemon_events(env, {});
+    ASSERT_TRUE(offline) << offline.error().detail;
+    ASSERT_FALSE(offline->events.empty());
+    EXPECT_EQ(offline->events.back().kind, "stopped");
+
+    auto next = start_test_daemon(env);
+    ASSERT_TRUE(next) << next.error().detail;
+    const auto resumed = app::query_daemon_events(
+        env, app::DaemonLogQuery{.since_seq = offline->latest_seq});
+    ASSERT_TRUE(resumed) << resumed.error().detail;
+    ASSERT_EQ(resumed->events.size(), 1U);
+    EXPECT_EQ(resumed->events.front().kind, "started");
+    EXPECT_EQ(resumed->events.front().seq, offline->latest_seq + 1U);
+    EXPECT_EQ(resumed->latest_seq, resumed->events.front().seq);
+}
+
 TEST(DaemonEngineTest, EnforcesSingleInstanceLockAndIpcSecurity) {
     auto setup =
         TwoPeerSetup::create("kasumi-daemon-lock-", app::KeyStorage::File, 0U);
@@ -112,11 +145,11 @@ TEST(DaemonEngineTest, EnforcesSingleInstanceLockAndIpcSecurity) {
     app::DaemonOptions opts;
     opts.watch_debounce = 150ms;
     opts.config_poll_interval = 200ms;
-    auto first = app::start_daemon_session(setup.env, opts);
+    auto first = start_test_daemon(setup.env, opts);
     ASSERT_TRUE(first.has_value()) << first.error().detail;
     EXPECT_TRUE(app::is_daemon_running(setup.env));
 
-    const auto duplicate = app::start_daemon_session(setup.env, opts);
+    const auto duplicate = start_test_daemon(setup.env, opts);
     ASSERT_FALSE(duplicate.has_value());
     EXPECT_EQ(duplicate.error().code, app::DaemonErrorCode::AlreadyRunning);
 
@@ -143,6 +176,93 @@ TEST(DaemonEngineTest, EnforcesSingleInstanceLockAndIpcSecurity) {
 }
 
 TEST(DaemonEngineTest,
+     WebLoginRequiresPrivateBootstrapAndGuardsBrowserMutations) {
+    auto workspace = kasumi::test::make_temp_workspace("kasumi-web-auth-");
+    app::ExecutionEnvironment env{.app_data_dir = workspace->root};
+    auto daemon = start_test_daemon(env);
+    ASSERT_TRUE(daemon) << daemon.error().detail;
+    const auto status = app::query_daemon_session_status(*daemon);
+    ASSERT_TRUE(status);
+    httplib::Client client("127.0.0.1", status->ipc_port);
+    const std::string origin =
+        "http://127.0.0.1:" + std::to_string(status->ipc_port);
+    httplib::Headers headers{{"Origin", origin}};
+    const auto post = [&](const std::string& path, const nlohmann::json& body) {
+        return client.Post(path, headers, body.dump(), "application/json");
+    };
+    const auto initial = client.Get("/v1/auth/status");
+    ASSERT_TRUE(initial);
+    EXPECT_FALSE(
+        nlohmann::json::parse(initial->body).at("configured").get<bool>());
+    auto denied = client.Get("/v1/auth/status",
+                             httplib::Headers{{"Host", "foreign.invalid"}});
+    ASSERT_TRUE(denied);
+    EXPECT_EQ(denied->status, 403);
+    std::string bootstrap;
+    std::ifstream(env.app_data_dir / "web-bootstrap.token") >> bootstrap;
+    ASSERT_EQ(bootstrap.size(), 64u);
+    nlohmann::json setup{{"bootstrap_token", bootstrap},
+                         {"password", "example password for test"}};
+    // Exercise the header guards without racing a body upload against an
+    // early rejection that can close the connection.
+    auto missing_origin =
+        client.Post("/v1/auth/password", "", "application/json");
+    ASSERT_TRUE(missing_origin) << httplib::to_string(missing_origin.error());
+    EXPECT_EQ(missing_origin->status, 403);
+    ASSERT_EQ(post("/v1/auth/password", setup)->status, 200);
+    EXPECT_FALSE(
+        std::filesystem::exists(env.app_data_dir / "web-bootstrap.token"));
+    EXPECT_EQ(post("/v1/auth/password", setup)->status, 403);
+    nlohmann::json login{{"username", "admin"},
+                         {"password", "example password for test"}};
+    auto logged = post("/v1/auth/login", login);
+    ASSERT_TRUE(logged);
+    ASSERT_EQ(logged->status, 200);
+    auto cookie = logged->get_header_value("Set-Cookie");
+    EXPECT_NE(cookie.find("HttpOnly"), std::string::npos);
+    EXPECT_NE(cookie.find("SameSite=Strict"), std::string::npos);
+    cookie.resize(cookie.find(';'));
+    headers.emplace("Cookie", cookie);
+    ASSERT_EQ(client.Get("/v1/status", headers)->status, 200);
+    const auto reload = [&] {
+        return client.Post("/v1/reload", headers, "", "application/json");
+    };
+    const auto missing_csrf = reload();
+    ASSERT_TRUE(missing_csrf) << httplib::to_string(missing_csrf.error());
+    EXPECT_EQ(missing_csrf->status, 403);
+    headers.emplace("X-CSRF-Token",
+                    nlohmann::json::parse(logged->body)
+                        .at("csrf_token")
+                        .get<std::string>());
+    const auto reloaded = reload();
+    ASSERT_TRUE(reloaded) << httplib::to_string(reloaded.error());
+    EXPECT_EQ(reloaded->status, 200);
+    headers.erase("Origin");
+    headers.emplace("Origin", "https://foreign.invalid");
+    const auto cross_origin = reload();
+    ASSERT_TRUE(cross_origin) << httplib::to_string(cross_origin.error());
+    EXPECT_EQ(cross_origin->status, 403);
+    headers.erase("Origin");
+    headers.emplace("Origin", origin);
+    EXPECT_EQ(client.Get("/v1/reload", headers)->status, 404);
+    EXPECT_EQ(post("/v1/auth/logout", {})->status, 200);
+    EXPECT_EQ(client.Get("/v1/status", headers)->status, 403);
+    login["password"] = "incorrect test password";
+    EXPECT_EQ(post("/v1/auth/login", login)->status, 401);
+    EXPECT_EQ(post("/v1/auth/login", login)->status, 429);
+}
+
+TEST(DaemonEngineTest, RefusesPublicListenerWithoutPassword) {
+    auto workspace = kasumi::test::make_temp_workspace("kasumi-web-bind-");
+    app::ExecutionEnvironment env{.app_data_dir = workspace->root};
+    kasumi::test::write_text(env.app_data_dir / "web.json",
+                             R"({"bind":"0.0.0.0"})");
+    const auto daemon = start_test_daemon(env);
+    ASSERT_FALSE(daemon);
+    EXPECT_EQ(daemon.error().code, app::DaemonErrorCode::ConfigFailure);
+}
+
+TEST(DaemonEngineTest,
      WatchesFilesWithDebounceSelfSuppressionAndFastNoopPolls) {
     auto setup = TwoPeerSetup::create(
         "kasumi-daemon-watch-", app::KeyStorage::File, 10U);
@@ -151,7 +271,7 @@ TEST(DaemonEngineTest,
     opts.watch_max_wait = 600ms;
     opts.config_poll_interval = 200ms;
     opts.full_scan_verification_interval = 10min;
-    auto session = app::start_daemon_session(setup.env, opts);
+    auto session = start_test_daemon(setup.env, opts);
     ASSERT_TRUE(session.has_value()) << session.error().detail;
 
     // Initial baseline sync establishes warm observation + watcher baseline.
@@ -250,7 +370,7 @@ TEST(DaemonEngineTest, FastNoopPollIncrementsWithoutExtraSyncRuns) {
     app::DaemonOptions opts;
     opts.watch_debounce = 100ms;
     opts.full_scan_verification_interval = 10min;
-    auto session = app::start_daemon_session(env, opts);
+    auto session = start_test_daemon(env, opts);
     ASSERT_TRUE(session.has_value()) << session.error().detail;
 
     // Wait for initial check (runs=1) and at least 3 consecutive 10s periodic
@@ -268,6 +388,20 @@ TEST(DaemonEngineTest, FastNoopPollIncrementsWithoutExtraSyncRuns) {
     EXPECT_GE(st->profiles[0].fast_noop_polls, 3U);
     EXPECT_TRUE(st->profiles[0].warm_transport_active);
 
+    ASSERT_TRUE(app::cancel_daemon_session_profile(*session, "main"));
+    const auto events = app::query_daemon_session_events(
+        *session, app::DaemonLogQuery{.profile_name = "main"});
+    ASSERT_TRUE(events) << events.error().detail;
+    const auto cancel = std::ranges::find(
+        events->events, "cancelled", &app::DaemonEvent::kind);
+    ASSERT_NE(cancel, events->events.end());
+    EXPECT_NE(std::ranges::find(events->events.begin(),
+                                cancel,
+                                "fast_noop",
+                                &app::DaemonEvent::kind),
+              cancel);
+    EXPECT_TRUE(std::ranges::is_sorted(events->events, {}, &app::DaemonEvent::seq));
+
     app::stop_daemon_session(*session);
 }
 
@@ -278,7 +412,7 @@ TEST(DaemonEngineTest,
 
     app::DaemonOptions opts;
     opts.watch_debounce = 100ms;
-    auto session = app::start_daemon_session(setup.env, opts);
+    auto session = start_test_daemon(setup.env, opts);
     ASSERT_TRUE(session.has_value()) << session.error().detail;
 
     const auto locked_st = app::query_daemon_session_status(*session, "peer_a");
@@ -318,7 +452,7 @@ TEST(DaemonEngineTest,
         "kasumi-daemon-safety-", app::KeyStorage::File, 0U);
     app::DaemonOptions opts;
     opts.watch_debounce = 100ms;
-    auto session = app::start_daemon_session(setup.env, opts);
+    auto session = start_test_daemon(setup.env, opts);
     ASSERT_TRUE(session.has_value()) << session.error().detail;
     ASSERT_TRUE(
         app::trigger_daemon_session_sync(*session, "peer_a", true).has_value());
@@ -362,7 +496,7 @@ TEST(DaemonEngineTest, PauseDuringLockAndDaemonLogsCancelWork) {
     app::DaemonOptions opts;
     opts.watch_debounce = 100ms;
     opts.startup_stagger = 0ms;
-    auto session = app::start_daemon_session(setup.env, opts);
+    auto session = start_test_daemon(setup.env, opts);
     ASSERT_TRUE(session.has_value()) << session.error().detail;
 
     const auto init_st = app::query_daemon_session_status(*session, "peer_a");
@@ -498,7 +632,7 @@ TEST(DaemonEngineTest,
     opts.full_scan_verification_interval = 10min;
     opts.enable_ipc_server = false;
 
-    auto session = app::start_daemon_session(setup.env, opts);
+    auto session = start_test_daemon(setup.env, opts);
     ASSERT_TRUE(session.has_value()) << session.error().detail;
 
     ASSERT_TRUE(
@@ -579,7 +713,7 @@ TEST(DaemonEngineTest,
     opts.config_poll_interval = 200ms;
     opts.full_scan_verification_interval = 10min;
 
-    auto session = app::start_daemon_session(setup.env, opts);
+    auto session = start_test_daemon(setup.env, opts);
     ASSERT_TRUE(session.has_value()) << session.error().detail;
 
     ASSERT_TRUE(
@@ -714,20 +848,18 @@ TEST(DaemonEngineTest,
             .has_value());
 
     kasumi::test::write_text(dir_a / "conflict.md", "base-line\n");
-    ASSERT_TRUE(
-        app::execute(app::ExecutionInput{
-                         .request = {.operation = app::Operation::Sync,
-                                     .profile_name = "peer_a"},
-                         .credentials = app::NoCredentials{},
-                         .environment = env_a})
-            .has_value());
-    ASSERT_TRUE(
-        app::execute(app::ExecutionInput{
-                         .request = {.operation = app::Operation::Sync,
-                                     .profile_name = "peer_b"},
-                         .credentials = app::NoCredentials{},
-                         .environment = env_b})
-            .has_value());
+    ASSERT_TRUE(app::execute(app::ExecutionInput{
+                                 .request = {.operation = app::Operation::Sync,
+                                             .profile_name = "peer_a"},
+                                 .credentials = app::NoCredentials{},
+                                 .environment = env_a})
+                    .has_value());
+    ASSERT_TRUE(app::execute(app::ExecutionInput{
+                                 .request = {.operation = app::Operation::Sync,
+                                             .profile_name = "peer_b"},
+                                 .credentials = app::NoCredentials{},
+                                 .environment = env_b})
+                    .has_value());
 
     app::DaemonOptions opts;
     opts.watch_debounce = 80ms;
@@ -735,17 +867,15 @@ TEST(DaemonEngineTest,
     opts.config_poll_interval = 150ms;
     opts.full_scan_verification_interval = 10min;
 
-    auto session_a = app::start_daemon_session(env_a, opts);
+    auto session_a = start_test_daemon(env_a, opts);
     ASSERT_TRUE(session_a.has_value()) << session_a.error().detail;
-    auto session_b = app::start_daemon_session(env_b, opts);
+    auto session_b = start_test_daemon(env_b, opts);
     ASSERT_TRUE(session_b.has_value()) << session_b.error().detail;
 
-    ASSERT_TRUE(
-        app::trigger_daemon_session_sync(*session_a, "peer_a", true)
-            .has_value());
-    ASSERT_TRUE(
-        app::trigger_daemon_session_sync(*session_b, "peer_b", true)
-            .has_value());
+    ASSERT_TRUE(app::trigger_daemon_session_sync(*session_a, "peer_a", true)
+                    .has_value());
+    ASSERT_TRUE(app::trigger_daemon_session_sync(*session_b, "peer_b", true)
+                    .has_value());
     ASSERT_TRUE(wait_until([&] {
         const auto sa = app::query_daemon_session_status(*session_a, "peer_a");
         const auto sb = app::query_daemon_session_status(*session_b, "peer_b");
@@ -774,9 +904,8 @@ TEST(DaemonEngineTest,
     const auto b_s0 = app::query_daemon_session_status(*session_b, "peer_b")
                           ->profiles[0]
                           .sync_runs;
-    ASSERT_TRUE(
-        app::trigger_daemon_session_sync(*session_b, "peer_b", true)
-            .has_value());
+    ASSERT_TRUE(app::trigger_daemon_session_sync(*session_b, "peer_b", true)
+                    .has_value());
     EXPECT_EQ(kasumi::test::read_text(dir_b / "hello.md"), "from-daemon-a");
     EXPECT_EQ(kasumi::test::read_text(dir_b / "large_2mb.bin"), large_payload);
     std::this_thread::sleep_for(400ms);
@@ -803,14 +932,13 @@ TEST(DaemonEngineTest,
         15s));
     kasumi::test::write_text(dir_b / "conflict.md", "edited-on-b\n");
     ASSERT_TRUE(app::resume_daemon_profile(env_b, "peer_b").has_value());
-    ASSERT_TRUE(
-        app::trigger_daemon_session_sync(*session_b, "peer_b", true)
-            .has_value());
+    ASSERT_TRUE(app::trigger_daemon_session_sync(*session_b, "peer_b", true)
+                    .has_value());
 
     bool saw_conflict_file = false;
     for (const auto& entry : std::filesystem::directory_iterator(dir_b)) {
-        const auto name = kasumi::platform::path::to_utf8(
-            entry.path().filename());
+        const auto name =
+            kasumi::platform::path::to_utf8(entry.path().filename());
         if (name.find("kasumiconflict") != std::string::npos) {
             saw_conflict_file = true;
         }
@@ -840,9 +968,8 @@ TEST(DaemonEngineTest,
                    sa->profiles[0].dirty_paths_count == 0U;
         },
         15s));
-    ASSERT_TRUE(
-        app::trigger_daemon_session_sync(*session_b, "peer_b", true)
-            .has_value());
+    ASSERT_TRUE(app::trigger_daemon_session_sync(*session_b, "peer_b", true)
+                    .has_value());
     EXPECT_FALSE(std::filesystem::exists(dir_b / "large_2mb.bin"));
     EXPECT_FALSE(std::filesystem::exists(dir_b / "hello.md"));
 
@@ -859,7 +986,7 @@ TEST(DaemonEngineTest,
     opts.config_poll_interval = 100ms;
     opts.full_scan_verification_interval = 10min;
 
-    auto session = app::start_daemon_session(setup.env, opts);
+    auto session = start_test_daemon(setup.env, opts);
     ASSERT_TRUE(session.has_value()) << session.error().detail;
 
     ASSERT_TRUE(wait_until([&] {
@@ -899,7 +1026,7 @@ TEST(DaemonEngineTest,
     opts.config_poll_interval = 150ms;
     opts.full_scan_verification_interval = 10min;
 
-    auto session = app::start_daemon_session(setup.env, opts);
+    auto session = start_test_daemon(setup.env, opts);
     ASSERT_TRUE(session.has_value()) << session.error().detail;
     ASSERT_TRUE(
         app::trigger_daemon_session_sync(*session, "peer_a", true).has_value());
@@ -913,11 +1040,11 @@ TEST(DaemonEngineTest,
                              "contention-payload");
     std::atomic<bool> fsck_done{false};
     std::thread fsck_thread([&] {
-        static_cast<void>(app::execute(app::ExecutionInput{
-            .request = {.operation = app::Operation::Fsck,
-                        .profile_name = "peer_a"},
-            .credentials = app::NoCredentials{},
-            .environment = setup.env}));
+        static_cast<void>(app::execute(
+            app::ExecutionInput{.request = {.operation = app::Operation::Fsck,
+                                            .profile_name = "peer_a"},
+                                .credentials = app::NoCredentials{},
+                                .environment = setup.env}));
         fsck_done.store(true, std::memory_order_release);
     });
     static_cast<void>(
@@ -936,10 +1063,9 @@ TEST(DaemonEngineTest,
                    st->profiles[0].dirty_paths_count == 0U;
         },
         15s));
-    EXPECT_NE(app::query_daemon_session_status(*session, "peer_a")
-                  ->profiles[0]
-                  .state,
-              app::DaemonProfileState::NeedsAttention);
+    EXPECT_NE(
+        app::query_daemon_session_status(*session, "peer_a")->profiles[0].state,
+        app::DaemonProfileState::NeedsAttention);
 
     // 2. In-flight cancel during a multi-chunk payload sync must keep the
     //    daemon healthy and allow clean convergence on the follow-up sync.
@@ -961,10 +1087,9 @@ TEST(DaemonEngineTest,
                    st->profiles[0].dirty_paths_count == 0U;
         },
         15s));
-    EXPECT_NE(app::query_daemon_session_status(*session, "peer_a")
-                  ->profiles[0]
-                  .state,
-              app::DaemonProfileState::NeedsAttention);
+    EXPECT_NE(
+        app::query_daemon_session_status(*session, "peer_a")->profiles[0].state,
+        app::DaemonProfileState::NeedsAttention);
 
     ASSERT_TRUE(
         app::trigger_daemon_session_sync(*session, "peer_b", true).has_value());
@@ -977,10 +1102,10 @@ TEST(DaemonEngineTest,
 }
 
 #ifdef _WIN32
-TEST(DaemonEngineTest,
-     VaultProfileAutoUnlocksAndSyncsWhenKeyAppearsInOsVault) {
+TEST(DaemonEngineTest, VaultProfileAutoUnlocksAndSyncsWhenKeyAppearsInOsVault) {
     auto ws = kasumi::test::make_temp_workspace("kasumi-daemon-vault-recheck-");
-    const app::ExecutionEnvironment env{kasumi::test::workspace_path(ws, "app")};
+    const app::ExecutionEnvironment env{
+        kasumi::test::workspace_path(ws, "app")};
     const auto local_dir = kasumi::test::workspace_path(ws, "local");
     const auto remote_dir = kasumi::test::workspace_path(ws, "remote");
     std::filesystem::create_directories(local_dir);
@@ -1020,23 +1145,26 @@ TEST(DaemonEngineTest,
     app::DaemonOptions opts;
     opts.watch_debounce = 50ms;
     opts.config_poll_interval = 200ms;
-    auto session = app::start_daemon_session(env, opts);
+    auto session = start_test_daemon(env, opts);
     ASSERT_TRUE(session.has_value()) << session.error().detail;
 
     // Without a key in Windows Credential Manager, profile starts Locked.
     ASSERT_TRUE(wait_until([&] {
-        const auto st = app::query_daemon_session_status(*session, "vault_auto");
+        const auto st =
+            app::query_daemon_session_status(*session, "vault_auto");
         return st && !st->profiles.empty() &&
                st->profiles[0].state == app::DaemonProfileState::Locked &&
                st->profiles[0].locked;
     }));
 
-    // Write the key into OS Vault AFTER daemon startup without calling reload().
-    ASSERT_TRUE(
-        app::set_profile_key(env, "vault_auto", app::MasterKeyHex{hex_key}, true)
-            .has_value());
+    // Write the key into OS Vault AFTER daemon startup without calling
+    // reload().
+    ASSERT_TRUE(app::set_profile_key(
+                    env, "vault_auto", app::MasterKeyHex{hex_key}, true)
+                    .has_value());
 
-    // Daemon must automatically re-check OS Vault (~3s backoff), unlock, and sync.
+    // Daemon must automatically re-check OS Vault (~3s backoff), unlock, and
+    // sync.
     ASSERT_TRUE(wait_until(
         [&] {
             const auto st =
@@ -1081,7 +1209,7 @@ TEST(DaemonEngineTest,
     app::DaemonOptions opts;
     opts.watch_debounce = 100ms;
     opts.startup_stagger = 6s;
-    auto session = app::start_daemon_session(setup.env, opts);
+    auto session = start_test_daemon(setup.env, opts);
     ASSERT_TRUE(session.has_value()) << session.error().detail;
 
     const auto st = app::query_daemon_session_status(*session);
@@ -1089,8 +1217,7 @@ TEST(DaemonEngineTest,
     ASSERT_EQ(st->profiles.size(), 2U);
     ASSERT_TRUE(st->profiles[0].next_sync_at.has_value());
     ASSERT_TRUE(st->profiles[1].next_sync_at.has_value());
-    EXPECT_GE(*st->profiles[1].next_sync_at - *st->profiles[0].next_sync_at,
-              4);
+    EXPECT_GE(*st->profiles[1].next_sync_at - *st->profiles[0].next_sync_at, 4);
 
     app::stop_daemon_session(*session);
 }

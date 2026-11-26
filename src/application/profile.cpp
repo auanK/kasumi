@@ -32,6 +32,7 @@
 #include <monocypher.h>
 #include <optional>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -349,6 +350,8 @@ struct InspectionTempDirectory {
     std::filesystem::path path;
     DirectoryIdentity identity;
     bool owns = false;
+
+    InspectionTempDirectory() = default;
 
     explicit InspectionTempDirectory(const std::filesystem::path& value)
         : path(value) {
@@ -830,6 +833,24 @@ validate_optional_profile_settings(const Profile& profile) {
     return {};
 }
 
+static Profile profile_from_config(const runtime::ProfileData& p) {
+    return Profile{
+        .name = p.name,
+        .local_dir = p.local_dir,
+        .remote_dir = p.remote_dir,
+        .min_history_depth = p.min_history_depth,
+        .min_history_age_hours = p.min_history_age_hours,
+        .key_storage = to_app_key_storage(p.key_storage),
+        .bandwidth_limit = p.bandwidth_limit,
+        .transfer_concurrency = p.transfer_concurrency,
+        .rclone_config = p.rclone_config,
+        .watch_enabled = p.watch_enabled,
+        .sync_interval_seconds = p.sync_interval_seconds,
+        .paused = p.paused,
+        .icon = p.icon,
+    };
+}
+
 std::expected<std::vector<Profile>, ProfileError>
 list_profiles(const ExecutionEnvironment& environment) {
     auto config_path = environment.app_data_dir / "config.toml";
@@ -845,28 +866,120 @@ list_profiles(const ExecutionEnvironment& environment) {
     std::vector<Profile> result;
     result.reserve(profiles_res->size());
     for (const auto& p : *profiles_res) {
-        result.push_back(Profile{
-            .name = p.name,
-            .local_dir = p.local_dir,
-            .remote_dir = p.remote_dir,
-            .min_history_depth = p.min_history_depth,
-            .min_history_age_hours = p.min_history_age_hours,
-            .key_storage = to_app_key_storage(p.key_storage),
-            .bandwidth_limit = p.bandwidth_limit,
-            .transfer_concurrency = p.transfer_concurrency,
-            .rclone_config = p.rclone_config,
-            .watch_enabled = p.watch_enabled,
-            .sync_interval_seconds = p.sync_interval_seconds,
-            .paused = p.paused,
-        });
+        result.push_back(profile_from_config(p));
     }
     return result;
+}
+
+static std::expected<ProfileConnectionReport, ProfileError>
+probe_connection(std::string_view profile_name,
+                 const std::string& remote,
+                 const transport::TransportOptions& options,
+                 const runtime::vault::KeyBytes& key) {
+    ProfileConnectionReport report{
+        .profile_name = std::string{profile_name},
+        .remote_dir = remote,
+    };
+    auto opened = transport::open_transport(remote, options);
+    if (!opened) {
+        report.transport_ok = false;
+        report.ready = false;
+        report.vault_state = RemoteVaultState::TransportFailure;
+        report.detail = transport::describe(opened.error());
+        return report;
+    }
+
+    auto workspace = platform::create_workspace("kasumi-profile-test");
+    if (!workspace) {
+        return fail_profile(ProfileErrorCode::StorageFailure,
+                            "failed to prepare temporary workspace: " +
+                                workspace.error());
+    }
+    struct WorkspaceGuard {
+        platform::Workspace& ws;
+        ~WorkspaceGuard() noexcept {
+            platform::cleanup_workspace(ws);
+        }
+    } ws_guard{*workspace};
+
+    // Probe authenticated history via scoped prefix reads first so large
+    // authenticated vaults do not trigger a full object listing.
+    const auto observed =
+        observation::history::observe(*opened, key, workspace->root, false);
+    if (!observed) {
+        if (observed.error().code ==
+            observation::history::ErrorCode::TransportFailure) {
+            report.transport_ok = false;
+            report.ready = false;
+            report.vault_state = RemoteVaultState::TransportFailure;
+            report.detail = observed.error().detail;
+            return report;
+        }
+        report.transport_ok = true;
+        report.ready = false;
+        report.vault_state = RemoteVaultState::KeyMismatchOrInvalidHistory;
+        report.detail = observed.error().detail;
+        return report;
+    }
+
+    if (observed->history_present) {
+        report.transport_ok = true;
+        report.ready = true;
+        report.vault_state = RemoteVaultState::AuthenticatedVault;
+        report.head_count = observed->logical_heads.size();
+        if (observed->epoch && !observed->epoch->reference.epoch_id.empty()) {
+            report.epoch_sequence = observed->epoch->reference.sequence;
+            report.epoch_id = observed->epoch->reference.epoch_id;
+        }
+        report.detail = "authenticated existing remote vault";
+        return report;
+    }
+
+    auto listed = transport::list(*opened);
+    if (!listed) {
+        if (listed.error().code == transport::ErrorCode::StorageNotFound) {
+            report.transport_ok = true;
+            report.ready = true;
+            report.vault_state = RemoteVaultState::EmptyReadyForInit;
+            report.detail =
+                "remote destination is reachable and uninitialized/empty "
+                "(ready for initial sync)";
+            return report;
+        }
+        report.transport_ok = false;
+        report.ready = false;
+        report.vault_state = RemoteVaultState::TransportFailure;
+        report.detail = transport::describe(listed.error());
+        return report;
+    }
+
+    if (listed->empty()) {
+        report.transport_ok = true;
+        report.ready = true;
+        report.vault_state = RemoteVaultState::EmptyReadyForInit;
+        report.detail =
+            "remote destination is reachable and empty (ready for initial "
+            "sync)";
+        return report;
+    }
+
+    report.transport_ok = true;
+    report.ready = false;
+    report.vault_state = RemoteVaultState::KeyMismatchOrInvalidHistory;
+    report.detail =
+        "remote destination contains objects that could not be "
+        "authenticated with this profile's key (verify password/salt or "
+        "remote_dir)";
+    return report;
 }
 
 std::expected<void, ProfileError>
 create_profile(const ExecutionEnvironment& environment,
                Profile profile,
-               ProfileCredentials credentials) {
+               ProfileCredentials credentials,
+               bool verify,
+               std::stop_token stop_token) {
+    const platform::cancellation::ScopedStopToken stop_scope{stop_token};
     std::expected<runtime::vault::KeyBytes, runtime::Error> master_key_res =
         std::unexpected(runtime::Error{.code = runtime::ErrorCode::KeyInvalid,
                                        .detail = "uninitialized"});
@@ -892,6 +1005,21 @@ create_profile(const ExecutionEnvironment& environment,
 
         if (!master_key_res) {
             return std::unexpected(map_runtime_error(master_key_res.error()));
+        }
+
+        if (verify) {
+            auto checked = probe_connection(
+                profile.name,
+                profile.remote_dir,
+                {.forbidden_executable_root = profile.local_dir,
+                 .rclone_config = profile.rclone_config,
+                 .bandwidth_limit = profile.bandwidth_limit},
+                *master_key_res);
+            if (!checked)
+                return std::unexpected(checked.error());
+            if (!checked->ready)
+                return fail_profile(ProfileErrorCode::CredentialFailure,
+                                    checked->detail);
         }
 
         auto loaded = load_profiles_locked(environment.app_data_dir, true);
@@ -966,6 +1094,7 @@ create_profile(const ExecutionEnvironment& environment,
             profile.watch_enabled,
             profile.sync_interval_seconds,
             profile.paused,
+            profile.icon,
         });
         if (auto save_res = runtime::save_profiles(config_path, profiles);
             !save_res) {
@@ -1062,7 +1191,8 @@ acquire_target_profile_lock(const ExecutionEnvironment& environment,
 std::expected<void, ProfileError>
 update_profile(const ExecutionEnvironment& environment,
                Profile profile,
-               bool allow_empty_local) {
+               bool allow_empty_local,
+               const Profile* expected) {
     if (!valid_retention_policy(profile)) {
         return fail_profile(ProfileErrorCode::ConfigFailure,
                             "invalid retention policy");
@@ -1085,6 +1215,25 @@ update_profile(const ExecutionEnvironment& environment,
         return fail_profile(ProfileErrorCode::NotFound, "profile not found");
     }
 
+    const auto settings = [](const Profile& p) {
+        return std::tie(p.name,
+                        p.local_dir,
+                        p.remote_dir,
+                        p.min_history_depth,
+                        p.min_history_age_hours,
+                        p.key_storage,
+                        p.bandwidth_limit,
+                        p.transfer_concurrency,
+                        p.rclone_config,
+                        p.watch_enabled,
+                        p.sync_interval_seconds,
+                        p.paused,
+                        p.icon);
+    };
+    if (expected && settings(*expected) != settings(profile_from_config(*it))) {
+        return fail_profile(ProfileErrorCode::LockFailure,
+                            "profile changed during update");
+    }
     const auto old_storage = it->key_storage;
     const auto new_storage = to_runtime_key_storage(profile.key_storage);
     auto profile_lock = acquire_target_profile_lock(environment, profile.name);
@@ -1134,6 +1283,7 @@ update_profile(const ExecutionEnvironment& environment,
     it->watch_enabled = profile.watch_enabled;
     it->sync_interval_seconds = profile.sync_interval_seconds;
     it->paused = profile.paused;
+    it->icon = profile.icon;
 
     auto save_res =
         runtime::save_profiles(loaded->config_path, loaded->profiles);
@@ -1894,6 +2044,189 @@ clone_profile(const ExecutionEnvironment& environment,
     return {};
 }
 
+namespace {
+
+struct PreparedLocalInspection {
+    runtime::ProfilePaths paths;
+    std::optional<runtime::vault::KeyBytes> key_bytes;
+    EntryInfo wal{};
+    EntryInfo shm{};
+    EntryInfo rollback{};
+};
+
+bool is_auxiliary_sidecar_corrupt(const EntryInfo& entry) noexcept {
+    return entry.state == EntryState::Error ||
+           (entry.state == EntryState::Present &&
+            (!entry.regular || entry.link));
+}
+
+bool is_rollback_sidecar_corrupt(
+    const EntryInfo& entry,
+    const std::filesystem::path& rollback_path) noexcept {
+    return is_auxiliary_sidecar_corrupt(entry) ||
+           (entry.state == EntryState::Present && entry.size > 0 &&
+            !can_read_first_byte(rollback_path));
+}
+
+std::expected<PreparedLocalInspection, ProfileLocalProblem>
+prepare_local_inspection(const ExecutionEnvironment& environment,
+                         std::string_view profile_name,
+                         bool load_key) {
+    if (!runtime::is_valid_profile_name(profile_name)) {
+        return std::unexpected(ProfileLocalProblem::InvalidName);
+    }
+    auto paths =
+        runtime::resolve_profile_paths(environment.app_data_dir, profile_name);
+    if (!paths) {
+        return std::unexpected(ProfileLocalProblem::Paths);
+    }
+    const auto profiles_dir = paths->profile_dir.parent_path();
+    for (const auto& directory :
+         {environment.app_data_dir, profiles_dir, paths->profile_dir}) {
+        if (!is_plain_dir(query_entry(directory))) {
+            return std::unexpected(ProfileLocalProblem::Directory);
+        }
+    }
+
+    PreparedLocalInspection prep{.paths = std::move(*paths)};
+    if (load_key) {
+        runtime::KeyStorage key_storage = runtime::KeyStorage::File;
+        if (auto loaded_profile = runtime::load_profile(
+                environment.app_data_dir / "config.toml", profile_name)) {
+            key_storage = loaded_profile->key_storage;
+        }
+        if (key_storage == runtime::KeyStorage::File) {
+            const auto key = query_entry(prep.paths.key_path);
+            if (!is_plain_file(key) || key.size != crypto::KEY_SIZE) {
+                return std::unexpected(ProfileLocalProblem::Key);
+            }
+            auto read_res = runtime::vault::read_only(prep.paths.key_path);
+            if (!read_res) {
+                return std::unexpected(ProfileLocalProblem::Key);
+            }
+            prep.key_bytes = *read_res;
+            crypto::secure_memory::wipe(read_res->data(), read_res->size());
+        } else if (key_storage == runtime::KeyStorage::Vault) {
+            auto read_res = runtime::vault::read_vault(prep.paths.key_path);
+            if (!read_res) {
+                wipe_optional_key(prep.key_bytes);
+                return std::unexpected(ProfileLocalProblem::Key);
+            }
+            prep.key_bytes = *read_res;
+            crypto::secure_memory::wipe(read_res->data(), read_res->size());
+        }
+    }
+
+    if (!is_plain_file(query_entry(prep.paths.database_path))) {
+        wipe_optional_key(prep.key_bytes);
+        return std::unexpected(ProfileLocalProblem::Database);
+    }
+
+    const auto sidecars = detail::sqlite_sidecar_paths(prep.paths.database_path);
+    prep.wal = query_entry(sidecars[0]);
+    prep.shm = query_entry(sidecars[1]);
+    prep.rollback = query_entry(sidecars[2]);
+    return prep;
+}
+
+sync::journal::InspectionResult inspect_profile_journal_readonly(
+    const sync::journal::Paths& journal_paths,
+    const std::filesystem::path& profile_dir,
+    const std::optional<runtime::vault::KeyBytes>& key_bytes) {
+    if (key_bytes) {
+        return sync::journal::inspect(journal_paths, *key_bytes);
+    }
+    const auto active_dir = query_entry(journal_paths.final_path.parent_path());
+    const auto retired_dir =
+        query_entry(profile_dir / "transaction.bin.enc.cleared");
+    if (active_dir.state == EntryState::Error ||
+        retired_dir.state == EntryState::Error) {
+        return sync::journal::InspectionResult::Corrupted;
+    }
+    if ((active_dir.state == EntryState::Present && !is_plain_dir(active_dir)) ||
+        (retired_dir.state == EntryState::Present &&
+         !is_plain_dir(retired_dir)) ||
+        (active_dir.state == EntryState::Present &&
+         retired_dir.state == EntryState::Present)) {
+        return sync::journal::InspectionResult::Corrupted;
+    }
+    if (active_dir.state == EntryState::Absent &&
+        retired_dir.state == EntryState::Absent) {
+        return sync::journal::InspectionResult::Absent;
+    }
+    if (retired_dir.state == EntryState::Present) {
+        return sync::journal::InspectionResult::Retired;
+    }
+    const auto retired_marker =
+        query_entry(journal_paths.final_path.parent_path() / "retired.enc");
+    if (retired_marker.state == EntryState::Error ||
+        (retired_marker.state == EntryState::Present &&
+         !is_plain_file(retired_marker))) {
+        return sync::journal::InspectionResult::Corrupted;
+    }
+    return retired_marker.state == EntryState::Present
+               ? sync::journal::InspectionResult::Retired
+               : sync::journal::InspectionResult::Active;
+}
+
+std::optional<std::filesystem::path> create_snapshot_temp_dir(
+    std::string_view prefix, InspectionTempDirectory& guard) {
+    auto random_id = platform::random::hex_id(16);
+    std::error_code temp_error;
+    const auto temp_root = std::filesystem::temp_directory_path(temp_error);
+    if (!random_id || random_id->empty() || temp_error) {
+        return std::nullopt;
+    }
+    const auto temp_dir = temp_root / (std::string{prefix} + *random_id);
+    if (query_entry(temp_dir).state != EntryState::Absent ||
+        !platform::private_storage::create_directory(temp_dir)) {
+        return std::nullopt;
+    }
+    guard.path = temp_dir;
+    guard.owns = true;
+    guard.identity = query_directory_identity(temp_dir);
+    if (!guard.identity.valid) {
+        return std::nullopt;
+    }
+    return temp_dir / "db.sqlite";
+}
+
+std::optional<state_storage::LocalActivitySnapshot>
+snapshot_local_activity_best_effort(const std::filesystem::path& database_path,
+                                    const EntryInfo& wal,
+                                    const EntryInfo& shm,
+                                    const EntryInfo& rollback,
+                                    std::string_view temp_prefix) {
+    if (is_auxiliary_sidecar_corrupt(wal) ||
+        is_auxiliary_sidecar_corrupt(shm) ||
+        is_auxiliary_sidecar_corrupt(rollback)) {
+        return std::nullopt;
+    }
+    // Always snapshot db.sqlite to a temporary directory before opening with
+    // SQLite so read-only queries never touch WAL/SHM sidecars or DB mtimes.
+    InspectionTempDirectory guard;
+    const auto copy_path = create_snapshot_temp_dir(temp_prefix, guard);
+    if (!copy_path) {
+        return std::nullopt;
+    }
+    const bool active_rollback =
+        rollback.state == EntryState::Present && rollback.size > 0;
+    if (!take_sqlite_snapshot(database_path,
+                              *copy_path,
+                              wal.state == EntryState::Present,
+                              active_rollback)) {
+        return std::nullopt;
+    }
+    auto loaded = state_storage::load_local_activity(*copy_path);
+    static_cast<void>(cleanup_inspection_temp_directory(guard));
+    if (!loaded) {
+        return std::nullopt;
+    }
+    return std::move(*loaded);
+}
+
+} // namespace
+
 ProfileLocalState
 inspect_profile_local_state(const ExecutionEnvironment& environment,
                             std::string_view profile_name,
@@ -1907,58 +2240,11 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
         }
         return ProfileLocalState::Problem;
     };
-    if (!runtime::is_valid_profile_name(profile_name)) {
-        return fail_inspection(ProfileLocalProblem::InvalidName);
+    auto prep = prepare_local_inspection(environment, profile_name, true);
+    if (!prep) {
+        return fail_inspection(prep.error());
     }
-
-    auto paths =
-        runtime::resolve_profile_paths(environment.app_data_dir, profile_name);
-    if (!paths) {
-        return fail_inspection(ProfileLocalProblem::Paths);
-    }
-
-    const auto profiles_dir = paths->profile_dir.parent_path();
-    for (const auto& directory :
-         {environment.app_data_dir, profiles_dir, paths->profile_dir}) {
-        const auto entry = query_entry(directory);
-        if (!is_plain_dir(entry)) {
-            return fail_inspection(ProfileLocalProblem::Directory);
-        }
-    }
-
-    runtime::KeyStorage key_storage = runtime::KeyStorage::File;
-    if (auto loaded_profile = runtime::load_profile(
-            environment.app_data_dir / "config.toml", profile_name)) {
-        key_storage = loaded_profile->key_storage;
-    }
-
-    std::optional<runtime::vault::KeyBytes> key_bytes;
-    OptionalKeyWiper key_wiper{key_bytes};
-
-    if (key_storage == runtime::KeyStorage::File) {
-        const auto key = query_entry(paths->key_path);
-        if (!is_plain_file(key) || key.size != crypto::KEY_SIZE) {
-            return fail_inspection(ProfileLocalProblem::Key);
-        }
-        auto read_res = runtime::vault::read_only(paths->key_path);
-        if (!read_res) {
-            return fail_inspection(ProfileLocalProblem::Key);
-        }
-        key_bytes = *read_res;
-        crypto::secure_memory::wipe(read_res->data(), read_res->size());
-    } else if (key_storage == runtime::KeyStorage::Vault) {
-        auto read_res = runtime::vault::read_vault(paths->key_path);
-        if (!read_res) {
-            return fail_inspection(ProfileLocalProblem::Key);
-        }
-        key_bytes = *read_res;
-        crypto::secure_memory::wipe(read_res->data(), read_res->size());
-    }
-
-    const auto database = query_entry(paths->database_path);
-    if (!is_plain_file(database)) {
-        return fail_inspection(ProfileLocalProblem::Database);
-    }
+    OptionalKeyWiper key_wiper{prep->key_bytes};
 
     const auto lock_path = environment.app_data_dir /
                            ("profile-" + std::string(profile_name) + ".lock");
@@ -1970,81 +2256,28 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
         return fail_inspection(ProfileLocalProblem::Lock);
     }
 
-    const auto auxiliary_corrupt = [](const auto& entry) {
-        return entry.state == EntryState::Error ||
-               (entry.state == EntryState::Present &&
-                (!entry.regular || entry.link));
-    };
-    const auto sidecars = detail::sqlite_sidecar_paths(paths->database_path);
+    const auto sidecars =
+        detail::sqlite_sidecar_paths(prep->paths.database_path);
     const auto& rollback_path = sidecars[2];
-    const auto rollback_corrupt = [&](const auto& entry) {
-        return auxiliary_corrupt(entry) ||
-               (entry.state == EntryState::Present && entry.size > 0 &&
-                !can_read_first_byte(rollback_path));
-    };
-
-    const auto wal = query_entry(sidecars[0]);
-    if (auxiliary_corrupt(wal)) {
-        return fail_inspection(ProfileLocalProblem::Sidecar);
-    }
-    if (auxiliary_corrupt(query_entry(sidecars[1]))) {
-        return fail_inspection(ProfileLocalProblem::Sidecar);
-    }
-    const auto rollback = query_entry(rollback_path);
-    if (rollback_corrupt(rollback)) {
+    if (is_auxiliary_sidecar_corrupt(prep->wal) ||
+        is_auxiliary_sidecar_corrupt(prep->shm) ||
+        is_rollback_sidecar_corrupt(prep->rollback, rollback_path)) {
         return fail_inspection(ProfileLocalProblem::Sidecar);
     }
 
-    auto journal_paths = sync::journal::make_paths(paths->profile_dir);
+    auto journal_paths = sync::journal::make_paths(prep->paths.profile_dir);
     if (!journal_paths) {
         return fail_inspection(ProfileLocalProblem::Journal);
     }
-    const auto inspect_journal = [&]() {
-        if (key_bytes) {
-            return sync::journal::inspect(*journal_paths, *key_bytes);
-        }
-        const auto active_dir =
-            query_entry(journal_paths->final_path.parent_path());
-        const auto retired_dir =
-            query_entry(paths->profile_dir / "transaction.bin.enc.cleared");
-        if (active_dir.state == EntryState::Error ||
-            retired_dir.state == EntryState::Error) {
-            return sync::journal::InspectionResult::Corrupted;
-        }
-        if ((active_dir.state == EntryState::Present &&
-             !is_plain_dir(active_dir)) ||
-            (retired_dir.state == EntryState::Present &&
-             !is_plain_dir(retired_dir)) ||
-            (active_dir.state == EntryState::Present &&
-             retired_dir.state == EntryState::Present)) {
-            return sync::journal::InspectionResult::Corrupted;
-        }
-        if (active_dir.state == EntryState::Absent &&
-            retired_dir.state == EntryState::Absent) {
-            return sync::journal::InspectionResult::Absent;
-        }
-        if (retired_dir.state == EntryState::Present) {
-            return sync::journal::InspectionResult::Retired;
-        }
-        const auto retired_marker = query_entry(
-            journal_paths->final_path.parent_path() / "retired.enc");
-        if (retired_marker.state == EntryState::Error ||
-            (retired_marker.state == EntryState::Present &&
-             !is_plain_file(retired_marker))) {
-            return sync::journal::InspectionResult::Corrupted;
-        }
-        return retired_marker.state == EntryState::Present
-                   ? sync::journal::InspectionResult::Retired
-                   : sync::journal::InspectionResult::Active;
-    };
-    const auto journal = inspect_journal();
+    const auto journal = inspect_profile_journal_readonly(
+        *journal_paths, prep->paths.profile_dir, prep->key_bytes);
     if (journal == sync::journal::InspectionResult::Corrupted) {
         return fail_inspection(ProfileLocalProblem::Journal);
     }
     const bool active_journal =
         journal == sync::journal::InspectionResult::Active;
     bool active_rollback_journal =
-        rollback.state == EntryState::Present && rollback.size > 0;
+        prep->rollback.state == EntryState::Present && prep->rollback.size > 0;
 
     auto random_id = platform::random::hex_id(16);
 #ifdef KASUMI_MUTATION_FAULT_TESTS
@@ -2124,9 +2357,9 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
     if (query_entry(copy_path).state != EntryState::Absent) {
         return fail_inspection(ProfileLocalProblem::Snapshot);
     }
-    if (!take_sqlite_snapshot(paths->database_path,
+    if (!take_sqlite_snapshot(prep->paths.database_path,
                               copy_path,
-                              wal.state == EntryState::Present,
+                              prep->wal.state == EntryState::Present,
                               active_rollback_journal)) {
         return fail_inspection(ProfileLocalProblem::Snapshot);
     }
@@ -2143,12 +2376,13 @@ inspect_profile_local_state(const ExecutionEnvironment& environment,
         return fail_inspection(ProfileLocalProblem::Database);
     }
 
-    const auto final_journal = inspect_journal();
+    const auto final_journal = inspect_profile_journal_readonly(
+        *journal_paths, prep->paths.profile_dir, prep->key_bytes);
     if (final_journal == sync::journal::InspectionResult::Corrupted) {
         return fail_inspection(ProfileLocalProblem::Journal);
     }
     const auto final_rollback = query_entry(rollback_path);
-    if (rollback_corrupt(final_rollback)) {
+    if (is_rollback_sidecar_corrupt(final_rollback, rollback_path)) {
         return fail_inspection(ProfileLocalProblem::Sidecar);
     }
     active_rollback_journal = active_rollback_journal ||
@@ -2287,85 +2521,13 @@ to_profile_publish(state_storage::RemotePublishState state) noexcept {
     return PP::NotApplicable;
 }
 
-} // namespace
-
-ProfileActivityReport
-inspect_profile_activity(const ExecutionEnvironment& environment,
-                         std::string_view profile_name) {
-    ProfileActivityReport report;
-    if (!runtime::is_valid_profile_name(profile_name)) {
-        return report;
-    }
-    auto paths =
-        runtime::resolve_profile_paths(environment.app_data_dir, profile_name);
-    if (!paths) {
-        return report;
-    }
-    const auto profiles_dir = paths->profile_dir.parent_path();
-    for (const auto& directory :
-         {environment.app_data_dir, profiles_dir, paths->profile_dir}) {
-        if (!is_plain_dir(query_entry(directory))) {
-            return report;
-        }
-    }
-    const auto db_entry = query_entry(paths->database_path);
-    if (!is_plain_file(db_entry)) {
-        return report;
-    }
-    const auto auxiliary_corrupt = [](const EntryInfo& entry) {
-        return entry.state == EntryState::Error ||
-               (entry.state == EntryState::Present &&
-                (!entry.regular || entry.link));
-    };
-    const auto sidecars = detail::sqlite_sidecar_paths(paths->database_path);
-    const auto wal = query_entry(sidecars[0]);
-    const auto shm = query_entry(sidecars[1]);
-    const auto rollback = query_entry(sidecars[2]);
-    if (auxiliary_corrupt(wal) || auxiliary_corrupt(shm) ||
-        auxiliary_corrupt(rollback)) {
-        return report;
-    }
-
-    // Always snapshot db.sqlite to a temporary directory before opening with
-    // SQLite so read-only queries never touch WAL/SHM sidecars or DB mtimes.
-    auto random_id = platform::random::hex_id(16);
-    std::error_code temp_error;
-    const auto temp_root = std::filesystem::temp_directory_path(temp_error);
-    if (!random_id || random_id->empty() || temp_error) {
-        return report;
-    }
-    const auto temp_dir = temp_root / ("kasumi_act_" + *random_id);
-    if (!platform::private_storage::create_directory(temp_dir)) {
-        return report;
-    }
-    InspectionTempDirectory guard{temp_dir};
-    guard.owns = true;
-    guard.identity = query_directory_identity(temp_dir);
-    if (!guard.identity.valid) {
-        return report;
-    }
-    const auto copy_path = temp_dir / "db.sqlite";
-    const bool active_rollback =
-        rollback.state == EntryState::Present && rollback.size > 0;
-    if (!take_sqlite_snapshot(paths->database_path,
-                              copy_path,
-                              wal.state == EntryState::Present,
-                              active_rollback)) {
-        return report;
-    }
-    auto loaded_activity = state_storage::load_local_activity(copy_path);
-    static_cast<void>(cleanup_inspection_temp_directory(guard));
-    if (!loaded_activity) {
-        return report;
-    }
-
+void populate_profile_activity(
+    ProfileActivityReport& report,
+    const state_storage::LocalActivitySnapshot& loaded_activity,
+    bool lock_held) {
     report.database_present = true;
-    const auto lock_path = environment.app_data_dir /
-                           ("profile-" + std::string{profile_name} + ".lock");
-    const bool lock_held = platform::is_profile_lock_held(lock_path);
-
-    if (loaded_activity->accepted_commit) {
-        const auto& meta = *loaded_activity->accepted_commit;
+    if (loaded_activity.accepted_commit) {
+        const auto& meta = *loaded_activity.accepted_commit;
         report.accepted_commit = ProfileCommitAuthorship{
             .commit_id = meta.commit_id,
             .height = meta.height,
@@ -2378,8 +2540,8 @@ inspect_profile_activity(const ExecutionEnvironment& environment,
         };
     }
 
-    report.recent_executions.reserve(loaded_activity->executions.size());
-    for (const auto& rec : loaded_activity->executions) {
+    report.recent_executions.reserve(loaded_activity.executions.size());
+    for (const auto& rec : loaded_activity.executions) {
         ProfileExecutionSummary item{
             .execution_id = rec.execution_id,
             .operation = to_profile_op(rec.operation),
@@ -2415,8 +2577,8 @@ inspect_profile_activity(const ExecutionEnvironment& environment,
     }
 
     report.cached_remote_activities.reserve(
-        loaded_activity->cached_remote_activities.size());
-    for (const auto& entry : loaded_activity->cached_remote_activities) {
+        loaded_activity.cached_remote_activities.size());
+    for (const auto& entry : loaded_activity.cached_remote_activities) {
         report.cached_remote_activities.push_back(ProfileCachedRemoteActivity{
             .event_id = entry.event_id,
             .operation = entry.operation,
@@ -2435,6 +2597,137 @@ inspect_profile_activity(const ExecutionEnvironment& environment,
             .cached_at = entry.cached_at,
         });
     }
+}
+
+} // namespace
+
+ProfileLocalSummary
+inspect_profile_local_summary(const ExecutionEnvironment& environment,
+                              std::string_view profile_name) {
+    ProfileLocalSummary summary;
+    const auto fail_summary = [&](ProfileLocalProblem reason) {
+        summary.state = ProfileLocalState::Problem;
+        summary.problem = reason;
+        return summary;
+    };
+    auto prep = prepare_local_inspection(environment, profile_name, true);
+    if (!prep) {
+        return fail_summary(prep.error());
+    }
+    OptionalKeyWiper key_wiper{prep->key_bytes};
+
+    const auto lock_path = environment.app_data_dir /
+                           ("profile-" + std::string{profile_name} + ".lock");
+    const auto lock_probe = probe_profile_lock(lock_path);
+    if (lock_probe == LockProbe::Active) {
+        summary.state = ProfileLocalState::Running;
+        summary.problem = ProfileLocalProblem::None;
+        if (const auto act = snapshot_local_activity_best_effort(
+                prep->paths.database_path,
+                prep->wal,
+                prep->shm,
+                prep->rollback,
+                "kasumi_sum_")) {
+            populate_profile_activity(summary.activity, *act, true);
+        }
+        return summary;
+    }
+    if (lock_probe != LockProbe::Inactive) {
+        return fail_summary(ProfileLocalProblem::Lock);
+    }
+
+    const auto sidecars =
+        detail::sqlite_sidecar_paths(prep->paths.database_path);
+    const auto& rollback_path = sidecars[2];
+    if (is_auxiliary_sidecar_corrupt(prep->wal) ||
+        is_auxiliary_sidecar_corrupt(prep->shm) ||
+        is_rollback_sidecar_corrupt(prep->rollback, rollback_path)) {
+        return fail_summary(ProfileLocalProblem::Sidecar);
+    }
+
+    auto journal_paths = sync::journal::make_paths(prep->paths.profile_dir);
+    if (!journal_paths) {
+        return fail_summary(ProfileLocalProblem::Journal);
+    }
+    const auto journal = inspect_profile_journal_readonly(
+        *journal_paths, prep->paths.profile_dir, prep->key_bytes);
+    if (journal == sync::journal::InspectionResult::Corrupted) {
+        return fail_summary(ProfileLocalProblem::Journal);
+    }
+    const bool active_journal =
+        journal == sync::journal::InspectionResult::Active;
+    bool active_rollback_journal =
+        prep->rollback.state == EntryState::Present && prep->rollback.size > 0;
+
+    InspectionTempDirectory temporary;
+    auto copy_path = create_snapshot_temp_dir("kasumi_sum_", temporary);
+    if (!copy_path) {
+        return fail_summary(ProfileLocalProblem::Workspace);
+    }
+    if (!take_sqlite_snapshot(prep->paths.database_path,
+                              *copy_path,
+                              prep->wal.state == EntryState::Present,
+                              active_rollback_journal)) {
+        return fail_summary(ProfileLocalProblem::Snapshot);
+    }
+    auto loaded = state_storage::load_state_and_activity_summary(*copy_path);
+    if (!loaded) {
+        return fail_summary(ProfileLocalProblem::Database);
+    }
+
+    const auto final_journal = inspect_profile_journal_readonly(
+        *journal_paths, prep->paths.profile_dir, prep->key_bytes);
+    if (final_journal == sync::journal::InspectionResult::Corrupted) {
+        return fail_summary(ProfileLocalProblem::Journal);
+    }
+    const auto final_rollback = query_entry(rollback_path);
+    if (is_rollback_sidecar_corrupt(final_rollback, rollback_path)) {
+        return fail_summary(ProfileLocalProblem::Sidecar);
+    }
+    active_rollback_journal = active_rollback_journal ||
+                              (final_rollback.state == EntryState::Present &&
+                               final_rollback.size > 0);
+    if (!cleanup_inspection_temp_directory(temporary)) {
+        return fail_summary(ProfileLocalProblem::Cleanup);
+    }
+
+    populate_profile_activity(summary.activity, loaded->activity, false);
+    summary.problem = ProfileLocalProblem::None;
+    if (active_journal || active_rollback_journal ||
+        final_journal == sync::journal::InspectionResult::Active) {
+        summary.state = ProfileLocalState::Pending;
+    } else if (!loaded->has_state) {
+        summary.state = ProfileLocalState::Initialized;
+    } else if (loaded->has_pending_materializations) {
+        summary.state = ProfileLocalState::Pending;
+    } else {
+        summary.state = ProfileLocalState::Ready;
+    }
+    return summary;
+}
+
+ProfileActivityReport
+inspect_profile_activity(const ExecutionEnvironment& environment,
+                         std::string_view profile_name) {
+    ProfileActivityReport report;
+    auto prep = prepare_local_inspection(environment, profile_name, false);
+    if (!prep) {
+        return report;
+    }
+    const auto loaded_activity = snapshot_local_activity_best_effort(
+        prep->paths.database_path,
+        prep->wal,
+        prep->shm,
+        prep->rollback,
+        "kasumi_act_");
+    if (!loaded_activity) {
+        return report;
+    }
+
+    const auto lock_path = environment.app_data_dir /
+                           ("profile-" + std::string{profile_name} + ".lock");
+    const bool lock_held = platform::is_profile_lock_held(lock_path);
+    populate_profile_activity(report, *loaded_activity, lock_held);
     return report;
 }
 
@@ -2485,107 +2778,13 @@ test_profile_connection(const ExecutionEnvironment& environment,
         return std::unexpected(key_res.error());
     }
 
-    ProfileConnectionReport report{
-        .profile_name = std::string{profile_name},
-        .remote_dir = runtime_res->storage_location,
-    };
-    auto opened = transport::open_transport(
+    return probe_connection(
+        profile_name,
         runtime_res->storage_location,
-        transport::TransportOptions{
-            .forbidden_executable_root = runtime_res->local_dir,
-            .rclone_config = runtime_res->rclone_config,
-            .bandwidth_limit = runtime_res->bandwidth_limit,
-        });
-    if (!opened) {
-        report.transport_ok = false;
-        report.ready = false;
-        report.vault_state = RemoteVaultState::TransportFailure;
-        report.detail = transport::describe(opened.error());
-        return report;
-    }
-
-    auto workspace = platform::create_workspace("kasumi-profile-test");
-    if (!workspace) {
-        return fail_profile(ProfileErrorCode::StorageFailure,
-                            "failed to prepare temporary workspace: " +
-                                workspace.error());
-    }
-    struct WorkspaceGuard {
-        platform::Workspace& ws;
-        ~WorkspaceGuard() noexcept {
-            platform::cleanup_workspace(ws);
-        }
-    } ws_guard{*workspace};
-
-    // Probe authenticated history via scoped prefix reads first so large
-    // authenticated vaults do not trigger a full object listing.
-    const auto observed =
-        observation::history::observe(*opened, key, workspace->root, false);
-    if (!observed) {
-        if (observed.error().code ==
-            observation::history::ErrorCode::TransportFailure) {
-            report.transport_ok = false;
-            report.ready = false;
-            report.vault_state = RemoteVaultState::TransportFailure;
-            report.detail = observed.error().detail;
-            return report;
-        }
-        report.transport_ok = true;
-        report.ready = false;
-        report.vault_state = RemoteVaultState::KeyMismatchOrInvalidHistory;
-        report.detail = observed.error().detail;
-        return report;
-    }
-
-    if (observed->history_present) {
-        report.transport_ok = true;
-        report.ready = true;
-        report.vault_state = RemoteVaultState::AuthenticatedVault;
-        report.head_count = observed->logical_heads.size();
-        if (observed->epoch && !observed->epoch->reference.epoch_id.empty()) {
-            report.epoch_sequence = observed->epoch->reference.sequence;
-            report.epoch_id = observed->epoch->reference.epoch_id;
-        }
-        report.detail = "authenticated existing remote vault";
-        return report;
-    }
-
-    auto listed = transport::list(*opened);
-    if (!listed) {
-        if (listed.error().code == transport::ErrorCode::StorageNotFound) {
-            report.transport_ok = true;
-            report.ready = true;
-            report.vault_state = RemoteVaultState::EmptyReadyForInit;
-            report.detail =
-                "remote destination is reachable and uninitialized/empty "
-                "(ready for initial sync)";
-            return report;
-        }
-        report.transport_ok = false;
-        report.ready = false;
-        report.vault_state = RemoteVaultState::TransportFailure;
-        report.detail = transport::describe(listed.error());
-        return report;
-    }
-
-    if (listed->empty()) {
-        report.transport_ok = true;
-        report.ready = true;
-        report.vault_state = RemoteVaultState::EmptyReadyForInit;
-        report.detail =
-            "remote destination is reachable and empty (ready for initial "
-            "sync)";
-        return report;
-    }
-
-    report.transport_ok = true;
-    report.ready = false;
-    report.vault_state = RemoteVaultState::KeyMismatchOrInvalidHistory;
-    report.detail =
-        "remote destination contains objects that could not be "
-        "authenticated with this profile's key (verify password/salt or "
-        "remote_dir)";
-    return report;
+        {.forbidden_executable_root = runtime_res->local_dir,
+         .rclone_config = runtime_res->rclone_config,
+         .bandwidth_limit = runtime_res->bandwidth_limit},
+        key);
 }
 
 std::expected<void, ProfileError> check_os_vault_available() {

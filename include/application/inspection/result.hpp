@@ -133,6 +133,13 @@ inline constexpr std::uint32_t remote_activity_flag_barrier_release_failed =
 inline constexpr std::uint32_t remote_activity_flag_mutation_uncertain = 1U
                                                                          << 3U;
 
+struct RemoteSpaceUsage {
+    std::uint64_t current_content_bytes{};
+    std::uint64_t retained_content_bytes{};
+    std::uint64_t orphan_content_bytes{};
+    std::size_t unknown_sizes{};
+};
+
 struct RemoteSummaryReport {
     bool history_present = false;
     std::uint64_t observed_height = 0;
@@ -144,6 +151,12 @@ struct RemoteSummaryReport {
     std::size_t active_writer_count = 0;
     std::vector<RemoteActivityInfo> recent_activities;
     std::size_t invalid_activity_count = 0;
+    std::optional<RemoteSpaceUsage> space_usage = std::nullopt;
+};
+
+struct RemoteChunkInfo {
+    std::string hash;
+    std::uint32_t size;
 };
 
 struct RemoteStatReport {
@@ -155,6 +168,8 @@ struct RemoteStatReport {
     std::string logical_hash;
     std::uint64_t size = 0;
     std::int64_t modified_at_unix_nanoseconds = 0;
+    std::optional<std::string> pack_hash = std::nullopt;
+    std::vector<RemoteChunkInfo> chunks{};
 };
 
 enum class RemoteCommitVariantState : std::uint8_t {
