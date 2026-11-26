@@ -857,6 +857,13 @@ install(
     DESTINATION ${CMAKE_INSTALL_DOCDIR}
     COMPONENT kasumi
 )
+if(UNIX AND NOT APPLE)
+    install(
+        FILES ${PROJECT_SOURCE_DIR}/packaging/linux/kasumi.desktop
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/applications
+        COMPONENT kasumi
+    )
+endif()
 
 set(CPACK_PACKAGE_NAME "kasumi")
 set(CPACK_PACKAGE_VENDOR "auanK")
@@ -893,6 +900,7 @@ set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
     "/usr"
     "/usr/bin"
     "/usr/share"
+    "/usr/share/applications"
     "/usr/share/doc"
 )
 set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE

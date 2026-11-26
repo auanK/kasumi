@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Kasumi
+GenericName=Encrypted File Synchronization
+Comment=Open the Kasumi encrypted synchronization Web UI
+Exec=/usr/bin/kasumi web
+Terminal=false
+Categories=Utility;Network;FileTransfer;
+Keywords=sync;encryption;backup;rclone;vault;
+StartupNotify=false

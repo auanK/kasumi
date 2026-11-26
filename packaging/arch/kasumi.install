@@ -1,8 +1,9 @@
 post_install() {
   echo "==> Kasumi v${1%-*} installed (/usr/bin/kasumi)"
-  echo "==> Run 'kasumi --version' or 'kasumi config' to get started."
+  echo "==> Run 'kasumi web' to open the Web UI, 'kasumi start --autostart' for login startup, or 'kasumi config' for CLI setup."
 }
 
 post_upgrade() {
   echo "==> Kasumi upgraded: v${2%-*} -> v${1%-*} (profiles and config preserved)"
+  echo "==> If the background daemon is running, restart it with 'kasumi stop && kasumi start'."
 }

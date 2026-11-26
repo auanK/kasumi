@@ -8,9 +8,10 @@ case "$1" in
       ver="$(/usr/bin/kasumi --version 2>/dev/null | awk '{print $NF}')"
     fi
     if [ -n "${2:-}" ]; then
-      echo "kasumi: upgraded v${2} -> v${ver:-unknown} (profiles preserved)"
+      echo "kasumi: upgraded v${2} -> v${ver:-unknown} (profiles preserved; restart the daemon with 'kasumi stop && kasumi start' if running)"
     else
       echo "kasumi: installed v${ver:-unknown} (/usr/bin/kasumi)"
+      echo "kasumi: run 'kasumi web' to open the Web UI or 'kasumi start --autostart' to enable login startup"
     fi
     ;;
 esac

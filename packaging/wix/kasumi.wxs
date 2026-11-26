@@ -34,7 +34,7 @@
     <Property Id="KASUMI_WELCOME_TITLE"
               Value="Welcome to the Kasumi v$(var.ProductVersion) Setup Wizard" />
     <Property Id="KASUMI_WELCOME_DESC"
-              Value="The Setup Wizard will install Kasumi v$(var.ProductVersion) on your computer and add it to the system PATH. Click Next to continue or Cancel to exit." />
+              Value="The Setup Wizard will install Kasumi v$(var.ProductVersion) on your computer, add it to the system PATH, and create a Start Menu shortcut. Click Next to continue or Cancel to exit." />
     <Property Id="KASUMI_READY_TITLE"
               Value="Ready to install Kasumi v$(var.ProductVersion)" />
     <Property Id="KASUMI_READY_TEXT"
@@ -43,10 +43,17 @@
               Value="Installing Kasumi v$(var.ProductVersion)" />
     <Property Id="KASUMI_EXIT_TITLE"
               Value="Completed the Kasumi v$(var.ProductVersion) Setup Wizard" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
 
     <CustomAction Id="SetFreshReadyText"
                   Property="KASUMI_READY_TEXT"
                   Value="Click Install to install Kasumi v$(var.ProductVersion) into [INSTALLFOLDER]." />
+    <CustomAction Id="SetFreshExitCheckboxText"
+                  Property="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT"
+                  Value="Start Kasumi on sign-in and open the Web UI" />
+    <CustomAction Id="SetUpgradeExitCheckboxText"
+                  Property="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT"
+                  Value="Restart Kasumi and open the Web UI" />
     <CustomAction Id="SetUpgradeWelcomeTitle"
                   Property="KASUMI_WELCOME_TITLE"
                   Value="Update Kasumi to v$(var.ProductVersion)" />
@@ -72,10 +79,34 @@
                   Property="KASUMI_EXIT_TITLE"
                   Value="Kasumi v$(var.ProductVersion) Update Complete" />
 
+    <SetProperty Id="WixQuietExec64CmdLine"
+                 Value="&quot;[INSTALLFOLDER]kasumi.exe&quot; stop"
+                 Before="StopKasumiDaemon"
+                 Sequence="execute"
+                 Condition="WIX_UPGRADE_DETECTED OR REMOVE=&quot;ALL&quot;" />
+    <CustomAction Id="StopKasumiDaemon"
+                  BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  DllEntry="WixQuietExec64"
+                  Execute="immediate"
+                  Return="ignore"
+                  Impersonate="yes" />
+    <CustomAction Id="RunKasumiFinishAction"
+                  BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  DllEntry="WixQuietExec64"
+                  Execute="immediate"
+                  Return="ignore"
+                  Impersonate="yes" />
+
     <InstallUISequence>
       <Custom Action="SetFreshReadyText"
               After="CostFinalize"
               Condition="NOT WIX_UPGRADE_DETECTED" />
+      <Custom Action="SetFreshExitCheckboxText"
+              After="CostFinalize"
+              Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED" />
+      <Custom Action="SetUpgradeExitCheckboxText"
+              After="CostFinalize"
+              Condition="WIX_UPGRADE_DETECTED" />
       <Custom Action="SetUpgradeWelcomeTitle"
               After="CostFinalize"
               Condition="WIX_UPGRADE_DETECTED" />
@@ -102,10 +133,26 @@
               Condition="WIX_UPGRADE_DETECTED" />
     </InstallUISequence>
 
+    <InstallExecuteSequence>
+      <Custom Action="StopKasumiDaemon"
+              Before="InstallValidate"
+              Condition="WIX_UPGRADE_DETECTED OR REMOVE=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+
+    <StandardDirectory Id="ProgramMenuFolder" />
+
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Kasumi">
         <Component Id="KasumiExecutable">
           <File Id="KasumiExe" Source="$(var.BinPath)" KeyPath="yes" />
+          <Shortcut Id="KasumiStartMenuShortcut"
+                    Directory="ProgramMenuFolder"
+                    Name="Kasumi"
+                    Description="Open the Kasumi Web UI"
+                    Arguments="web"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Show="minimized"
+                    Advertise="no" />
           <RegistryValue Root="HKLM"
                          Key="Software\auanK\Kasumi"
                          Name="InstallFolder"
@@ -156,6 +203,30 @@
                Value="WelcomeDlg"
                Condition="WIX_UPGRADE_DETECTED"
                Order="10" />
+      <Publish Dialog="ExitDialog"
+               Control="Finish"
+               Property="WixQuietExec64CmdLine"
+               Value="&quot;[#KasumiExe]&quot; start --autostart"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed AND NOT WIX_UPGRADE_DETECTED"
+               Order="1" />
+      <Publish Dialog="ExitDialog"
+               Control="Finish"
+               Event="DoAction"
+               Value="RunKasumiFinishAction"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed AND NOT WIX_UPGRADE_DETECTED"
+               Order="2" />
+      <Publish Dialog="ExitDialog"
+               Control="Finish"
+               Property="WixQuietExec64CmdLine"
+               Value="&quot;[#KasumiExe]&quot; web"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND (NOT Installed OR WIX_UPGRADE_DETECTED)"
+               Order="3" />
+      <Publish Dialog="ExitDialog"
+               Control="Finish"
+               Event="DoAction"
+               Value="RunKasumiFinishAction"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND (NOT Installed OR WIX_UPGRADE_DETECTED)"
+               Order="4" />
     </UI>
   </Package>
 </Wix>

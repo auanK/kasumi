@@ -135,6 +135,27 @@ jobs:
           env -u DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR="$tmp/no-bus" XDG_CONFIG_HOME="$tmp/cfg" \
             KASUMI_LANG=en ./build/kasumi list | grep -q "smoke"
 
+          mkdir -p "$tmp/webcfg/kasumi"
+          printf '{"port":0}\n' > "$tmp/webcfg/kasumi/web.json"
+          cleanup_smoke() {
+            XDG_CONFIG_HOME="$tmp/webcfg" ./build/kasumi stop >/dev/null 2>&1 || true
+            rm -rf "$tmp"
+          }
+          trap cleanup_smoke EXIT
+          web_json="$(XDG_CONFIG_HOME="$tmp/webcfg" KASUMI_LANG=en ./build/kasumi web --no-open --json)"
+          python3 - "$web_json" <<'PY'
+          import json, sys, urllib.request
+          payload = json.loads(sys.argv[1])
+          assert payload.get("status") == "ok", payload
+          url = payload["url"]
+          assert isinstance(url, str) and url.startswith("http://127.0.0.1:"), payload
+          with urllib.request.urlopen(url, timeout=5) as resp:
+              assert resp.status == 200, resp.status
+              body = resp.read().decode("utf-8", errors="replace").lower()
+              assert "<!doctype html>" in body, body[:160]
+          PY
+          XDG_CONFIG_HOME="$tmp/webcfg" ./build/kasumi stop >/dev/null
+
       - name: Package
         run: |
           VERSION="$(python3 -c 'import re; print(re.search(r"project\(kasumi\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)", open("CMakeLists.txt").read()).group(1))')"
@@ -157,6 +178,7 @@ jobs:
             --binary build/kasumi \
             --version "$VERSION" \
             --install-script packaging/arch/kasumi.install \
+            --desktop-entry packaging/linux/kasumi.desktop \
             --output "kasumi-v${VERSION}-linux-x86_64.pkg.tar.zst"
 
           for pkg in "kasumi-v${VERSION}-linux-x86_64.deb" "kasumi-v${VERSION}-linux-x86_64.rpm" "kasumi-v${VERSION}-linux-x86_64.pkg.tar.zst"; do
@@ -186,16 +208,19 @@ jobs:
           dpkg-deb --info "kasumi-v${VERSION}-linux-x86_64.deb"
           sudo dpkg -i "kasumi-v${VERSION}-linux-x86_64.deb"
           test "$(/usr/bin/kasumi --version)" = "kasumi version $VERSION"
+          test -f /usr/share/applications/kasumi.desktop
           test -f /usr/share/doc/kasumi/LICENSE
           test -f /usr/share/doc/kasumi/THIRD_PARTY_NOTICES.md
           sudo dpkg -i "kasumi-v${VERSION}-linux-x86_64.deb"
           test "$(/usr/bin/kasumi --version)" = "kasumi version $VERSION"
           sudo dpkg -r kasumi
           test ! -e /usr/bin/kasumi
+          test ! -e /usr/share/applications/kasumi.desktop
 
           docker run --rm -v "$PWD:/work:ro" archlinux:latest bash -euo pipefail -c "
             pacman -U --noconfirm \"/work/kasumi-v${VERSION}-linux-x86_64.pkg.tar.zst\"
             test \"\$(/usr/bin/kasumi --version)\" = \"kasumi version $VERSION\"
+            test -f /usr/share/applications/kasumi.desktop
             test -f /usr/share/licenses/kasumi/LICENSE
             test -f /usr/share/licenses/kasumi/THIRD_PARTY_NOTICES.md
             pacman -Qk kasumi
@@ -203,6 +228,7 @@ jobs:
             test \"\$(/usr/bin/kasumi --version)\" = \"kasumi version $VERSION\"
             pacman -R --noconfirm kasumi
             test ! -e /usr/bin/kasumi
+            test ! -e /usr/share/applications/kasumi.desktop
           "
 
           docker run --rm -v "$PWD:/work:ro" fedora:latest bash -euo pipefail -c "
@@ -210,6 +236,7 @@ jobs:
             rpm -qpi --nosignature \"/work/kasumi-v${VERSION}-linux-x86_64.rpm\"
             rpm -Uvh --nosignature \"/work/kasumi-v${VERSION}-linux-x86_64.rpm\"
             test \"\$(/usr/bin/kasumi --version)\" = \"kasumi version $VERSION\"
+            test -f /usr/share/applications/kasumi.desktop
             test -f /usr/share/doc/kasumi/LICENSE
             test -f /usr/share/doc/kasumi/THIRD_PARTY_NOTICES.md
             rpm -V --nosignature kasumi
@@ -217,6 +244,7 @@ jobs:
             test \"\$(/usr/bin/kasumi --version)\" = \"kasumi version $VERSION\"
             rpm -e kasumi
             test ! -e /usr/bin/kasumi
+            test ! -e /usr/share/applications/kasumi.desktop
           "
 
       - name: Upload Artifact
@@ -349,6 +377,29 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Binary smoke test --version failed with code $LASTEXITCODE" }
           & $exe --help
           if ($LASTEXITCODE -ne 0) { throw "Binary smoke test --help failed with code $LASTEXITCODE" }
+          $tmpAppData = Join-Path $env:RUNNER_TEMP ("kasumi-smoke-" + [guid]::NewGuid().ToString("N"))
+          $cfgDir = Join-Path $tmpAppData "kasumi"
+          New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+          [System.IO.File]::WriteAllText((Join-Path $cfgDir "web.json"), '{"port":0}')
+          $prevAppData = $env:APPDATA
+          $env:APPDATA = $tmpAppData
+          try {
+              $webOut = (& $exe web --no-open --json | Out-String)
+              if ($LASTEXITCODE -ne 0) { throw "kasumi web --no-open --json failed ($LASTEXITCODE): $webOut" }
+              $parsed = $webOut | ConvertFrom-Json
+              if ($parsed.status -ne "ok") { throw "kasumi web returned status=$($parsed.status): $webOut" }
+              $url = [string]$parsed.url
+              if ([string]::IsNullOrWhiteSpace($url)) { throw "Expected valid Web UI url in: $webOut" }
+              $resp = Invoke-WebRequest -UseBasicParsing -Uri $url -TimeoutSec 5
+              if ($resp.StatusCode -ne 200) { throw "Web UI returned HTTP $($resp.StatusCode)" }
+              if ($resp.Content.ToLowerInvariant() -notmatch '<!doctype html>') {
+                  throw "Web UI response did not contain HTML entrypoint"
+              }
+          } finally {
+              & $exe stop | Out-Null
+              $env:APPDATA = $prevAppData
+              Remove-Item -Recurse -Force $tmpAppData -ErrorAction SilentlyContinue
+          }
 
       - name: Release Gate - Verify Runtime Dependencies (Static MSVC)
         shell: powershell
@@ -400,6 +451,8 @@ jobs:
           wix --version
           wix extension add -g WixToolset.UI.wixext/5.0.2
           if ($LASTEXITCODE -ne 0) { throw "Failed to add WixToolset.UI.wixext" }
+          wix extension add -g WixToolset.Util.wixext/5.0.2
+          if ($LASTEXITCODE -ne 0) { throw "Failed to add WixToolset.Util.wixext" }
 
       - name: Package
         shell: powershell
@@ -425,6 +478,7 @@ jobs:
           wix build packaging/wix/kasumi.wxs `
             -arch x64 `
             -ext WixToolset.UI.wixext/5.0.2 `
+            -ext WixToolset.Util.wixext/5.0.2 `
             -loc packaging/wix/KasumiStrings.wxl `
             -d "ProductVersion=$version" `
             -d "BinPath=build-release/kasumi.exe" `
@@ -489,6 +543,10 @@ jobs:
                   throw "Missing installed file: $f"
               }
           }
+          $startMenuShortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\Kasumi.lnk"
+          if (-not (Test-Path -LiteralPath $startMenuShortcut -PathType Leaf)) {
+              throw "Missing Start Menu shortcut after MSI install: $startMenuShortcut"
+          }
           $installedVer = (Get-ItemPropertyValue -Path "HKLM:\Software\auanK\Kasumi" -Name "InstalledVersion")
           if ($installedVer -ne $version) {
               throw "Registry InstalledVersion expected '$version', got '$installedVer'"
@@ -520,6 +578,9 @@ jobs:
           Invoke-MsiExec @("/x", $msiPath, "/qn") "$PWD\msi-uninstall.log"
           if (Test-Path -LiteralPath (Join-Path $installDir "kasumi.exe")) {
               throw "kasumi.exe still present after MSI uninstall"
+          }
+          if (Test-Path -LiteralPath $startMenuShortcut) {
+              throw "Start Menu shortcut still present after MSI uninstall: $startMenuShortcut"
           }
           $pathHitsAfterUninstall = @(Get-MachinePathEntries | Where-Object { $_ -ieq $installDir })
           if ($pathHitsAfterUninstall.Count -ne 0) {

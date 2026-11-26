@@ -13,11 +13,14 @@ optdepends=(
   'libsecret: GNOME Keyring / Secret Service vault storage'
   'kwallet: KDE KWallet vault storage'
 )
-makedepends=('cmake' 'ninja' 'python' 'gcc')
+makedepends=('cmake' 'ninja' 'python' 'gcc' 'nodejs' 'npm')
 source=("kasumi-${pkgver}.tar.gz::https://github.com/auanK/kasumi/archive/refs/tags/v${pkgver}.tar.gz")
 sha256sums=('SKIP')
 
 build() {
+  cd "${srcdir}/${pkgname}-${pkgver}/web"
+  npm ci
+  npm run build
   cd "${srcdir}/${pkgname}-${pkgver}"
   cmake --preset default -DBUILD_TESTING=OFF
   cmake --build --preset default --parallel
@@ -26,6 +29,7 @@ build() {
 package() {
   cd "${srcdir}/${pkgname}-${pkgver}"
   install -Dm755 "build/kasumi" "${pkgdir}/usr/bin/kasumi"
+  install -Dm644 "packaging/linux/kasumi.desktop" "${pkgdir}/usr/share/applications/kasumi.desktop"
   install -Dm644 "LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
   install -Dm644 "THIRD_PARTY_NOTICES.md" "${pkgdir}/usr/share/licenses/${pkgname}/THIRD_PARTY_NOTICES.md"
 }

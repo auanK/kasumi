@@ -72,6 +72,7 @@ def _render_mtree(
     license_bytes: bytes,
     notices_bytes: bytes,
     install_bytes: bytes | None = None,
+    desktop_bytes: bytes | None = None,
 ) -> bytes:
     def file_line(relpath: str, payload: bytes, mode: str | None = None) -> str:
         md5_hex, sha256_hex = _digests(payload)
@@ -96,6 +97,13 @@ def _render_mtree(
         dir_line("usr/bin"),
         file_line("usr/bin/kasumi", bin_bytes, mode="755"),
         dir_line("usr/share"),
+    ])
+    if desktop_bytes is not None:
+        lines.extend([
+            dir_line("usr/share/applications"),
+            file_line("usr/share/applications/kasumi.desktop", desktop_bytes),
+        ])
+    lines.extend([
         dir_line("usr/share/licenses"),
         dir_line(f"usr/share/licenses/{PKGNAME}"),
         file_line(f"usr/share/licenses/{PKGNAME}/LICENSE", license_bytes),
@@ -142,6 +150,7 @@ def build_arch_tar_bytes(
     license_path: Path,
     notices_path: Path,
     install_script_path: Path | None = None,
+    desktop_entry_path: Path | None = None,
     pkgrel: int = 1,
     arch: str = "x86_64",
     builddate: int | None = None,
@@ -159,8 +168,18 @@ def build_arch_tar_bytes(
         if install_script_path is not None
         else None
     )
+    desktop_bytes = (
+        desktop_entry_path.read_bytes().replace(b"\r\n", b"\n")
+        if desktop_entry_path is not None
+        else None
+    )
 
-    installed_size = len(bin_bytes) + len(license_bytes) + len(notices_bytes)
+    installed_size = (
+        len(bin_bytes)
+        + len(license_bytes)
+        + len(notices_bytes)
+        + (len(desktop_bytes) if desktop_bytes is not None else 0)
+    )
     pkginfo_bytes = _render_pkginfo(
         version=version,
         pkgrel=pkgrel,
@@ -175,6 +194,7 @@ def build_arch_tar_bytes(
         license_bytes=license_bytes,
         notices_bytes=notices_bytes,
         install_bytes=install_bytes,
+        desktop_bytes=desktop_bytes,
     )
 
     buffer = io.BytesIO()
@@ -187,6 +207,15 @@ def build_arch_tar_bytes(
         _add_dir(archive, "usr/bin", builddate)
         _add_file(archive, "usr/bin/kasumi", bin_bytes, 0o755, builddate)
         _add_dir(archive, "usr/share", builddate)
+        if desktop_bytes is not None:
+            _add_dir(archive, "usr/share/applications", builddate)
+            _add_file(
+                archive,
+                "usr/share/applications/kasumi.desktop",
+                desktop_bytes,
+                0o644,
+                builddate,
+            )
         _add_dir(archive, "usr/share/licenses", builddate)
         _add_dir(archive, f"usr/share/licenses/{PKGNAME}", builddate)
         _add_file(
@@ -214,6 +243,7 @@ def build_arch_package(
     license_path: Path,
     notices_path: Path,
     install_script_path: Path | None = None,
+    desktop_entry_path: Path | None = None,
     pkgrel: int = 1,
     arch: str = "x86_64",
     builddate: int | None = None,
@@ -226,6 +256,7 @@ def build_arch_package(
         license_path=license_path,
         notices_path=notices_path,
         install_script_path=install_script_path,
+        desktop_entry_path=desktop_entry_path,
         pkgrel=pkgrel,
         arch=arch,
         builddate=builddate,
@@ -267,6 +298,7 @@ def main(argv: list[str] | None = None) -> int:
         "--notices", type=Path, default=Path("THIRD_PARTY_NOTICES.md")
     )
     parser.add_argument("--install-script", type=Path, default=None)
+    parser.add_argument("--desktop-entry", type=Path, default=None)
     parser.add_argument("--pkgrel", type=int, default=1)
     parser.add_argument("--arch", default="x86_64")
     parser.add_argument("--builddate", type=int, default=None)
@@ -280,6 +312,7 @@ def main(argv: list[str] | None = None) -> int:
         license_path=args.license,
         notices_path=args.notices,
         install_script_path=args.install_script,
+        desktop_entry_path=args.desktop_entry,
         pkgrel=args.pkgrel,
         arch=args.arch,
         builddate=args.builddate,

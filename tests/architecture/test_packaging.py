@@ -48,18 +48,39 @@ class PackagingContractTest(unittest.TestCase):
         self.assertIn("pkgname=kasumi", pkgbuild)
         self.assertIn("license=('MIT')", pkgbuild)
         self.assertIn("install=kasumi.install", pkgbuild)
+        for tool in ("'nodejs'", "'npm'"):
+            self.assertIn(tool, pkgbuild)
+        self.assertIn("npm run build", pkgbuild)
         self.assertIn("install -Dm755 \"build/kasumi\" \"${pkgdir}/usr/bin/kasumi\"", pkgbuild)
+        self.assertIn(
+            "install -Dm644 \"packaging/linux/kasumi.desktop\" \"${pkgdir}/usr/share/applications/kasumi.desktop\"",
+            pkgbuild,
+        )
         install_script = ROOT / "packaging" / "arch" / "kasumi.install"
         self.assertTrue(install_script.is_file())
         install_text = install_script.read_text(encoding="utf-8")
         self.assertIn("post_install()", install_text)
         self.assertIn("post_upgrade()", install_text)
 
+    def test_linux_desktop_entry_has_no_icon_and_uses_lf(self):
+        self.assertFalse((ROOT / "packaging" / "linux" / "kasumi.svg").exists())
+        desktop_path = ROOT / "packaging" / "linux" / "kasumi.desktop"
+        self.assertTrue(desktop_path.is_file())
+        raw = desktop_path.read_bytes()
+        self.assertNotIn(b"\r\n", raw)
+        text = raw.decode("utf-8")
+        self.assertIn("[Desktop Entry]", text)
+        self.assertIn("Exec=/usr/bin/kasumi web", text)
+        self.assertIn("Terminal=false", text)
+        self.assertNotIn("Icon=", text)
+
     def test_cpack_deb_and_rpm_configuration_present(self):
         cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
         for needle in (
             'install(\n    TARGETS kasumi',
             '${CMAKE_INSTALL_DOCDIR}',
+            'packaging/linux/kasumi.desktop',
+            '"/usr/share/applications"',
             'set(CPACK_DEBIAN_KASUMI_FILE_NAME "kasumi-v${PROJECT_VERSION}-linux-x86_64.deb")',
             'set(CPACK_RPM_KASUMI_FILE_NAME "kasumi-v${PROJECT_VERSION}-linux-x86_64.rpm")',
             'set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA\n    "${PROJECT_SOURCE_DIR}/packaging/linux/deb/postinst")',
@@ -104,8 +125,37 @@ class PackagingContractTest(unittest.TestCase):
             "KASUMI_READY_TEXT",
             "KASUMI_PROGRESS_TITLE",
             "KASUMI_EXIT_TITLE",
+            "WIXUI_EXITDIALOGOPTIONALCHECKBOX",
         ):
             self.assertIn(expected_prop, prop_ids)
+
+        self.assertEqual(pkg.findall(f".//{{{WIX_NS}}}Icon"), [])
+        shortcuts = {
+            s.attrib.get("Id"): s
+            for s in pkg.findall(f".//{{{WIX_NS}}}Shortcut")
+        }
+        self.assertIn("KasumiStartMenuShortcut", shortcuts)
+        shortcut = shortcuts["KasumiStartMenuShortcut"]
+        self.assertEqual(shortcut.attrib.get("Directory"), "ProgramMenuFolder")
+        self.assertEqual(shortcut.attrib.get("Arguments"), "web")
+        self.assertEqual(shortcut.attrib.get("Show"), "minimized")
+        self.assertIsNone(shortcut.attrib.get("Icon"))
+
+        actions = {
+            a.attrib.get("Id"): a
+            for a in pkg.findall(f".//{{{WIX_NS}}}CustomAction")
+        }
+        self.assertIn("StopKasumiDaemon", actions)
+        self.assertIn("RunKasumiFinishAction", actions)
+
+        exec_seq = pkg.find(f"{{{WIX_NS}}}InstallExecuteSequence")
+        self.assertIsNotNone(exec_seq)
+        stop_customs = [
+            c for c in exec_seq.findall(f"{{{WIX_NS}}}Custom")
+            if c.attrib.get("Action") == "StopKasumiDaemon"
+        ]
+        self.assertEqual(len(stop_customs), 1)
+        self.assertEqual(stop_customs[0].attrib.get("Before"), "InstallValidate")
 
         reg_names = {
             r.attrib.get("Name") for r in pkg.findall(f".//{{{WIX_NS}}}RegistryValue")
@@ -143,6 +193,15 @@ class PackagingContractTest(unittest.TestCase):
                 and p.attrib.get("Control") == "Next"
                 and p.attrib.get("Value") == "VerifyReadyDlg"
                 and p.attrib.get("Condition") == "WIX_UPGRADE_DETECTED"
+                for p in publish_elems
+            )
+        )
+        self.assertTrue(
+            any(
+                p.attrib.get("Dialog") == "ExitDialog"
+                and p.attrib.get("Control") == "Finish"
+                and p.attrib.get("Event") == "DoAction"
+                and p.attrib.get("Value") == "RunKasumiFinishAction"
                 for p in publish_elems
             )
         )
@@ -187,9 +246,11 @@ class PackagingContractTest(unittest.TestCase):
         license_path = ROOT / "LICENSE"
         notices_path = ROOT / "THIRD_PARTY_NOTICES.md"
         install_path = ROOT / "packaging" / "arch" / "kasumi.install"
+        desktop_path = ROOT / "packaging" / "linux" / "kasumi.desktop"
         license_bytes = license_path.read_bytes()
         notices_bytes = notices_path.read_bytes()
         install_bytes = install_path.read_bytes().replace(b"\r\n", b"\n")
+        desktop_bytes = desktop_path.read_bytes().replace(b"\r\n", b"\n")
 
         with tempfile.TemporaryDirectory(prefix="kasumi-arch-pkg-test-") as tmp:
             tmp_dir = Path(tmp)
@@ -204,6 +265,7 @@ class PackagingContractTest(unittest.TestCase):
                 license_path=license_path,
                 notices_path=notices_path,
                 install_script_path=install_path,
+                desktop_entry_path=desktop_path,
                 builddate=1700000000,
             )
 
@@ -215,6 +277,8 @@ class PackagingContractTest(unittest.TestCase):
                 "usr/bin",
                 "usr/bin/kasumi",
                 "usr/share",
+                "usr/share/applications",
+                "usr/share/applications/kasumi.desktop",
                 "usr/share/licenses",
                 "usr/share/licenses/kasumi",
                 "usr/share/licenses/kasumi/LICENSE",
@@ -245,7 +309,12 @@ class PackagingContractTest(unittest.TestCase):
             pkginfo_text = payloads[".PKGINFO"].decode("utf-8")
             self.assertIn("pkgname = kasumi\n", pkginfo_text)
             self.assertIn(f"pkgver = {version}-1\n", pkginfo_text)
-            expected_size = len(fake_binary_bytes) + len(license_bytes) + len(notices_bytes)
+            expected_size = (
+                len(fake_binary_bytes)
+                + len(license_bytes)
+                + len(notices_bytes)
+                + len(desktop_bytes)
+            )
             self.assertIn(f"size = {expected_size}\n", pkginfo_text)
             self.assertIn("arch = x86_64\n", pkginfo_text)
             self.assertIn("depend = glibc\n", pkginfo_text)
@@ -258,6 +327,7 @@ class PackagingContractTest(unittest.TestCase):
                 (".PKGINFO", payloads[".PKGINFO"]),
                 (".INSTALL", install_bytes),
                 ("usr/bin/kasumi", fake_binary_bytes),
+                ("usr/share/applications/kasumi.desktop", desktop_bytes),
                 ("usr/share/licenses/kasumi/LICENSE", license_bytes),
                 ("usr/share/licenses/kasumi/THIRD_PARTY_NOTICES.md", notices_bytes),
             ):
@@ -283,6 +353,7 @@ class PackagingContractTest(unittest.TestCase):
                     license_path=license_path,
                     notices_path=notices_path,
                     install_script_path=install_path,
+                    desktop_entry_path=desktop_path,
                     builddate=1700000000,
                     zstd_exe=zstd,
                 )
