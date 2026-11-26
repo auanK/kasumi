@@ -1,0 +1,290 @@
+/* Layout primitives for authentication, profile tools and workspace panels. */
+
+.k-auth-shell {
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 1.25rem;
+}
+
+.k-auth-card {
+  width: 100%;
+  max-width: 400px;
+  background: var(--k-surface);
+  border: 1px solid var(--k-border);
+  border-radius: var(--k-radius-sm);
+  padding: 1.5rem;
+}
+
+.k-hub-shell {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--k-bg);
+}
+
+.k-workspace-shell {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--k-bg);
+}
+
+.k-workspace-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.k-workspace-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 1.5rem 1.75rem 3rem;
+}
+
+.k-readable-canvas {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.k-topbar {
+  height: var(--k-topbar-height);
+  min-height: var(--k-topbar-height);
+  padding: 0 1rem;
+  background: var(--k-chrome);
+  border-bottom: 1px solid var(--k-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-shrink: 0;
+}
+
+.k-topbar-left,
+.k-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+/* Underline Workspace Tabs */
+.k-tabs {
+  display: flex;
+  align-items: stretch;
+  height: var(--k-topbar-height);
+  gap: 0.2rem;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.k-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 0.75rem;
+  border: none;
+  background: transparent;
+  color: var(--k-text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  transition: color 0.11s ease, border-color 0.11s ease;
+}
+
+.k-tab:hover {
+  background: var(--k-hover);
+  color: var(--k-text);
+}
+
+.k-tab--active {
+  background: transparent;
+  color: var(--k-text);
+  border-bottom-color: var(--k-lavender);
+}
+
+.k-tab-count {
+  padding: 1px 6px;
+  border-radius: var(--k-radius-xs);
+  background: var(--k-warn-bg);
+  border: 1px solid var(--k-warn-border);
+  color: var(--k-warn);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* Segmented pills (Hub Toolbar & Modals) */
+.k-segmented {
+  display: inline-flex;
+  border: 1px solid var(--k-border);
+  border-radius: var(--k-radius-xs);
+  background: var(--k-input-bg);
+  overflow: hidden;
+}
+
+.k-seg-btn {
+  padding: 4px 10px;
+  border: none;
+  background: transparent;
+  color: var(--k-text-muted);
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.k-seg-btn:hover {
+  color: var(--k-text);
+}
+
+.k-seg-btn--active {
+  background: var(--k-active);
+  color: var(--k-lavender);
+  font-weight: 600;
+}
+
+/* Split panes for Files / History / Conflicts */
+.k-sidebar-pane {
+  width: 290px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--k-surface);
+  border-right: 1px solid var(--k-border);
+}
+
+.k-sidebar-head {
+  padding: 10px 12px;
+  background: var(--k-surface-header);
+  border-bottom: 1px solid var(--k-border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.k-sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px;
+}
+
+.k-main-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 1.35rem 1.75rem 2.5rem;
+  background: var(--k-bg);
+}
+
+.k-list-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--k-radius-xs);
+  background: transparent;
+  color: var(--k-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.k-list-row:hover {
+  background: var(--k-hover);
+}
+
+.k-list-row--active,
+.k-list-row--active:hover {
+  background: var(--k-active);
+  border-color: var(--k-active-border);
+}
+
+/* Code & Diff */
+.k-code-block {
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--k-input-bg);
+  border: 1px solid var(--k-border-subtle);
+  border-radius: var(--k-radius-xs);
+  overflow: auto;
+  font-family: var(--k-font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre;
+  tab-size: 4;
+}
+
+.k-diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--k-font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--k-input-bg);
+}
+
+.k-diff-table td {
+  padding: 1px 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  vertical-align: top;
+}
+
+.k-diff-ln {
+  width: 44px;
+  text-align: right;
+  color: var(--k-text-faint);
+  user-select: none;
+  border-right: 1px solid var(--k-border-subtle);
+}
+
+.k-diff-row--add td {
+  background: rgba(76, 195, 138, 0.13);
+  color: #b8ebd0;
+}
+
+.k-diff-row--del td {
+  background: rgba(232, 123, 132, 0.14);
+  color: #f6c4c9;
+}
+
+.k-preview-media {
+  max-width: 100%;
+  max-height: 66vh;
+  display: block;
+  margin: 0 auto;
+  border: 1px solid var(--k-border);
+  border-radius: var(--k-radius-xs);
+  background: #0b0c10;
+}
+
+.k-preview-media--loading {
+  display: none;
+}
+
+@media (max-width: 860px) {
+  .k-workspace-body {
+    flex-direction: column;
+  }
+
+  .k-sidebar-pane {
+    width: 100%;
+    max-height: 38vh;
+    border-right: none;
+    border-bottom: 1px solid var(--k-border);
+  }
+}
