@@ -196,13 +196,7 @@ Download the new installer or portable archive and its SHA-256 checksum from
 Read [Upgrading Kasumi](best-practices.md#upgrading-kasumi) for compatibility and
 backup precautions before upgrading:
 
-- **Native installers (in-place upgrade):** Stop running Kasumi operations and
-  run the verified package (`kasumi-v<version>-windows-x86_64.msi` on Windows,
-  `sudo pacman -U kasumi-v<version>-linux-x86_64.pkg.tar.zst` on Arch Linux,
-  `sudo apt install ./kasumi-v<version>-linux-x86_64.deb` on Debian/Ubuntu, or
-  `sudo dnf install --nogpgcheck ./kasumi-v<version>-linux-x86_64.rpm` on
-  Fedora/RHEL). Installers detect existing installations, report the version
-  transition, and preserve existing profiles, local databases, and configuration.
+- **Native installers (in-place upgrade):** Stop active sync operations and run the verified package (`kasumi-v<version>-windows-x86_64.msi` on Windows, `sudo pacman -U kasumi-v<version>-linux-x86_64.pkg.tar.zst` on Arch Linux, `sudo apt install ./kasumi-v<version>-linux-x86_64.deb` on Debian/Ubuntu, or `sudo dnf install --nogpgcheck ./kasumi-v<version>-linux-x86_64.rpm` on Fedora/RHEL). Installers detect existing installations, report the version transition, and preserve existing profiles, local databases, and configuration. On Windows, the `.msi` attempts a graceful `kasumi stop` before replacing files and offers restarting/opening the Web UI at the end; on Linux, restart a running user daemon afterward with `kasumi stop && kasumi start`.
 - **Portable archives (`.zip` / `.tar.gz`):** Stop Kasumi and replace the
   executable manually from the verified archive.
 

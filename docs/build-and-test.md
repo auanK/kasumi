@@ -7,7 +7,8 @@ Building Kasumi requires CMake 3.28+, Git, and a C++23 compiler:
 * **CMake**: Version 3.28 or later.
 * **Git**: Used for dependency retrieval during the build.
 * **Ninja**: The provided CMake presets use Ninja.
-* **Python 3**: Required to generate the embedded locale header and run repository scripts.
+* **Python 3**: Required to generate the embedded locale and Web UI asset headers and run repository scripts.
+* **Node.js 22+ & npm**: Optional; required to test and bundle the Vue 3 Web UI in `web/` for embedding into the binary (`-DKASUMI_ENABLE_WEBUI=ON`).
 * **rclone**: Required for rclone-backed remote operation and for system tests that exercise the rclone transport. Not required for building or running local transport tests.
 
 Repository CI exercises:

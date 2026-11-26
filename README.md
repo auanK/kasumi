@@ -45,6 +45,7 @@ Machine C ───┘
 - **Adaptive encrypted storage**: Combines loose objects, `KPAK\x01` Micro-Packs (`<= 256 KiB`), and FastCDC chunking (`> 8 MiB`) with Zstandard compression, **XChaCha20-Poly1305** AEAD, Argon2id key derivation, and a persistent BLAKE3 hash cache.
 - **Flexible key storage (`vault`, `file`, `memory`)**: Persist derived keys in Windows Credential Manager / Linux Secret Service & KWallet, local `key.bin`, or stateless RAM-only derivation (kept pinned in non-swappable OS memory pages while unlocked in `kasumi daemon`).
 - **Continuous multi-profile daemon (`kasumi daemon`)**: Native file watchers (`ReadDirectoryChangesW` / `inotify`) with debounce and self-mutation suppression, warm `rclone` transport sessions, staggered startup and per-remote concurrency limits, zero-walk remote fast polling, user-session autostart, and authenticated loopback IPC.
+- **Embedded Local Web UI & HTTP API (`kasumi web`)**: Single-binary Vue 3 interface served at `http://127.0.0.1:3137/` with Argon2id single-user authentication, live Server-Sent Events (`/v1/events/stream`), local and remote file explorers with previews, commit history and text diffs, visual conflict resolution, and on-demand maintenance jobs (`/v1/*`).
 - **Crash-resilient & auditable**: Encrypted local transaction journals safely recover interrupted runs; built-in `diagnostics`, `sync --repair`, `fsck`, `repack`, `resolve-missing`, and hardened `gc` (6h remote-clock-clamped grace period, `remote_busy` backoff, multi-barrier checks, periodic mid-`Apply` revalidation) keep vaults healthy.
 - **Automation-ready CLI**: Non-interactive `kasumi profile ...` lifecycle commands, `kasumi daemon ...` service controls, `kasumi completion <shell>`, live terminal progress, `--json` (`schema_version: 1` with stable `error.code`), `--quiet`, `--log-file <path>` (text or NDJSON), and `--full`.
 
@@ -75,10 +76,11 @@ kasumi config
 kasumi sync work
 ```
 
-4. *(Optional)* **Enable continuous real-time sync** in the background and inspect status or live logs at any time:
+4. *(Optional)* **Enable continuous real-time sync** in the background, open the embedded Web UI (`http://127.0.0.1:3137/`), and inspect status or live logs at any time:
 
 ```bash
 kasumi start --autostart
+kasumi web
 kasumi
 kasumi logs -f
 ```
@@ -104,11 +106,11 @@ Official x86_64 installers and portable archives (`kasumi-v<version>-...`) are p
 
 | Platform | Package / Archive | Install |
 |---|---|---|
-| **Windows (Installer)** | `kasumi-v<version>-windows-x86_64.msi` | Run installer (adds to `PATH`, supports in-place upgrades) |
+| **Windows (Installer)** | `kasumi-v<version>-windows-x86_64.msi` | Run installer (adds to `PATH`, creates a Start Menu shortcut, stops an active daemon on in-place upgrades, and offers opening the Web UI on finish) |
 | **Windows (Portable)** | `kasumi-v<version>-windows-x86_64.zip` | Extract to a folder on `PATH` |
-| **Arch Linux** | `kasumi-v<version>-linux-x86_64.pkg.tar.zst` | `sudo pacman -U kasumi-v<version>-linux-x86_64.pkg.tar.zst` ([PKGBUILD](packaging/arch/PKGBUILD)) |
-| **Debian / Ubuntu** | `kasumi-v<version>-linux-x86_64.deb` | `sudo apt install ./kasumi-v<version>-linux-x86_64.deb` |
-| **Fedora / RHEL** | `kasumi-v<version>-linux-x86_64.rpm` | `sudo dnf install --nogpgcheck ./kasumi-v<version>-linux-x86_64.rpm` |
+| **Arch Linux** | `kasumi-v<version>-linux-x86_64.pkg.tar.zst` | `sudo pacman -U kasumi-v<version>-linux-x86_64.pkg.tar.zst` (includes `/usr/bin/kasumi` and desktop menu launcher; [PKGBUILD](packaging/arch/PKGBUILD)) |
+| **Debian / Ubuntu** | `kasumi-v<version>-linux-x86_64.deb` | `sudo apt install ./kasumi-v<version>-linux-x86_64.deb` (includes `/usr/bin/kasumi` and desktop menu launcher) |
+| **Fedora / RHEL** | `kasumi-v<version>-linux-x86_64.rpm` | `sudo dnf install --nogpgcheck ./kasumi-v<version>-linux-x86_64.rpm` (includes `/usr/bin/kasumi` and desktop menu launcher) |
 | **Linux (Portable)** | `kasumi-v<version>-linux-x86_64.tar.gz` | Extract and place `kasumi` on `PATH` |
 
 **Build from source** (CMake 3.28+, Git, Ninja, Python 3, C++23 compiler, plus Node.js 22+ to embed the Web UI — see [Build and Test](docs/build-and-test.md)):
@@ -149,6 +151,7 @@ Run `kasumi help`, `kasumi help --all`, `kasumi help <command>` (or `--help`), a
 
 - [Getting Started](docs/getting-started.md) — download verification, first profile, and two-machine setup.
 - [Configuration and Usage](docs/configuration-and-usage.md) — complete CLI reference, `--json`/`--log-file`, `.kasumiignore`, and exit codes.
+- [HTTP API](docs/http-api.md) — browser listener settings, authentication, `/v1/*` routes, and [OpenAPI 3.1 contract](docs/api/openapi.yaml).
 - [Best Practices](docs/best-practices.md) — scheduling, backups, upgrades, and maintenance cadence.
 - [Troubleshooting](docs/troubleshooting.md) — diagnosis and safe recovery procedures.
 - [Security](docs/security.md) — threat model, cryptography, and local key storage trade-offs.

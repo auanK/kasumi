@@ -438,6 +438,22 @@ Objects exist in the remote storage directory that do not conform to Kasumi's ke
 
 ---
 
+## Web UI Access, Setup Token, and Port Conflicts
+
+### First-Time Login (`web-bootstrap.token`)
+- When opening `http://127.0.0.1:3137/` (or launching `kasumi web`) before any Web UI password is set, the setup view asks for the single-use `web-bootstrap.token` stored in `%APPDATA%\kasumi\web-bootstrap.token` (Windows) or `~/.config/kasumi/web-bootstrap.token` (Linux).
+- Alternatively, configure the login account directly from a terminal (or reset a forgotten password) without needing the bootstrap file:
+  ```sh
+  kasumi web set-password
+  kasumi stop && kasumi start   # reload daemon if it was already running
+  ```
+
+### Port Already in Use or HTTP 503 ("Kasumi Web UI not bundled")
+- **Port conflict on `3137`**: Create or edit `web.json` beside `config.toml` (for example `{"port": 3138}`, or `{"port": 0}` for a dynamic port), then restart the daemon and run `kasumi web`. See the [HTTP API reference](http-api.md#listener-and-login).
+- **HTTP 503 at `/`**: The binary was compiled without bundled frontend assets (`web/dist/index.html` absent or `-DKASUMI_ENABLE_WEBUI=OFF`). Build `web/` (`cd web && npm ci && npm run build`) and rebuild with `-DKASUMI_ENABLE_WEBUI=ON`, or install an official release package.
+
+---
+
 ## Differences Between Diagnostic Commands
 
 The table below clarifies the purpose and operational behavior of Kasumi's diagnostic and inspection commands:

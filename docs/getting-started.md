@@ -13,9 +13,9 @@ compatibility across releases or automatically migrate existing data; see the
 
 Official [GitHub Releases](https://github.com/auanK/kasumi/releases) provide versioned native installers and portable x86_64 archives (`kasumi-v<version>-...`; internal executables remain named `kasumi` / `kasumi.exe`):
 
-- **Windows x86_64 installer (`.msi`):** `kasumi-v<version>-windows-x86_64.msi` installs to `C:\Program Files\Kasumi`, adds that directory to the system `PATH`, and automatically detects existing installations (patch, minor, or major) to display the target version and upgrade in-place without prompting again for the install folder.
+- **Windows x86_64 installer (`.msi`):** `kasumi-v<version>-windows-x86_64.msi` installs to `C:\Program Files\Kasumi`, adds that directory to the system `PATH`, creates a **Kasumi** Start Menu shortcut (`kasumi.exe web`), and automatically detects existing installations (patch, minor, or major) to stop a running daemon before upgrading in-place without prompting again for the install folder. In interactive installs and upgrades, the final wizard step offers launching/enabling the background daemon and opening the Web UI (`http://127.0.0.1:3137/`); unattended `/qn` installs leave no background process running.
 - **Windows x86_64 portable (`.zip`):** `kasumi-v<version>-windows-x86_64.zip` (built on `windows-2022` with the MSVC static C/C++ runtime `/MT`). Extract into a directory on `PATH` and invoke `kasumi.exe`.
-- **Arch Linux (`.pkg.tar.zst` / `PKGBUILD`):** install or upgrade directly with `pacman` (reports installed/upgraded versions via `.INSTALL`), or build locally using [PKGBUILD](../packaging/arch/PKGBUILD):
+- **Arch Linux (`.pkg.tar.zst` / `PKGBUILD`):** install or upgrade directly with `pacman` (installs `/usr/bin/kasumi` and `/usr/share/applications/kasumi.desktop`, and reports installed/upgraded versions via `.INSTALL` without starting user daemons as `root`), or build locally using [PKGBUILD](../packaging/arch/PKGBUILD):
 
   ```sh
   sudo pacman -U kasumi-v<version>-linux-x86_64.pkg.tar.zst
@@ -32,6 +32,8 @@ Official [GitHub Releases](https://github.com/auanK/kasumi/releases) provide ver
   ```sh
   sudo dnf install --nogpgcheck ./kasumi-v<version>-linux-x86_64.rpm
   ```
+
+  Both `.deb` and `.rpm` install `/usr/bin/kasumi` and `/usr/share/applications/kasumi.desktop` (a desktop launcher for `kasumi web`). Package scripts do not start user daemons as `root`; run `kasumi web` or `kasumi start --autostart` as your regular user.
 
 - **Portable Linux x86_64 (`.tar.gz`):** `kasumi-v<version>-linux-x86_64.tar.gz` (built on GitHub `ubuntu-latest` with GCC 14 and dynamically linked against the host `glibc`; distributions with an older `glibc` should build from source). Extract and place `kasumi` on `PATH`.
 
@@ -87,17 +89,15 @@ artifacts are not currently OS-code-signed (Authenticode or GPG).
 
 ### Build from Source
 
-Install CMake 3.28+, Git, Ninja, Python 3, and a C++23 compiler. On Windows, use a Visual
-Studio 2022 developer shell or an MSYS2 UCRT64 toolchain environment. On Linux,
-repository CI uses GCC 14. From the repository root:
+Install CMake 3.28+, Git, Ninja, Python 3, a C++23 compiler, and Node.js 22+ / npm (optional; needed to build and embed the Web UI). On Windows, use a Visual Studio 2022 developer shell or an MSYS2 UCRT64 toolchain environment. On Linux, repository CI uses GCC 14. From the repository root:
 
 ```sh
+cd web && npm ci && npm run build && cd ..
 cmake --preset default
 cmake --build --preset default
 ```
 
-The executable is `build/kasumi.exe` on Windows or `build/kasumi` on Linux.
-See [Build and Test](build-and-test.md) for toolchain setup and tests.
+Pass `-DKASUMI_ENABLE_WEBUI=OFF` to `cmake --preset default` if building CLI-only without Node.js. The executable is `build/kasumi.exe` on Windows or `build/kasumi` on Linux. See [Build and Test](build-and-test.md) for toolchain setup and tests.
 
 Optionally generate shell tab-completions for commands, flags, and profile names:
 
@@ -210,10 +210,14 @@ bidirectional synchronization; inspect the preview first.
 
 ## 6. Continue Synchronizing
 
-Run `kasumi sync work` on each machine whenever you want to exchange changes.
-Clients do not need to be online simultaneously. Concurrent changes can produce
-preserved conflict files; review and resolve them using
-[Best Practices](best-practices.md#multi-machine-usage).
+Run `kasumi sync work` on each machine whenever you want to exchange changes, or enable continuous background synchronization and open the embedded Web UI (`http://127.0.0.1:3137/`):
+
+```sh
+kasumi start --autostart
+kasumi web
+```
+
+On first launch without a browser password configured, the daemon generates a single-use `web-bootstrap.token` in your Kasumi configuration directory (or you can set one directly from the terminal with `kasumi web set-password`). Clients do not need to be online simultaneously. Concurrent changes can produce preserved conflict files; review and resolve them in the Web UI **Conflicts** tab or using [Best Practices](best-practices.md#multi-machine-usage).
 
 Use [.kasumiignore](configuration-and-usage.md#kasumiignore) to exclude local
 paths, and consult [maintenance guidance](best-practices.md) for integrity
