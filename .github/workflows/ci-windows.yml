@@ -72,6 +72,21 @@ jobs:
           ninja --version
           ccache --version
 
+      - name: Test and Build Web UI
+        shell: powershell
+        run: |
+          Push-Location web
+          try {
+            npm ci
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm test
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm run build
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Pop-Location
+          }
+
       - name: Build (Release)
         shell: powershell
         run: |
@@ -175,6 +190,21 @@ jobs:
             esac
           done
 
+      - name: Test and Build Web UI
+        shell: powershell
+        run: |
+          Push-Location web
+          try {
+            npm ci
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm test
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm run build
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Pop-Location
+          }
+
       - name: Build (Release)
         run: |
           FC_CACHE="$(cygpath -m "$RUNNER_TEMP")/kasumi-fc-cache"
@@ -262,6 +292,21 @@ jobs:
                 ;;
             esac
           done
+
+      - name: Test and Build Web UI
+        shell: powershell
+        run: |
+          Push-Location web
+          try {
+            npm ci
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm test
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm run build
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Pop-Location
+          }
 
       - name: Build (Release)
         run: |

@@ -1,0 +1,416 @@
+/* Crisp desktop base typography, forms, buttons, cards, and spacing helpers */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background: var(--k-bg);
+  color: var(--k-text);
+  font-family: var(--k-font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--k-info);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--k-info-hover);
+  text-decoration: underline;
+}
+
+code,
+pre,
+.k-mono {
+  font-family: var(--k-font-mono);
+  font-size: 0.88em;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--k-text);
+}
+
+/* Inputs & Form Controls */
+.k-input,
+.k-select,
+.k-textarea {
+  width: 100%;
+  background: var(--k-input-bg);
+  border: 1px solid var(--k-border);
+  border-radius: var(--k-radius-xs);
+  padding: 7px 10px;
+  color: var(--k-text);
+  outline: none;
+  transition: border-color 0.12s ease;
+}
+
+.k-input:focus,
+.k-select:focus,
+.k-textarea:focus {
+  border-color: var(--k-primary);
+}
+
+.k-input::placeholder,
+.k-textarea::placeholder {
+  color: var(--k-text-faint);
+  opacity: 1;
+}
+
+.k-textarea {
+  resize: vertical;
+  min-height: 76px;
+  font-family: var(--k-font-mono);
+  font-size: 12.5px;
+}
+
+.k-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.k-field-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--k-text-muted);
+}
+
+.k-field-hint {
+  font-size: 12px;
+  color: var(--k-text-faint);
+}
+
+/* Crisp Buttons (Ayame desktop cadence) */
+.k-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 5px 12px;
+  border-radius: var(--k-radius-xs);
+  border: 1px solid var(--k-border);
+  background: var(--k-surface-elevated);
+  color: var(--k-text);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.11s ease, border-color 0.11s ease, color 0.11s ease;
+}
+
+.k-btn:hover:not(:disabled) {
+  background: var(--k-hover);
+  border-color: var(--k-active-border);
+  color: var(--k-text);
+}
+
+.k-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.k-btn--primary {
+  background: var(--k-primary);
+  border-color: var(--k-primary);
+  color: var(--k-primary-fg);
+  font-weight: 600;
+}
+
+.k-btn--primary:hover:not(:disabled) {
+  background: var(--k-primary-strong);
+  border-color: var(--k-primary-strong);
+  color: var(--k-primary-fg);
+}
+
+.k-btn--ghost {
+  min-height: 26px;
+  padding: 4px 8px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--k-text-muted);
+}
+
+.k-btn--ghost:hover:not(:disabled) {
+  background: var(--k-hover);
+  border-color: transparent;
+  color: var(--k-text);
+}
+
+.k-btn--danger {
+  background: var(--k-error-bg);
+  border-color: var(--k-error-border);
+  color: var(--k-error);
+}
+
+.k-btn--danger:hover:not(:disabled) {
+  background: #3b1e24;
+  border-color: var(--k-error);
+  color: #fbd0d4;
+}
+
+.k-btn--compact {
+  min-height: 28px;
+  padding: 4px 10px;
+  font-size: 12.5px;
+}
+
+.k-btn--block {
+  width: 100%;
+}
+
+/* Cards */
+.k-card {
+  background: var(--k-surface);
+  border: 1px solid var(--k-border);
+  border-radius: var(--k-radius-sm);
+}
+
+.k-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--k-surface-header);
+  border-radius: var(--k-radius-sm) var(--k-radius-sm) 0 0;
+  border-bottom: 1px solid var(--k-border-subtle);
+}
+
+.k-card-body {
+  padding: 16px;
+}
+
+.k-card-body--compact {
+  padding: 8px 12px;
+}
+
+/* Alerts & Banners */
+.k-alert {
+  padding: 10px 12px;
+  border-radius: var(--k-radius-xs);
+  border: 1px solid var(--k-border);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.k-alert--error {
+  background: var(--k-error-bg);
+  border-color: var(--k-error-border);
+  border-left: 2px solid var(--k-error);
+  color: var(--k-error);
+}
+
+.k-alert--warn {
+  background: var(--k-warn-bg);
+  border-color: var(--k-warn-border);
+  border-left: 2px solid var(--k-warn);
+  color: var(--k-warn);
+}
+
+.k-alert--ok {
+  background: var(--k-ok-bg);
+  border-color: var(--k-ok-border);
+  color: var(--k-ok);
+}
+
+.k-alert--info {
+  background: var(--k-info-bg);
+  border-color: var(--k-info-border);
+  color: var(--k-info);
+}
+
+/* Progress bar */
+.k-progress {
+  width: 100%;
+  height: 4px;
+  appearance: none;
+  border: none;
+  border-radius: var(--k-radius-none);
+  background: var(--k-progress-track);
+  overflow: hidden;
+}
+
+.k-progress::-webkit-progress-bar {
+  background: var(--k-progress-track);
+}
+
+.k-progress::-webkit-progress-value {
+  background: var(--k-progress-fill, var(--k-primary));
+}
+
+.k-progress::-moz-progress-bar {
+  background: var(--k-progress-fill, var(--k-primary));
+}
+
+/* Disclosure (collapsible advanced sections) */
+.k-disclosure {
+  border: 1px solid var(--k-border-subtle);
+  border-radius: var(--k-radius-xs);
+  background: var(--k-input-bg);
+}
+
+.k-disclosure > summary {
+  padding: 9px 12px;
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--k-text-muted);
+  user-select: none;
+}
+
+.k-disclosure > summary:hover {
+  color: var(--k-text);
+}
+
+.k-disclosure-body {
+  padding: 12px;
+  border-top: 1px solid var(--k-border-subtle);
+}
+
+/* Tables */
+.k-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.k-table th,
+.k-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--k-border-subtle);
+  vertical-align: top;
+}
+
+.k-table th {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--k-text-faint);
+  font-weight: 600;
+}
+
+/* Layout primitives */
+.k-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.k-row--sm {
+  gap: 6px;
+}
+
+.k-row--lg {
+  gap: 12px;
+}
+
+.k-row--wrap {
+  flex-wrap: wrap;
+}
+
+.k-row--between {
+  justify-content: space-between;
+}
+
+.k-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.k-stack--sm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.k-stack--lg {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.k-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.k-grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.k-muted {
+  color: var(--k-text-muted);
+}
+
+.k-faint {
+  color: var(--k-text-faint);
+}
+
+.k-text-sm {
+  font-size: 12.5px;
+}
+
+.k-text-xs {
+  font-size: 11.5px;
+}
+
+.k-min-w-0 {
+  min-width: 0;
+}
+
+.k-w-full {
+  width: 100%;
+}
+
+.k-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.k-select--compact {
+  width: auto;
+  min-width: 140px;
+  padding: 4px 8px;
+}
+
+.k-input--compact {
+  padding: 5px 8px;
+}
+
+.k-scroll-sm {
+  max-height: 220px;
+  overflow: auto;
+}
+
+.k-scroll-md {
+  max-height: 320px;
+  overflow: auto;
+}
+
+@media (max-width: 760px) {
+  .k-grid-2,
+  .k-grid-3 {
+    grid-template-columns: 1fr;
+  }
+}

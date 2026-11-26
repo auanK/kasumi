@@ -607,6 +607,26 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         }
         return std::unexpected(ParseError{});
     }
+    if (command == "web") {
+        if (argc == 2) {
+            return WebInvocation{};
+        }
+        if (argc == 3 && argv[2] != nullptr) {
+            const std::string_view arg{argv[2]};
+            if (arg == "--no-open") {
+                return WebInvocation{.no_open = true};
+            }
+            if (arg == "set-password") {
+                return WebInvocation{.set_password = true};
+            }
+        }
+        if (argc == 5 && argv[2] != nullptr && argv[3] != nullptr &&
+            argv[4] != nullptr && std::string_view{argv[2]} == "set-password" &&
+            std::string_view{argv[3]} == "--username") {
+            return WebInvocation{.set_password = true, .username = argv[4]};
+        }
+        return std::unexpected(ParseError{});
+    }
     if (command == "completion") {
         if (argc != 3 || argv[2] == nullptr) {
             return std::unexpected(ParseError{});

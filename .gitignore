@@ -45,3 +45,7 @@ __pycache__/
 
 # CTest artifacts
 Testing/
+
+# Web UI build artifacts
+web/node_modules/
+web/dist/

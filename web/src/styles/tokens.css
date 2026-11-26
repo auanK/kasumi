@@ -1,0 +1,57 @@
+/* Kasumi interface tokens ("Ayame sobre Sumi" ergonomic dark system) */
+:root {
+  color-scheme: dark;
+
+  --k-bg: #111216;
+  --k-surface: #18191f;
+  --k-surface-elevated: #20222b;
+  --k-surface-recessed: #0d0e12;
+  --k-surface-header: #1e2028;
+  --k-chrome: #14151b;
+  --k-input-bg: #0d0e12;
+  --k-hover: #242630;
+  --k-active: #242136;
+  --k-active-border: #5e4ea8;
+
+  --k-primary: #6b54c8;
+  --k-primary-strong: #7861d4;
+  --k-primary-fg: #f8f7fc;
+  --k-lavender: #b4a2f0;
+
+  --k-text: #dcdde4;
+  --k-text-muted: #989ba9;
+  --k-text-faint: #7d8091;
+
+  --k-border: rgba(255, 255, 255, 0.09);
+  --k-border-subtle: rgba(255, 255, 255, 0.05);
+  --k-progress-track: #272935;
+
+  --k-ok: #4cc38a;
+  --k-ok-bg: #14261e;
+  --k-ok-border: #244a38;
+
+  --k-info: #5eb1ef;
+  --k-info-hover: #8ac8f6;
+  --k-info-bg: #132230;
+  --k-info-border: #24435e;
+
+  --k-warn: #e5b567;
+  --k-warn-bg: #292114;
+  --k-warn-border: #524124;
+
+  --k-error: #e87b84;
+  --k-error-bg: #2a171b;
+  --k-error-border: #592b33;
+
+  --k-folder: #a395d8;
+  --k-folder-bg: #232036;
+
+  --k-radius-none: 0px;
+  --k-radius-xs: 2px;
+  --k-radius-sm: 4px;
+
+  --k-font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --k-font-mono: 'JetBrains Mono', 'Cascadia Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+
+  --k-topbar-height: 51px;
+}

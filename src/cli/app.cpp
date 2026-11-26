@@ -12,6 +12,7 @@
 #include "cli/parser.hpp"
 #include "cli/presenter.hpp"
 #include "cli/wizard.hpp"
+#include "crypto/secure_memory.hpp"
 #include "platform/cancellation.hpp"
 #include "platform/path.hpp"
 
@@ -24,6 +25,7 @@
 #include <filesystem>
 #include <format>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <print>
 #include <stop_token>
@@ -38,8 +40,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <atomic>
 #include <windows.h>
+#include <shellapi.h>
 #else
 #include <signal.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -256,6 +260,7 @@ int run(int argc, char* argv[]) {
     const bool supports_quiet =
         is_bare_overview || is_logs_cmd || is_start_cmd || is_stop_cmd ||
         is_toggle_cmd || cmd == "list" || cmd == "diagnostics" ||
+        cmd == "web" ||
         (has_profile_arg &&
          (cmd == "show" || cmd == "key" || cmd == "sync" || cmd == "status" ||
           cmd == "fsck" || cmd == "repack" || cmd == "resolve-missing" ||
@@ -266,7 +271,8 @@ int run(int argc, char* argv[]) {
     const std::size_t quiet_start_index =
         is_bare_overview
             ? 1U
-            : ((cmd == "list" || (cmd == "diagnostics" && !has_profile_arg) ||
+            : ((cmd == "list" || cmd == "web" ||
+                (cmd == "diagnostics" && !has_profile_arg) ||
                 is_logs_cmd || is_start_cmd || is_stop_cmd)
                    ? 2U
                    : ((is_gc_subcommand || is_profile_subcommand ||
@@ -286,6 +292,7 @@ int run(int argc, char* argv[]) {
     const bool supports_json =
         is_bare_overview || is_logs_cmd || is_start_cmd || is_stop_cmd ||
         is_toggle_cmd || cmd == "list" || cmd == "diagnostics" ||
+        cmd == "web" ||
         (has_profile_arg &&
          (cmd == "show" || cmd == "key" || cmd == "sync" || cmd == "status" ||
           cmd == "fsck" || cmd == "repack" || cmd == "resolve-missing" ||
@@ -297,7 +304,8 @@ int run(int argc, char* argv[]) {
     const std::size_t json_start_index =
         is_bare_overview
             ? 1U
-            : ((cmd == "list" || (cmd == "diagnostics" && !has_profile_arg) ||
+            : ((cmd == "list" || cmd == "web" ||
+                (cmd == "diagnostics" && !has_profile_arg) ||
                 is_logs_cmd || is_start_cmd || is_stop_cmd)
                    ? 2U
                    : ((is_profile_subcommand || is_ignore_subcommand ||
@@ -526,6 +534,123 @@ int run(int argc, char* argv[]) {
                            .command = "overview",
                            .summary = code == 0 ? "completed" : "failed"},
                           code);
+    }
+
+    if (const auto* web_inv = std::get_if<WebInvocation>(&*parse_result)) {
+        if (web_inv->set_password) {
+            std::string password = credentials::read_secret(
+                "KASUMI_WEB_PASSWORD",
+                std::string{i18n::tr(i18n::Key::PromptPassword)});
+            crypto::secure_memory::WipeGuard wipe_pw(password);
+            const char* env_pw = std::getenv("KASUMI_WEB_PASSWORD");
+            if (env_pw == nullptr || env_pw[0] == '\0') {
+                std::string confirm = credentials::read_secret(
+                    nullptr,
+                    std::string{i18n::tr(i18n::Key::PromptConfirmPassword)});
+                crypto::secure_memory::WipeGuard wipe_confirm(confirm);
+                if (password != confirm) {
+                    if (json) {
+                        nlohmann::json out{
+                            {"command", "web set-password"},
+                            {"status", "error"},
+                            {"error",
+                             std::string{
+                                 i18n::tr(i18n::Key::PasswordsDoNotMatch)}},
+                        };
+                        std::println("{}", out.dump());
+                        return 1;
+                    }
+                    std::println(stderr,
+                                 "{} {}",
+                                 i18n::tr(i18n::Key::LabelError),
+                                 i18n::tr(i18n::Key::PasswordsDoNotMatch));
+                    return 1;
+                }
+            }
+            const auto saved = application::set_web_password(
+                environment, password, web_inv->username);
+            if (!saved) {
+                if (json) {
+                    return present_json_daemon_error(
+                        "web set-password", "", saved.error(), elapsed());
+                }
+                return finish(present(saved.error()));
+            }
+            const bool daemon_up = application::is_daemon_running(environment);
+            if (json) {
+                nlohmann::json out{
+                    {"command", "web set-password"},
+                    {"status", "ok"},
+                    {"restart_required", daemon_up},
+                };
+                std::println("{}", out.dump());
+                return 0;
+            }
+            if (!quiet) {
+                print_ok_line("Web UI password saved.");
+                if (daemon_up) {
+                    std::println(
+                        "Restart the daemon ('kasumi stop && kasumi start') "
+                        "to apply the new Web UI password.");
+                }
+            }
+            return 0;
+        }
+
+        application::DaemonStatusReport report;
+        if (application::is_daemon_running(environment)) {
+            const auto st = application::query_daemon_status(environment);
+            if (!st) {
+                if (json) {
+                    return present_json_daemon_error(
+                        "web", "", st.error(), elapsed());
+                }
+                return finish(present(st.error()));
+            }
+            report = *st;
+        } else {
+            const auto bg =
+                application::spawn_background_daemon(environment, log_file);
+            if (!bg) {
+                if (json) {
+                    return present_json_daemon_error(
+                        "web", "", bg.error(), elapsed());
+                }
+                return finish(present(bg.error()));
+            }
+            report = *bg;
+        }
+        const std::uint16_t port =
+            report.web_port != 0 ? report.web_port : report.ipc_port;
+        const std::string url = std::format("http://127.0.0.1:{}/", port);
+        if (json) {
+            nlohmann::json out{
+                {"command", "web"},
+                {"status", "ok"},
+                {"url", url},
+                {"web_port", port},
+                {"pid", report.pid},
+            };
+            std::println("{}", out.dump());
+            return 0;
+        }
+        if (!quiet) {
+            std::println("{}", url);
+        }
+        if (!web_inv->no_open) {
+#ifdef _WIN32
+            ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr,
+                          SW_SHOWNORMAL);
+#else
+            const pid_t child = ::fork();
+            if (child == 0) {
+                ::execlp("xdg-open", "xdg-open", url.c_str(),
+                         static_cast<char*>(nullptr));
+                ::_exit(127);
+            }
+#endif
+        }
+        return 0;
     }
 
     const auto run_logs_common =
