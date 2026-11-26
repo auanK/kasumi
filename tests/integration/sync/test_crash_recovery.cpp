@@ -8,6 +8,7 @@
 #include "kasumi/test/history_storage.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/path.hpp"
+#include "platform/private_storage.hpp"
 #include "runtime/vault.hpp"
 #include "state_storage/database.hpp"
 #include "transport/transport.hpp"
@@ -19,10 +20,10 @@
 #include <cstdlib>
 #include <expected>
 #include <filesystem>
-#include <fstream>
 #include <gtest/gtest.h>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -347,6 +348,25 @@ struct ChildRun {
     std::string detail;
 };
 
+// The child publishes two newline-terminated fields. On Windows, a file
+// that is visible can still be temporarily unavailable to open or read.
+std::optional<std::string>
+read_crash_signal(const std::filesystem::path& path) {
+    namespace storage = kasumi::platform::private_storage;
+    const auto input = storage::open_regular_file(path);
+    if (!input || input->size < 2 || input->size > 4096) {
+        return std::nullopt;
+    }
+    std::string signal(static_cast<std::size_t>(input->size), '\0');
+    auto bytes = std::span{reinterpret_cast<std::uint8_t*>(signal.data()),
+                           signal.size()};
+    if (!storage::read_regular_file_exact(*input, bytes) ||
+        !signal.ends_with('\n') || signal.find('\n') == signal.size() - 1) {
+        return std::nullopt;
+    }
+    return signal;
+}
+
 #if defined(_WIN32)
 
 std::optional<std::wstring> environment_value(const wchar_t* name) {
@@ -430,7 +450,8 @@ ChildRun run_child(const CrashFixture& fixture,
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds{30};
     while (std::chrono::steady_clock::now() < deadline) {
-        if (std::filesystem::exists(signal_path)) {
+        if (auto signal = read_crash_signal(signal_path)) {
+            result.signal_contents = std::move(*signal);
             result.reached_point = true;
             break;
         }
@@ -448,11 +469,7 @@ ChildRun run_child(const CrashFixture& fixture,
     }
 
     if (!result.reached_point) {
-        result.detail = "timed out waiting for child crash point";
-    } else {
-        std::ifstream signal{signal_path, std::ios::binary};
-        result.signal_contents.assign(std::istreambuf_iterator<char>{signal},
-                                      std::istreambuf_iterator<char>{});
+        result.detail = "timed out waiting for complete child crash signal";
     }
     if (TerminateProcess(process.hProcess, 137) &&
         WaitForSingleObject(process.hProcess, 5000) == WAIT_OBJECT_0) {
@@ -529,7 +546,8 @@ ChildRun run_child(const CrashFixture& fixture,
     int child_status = 0;
     bool child_reaped = false;
     while (std::chrono::steady_clock::now() < deadline) {
-        if (std::filesystem::exists(signal_path)) {
+        if (auto signal = read_crash_signal(signal_path)) {
+            result.signal_contents = std::move(*signal);
             result.reached_point = true;
             break;
         }
@@ -551,11 +569,7 @@ ChildRun run_child(const CrashFixture& fixture,
     }
 
     if (!result.reached_point && result.detail.empty()) {
-        result.detail = "timed out waiting for child crash point";
-    } else if (result.reached_point) {
-        std::ifstream signal{signal_path, std::ios::binary};
-        result.signal_contents.assign(std::istreambuf_iterator<char>{signal},
-                                      std::istreambuf_iterator<char>{});
+        result.detail = "timed out waiting for complete child crash signal";
     }
 
     if (!child_reaped) {

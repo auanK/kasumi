@@ -75,9 +75,11 @@ target_include_directories(
 
 target_link_libraries(kasumi_test_support
     PRIVATE
+    nlohmann_json::nlohmann_json
     httplib::httplib
     reproc++
     kasumi_sqlite3
+    monocypher
     kasumi_warnings
 )
 if(WIN32)

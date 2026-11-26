@@ -1491,6 +1491,9 @@ class CliProcessTest(unittest.TestCase):
         )
         self.assertFalse(as_uninstall["data"]["installed"])
 
+        app_dir = self.root / "kasumi"
+        (app_dir / "web.json").write_text('{"port":0}', encoding="utf-8")
+
         # Launch background daemon and verify stop in finally
         bg_started = self.invoke_raw("daemon", "run", "--background", "--json", environment=env)
         self.assertEqual(bg_started.returncode, 0, bg_started.stdout + bg_started.stderr)

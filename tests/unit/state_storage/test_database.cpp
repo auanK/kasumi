@@ -1586,4 +1586,210 @@ TEST(StateStorageDatabaseTest,
     EXPECT_EQ(*updated_activity->accepted_commit, valid_meta2);
 }
 
+TEST(StateStorageDatabaseTest,
+     LoadStateAndActivitySummaryReadsStateFlagsAndActivityInOneSnapshot) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-combined-summary");
+    const auto db = kasumi::test::workspace_path(workspace, "state.db");
+
+    const auto absent =
+        kasumi::state_storage::load_state_and_activity_summary(db);
+    ASSERT_TRUE(absent.has_value()) << absent.error();
+    EXPECT_FALSE(absent->has_state);
+    EXPECT_FALSE(absent->has_pending_materializations);
+    EXPECT_TRUE(absent->activity.executions.empty());
+
+    ASSERT_TRUE(kasumi::state_storage::initialize(db));
+    const auto initialized =
+        kasumi::state_storage::load_state_and_activity_summary(db);
+    ASSERT_TRUE(initialized.has_value()) << initialized.error();
+    EXPECT_FALSE(initialized->has_state);
+    EXPECT_FALSE(initialized->has_pending_materializations);
+
+    const auto snapshot = make_snapshot("docs/alpha.txt", "alpha", 11);
+    const kasumi::state_storage::AcceptedCommitMeta meta{
+        .commit_id = std::string(64, 'c'),
+        .height = 3,
+        .created_at = 1700000300,
+        .origin_operation = kasumi::history::CommitOriginOperation::Sync,
+        .machine_id_hex = std::string(32, '4'),
+        .machine_name = "Workstation",
+        .accepted_at = 1700000305,
+    };
+    ASSERT_TRUE(kasumi::state_storage::save_state(
+        db,
+        kasumi::state_storage::StoredState{
+            .tree = snapshot,
+            .height = 3,
+            .commit_id = std::string(64, 'c'),
+            .pending_materializations = {
+                *kasumi::find_row(snapshot, "docs/alpha.txt")}},
+        meta));
+    ASSERT_TRUE(kasumi::state_storage::record_execution_complete(
+        db,
+        kasumi::state_storage::LocalExecutionRecord{
+            .execution_id = "exec-1",
+            .operation = kasumi::state_storage::LocalOperationKind::Sync,
+            .machine_id_hex = std::string(32, '4'),
+            .machine_name = "Workstation",
+            .started_at = 1700000301,
+            .finished_at = 1700000304,
+            .duration_ms = 3000,
+            .status = kasumi::state_storage::LocalExecutionStatus::Succeeded,
+            .commit_id = std::string(64, 'c'),
+        }));
+
+    const auto combined =
+        kasumi::state_storage::load_state_and_activity_summary(db);
+    ASSERT_TRUE(combined.has_value()) << combined.error();
+    EXPECT_TRUE(combined->has_state);
+    EXPECT_TRUE(combined->has_pending_materializations);
+    ASSERT_TRUE(combined->activity.accepted_commit.has_value());
+    EXPECT_EQ(*combined->activity.accepted_commit, meta);
+    ASSERT_EQ(combined->activity.executions.size(), 1U);
+    EXPECT_EQ(combined->activity.executions.front().execution_id, "exec-1");
+}
+
+TEST(StateStorageDatabaseTest,
+     LocalTreeSnapshotAndLookupPointQueryExcludePendingRows) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-local-tree-lookup");
+    const auto db = kasumi::test::workspace_path(workspace, "state.db");
+
+    const auto missing_tree =
+        kasumi::state_storage::load_local_tree_snapshot(db);
+    ASSERT_TRUE(missing_tree.has_value()) << missing_tree.error();
+    EXPECT_FALSE(missing_tree->has_state);
+
+    const auto missing_lookup =
+        kasumi::state_storage::lookup_mapped_path(db, "docs/alpha.txt");
+    ASSERT_TRUE(missing_lookup.has_value()) << missing_lookup.error();
+    EXPECT_FALSE(missing_lookup->has_value());
+
+    ASSERT_TRUE(kasumi::state_storage::initialize(db));
+
+    kasumi::Snapshot snapshot{
+        .rows = {
+            kasumi::NodeRow{.path = "", .is_directory = true},
+            kasumi::NodeRow{.path = "docs", .is_directory = true},
+            kasumi::NodeRow{.path = "docs/alpha.txt",
+                            .hash = kasumi::hasher::hash_string("alpha"),
+                            .size = 5,
+                            .mtime = 100,
+                            .is_directory = false},
+            kasumi::NodeRow{.path = "docs/pending.txt",
+                            .hash = kasumi::hasher::hash_string("pending"),
+                            .size = 7,
+                            .mtime = 101,
+                            .is_directory = false},
+        }};
+    kasumi::finalize_snapshot(snapshot);
+    const kasumi::state_storage::AcceptedCommitMeta meta{
+        .commit_id = std::string(64, 'd'),
+        .height = 4,
+        .created_at = 1700000400,
+        .origin_operation = kasumi::history::CommitOriginOperation::Sync,
+        .machine_id_hex = std::string(32, '5'),
+        .machine_name = "Workstation",
+        .accepted_at = 1700000405,
+    };
+    ASSERT_TRUE(kasumi::state_storage::save_state(
+        db,
+        kasumi::state_storage::StoredState{
+            .tree = snapshot,
+            .height = 4,
+            .commit_id = std::string(64, 'd'),
+            .pending_materializations = {
+                *kasumi::find_row(snapshot, "docs/pending.txt")}},
+        meta));
+
+    const auto tree = kasumi::state_storage::load_local_tree_snapshot(db);
+    ASSERT_TRUE(tree.has_value()) << tree.error();
+    EXPECT_TRUE(tree->has_state);
+    EXPECT_EQ(tree->height, 4U);
+    EXPECT_EQ(tree->commit_id, std::string(64, 'd'));
+    ASSERT_TRUE(tree->activity.has_value());
+    ASSERT_TRUE(tree->activity->accepted_commit.has_value());
+    EXPECT_EQ(tree->activity->accepted_commit->created_at, 1700000400);
+    ASSERT_EQ(tree->entries.size(), 2U);
+    EXPECT_EQ(tree->entries[0].path, "docs");
+    EXPECT_TRUE(tree->entries[0].is_directory);
+    EXPECT_EQ(tree->entries[1].path, "docs/alpha.txt");
+    EXPECT_FALSE(tree->entries[1].is_directory);
+    EXPECT_EQ(tree->entries[1].size, 5U);
+
+    const auto found_alpha =
+        kasumi::state_storage::lookup_mapped_path(db, "docs/alpha.txt");
+    ASSERT_TRUE(found_alpha.has_value()) << found_alpha.error();
+    ASSERT_TRUE(found_alpha->has_value());
+    EXPECT_EQ((*found_alpha)->path, "docs/alpha.txt");
+    EXPECT_EQ((*found_alpha)->size, 5U);
+
+    const auto pending_lookup =
+        kasumi::state_storage::lookup_mapped_path(db, "docs/pending.txt");
+    ASSERT_TRUE(pending_lookup.has_value()) << pending_lookup.error();
+    EXPECT_FALSE(pending_lookup->has_value());
+
+    const auto absent_lookup =
+        kasumi::state_storage::lookup_mapped_path(db, "docs/none.txt");
+    ASSERT_TRUE(absent_lookup.has_value()) << absent_lookup.error();
+    EXPECT_FALSE(absent_lookup->has_value());
+
+    const auto root_lookup = kasumi::state_storage::lookup_mapped_path(db, "");
+    ASSERT_TRUE(root_lookup.has_value()) << root_lookup.error();
+    EXPECT_FALSE(root_lookup->has_value());
+
+    const auto traversal_lookup =
+        kasumi::state_storage::lookup_mapped_path(db, "../escape");
+    ASSERT_TRUE(traversal_lookup.has_value()) << traversal_lookup.error();
+    EXPECT_FALSE(traversal_lookup->has_value());
+}
+
+TEST(StateStorageDatabaseTest,
+     LocalTreeSnapshotSortsCanonicallyAndRejectsCorruptPaths) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("persistence-local-tree-order");
+    const auto db = kasumi::test::workspace_path(workspace, "state.db");
+    ASSERT_TRUE(kasumi::state_storage::initialize(db));
+
+    kasumi::Snapshot snapshot{
+        .rows = {
+            kasumi::NodeRow{.path = "", .is_directory = true},
+            kasumi::NodeRow{.path = "a", .is_directory = true},
+            kasumi::NodeRow{.path = "a/c",
+                            .hash = kasumi::hasher::hash_string("c"),
+                            .size = 1,
+                            .mtime = 10,
+                            .is_directory = false},
+            kasumi::NodeRow{.path = "a-b",
+                            .hash = kasumi::hasher::hash_string("ab"),
+                            .size = 2,
+                            .mtime = 11,
+                            .is_directory = false},
+        }};
+    kasumi::finalize_snapshot(snapshot);
+    ASSERT_TRUE(kasumi::state_storage::save_state(
+        db,
+        kasumi::state_storage::StoredState{
+            .tree = snapshot,
+            .height = 1,
+            .commit_id = std::string(64, 'd')}));
+
+    const auto tree = kasumi::state_storage::load_local_tree_snapshot(db);
+    ASSERT_TRUE(tree.has_value()) << tree.error();
+    ASSERT_EQ(tree->entries.size(), 3U);
+    EXPECT_EQ(tree->entries[0].path, "a");
+    EXPECT_EQ(tree->entries[1].path, "a/c");
+    EXPECT_EQ(tree->entries[2].path, "a-b");
+
+    execute_sql(db,
+                "INSERT INTO nodes(path, hash, size, mtime, is_dir) "
+                "VALUES ('../escape', '" +
+                    kasumi::hash_hex(kasumi::hasher::hash_string("bad")) +
+                    "', 3, 12, 0);");
+    const auto corrupt_tree =
+        kasumi::state_storage::load_local_tree_snapshot(db);
+    EXPECT_FALSE(corrupt_tree.has_value());
+}
+
 } // namespace

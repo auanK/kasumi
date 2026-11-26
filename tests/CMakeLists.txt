@@ -425,6 +425,7 @@ kasumi_add_test_suite(
     "integration.daemon"
     SOURCES
         integration/daemon/test_daemon_engine.cpp
+        integration/daemon/test_web_api.cpp
     LIBRARIES
         kasumi_application
         httplib::httplib

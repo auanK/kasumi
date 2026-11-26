@@ -2649,4 +2649,105 @@ TEST(ApplicationInspectionTest,
     EXPECT_EQ(overlap.error().code, InspectionErrorCode::DestinationFailure);
 }
 
+TEST(ApplicationInspectionTest,
+     RemoteDownloadSessionReusesSingleObservationAcrossMultipleSlices) {
+    auto fixture = make_local_storage();
+    auto workspace =
+        kasumi::test::make_temp_workspace("application-download-session");
+    const auto remote_root =
+        kasumi::test::workspace_path(fixture.workspace, "storage");
+    write_profile(workspace, remote_root);
+
+    const std::string body = "0123456789abcdefghij";
+    kasumi::Snapshot tree{
+        .rows = {
+            kasumi::NodeRow{.path = "", .is_directory = true},
+            kasumi::NodeRow{.path = "subdir", .is_directory = true},
+            kasumi::NodeRow{.path = "sample.txt",
+                            .hash = kasumi::hasher::hash_string(body),
+                            .size = body.size(),
+                            .mtime = 1700000100000000000LL,
+                            .is_directory = false},
+        }};
+    kasumi::finalize_snapshot(tree);
+    const auto commit = kasumi::history::make_commit(0, {}, tree, 100).value();
+    const auto head = publish(fixture, commit);
+    static_cast<void>(put_content(fixture, body));
+    persist_state(workspace, commit, head.head);
+
+    auto opened = kasumi::application::open_remote_download(
+        kasumi::application::InspectionInput{
+            .request = InspectionRequest{
+                .operation = InspectionOperation::RemoteGet,
+                .profile_name = "demo",
+                .logical_path = "sample.txt",
+            },
+            .credentials = Credentials{MasterKeyHex{test_key_hex()}},
+            .environment = ExecutionEnvironment{
+                kasumi::test::workspace_path(workspace, "app")},
+        });
+    ASSERT_TRUE(opened.has_value()) << opened.error().detail;
+    const auto& stat = kasumi::application::remote_download_stat(*opened);
+    EXPECT_EQ(stat.size, body.size());
+    EXPECT_EQ(stat.path, "sample.txt");
+
+    const auto part1 = kasumi::test::workspace_path(workspace, "part1.bin");
+    const auto r1 = kasumi::application::read_remote_download_slice(
+        *opened,
+        part1,
+        kasumi::application::DownloadSlice{.offset = 0, .length = 10});
+    ASSERT_TRUE(r1.has_value()) << r1.error().detail;
+    EXPECT_EQ(kasumi::test::read_text(part1), "0123456789");
+
+    const auto part2 = kasumi::test::workspace_path(workspace, "part2.bin");
+    const auto r2 = kasumi::application::read_remote_download_slice(
+        *opened,
+        part2,
+        kasumi::application::DownloadSlice{.offset = 10, .length = 10});
+    ASSERT_TRUE(r2.has_value()) << r2.error().detail;
+    EXPECT_EQ(kasumi::test::read_text(part2), "abcdefghij");
+
+    const auto zero_slice = kasumi::application::read_remote_download_slice(
+        *opened,
+        kasumi::test::workspace_path(workspace, "empty-slice.bin"),
+        kasumi::application::DownloadSlice{.offset = 0, .length = 0});
+    ASSERT_FALSE(zero_slice.has_value());
+    EXPECT_EQ(zero_slice.error().code, InspectionErrorCode::InvalidRequest);
+
+    const auto past_eof = kasumi::application::read_remote_download_slice(
+        *opened,
+        kasumi::test::workspace_path(workspace, "past-eof.bin"),
+        kasumi::application::DownloadSlice{.offset = 20, .length = 1});
+    ASSERT_FALSE(past_eof.has_value());
+    EXPECT_EQ(past_eof.error().code, InspectionErrorCode::InvalidRequest);
+
+    auto transport = kasumi::application::take_remote_download_transport(*opened);
+    EXPECT_TRUE(transport.has_value());
+    EXPECT_FALSE(
+        kasumi::application::take_remote_download_transport(*opened).has_value());
+
+    const auto closed_slice = kasumi::application::read_remote_download_slice(
+        *opened,
+        kasumi::test::workspace_path(workspace, "closed.bin"),
+        kasumi::application::DownloadSlice{.offset = 0, .length = 5});
+    ASSERT_FALSE(closed_slice.has_value());
+    EXPECT_EQ(closed_slice.error().code, InspectionErrorCode::RuntimeFailure);
+
+    auto dir_open = kasumi::application::open_remote_download(
+        kasumi::application::InspectionInput{
+            .request = InspectionRequest{
+                .operation = InspectionOperation::RemoteGet,
+                .profile_name = "demo",
+                .logical_path = "subdir",
+            },
+            .credentials = Credentials{MasterKeyHex{test_key_hex()}},
+            .environment = ExecutionEnvironment{
+                kasumi::test::workspace_path(workspace, "app")},
+            .transport_cache = &*transport,
+        });
+    ASSERT_FALSE(dir_open.has_value());
+    EXPECT_EQ(dir_open.error().code,
+              InspectionErrorCode::RemotePathIsDirectory);
+}
+
 } // namespace
