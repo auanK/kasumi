@@ -100,10 +100,17 @@ struct DaemonProfileStatus {
     std::string remote_dir;
     std::size_t dirty_paths_count = 0;
     std::string active_stage;
+    std::string active_item_path;
+    std::optional<std::uint64_t> active_item_bytes = std::nullopt;
+    std::optional<std::uint64_t> active_item_total_bytes = std::nullopt;
     std::uint64_t active_objects = 0;
     std::optional<std::uint64_t> active_total_objects = std::nullopt;
     std::uint64_t active_bytes = 0;
     std::optional<std::uint64_t> active_total_bytes = std::nullopt;
+    std::string sync_phase{};
+    std::optional<std::uint32_t> sync_applied_items = std::nullopt;
+    std::optional<std::uint32_t> sync_total_items = std::nullopt;
+    std::optional<double> active_bytes_per_second = std::nullopt;
     std::optional<std::int64_t> last_sync_started_at = std::nullopt;
     std::optional<std::int64_t> last_sync_finished_at = std::nullopt;
     std::optional<std::int64_t> last_checked_at = std::nullopt;
@@ -115,17 +122,22 @@ struct DaemonProfileStatus {
     std::uint64_t fast_noop_polls = 0;
     std::string last_outcome;
     std::string last_error;
+    bool busy = false;
+    std::string active_operation;
 };
 
 struct DaemonStatusReport {
     bool running = false;
     std::uint32_t api_version = 1;
     std::string kasumi_version;
+    std::string machine_name;
     bool secure_pages_locked = false;
     std::uint64_t pid = 0;
     std::int64_t started_at_unix = 0;
+    std::string daemon_instance;
     std::uint64_t uptime_seconds = 0;
     std::uint16_t ipc_port = 0;
+    std::uint16_t web_port = 0;
     DaemonAutostartStatus autostart;
     std::vector<DaemonProfileStatus> profiles;
 };
@@ -258,6 +270,13 @@ std::expected<DaemonStatusReport, DaemonError> spawn_background_daemon(
 std::expected<DaemonAutostartStatus, DaemonError> install_daemon_autostart();
 std::expected<DaemonAutostartStatus, DaemonError> uninstall_daemon_autostart();
 std::expected<DaemonAutostartStatus, DaemonError> query_daemon_autostart();
+
+// Writes a salted Argon2id verifier to web-password.json (minimum 8 characters).
+// and removes any pending web-bootstrap.token.
+std::expected<void, DaemonError>
+set_web_password(const ExecutionEnvironment& environment,
+                 std::string_view password,
+                 std::optional<std::string_view> username = std::nullopt);
 
 } // namespace kasumi::application
 
