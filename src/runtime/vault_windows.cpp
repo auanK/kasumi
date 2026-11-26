@@ -2,10 +2,12 @@
 #include "vault_wipe.hpp"
 
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -21,10 +23,35 @@
 namespace kasumi::runtime::vault {
 namespace {
 
-// Keep verification in the same critical section as its write or delete.
+// Keep verification in the same critical section across threads and processes.
 std::mutex& credential_mutex() noexcept {
     static std::mutex mutex;
     return mutex;
+}
+
+HANDLE acquire_credential_ipc_mutex() noexcept {
+    static HANDLE mutex =
+        CreateMutexW(nullptr, FALSE, L"Local\\KasumiWindowsCredentialManager");
+    if (mutex == nullptr) {
+        return nullptr;
+    }
+    const DWORD wait_rc = WaitForSingleObject(mutex, 10000);
+    return (wait_rc == WAIT_OBJECT_0 || wait_rc == WAIT_ABANDONED) ? mutex
+                                                                   : nullptr;
+}
+
+void release_credential_ipc_mutex(HANDLE handle) noexcept {
+    if (handle != nullptr) {
+        ReleaseMutex(handle);
+    }
+}
+
+template <typename Fn> decltype(auto) with_credential_lock(Fn&& fn) {
+    const std::lock_guard local_lock{credential_mutex()};
+    const std::unique_ptr<void, decltype(&release_credential_ipc_mutex)>
+        ipc_guard{acquire_credential_ipc_mutex(),
+                  &release_credential_ipc_mutex};
+    return std::forward<Fn>(fn)();
 }
 
 template <typename Operation> DWORD credential_call(Operation operation) {
@@ -101,30 +128,34 @@ std::expected<void, runtime::Error> check_vault_available() {
 std::expected<KeyBytes, runtime::Error>
 read_vault(const std::filesystem::path& key_path) {
     const auto target = vault_target_name(key_path);
-    const std::lock_guard lock{credential_mutex()};
-    Credential credential;
-    DWORD error = credential.read(target);
-    for (unsigned attempt = 0; error == ERROR_NOT_FOUND && attempt < 4U;
-         ++attempt) {
-        Sleep(10UL << attempt);
-        error = credential.read(target);
-    }
-    if (error == ERROR_NOT_FOUND) {
-        return fail(ErrorCode::KeyNotFound,
-                    "profile key is missing in OS vault; run 'kasumi key "
-                    "<profile>' to re-enter the key");
-    }
-    if (error != ERROR_SUCCESS) {
-        return fail(ErrorCode::IoFailure, credential_error("read key", error));
-    }
-    if (!credential.has_key()) {
-        return fail(ErrorCode::KeyInvalid, "OS vault key has invalid size");
-    }
-    KeyBytes key{};
-    WipeGuard guard{key};
-    std::memcpy(key.data(), credential.value->CredentialBlob, KEY_SIZE);
-    obscure(key);
-    return key;
+    return with_credential_lock(
+        [&]() -> std::expected<KeyBytes, runtime::Error> {
+            Credential credential;
+            DWORD error = credential.read(target);
+            for (unsigned attempt = 0; error == ERROR_NOT_FOUND && attempt < 6U;
+                 ++attempt) {
+                Sleep(10UL << attempt);
+                error = credential.read(target);
+            }
+            if (error == ERROR_NOT_FOUND) {
+                return fail(ErrorCode::KeyNotFound,
+                            "profile key is missing in OS vault; run 'kasumi "
+                            "key <profile>' to re-enter the key");
+            }
+            if (error != ERROR_SUCCESS) {
+                return fail(ErrorCode::IoFailure,
+                            credential_error("read key", error));
+            }
+            if (!credential.has_key()) {
+                return fail(ErrorCode::KeyInvalid,
+                            "OS vault key has invalid size");
+            }
+            KeyBytes key{};
+            WipeGuard guard{key};
+            std::memcpy(key.data(), credential.value->CredentialBlob, KEY_SIZE);
+            obscure(key);
+            return key;
+        });
 }
 
 std::expected<void, runtime::Error>
@@ -141,61 +172,63 @@ write_vault(const std::filesystem::path& key_path, const KeyBytes& clear_key) {
     cred.CredentialBlob = stored.data();
     cred.Persist = CRED_PERSIST_LOCAL_MACHINE;
 
-    const std::lock_guard lock{credential_mutex()};
-    for (unsigned attempt = 0;; ++attempt) {
-        const auto error = credential_call([&] {
-            return CredWriteW(&cred, 0);
-        });
-        if (error != ERROR_SUCCESS) {
-            return fail(ErrorCode::KeyWriteFailure,
-                        credential_error("store key", error));
-        }
-        Credential verify;
-        auto read_error = verify.read(target);
-        if (read_error == ERROR_SUCCESS) {
-            if (verify.has_key() &&
-                crypto_verify32(verify.value->CredentialBlob, stored.data()) ==
-                    0) {
-                return {};
+    return with_credential_lock([&]() -> std::expected<void, runtime::Error> {
+        for (unsigned attempt = 0;; ++attempt) {
+            const auto error = credential_call([&] {
+                return CredWriteW(&cred, 0);
+            });
+            if (error != ERROR_SUCCESS) {
+                return fail(ErrorCode::KeyWriteFailure,
+                            credential_error("store key", error));
             }
-            read_error = ERROR_INVALID_DATA;
+            Credential verify;
+            auto read_error = verify.read(target);
+            if (read_error == ERROR_SUCCESS) {
+                if (verify.has_key() &&
+                    crypto_verify32(verify.value->CredentialBlob,
+                                    stored.data()) == 0) {
+                    return {};
+                }
+                read_error = ERROR_INVALID_DATA;
+            }
+            if (attempt < 5U) {
+                Sleep(10UL << attempt);
+                continue;
+            }
+            return fail(ErrorCode::KeyWriteFailure,
+                        credential_error("verify stored key", read_error));
         }
-        if (attempt < 5U) {
-            Sleep(10UL << attempt);
-            continue;
-        }
-        return fail(ErrorCode::KeyWriteFailure,
-                    credential_error("verify stored key", read_error));
-    }
+    });
 }
 
 std::expected<void, runtime::Error>
 delete_vault(const std::filesystem::path& key_path) {
     const auto target = vault_target_name(key_path);
-    const std::lock_guard lock{credential_mutex()};
-    DWORD read_error = ERROR_SUCCESS;
-    for (unsigned attempt = 0; attempt < 6U; ++attempt) {
-        const auto error = credential_call([&] {
-            return CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0);
-        });
-        if (error != ERROR_SUCCESS && error != ERROR_NOT_FOUND) {
-            return fail(ErrorCode::IoFailure,
-                        credential_error("delete key", error));
+    return with_credential_lock([&]() -> std::expected<void, runtime::Error> {
+        DWORD read_error = ERROR_SUCCESS;
+        for (unsigned attempt = 0; attempt < 6U; ++attempt) {
+            const auto error = credential_call([&] {
+                return CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0);
+            });
+            if (error != ERROR_SUCCESS && error != ERROR_NOT_FOUND) {
+                return fail(ErrorCode::IoFailure,
+                            credential_error("delete key", error));
+            }
+            Credential verify;
+            read_error = verify.read(target);
+            if (read_error == ERROR_NOT_FOUND) {
+                return {};
+            }
+            if (attempt < 5U) {
+                Sleep(10UL << attempt);
+            }
         }
-        Credential verify;
-        read_error = verify.read(target);
-        if (read_error == ERROR_NOT_FOUND) {
-            return {};
-        }
-        if (attempt < 5U) {
-            Sleep(10UL << attempt);
-        }
-    }
-    return fail(
-        ErrorCode::IoFailure,
-        read_error == ERROR_SUCCESS
-            ? "Windows Credential Manager: key still present after deletion"
-            : credential_error("verify deleted key", read_error));
+        return fail(
+            ErrorCode::IoFailure,
+            read_error == ERROR_SUCCESS
+                ? "Windows Credential Manager: key still present after deletion"
+                : credential_error("verify deleted key", read_error));
+    });
 }
 
 } // namespace kasumi::runtime::vault

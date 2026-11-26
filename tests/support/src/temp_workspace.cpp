@@ -78,6 +78,39 @@ TempWorkspace make_temp_workspace(std::string_view label) {
 #include <wincred.h>
 // clang-format on
 
+void delete_windows_credential(const std::wstring& target) noexcept {
+    HANDLE mutex =
+        CreateMutexW(nullptr, FALSE, L"Local\\KasumiWindowsCredentialManager");
+    bool owned = false;
+    if (mutex != nullptr) {
+        const DWORD wait_rc = WaitForSingleObject(mutex, 10000);
+        owned = (wait_rc == WAIT_OBJECT_0 || wait_rc == WAIT_ABANDONED);
+    }
+    for (unsigned attempt = 0; attempt < 6U; ++attempt) {
+        if (CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0)) {
+            break;
+        }
+        const DWORD error = GetLastError();
+        if (error == ERROR_NOT_FOUND) {
+            break;
+        }
+        if (attempt == 5U ||
+            (error != ERROR_SHARING_VIOLATION &&
+             error != ERROR_LOCK_VIOLATION && error != ERROR_BUSY &&
+             error != ERROR_ACCESS_DENIED && error != ERROR_RETRY &&
+             error != RPC_S_SERVER_TOO_BUSY)) {
+            break;
+        }
+        Sleep(10UL << attempt);
+    }
+    if (owned) {
+        ReleaseMutex(mutex);
+    }
+    if (mutex != nullptr) {
+        CloseHandle(mutex);
+    }
+}
+
 void clean_windows_tree(const std::filesystem::path& root) noexcept {
     std::error_code ec;
     for (std::filesystem::recursive_directory_iterator
@@ -111,7 +144,7 @@ void clean_windows_tree(const std::filesystem::path& root) noexcept {
                         ch = static_cast<wchar_t>(ch - L'A' + L'a');
                     }
                 }
-                CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0);
+                delete_windows_credential(target);
             }
         }
         if (attrs != INVALID_FILE_ATTRIBUTES &&
