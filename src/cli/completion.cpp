@@ -16,7 +16,7 @@ _kasumi() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    local top_commands="status show logs start stop pause resume sync conflicts config list diagnostics key profile daemon ignore fsck gc repack resolve-missing remote version help completion"
+    local top_commands="status show logs start stop pause resume sync conflicts config web list diagnostics key profile daemon ignore fsck gc repack resolve-missing remote version help completion"
     local profile_cmds="create edit clone storage rename delete test"
     local daemon_cmds="run stop status sync pause resume unlock lock reload logs autostart"
     local autostart_cmds="install uninstall status"

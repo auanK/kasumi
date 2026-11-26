@@ -58,6 +58,7 @@ inline constexpr auto help_topics = std::to_array<HelpTopic>({
     {"ignore init", i18n::Key::HelpIgnoreInit},
     {"conflicts", i18n::Key::HelpConflicts},
     {"conflicts resolve", i18n::Key::HelpConflictsResolve},
+    {"web", i18n::Key::HelpWeb},
     {"completion", i18n::Key::HelpCompletion},
     {"remote heads", i18n::Key::HelpRemoteHeads},
     {"remote tree", i18n::Key::HelpRemoteTree},

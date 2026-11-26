@@ -55,6 +55,11 @@ struct ConflictsInvocation {
 struct CompletionInvocation {
     CompletionShell shell = CompletionShell::Bash;
 };
+struct WebInvocation {
+    bool set_password = false;
+    bool no_open = false;
+    std::optional<std::string> username = std::nullopt;
+};
 enum class ProfileAction {
     Create,
     Edit,
@@ -143,6 +148,7 @@ using Invocation = std::variant<application::Request,
                                 KeyInvocation,
                                 ConflictsInvocation,
                                 CompletionInvocation,
+                                WebInvocation,
                                 ProfileInvocation,
                                 DaemonInvocation,
                                 IgnoreInvocation,

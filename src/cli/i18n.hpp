@@ -147,6 +147,7 @@ enum class Key {
     HelpIgnoreInit,
     HelpConflicts,
     HelpConflictsResolve,
+    HelpWeb,
     HelpCompletion,
     HelpRemoteHeads,
     HelpRemoteTree,
