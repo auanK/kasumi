@@ -1,0 +1,3584 @@
+openapi: 3.1.0
+info: {title: Kasumi daemon HTTP API, version: 1.0.0, description: The daemon validates Host against the local address
+    and configured allowed_hosts. Browser mutations require a matching Origin or Referer and JSON for requests with
+    a body. Browser session cookies and IPC tokens are accepted on their respective listeners. Registered GET routes
+    also accept HEAD through the HTTP server.}
+servers:
+- {url: 'http://127.0.0.1:3137', description: Default Web API listener.}
+- url: http://127.0.0.1:{ipc_port}
+  description: Local IPC listener discovered via daemon.control.json.
+  variables:
+    ipc_port: {default: '3137', description: Use the current dynamically assigned IPC port.}
+security:
+- browserSession: []
+- ipcToken: []
+tags:
+- {name: Authentication}
+- {name: Daemon}
+- {name: Profiles}
+- {name: Diagnostics}
+- {name: Remote explorer}
+- {name: Conflicts}
+- {name: Jobs}
+paths:
+  /v1/auth/status:
+    get:
+      operationId: getAuthStatus
+      tags: [Authentication]
+      summary: Read password setup and session state
+      security:
+      - {}
+      - browserSession: []
+      - ipcToken: []
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuthStatus'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/auth/login:
+    post:
+      operationId: login
+      tags: [Authentication]
+      summary: Create a browser session
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username: {$ref: '#/components/schemas/WebUsername'}
+                password: {type: string, format: password}
+              required: [username, password]
+      responses:
+        '200':
+          description: Session created.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LoginSession'}
+          headers:
+            Set-Cookie:
+              description: Session cookie or expiration directive.
+              schema: {type: string}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/Throttled'}
+        '503': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/auth/logout:
+    post:
+      operationId: logout
+      tags: [Authentication]
+      summary: Revoke the current session
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      responses:
+        '200':
+          description: Cookie expired.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LogoutResponse'}
+          headers:
+            Set-Cookie:
+              description: Session cookie or expiration directive.
+              schema: {type: string}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/auth/password:
+    post:
+      operationId: setPassword
+      tags: [Authentication]
+      summary: Create or rotate the Web API password
+      description: Initial setup uses the single-use token in web-bootstrap.token. Rotation requires an active session,
+        its CSRF token and the current password. Browser requests always supply a matching Origin or Referer.
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - {$ref: '#/components/schemas/BootstrapPassword'}
+              - {$ref: '#/components/schemas/RotatePassword'}
+      responses:
+        '200':
+          description: Password stored and all sessions revoked.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SetPasswordResponse'}
+          headers:
+            Set-Cookie:
+              description: Session cookie or expiration directive.
+              schema: {type: string}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/Throttled'}
+        '500': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/status:
+    get:
+      operationId: getStatus
+      tags: [Daemon]
+      summary: Read daemon and profile status
+      parameters:
+      - name: profile
+        in: query
+        required: false
+        description: Filter by profile name.
+        schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DaemonStatus'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/events:
+    get:
+      operationId: getEvents
+      tags: [Daemon]
+      summary: Read sequenced daemon events
+      parameters:
+      - name: profile
+        in: query
+        required: false
+        description: Filter by profile name.
+        schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+      - name: since
+        in: query
+        required: false
+        description: Return events after this sequence number.
+        schema: {type: integer, format: int64, minimum: 0}
+      - name: limit
+        in: query
+        required: false
+        description: Maximum number of returned events. Zero selects the default, and values above 1000 are capped.
+        schema: {type: integer, format: int64, minimum: 0}
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EventHistory'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/logs:
+    get:
+      operationId: getLogs
+      tags: [Daemon]
+      summary: Read daemon log history
+      parameters:
+      - name: profile
+        in: query
+        required: false
+        description: Filter by profile name.
+        schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+      - name: lines
+        in: query
+        required: false
+        description: Number of log entries, clamped to 1–1000.
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 100
+      - name: full
+        in: query
+        required: false
+        description: Include the detail field.
+        schema: {type: boolean, default: true}
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LogHistory'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/events/stream:
+    get:
+      operationId: streamEvents
+      tags: [Daemon]
+      summary: Subscribe to status, jobs and log events
+      description: Server-Sent Events with JSON in each data field. Named log events carry id equal to seq. Named
+        status events contain profile progress and job snapshots. Reconnect using Last-Event-ID to recover available
+        entries from the live ring. The server closes the stream when its session expires or is revoked.
+      parameters:
+      - name: since
+        in: query
+        required: false
+        description: Return events after this sequence number.
+        schema: {type: integer, format: int64, minimum: 0}
+      - name: Last-Event-ID
+        in: header
+        required: false
+        description: Last received log sequence. Takes precedence over since.
+        schema: {type: integer, format: int64, minimum: 0}
+      responses:
+        '200':
+          description: SSE stream.
+          content:
+            text/event-stream:
+              schema: {type: string}
+          headers:
+            X-Accel-Buffering:
+              description: Disable proxy buffering.
+              schema: {const: 'no'}
+          x-event-schemas:
+            log: {$ref: '#/components/schemas/DaemonEvent'}
+            status: {$ref: '#/components/schemas/StreamStatus'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/Throttled'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/sync:
+    post:
+      operationId: triggerSync
+      tags: [Daemon]
+      summary: Trigger the normal daemon synchronization
+      description: Omit profile to trigger all eligible profiles. Use the maintenance sync job to pass advanced
+        CLI options.
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                profile: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+                wait: {type: boolean, default: false}
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SyncTriggered'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/autostart:
+    post:
+      operationId: setAutostart
+      tags: [Daemon]
+      summary: Enable or disable login-session autostart
+      description: Updates the current user's platform autostart setting and refreshes the daemon status.
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: {type: boolean}
+              required: [enabled]
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DaemonAutostartStatus'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '500': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/pause:
+    post:
+      operationId: pauseProfile
+      tags: [Daemon]
+      summary: Pause a daemon profile
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                profile: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+              required: [profile]
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {const: true}
+                required: [ok]
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/resume:
+    post:
+      operationId: resumeProfile
+      tags: [Daemon]
+      summary: Resume a daemon profile
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                profile: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+              required: [profile]
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {const: true}
+                required: [ok]
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/lock:
+    post:
+      operationId: lockProfile
+      tags: [Daemon]
+      summary: Lock a daemon profile
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                profile: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+              required: [profile]
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {const: true}
+                required: [ok]
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/cancel:
+    post:
+      operationId: cancelProfile
+      tags: [Daemon]
+      summary: Cancel work on a daemon profile
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                profile: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+              required: [profile]
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {const: true}
+                required: [ok]
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/unlock:
+    post:
+      operationId: unlockProfile
+      tags: [Daemon]
+      summary: Unlock a daemon memory profile
+      description: Browser authentication uses profile credentials in the body. IPC authentication uses the daemon's
+        sealed key format.
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - {$ref: '#/components/schemas/BrowserUnlock'}
+              - {$ref: '#/components/schemas/IpcUnlock'}
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  unlocked: {const: true}
+                required: [unlocked]
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/reload:
+    post:
+      operationId: reloadDaemon
+      tags: [Daemon]
+      summary: Reload daemon configuration
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reloaded: {const: true}
+                required: [reloaded]
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/stop:
+    post:
+      operationId: stopDaemon
+      tags: [Daemon]
+      summary: Stop the daemon
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stopping: {const: true}
+                required: [stopping]
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/diagnostics:
+    get:
+      operationId: getDiagnostics
+      tags: [Diagnostics]
+      summary: Read host and profile diagnostics
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DiagnosticsReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/diagnostics/{profile}:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: getProfileDiagnostics
+      tags: [Diagnostics]
+      summary: Read diagnostics for a selected profile
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DiagnosticsReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/rclone/remotes:
+    get:
+      operationId: listRcloneRemotes
+      tags: [Diagnostics]
+      summary: List configured rclone remotes
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RcloneRemotesInfo'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/profiles:
+    get:
+      operationId: listProfiles
+      tags: [Profiles]
+      summary: List profile configuration and status
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profiles'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: createProfile
+      tags: [Profiles]
+      summary: Create a profile
+      description: Use verify to authenticate the remote with these credentials before saving the profile.
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateProfile'}
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '500': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/profiles/{name}:
+    parameters:
+    - name: name
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: getProfile
+      tags: [Profiles]
+      summary: Read profile configuration, activity and status
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProfileDetails'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+    patch:
+      operationId: updateProfile
+      tags: [Profiles]
+      summary: Update profile configuration
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProfilePatch'}
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Profile'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '500': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: deleteProfile
+      tags: [Profiles]
+      summary: Remove a profile and preserve its files
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                confirm: {const: true}
+              required: [confirm]
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: {const: true}
+                required: [deleted]
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '500': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/profiles/{name}/clone:
+    parameters:
+    - name: name
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    post:
+      operationId: cloneProfile
+      tags: [Profiles]
+      summary: Clone a profile
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+              required: [name]
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {const: true}
+                required: [ok]
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '500': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/profiles/{name}/rename:
+    parameters:
+    - name: name
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    post:
+      operationId: renameProfile
+      tags: [Profiles]
+      summary: Rename a profile
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+              required: [name]
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {const: true}
+                required: [ok]
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '500': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/profiles/{name}/storage:
+    parameters:
+    - name: name
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    post:
+      operationId: setProfileStorage
+      tags: [Profiles]
+      summary: Change profile key storage
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key_storage: {$ref: '#/components/schemas/KeyStorage'}
+              required: [key_storage]
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {const: true}
+                required: [ok]
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '500': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/profiles/{name}/key:
+    parameters:
+    - name: name
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    post:
+      operationId: setProfileKey
+      tags: [Profiles]
+      summary: Set or replace profile credentials
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ReplaceKey'}
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {const: true}
+                required: [ok]
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '500': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/profiles/{name}/test:
+    parameters:
+    - name: name
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    post:
+      operationId: testProfile
+      tags: [Profiles]
+      summary: Test configured remote connectivity and authentication
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProfileConnectionReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/profiles/{name}/ignore/check:
+    parameters:
+    - name: name
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    post:
+      operationId: checkIgnore
+      tags: [Profiles]
+      summary: Evaluate logical paths against ignore rules
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                paths:
+                  type: array
+                  items: {type: string}
+              required: [paths]
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/IgnoreCheckReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/profiles/{name}/ignore/init:
+    parameters:
+    - name: name
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    post:
+      operationId: initIgnore
+      tags: [Profiles]
+      summary: Generate or preview the local ignore file
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                preset: {$ref: '#/components/schemas/IgnorePreset', default: default}
+                force: {type: boolean, default: false}
+                dry_run: {type: boolean, default: false}
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/IgnoreInitReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/profiles/{name}/preview:
+    parameters:
+    - name: name
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    post:
+      operationId: previewProfile
+      tags: [Jobs]
+      summary: Queue a read-only synchronization preview
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      responses:
+        '202': {$ref: '#/components/responses/Accepted'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/Throttled'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/remote/{profile}/summary:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: getRemoteSummary
+      tags: [Remote explorer]
+      summary: Read vault history, activity and space usage
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RemoteSummaryReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/remote/{profile}/heads:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: getRemoteHeads
+      tags: [Remote explorer]
+      summary: List current logical heads
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RemoteHeadsReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/remote/{profile}/commits:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: listRemoteCommits
+      tags: [Remote explorer]
+      summary: List reachable commits and their parents
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RemoteCommitsReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/remote/{profile}/commits/{commit_id}:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    - name: commit_id
+      in: path
+      required: true
+      description: Commit ID.
+      schema: {type: string, pattern: '^[a-f0-9]{64}$'}
+    get:
+      operationId: getRemoteCommit
+      tags: [Remote explorer]
+      summary: Read a commit and its physical variants
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RemoteCommitReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/remote/{profile}/objects:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: listRemoteObjects
+      tags: [Remote explorer]
+      summary: List physical vault objects
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RemoteObjectsReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/remote/{profile}/orphans:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: listRemoteOrphans
+      tags: [Remote explorer]
+      summary: List orphan objects and removal candidates
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RemoteOrphansReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/remote/{profile}/writers:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: listRemoteWriters
+      tags: [Remote explorer]
+      summary: List writer markers and maintenance barriers
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RemoteWritersReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/remote/{profile}/epochs:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: listRemoteEpochs
+      tags: [Remote explorer]
+      summary: List authenticated retention epochs
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RemoteEpochsReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/remote/{profile}/health:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: getRemoteHealth
+      tags: [Remote explorer]
+      summary: Read vault health and its findings
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RemoteHealthReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/remote/{profile}/tree:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: getRemoteTree
+      tags: [Remote explorer]
+      summary: Browse the authenticated tree
+      parameters:
+      - name: commit
+        in: query
+        required: false
+        description: Select an authenticated commit.
+        schema: {type: string, pattern: '^[a-f0-9]{64}$'}
+      - name: head
+        in: query
+        required: false
+        description: Select a current logical head. Use either head or commit.
+        schema: {type: string, pattern: '^[a-f0-9]{64}$'}
+      - name: prefix
+        in: query
+        required: false
+        description: Filter to a subtree. A slash selects the root.
+        schema: {type: string}
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RemoteTreeReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/remote/{profile}/stat:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: statRemotePath
+      tags: [Remote explorer]
+      summary: Read metadata and physical layout for a path
+      parameters:
+      - name: path
+        in: query
+        required: true
+        description: URL-encoded logical path.
+        schema: {type: string, minLength: 1}
+      - name: commit
+        in: query
+        required: false
+        description: Select an authenticated commit.
+        schema: {type: string, pattern: '^[a-f0-9]{64}$'}
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RemoteStatReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/remote/{profile}/log:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: getRemotePathHistory
+      tags: [Remote explorer]
+      summary: Read the commit history of a path
+      parameters:
+      - name: path
+        in: query
+        required: true
+        description: URL-encoded logical path.
+        schema: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RemoteLogReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/remote/{profile}/diff:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: diffRemoteCommits
+      tags: [Remote explorer]
+      summary: Compare two authenticated revisions
+      parameters:
+      - name: from
+        in: query
+        required: true
+        description: Starting commit.
+        schema: {type: string, pattern: '^[a-f0-9]{64}$'}
+      - name: to
+        in: query
+        required: true
+        description: Ending commit.
+        schema: {type: string, pattern: '^[a-f0-9]{64}$'}
+      - name: path
+        in: query
+        required: false
+        description: Load one file on each side for text comparison. Limit of 1 MiB per side.
+        schema: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                - {$ref: '#/components/schemas/RemoteTreeDiff'}
+                - {$ref: '#/components/schemas/RemoteTextDiff'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/local/{profile}/tree:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: listLocalTree
+      tags: [Remote explorer]
+      summary: List the profile's saved local synchronization map
+      description: Returns paths and sizes recorded by the last accepted local snapshot. Omits files pending materialization. A vault key is not required.
+      responses:
+        '200':
+          description: Local tree.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries]
+                properties:
+                  commit_id: {type: string}
+                  height: {type: integer, format: int64, minimum: 0}
+                  created_at: {type: integer, format: int64}
+                  entries:
+                    type: array
+                    items:
+                      type: object
+                      required: [path, type, size]
+                      properties:
+                        path: {type: string}
+                        type: {$ref: '#/components/schemas/RemoteTreeEntryType'}
+                        size: {type: integer, format: int64, minimum: 0}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/local/{profile}/download:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: readLocalFile
+      tags: [Remote explorer]
+      summary: Stream a file from the profile's local folder
+      description: Streams current disk contents for a mapped file. The path must be present in the saved local map. Symlinks and reparse points are skipped. PDF responses declare inline disposition.
+      parameters:
+      - name: path
+        in: query
+        required: true
+        schema: {type: string, minLength: 1}
+      - name: Range
+        in: header
+        description: A single bytes range, explicit, open-ended or suffix.
+        schema: {type: string}
+      responses:
+        '200':
+          description: Complete file with its media type.
+          headers:
+            Accept-Ranges: {schema: {const: bytes}}
+          content:
+            '*/*':
+              schema: {type: string, format: binary}
+        '206':
+          description: Requested byte range with the file's media type.
+          headers:
+            Accept-Ranges: {schema: {const: bytes}}
+            Content-Range: {schema: {type: string}}
+          content:
+            '*/*':
+              schema: {type: string, format: binary}
+        '416':
+          description: Unsatisfiable range.
+          headers:
+            Content-Range: {schema: {type: string}}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/remote/{profile}/download:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: downloadRemotePath
+      tags: [Remote explorer]
+      summary: Download an authenticated file or range
+      description: Streams large chunked files in verified windows. PDF responses declare inline disposition.
+      parameters:
+      - name: path
+        in: query
+        required: true
+        description: URL-encoded logical path.
+        schema: {type: string, minLength: 1}
+      - name: commit
+        in: query
+        required: false
+        description: Select an authenticated commit.
+        schema: {type: string, pattern: '^[a-f0-9]{64}$'}
+      - name: Range
+        in: header
+        required: false
+        description: A single bytes range. Supports explicit, open-ended and suffix ranges.
+        schema: {type: string}
+      responses:
+        '200':
+          description: Complete file.
+          headers:
+            Accept-Ranges:
+              description: Supported range unit.
+              schema: {const: bytes}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+            application/pdf:
+              schema: {type: string, format: binary}
+            text/plain:
+              schema: {type: string, format: binary}
+            image/png:
+              schema: {type: string, format: binary}
+            image/jpeg:
+              schema: {type: string, format: binary}
+            image/webp:
+              schema: {type: string, format: binary}
+            image/gif:
+              schema: {type: string, format: binary}
+            video/mp4:
+              schema: {type: string, format: binary}
+            video/webm:
+              schema: {type: string, format: binary}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+        '206':
+          description: Authenticated byte range.
+          headers:
+            Accept-Ranges:
+              description: Supported range unit.
+              schema: {const: bytes}
+            Content-Range:
+              description: Byte interval and the resource length.
+              schema: {type: string}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+            application/pdf:
+              schema: {type: string, format: binary}
+            text/plain:
+              schema: {type: string, format: binary}
+            image/png:
+              schema: {type: string, format: binary}
+            image/jpeg:
+              schema: {type: string, format: binary}
+            image/webp:
+              schema: {type: string, format: binary}
+            image/gif:
+              schema: {type: string, format: binary}
+            video/mp4:
+              schema: {type: string, format: binary}
+            video/webm:
+              schema: {type: string, format: binary}
+        '416':
+          description: Unsatisfiable range or multiple ranges.
+          headers:
+            Content-Range:
+              description: Byte interval and the resource length.
+              schema: {type: string}
+  /v1/remote/{profile}/restore:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    post:
+      operationId: restoreRemoteTree
+      tags: [Remote explorer]
+      summary: Restore a file or subtree
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dst: {type: string, minLength: 1}
+                commit: {type: string, pattern: '^[a-f0-9]{64}$'}
+                prefix: {type: string}
+                dry_run: {type: boolean, default: true}
+              required: [dst]
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RemoteRestoreReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '422': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/conflicts/{profile}:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: listConflicts
+      tags: [Conflicts]
+      summary: List conflict groups and preserved artifacts
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LocalConflictsReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/conflicts/{profile}/diff:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    get:
+      operationId: previewConflict
+      tags: [Conflicts]
+      summary: Read both sides of a conflict
+      description: Each present file contributes up to 1 MiB, encoded as hexadecimal. A missing canonical side is
+        null.
+      parameters:
+      - name: path
+        in: query
+        required: true
+        description: URL-encoded logical path.
+        schema: {type: string, minLength: 1}
+      - name: artifact
+        in: query
+        required: true
+        description: Full logical path of an artifact returned for this group.
+        schema: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConflictPreview'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/conflicts/{profile}/resolve:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    post:
+      operationId: resolveConflict
+      tags: [Conflicts]
+      summary: Resolve or preview one conflict
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path: {type: string, minLength: 1}
+                choice: {$ref: '#/components/schemas/ConflictResolutionChoice'}
+                artifact: {type: string, minLength: 1}
+                dry_run: {type: boolean, default: false}
+              required: [path, choice]
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ResolveConflictReport'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/jobs/{id}:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      description: Daemon job ID.
+      schema: {type: integer, format: int64, minimum: 0}
+    get:
+      operationId: getJob
+      tags: [Jobs]
+      summary: Read job progress and result
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Job'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/maintenance/{profile}/fsck:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    post:
+      operationId: queueFsck
+      tags: [Jobs]
+      summary: Queue the integrity check
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      responses:
+        '202': {$ref: '#/components/responses/Accepted'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/Throttled'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/maintenance/{profile}/gc:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    post:
+      operationId: queueGarbageCollection
+      tags: [Jobs]
+      summary: Queue garbage collection
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dry_run: {type: boolean, default: true}
+                confirm: {type: boolean, default: false}
+                min_age_hours:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                  maximum: 8760
+              if:
+                required: [dry_run]
+                properties:
+                  dry_run: {const: false}
+              then:
+                required: [confirm]
+                properties:
+                  confirm: {const: true}
+      responses:
+        '202': {$ref: '#/components/responses/Accepted'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/Throttled'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/maintenance/{profile}/repack:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    post:
+      operationId: queueRepack
+      tags: [Jobs]
+      summary: Queue pack consolidation
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dry_run: {type: boolean, default: true}
+                confirm: {type: boolean, default: false}
+                reclaim_dirty: {type: boolean, default: false}
+              if:
+                required: [dry_run]
+                properties:
+                  dry_run: {const: false}
+              then:
+                required: [confirm]
+                properties:
+                  confirm: {const: true}
+      responses:
+        '202': {$ref: '#/components/responses/Accepted'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/Throttled'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/maintenance/{profile}/resolve-missing:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    post:
+      operationId: queueResolveMissing
+      tags: [Jobs]
+      summary: Queue pending-content resolution
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dry_run: {type: boolean, default: true}
+                confirm: {type: boolean, default: false}
+              if:
+                required: [dry_run]
+                properties:
+                  dry_run: {const: false}
+              then:
+                required: [confirm]
+                properties:
+                  confirm: {const: true}
+      responses:
+        '202': {$ref: '#/components/responses/Accepted'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/Throttled'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/maintenance/{profile}/sync:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    post:
+      operationId: queueAdvancedSync
+      tags: [Jobs]
+      summary: Queue synchronization using advanced CLI options
+      description: Options are passed to the application sync request. Semantic validation failures are reported
+        in the job result. An inventory-audit failure after a successful sync carries the sync result so clients
+        can distinguish it from a failed sync.
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AdvancedSync'}
+      responses:
+        '202': {$ref: '#/components/responses/Accepted'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/Throttled'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/maintenance/{profile}/remove-writer:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    post:
+      operationId: queueRemoveWriter
+      tags: [Jobs]
+      summary: Queue removal of the selected writer marker
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                writer_id: {type: string, minLength: 1}
+              required: [writer_id]
+      responses:
+        '202': {$ref: '#/components/responses/Accepted'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/Throttled'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/maintenance/{profile}/remove-barrier:
+    parameters:
+    - name: profile
+      in: path
+      required: true
+      description: Profile name.
+      schema: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+    post:
+      operationId: queueRemoveBarrier
+      tags: [Jobs]
+      summary: Queue removal of an abandoned maintenance barrier
+      description: Explicit confirmation is required. When no barrier ID is supplied, the application selects the
+        single eligible barrier or fails if selection is ambiguous.
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                barrier_id: {type: string, minLength: 1}
+                confirm_abandoned: {const: true}
+              required: [confirm_abandoned]
+      responses:
+        '202': {$ref: '#/components/responses/Accepted'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/Throttled'}
+        default: {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    browserSession:
+      type: apiKey
+      in: cookie
+      name: kasumi_session
+      description: HttpOnly, SameSite=Strict and Secure via a trusted loopback HTTPS proxy. Sessions expire after
+        a 30 minute idle timeout or 12 hours total.
+    csrfToken:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+      description: Session-bound token from login or auth status. Browser mutations also require a same-origin Origin
+        or Referer.
+    ipcToken:
+      type: apiKey
+      in: header
+      name: X-Kasumi-Daemon-Token
+      description: Local CLI token from daemon.control.json, accepted on the loopback IPC listener. Browser Origin,
+        Referer and fetch metadata headers are forbidden for this scheme.
+  responses:
+    Error:
+      description: API error. HTTP parser errors may have an empty or plain-text body.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+        text/plain:
+          schema: {type: string}
+    BadRequest:
+      description: Invalid request, selector, field or confirmation.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Forbidden:
+      description: Invalid credentials, Host, browser origin, or CSRF token.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    NotFound:
+      description: Requested profile, job, path, commit or object was not found.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Conflict:
+      description: Concurrent operation, stale state or an ambiguous revision selector.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    UnsupportedMedia:
+      description: A mutation body requires application/json.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Throttled:
+      description: Login backoff or job or stream capacity reached.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+      headers:
+        Retry-After:
+          description: Retry delay in seconds for authentication backoff, when present.
+          schema: {type: integer, format: int64, minimum: 0}
+    Accepted:
+      description: Job accepted. Use the Location header or the SSE status events to follow it.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/JobSnapshot'}
+      headers:
+        Location:
+          description: Relative URL of the job resource.
+          schema: {type: string}
+      links:
+        job:
+          operationId: getJob
+          parameters: {id: $response.body#/id}
+  schemas:
+    Activity:
+      type: string
+      enum: [scanning, staging, uploading, downloading, verifying, installing, reobserving, listing, authenticating,
+        auditing, removing, comparing_snapshots, checking_remote_content, preparing_plan, preparing_remote, checking_controls,
+        establishing_barrier, probing_consistency, analyzing_reachability, loading_activities, releasing_barrier]
+    ActivityProgress:
+      type: object
+      properties:
+        activity: {$ref: '#/components/schemas/Activity'}
+        bytes: {type: integer, format: int64, minimum: 0}
+        total_bytes:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        objects: {type: integer, format: int64, minimum: 0}
+        total_objects:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        cache_hits: {type: integer, format: int64, minimum: 0}
+        files_hashed: {type: integer, format: int64, minimum: 0}
+        bytes_reused: {type: integer, format: int64, minimum: 0}
+        staged_bytes:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        attempt: {type: integer, format: int64, minimum: 0}
+        observing_remote: {type: boolean}
+        stage_id: {type: integer, format: int64, minimum: 0}
+        item_path: {type: string}
+        item_bytes:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        item_total_bytes:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+      required: [activity, bytes, total_bytes, objects, total_objects, cache_hits, files_hashed, bytes_reused, staged_bytes,
+        attempt, observing_remote, stage_id, item_path, item_bytes, item_total_bytes]
+    AdvancedSync:
+      type: object
+      properties:
+        initial: {type: boolean, default: false, description: Perform initial sync. The profile must have no existing
+            local database or transaction evidence.}
+        repair: {type: boolean, default: false, description: Repair missing remote content using recoverable sources.}
+        audit_inventory: {type: boolean, default: false, description: Report authenticated inventory after sync.}
+        allow_empty_local: {type: boolean, default: false, description: Allow sync to proceed when an unexpectedly
+            empty local tree would otherwise block it.}
+        bandwidth_limit:
+          type: string
+          minLength: 1
+          examples: [8M]
+          description: Override the profile rclone bandwidth setting for this run.
+        transfer_concurrency:
+          type: integer
+          minimum: 1
+          maximum: 16
+          description: Override the profile content transfer concurrency for this run.
+      allOf:
+      - if:
+          properties:
+            initial: {const: true}
+          required: [initial]
+        then:
+          not:
+            properties:
+              repair: {const: true}
+            required: [repair]
+      - if:
+          properties:
+            initial: {const: true}
+          required: [initial]
+        then:
+          not:
+            properties:
+              audit_inventory: {const: true}
+            required: [audit_inventory]
+      - if:
+          properties:
+            initial: {const: true}
+          required: [initial]
+        then:
+          not:
+            properties:
+              allow_empty_local: {const: true}
+            required: [allow_empty_local]
+      - if:
+          properties:
+            repair: {const: true}
+          required: [repair]
+        then:
+          not:
+            properties:
+              allow_empty_local: {const: true}
+            required: [allow_empty_local]
+    AuthStatus:
+      type: object
+      properties:
+        authenticated: {type: boolean}
+        configured: {type: boolean}
+        csrf_token: {type: string, pattern: '^[A-Fa-f0-9]{64}$'}
+        username: {$ref: '#/components/schemas/WebUsername'}
+      required: [authenticated, configured]
+    BarrierRemovalMutationState:
+      type: string
+      enum: [not_attempted, confirmed, uncertain]
+    BarrierRemovalOutcome:
+      type: string
+      enum: [removed, already_absent]
+    BarrierRemovalStage:
+      type: string
+      enum: [checking_presence, downloading_payload, validating_payload, checking_writers, verifying_physical_identity,
+        removing, confirming_absence]
+    BootstrapPassword:
+      type: object
+      properties:
+        bootstrap_token: {type: string, pattern: '^[A-Fa-f0-9]{64}$'}
+        username: {$ref: '#/components/schemas/WebUsername'}
+        password: {$ref: '#/components/schemas/WebPassword'}
+      required: [bootstrap_token, password]
+    BrowserUnlock:
+      allOf:
+      - {$ref: '#/components/schemas/ProfileCredentials'}
+      - type: object
+        properties:
+          profile: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+        required: [profile]
+    ConflictOrigin:
+      type: string
+      enum: [local, remote, branch_commit]
+    ConflictPreview:
+      type: object
+      properties:
+        canonical:
+          anyOf:
+          - {$ref: '#/components/schemas/FilePreview'}
+          - {type: 'null'}
+        artifact: {$ref: '#/components/schemas/FilePreview'}
+      required: [canonical, artifact]
+    ConflictResolutionChoice:
+      type: string
+      enum: [keep_canonical, keep_artifact]
+    CreateProfile:
+      allOf:
+      - {$ref: '#/components/schemas/ProfileCredentials'}
+      - type: object
+        properties:
+          local_dir: {type: string}
+          remote_dir: {type: string}
+          min_history_depth: {type: integer, format: int64, minimum: 0}
+          min_history_age_hours: {type: integer, format: int64, minimum: 0}
+          bandwidth_limit:
+            anyOf:
+            - {type: string}
+            - {type: 'null'}
+          transfer_concurrency:
+            anyOf:
+            - {type: integer, format: int64, minimum: 0}
+            - {type: 'null'}
+          rclone_config:
+            anyOf:
+            - {type: string}
+            - {type: 'null'}
+          watch_enabled:
+            anyOf:
+            - {type: boolean}
+            - {type: 'null'}
+          sync_interval_seconds:
+            anyOf:
+            - {type: integer, format: int64, minimum: 0}
+            - {type: 'null'}
+          paused: {type: boolean}
+          allow_empty_local: {type: boolean, default: false}
+          name: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+          key_storage: {$ref: '#/components/schemas/KeyStorage'}
+          verify: {type: boolean, default: false}
+        required: [name, local_dir, remote_dir]
+    DaemonAutostartStatus:
+      type: object
+      properties:
+        supported: {type: boolean}
+        installed: {type: boolean}
+        systemd_enabled: {type: boolean}
+        method: {type: string}
+        location: {type: string}
+        command: {type: string}
+        detail: {type: string}
+      required: [supported, installed, systemd_enabled, method, location, command, detail]
+    DaemonEvent:
+      type: object
+      properties:
+        seq: {type: integer, format: int64, minimum: 0}
+        timestamp_unix: {type: integer, format: int64}
+        profile_name: {type: string}
+        kind: {type: string}
+        detail: {type: string}
+      required: [seq, timestamp_unix, profile_name, kind, detail]
+    DaemonProfileState:
+      type: string
+      enum: [idle, pending_debounce, running_sync, paused, locked, backoff, needs_attention]
+    DaemonProfileStatus:
+      type: object
+      properties:
+        name: {type: string}
+        key_storage: {$ref: '#/components/schemas/KeyStorage'}
+        state: {$ref: '#/components/schemas/DaemonProfileState'}
+        paused: {type: boolean}
+        locked: {type: boolean}
+        watch_enabled: {type: boolean}
+        watcher_active: {type: boolean}
+        watcher_degraded: {type: boolean}
+        warm_transport_active: {type: boolean}
+        warm_cache_entries: {type: integer, format: int64, minimum: 0}
+        sync_interval_seconds: {type: integer, format: int64, minimum: 0}
+        local_dir: {type: string}
+        remote_dir: {type: string}
+        dirty_paths_count: {type: integer, format: int64, minimum: 0}
+        active_stage: {type: string}
+        active_item_path: {type: string}
+        active_item_bytes:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        active_item_total_bytes:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        active_objects: {type: integer, format: int64, minimum: 0}
+        active_total_objects:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        active_bytes: {type: integer, format: int64, minimum: 0}
+        active_total_bytes:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        sync_phase:
+          anyOf:
+          - {$ref: '#/components/schemas/SyncStage'}
+          - {const: ''}
+        sync_applied_items: {type: [integer, 'null'], minimum: 0}
+        sync_total_items: {type: [integer, 'null'], minimum: 0}
+        active_bytes_per_second: {type: [number, 'null'], minimum: 0}
+        last_sync_started_at:
+          anyOf:
+          - {type: integer, format: int64}
+          - {type: 'null'}
+        last_sync_finished_at:
+          anyOf:
+          - {type: integer, format: int64}
+          - {type: 'null'}
+        last_checked_at:
+          anyOf:
+          - {type: integer, format: int64}
+          - {type: 'null'}
+        next_sync_at:
+          anyOf:
+          - {type: integer, format: int64}
+          - {type: 'null'}
+        backoff_until_unix:
+          anyOf:
+          - {type: integer, format: int64}
+          - {type: 'null'}
+        backoff_seconds: {type: integer, format: int64, minimum: 0}
+        consecutive_failures: {type: integer, format: int64, minimum: 0}
+        sync_runs: {type: integer, format: int64, minimum: 0}
+        fast_noop_polls: {type: integer, format: int64, minimum: 0}
+        last_outcome: {type: string}
+        last_error: {type: string}
+      required: [name, key_storage, state, paused, locked, watch_enabled, watcher_active, watcher_degraded, warm_transport_active,
+        warm_cache_entries, sync_interval_seconds, local_dir, remote_dir, dirty_paths_count, active_stage, active_item_path,
+        active_item_bytes, active_item_total_bytes, active_objects, active_total_objects, active_bytes, active_total_bytes,
+        sync_phase, sync_applied_items, sync_total_items, active_bytes_per_second,
+        last_sync_started_at, last_sync_finished_at, last_checked_at, next_sync_at, backoff_until_unix, backoff_seconds,
+        consecutive_failures, sync_runs, fast_noop_polls, last_outcome, last_error]
+    DaemonStatus:
+      type: object
+      properties:
+        running: {type: boolean}
+        api_version: {type: integer, format: int64, minimum: 0}
+        kasumi_version: {type: string}
+        secure_pages_locked: {type: boolean}
+        pid: {type: integer, format: int64, minimum: 0}
+        started_at_unix: {type: integer, format: int64, minimum: 0}
+        uptime_seconds: {type: integer, format: int64, minimum: 0}
+        ipc_port: {type: integer, format: int64, minimum: 0}
+        web_port: {type: integer, format: int64, minimum: 0}
+        autostart: {$ref: '#/components/schemas/DaemonAutostartStatus'}
+        profiles:
+          type: array
+          items: {$ref: '#/components/schemas/DaemonProfileStatus'}
+      required: [running, api_version, kasumi_version, secure_pages_locked, pid, started_at_unix, uptime_seconds,
+        ipc_port, web_port, autostart, profiles]
+    DiagnosticsDaemonInfo:
+      type: object
+      properties:
+        running: {type: boolean}
+        pid: {type: integer, format: int64, minimum: 0}
+        ipc_port: {type: integer, format: int64, minimum: 0}
+        control_metadata_valid: {type: boolean}
+        secure_pages_locked: {type: boolean}
+        autostart_supported: {type: boolean}
+        autostart_installed: {type: boolean}
+        autostart_method: {type: string}
+        detail: {type: string}
+      required: [running, pid, ipc_port, control_metadata_valid, secure_pages_locked, autostart_supported, autostart_installed,
+        autostart_method, detail]
+    DiagnosticsRcloneInfo:
+      type: object
+      properties:
+        found: {type: boolean}
+        executable: {type: string}
+        version: {type: string}
+        minimum_version: {type: string}
+        meets_minimum: {type: boolean}
+        detail: {type: string}
+      required: [found, executable, version, minimum_version, meets_minimum, detail]
+    DiagnosticsReport:
+      type: object
+      properties:
+        os_name: {type: string}
+        app_data_dir: {type: string}
+        config_path: {type: string}
+        config_exists: {type: boolean}
+        app_data_free_bytes:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        rclone: {$ref: '#/components/schemas/DiagnosticsRcloneInfo'}
+        daemon: {$ref: '#/components/schemas/DiagnosticsDaemonInfo'}
+        profiles:
+          type: array
+          items: {$ref: '#/components/schemas/ProfileDiagnostic'}
+        overall_ok: {type: boolean}
+      required: [os_name, app_data_dir, config_path, config_exists, app_data_free_bytes, rclone, daemon, profiles,
+        overall_ok]
+    Error:
+      type: object
+      properties:
+        error: {type: string}
+        code: {type: string}
+      required: [error]
+    EventHistory:
+      type: object
+      properties:
+        log_path: {type: string}
+        latest_seq: {type: integer, format: int64, minimum: 0}
+        events:
+          type: array
+          items:
+            type: object
+            properties:
+              seq: {type: integer, format: int64, minimum: 0}
+              ts: {type: integer, format: int64}
+              profile: {type: string}
+              kind: {type: string}
+              detail: {type: string}
+            required: [seq, ts, profile, kind, detail]
+      required: [log_path, latest_seq, events]
+    FilePreview:
+      type: object
+      properties:
+        path: {type: string}
+        size: {type: integer, format: int64, minimum: 0}
+        truncated: {type: boolean}
+        hex: {type: string, contentEncoding: base16}
+      required: [path, size, truncated, hex]
+    FsckCompleted:
+      type: object
+      properties:
+        checked_objects: {type: integer, format: int64, minimum: 0}
+        checked_plaintext_bytes:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        wire_download_bytes: {type: integer, format: int64, minimum: 0}
+        physical_objects_downloaded: {type: integer, format: int64, minimum: 0}
+        files_reassembled: {type: integer, format: int64, minimum: 0}
+        warning: {type: string}
+      required: [checked_objects, checked_plaintext_bytes, wire_download_bytes, physical_objects_downloaded, files_reassembled]
+    FsckProgress:
+      type: object
+      properties:
+        stage: {$ref: '#/components/schemas/FsckStage'}
+        completed_objects: {type: integer, format: int64, minimum: 0}
+        total_objects:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        completed_plaintext_bytes:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        total_plaintext_bytes:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        wire_download_bytes: {type: integer, format: int64, minimum: 0}
+        total_wire_bytes:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        physical_objects_downloaded: {type: integer, format: int64, minimum: 0}
+        files_reassembled: {type: integer, format: int64, minimum: 0}
+      required: [stage, completed_objects, total_objects, completed_plaintext_bytes, total_plaintext_bytes, wire_download_bytes,
+        total_wire_bytes, physical_objects_downloaded, files_reassembled]
+    FsckStage:
+      type: string
+      enum: [preparing, observing, analyzing, auditing_content, finalizing]
+    GarbageCollectCompleted:
+      type: object
+      properties:
+        candidate_objects: {type: integer, format: int64, minimum: 0}
+        analysis_only: {type: boolean}
+        dry_run: {type: boolean}
+        candidate_content_objects: {type: integer, format: int64, minimum: 0}
+        candidate_commit_variants: {type: integer, format: int64, minimum: 0}
+        candidate_expired_commits: {type: integer, format: int64, minimum: 0}
+        candidate_activities: {type: integer, format: int64, minimum: 0}
+        deferred_recent_objects: {type: integer, format: int64, minimum: 0}
+        candidate_bytes: {type: integer, format: int64, minimum: 0}
+        removed_objects: {type: integer, format: int64, minimum: 0}
+        removed_bytes: {type: integer, format: int64, minimum: 0}
+        min_age_hours: {type: integer, format: int64, minimum: 0}
+        warning: {type: string}
+      required: [candidate_objects, analysis_only, dry_run, candidate_content_objects, candidate_commit_variants,
+        candidate_expired_commits, candidate_activities, deferred_recent_objects, candidate_bytes, removed_objects,
+        removed_bytes, min_age_hours]
+    GarbageCollectProgress:
+      type: object
+      properties:
+        stage: {$ref: '#/components/schemas/GarbageCollectStage'}
+        sub_stage: {$ref: '#/components/schemas/GarbageCollectSubStage'}
+        removed_objects: {type: integer, format: int64, minimum: 0}
+        candidate_objects:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+      required: [stage, sub_stage, removed_objects, candidate_objects]
+    GarbageCollectStage:
+      type: string
+      enum: [preparing, analyzing, applying, finalizing]
+    GarbageCollectSubStage:
+      type: string
+      enum: [none, checking_controls, establishing_barrier, probing_consistency, listing_remote, authenticating_history,
+        analyzing_reachability, loading_activities, removing_objects, releasing_barrier]
+    IgnoreCheckItem:
+      type: object
+      properties:
+        input_path: {type: string}
+        logical_path: {type: string}
+        is_directory: {type: boolean}
+        disposition: {$ref: '#/components/schemas/IgnoreDispositionKind'}
+        reserved_internal: {type: boolean}
+        matched_rule: {type: boolean}
+        rule_line: {type: integer, format: int64, minimum: 0}
+        rule_text: {type: string}
+      required: [input_path, logical_path, is_directory, disposition, reserved_internal, matched_rule, rule_line,
+        rule_text]
+    IgnoreCheckReport:
+      type: object
+      properties:
+        profile_name: {type: string}
+        ignore_file: {type: string}
+        ignore_file_present: {type: boolean}
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/IgnoreCheckItem'}
+      required: [profile_name, ignore_file, ignore_file_present, items]
+    IgnoreDispositionKind:
+      type: string
+      enum: [managed, ignored_protected, ignored_disposable]
+    IgnoreInitReport:
+      type: object
+      properties:
+        profile_name: {type: string}
+        ignore_file: {type: string}
+        preset: {$ref: '#/components/schemas/IgnorePreset'}
+        created: {type: boolean}
+        overwritten: {type: boolean}
+        dry_run: {type: boolean}
+        content: {type: string}
+      required: [profile_name, ignore_file, preset, created, overwritten, dry_run, content]
+    IgnorePreset:
+      type: string
+      enum: [default, dev, office, minimal]
+    InventoryAuditReport:
+      type: object
+      properties:
+        referenced_content: {type: integer, format: int64, minimum: 0}
+        present_content: {type: integer, format: int64, minimum: 0}
+        missing_content: {type: integer, format: int64, minimum: 0}
+        orphan_content: {type: integer, format: int64, minimum: 0}
+        unknown_objects: {type: integer, format: int64, minimum: 0}
+      required: [referenced_content, present_content, missing_content, orphan_content, unknown_objects]
+    IpcUnlock:
+      type: object
+      properties:
+        profile: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
+        nonce: {type: string, pattern: '^[A-Fa-f0-9]{48}$'}
+        mac: {type: string, pattern: '^[A-Fa-f0-9]{32}$'}
+        ciphertext: {type: string, pattern: '^[A-Fa-f0-9]{64}$'}
+      required: [profile, nonce, mac, ciphertext]
+    Job:
+      allOf:
+      - {$ref: '#/components/schemas/JobSnapshot'}
+      - type: object
+        properties:
+          result:
+            anyOf:
+            - {$ref: '#/components/schemas/PlanReport'}
+            - {$ref: '#/components/schemas/SyncCompleted'}
+            - {$ref: '#/components/schemas/FsckCompleted'}
+            - {$ref: '#/components/schemas/GarbageCollectCompleted'}
+            - {$ref: '#/components/schemas/RepackCompleted'}
+            - {$ref: '#/components/schemas/ResolveMissingCompleted'}
+            - {$ref: '#/components/schemas/ManualWriterRemovalCompleted'}
+            - {$ref: '#/components/schemas/ManualBarrierRemovalCompleted'}
+            - {$ref: '#/components/schemas/JobError'}
+            - {type: 'null'}
+        required: [result]
+      - if:
+          properties:
+            state: {const: completed}
+          required: [state]
+        then:
+          allOf:
+          - if:
+              properties:
+                operation: {const: preview}
+              required: [operation]
+            then:
+              properties:
+                result: {$ref: '#/components/schemas/PlanReport'}
+          - if:
+              properties:
+                operation: {const: sync}
+              required: [operation]
+            then:
+              properties:
+                result: {$ref: '#/components/schemas/SyncCompleted'}
+          - if:
+              properties:
+                operation: {const: fsck}
+              required: [operation]
+            then:
+              properties:
+                result: {$ref: '#/components/schemas/FsckCompleted'}
+          - if:
+              properties:
+                operation: {const: gc}
+              required: [operation]
+            then:
+              properties:
+                result: {$ref: '#/components/schemas/GarbageCollectCompleted'}
+          - if:
+              properties:
+                operation: {const: repack}
+              required: [operation]
+            then:
+              properties:
+                result: {$ref: '#/components/schemas/RepackCompleted'}
+          - if:
+              properties:
+                operation: {const: resolve-missing}
+              required: [operation]
+            then:
+              properties:
+                result: {$ref: '#/components/schemas/ResolveMissingCompleted'}
+          - if:
+              properties:
+                operation: {const: remove-writer}
+              required: [operation]
+            then:
+              properties:
+                result: {$ref: '#/components/schemas/ManualWriterRemovalCompleted'}
+          - if:
+              properties:
+                operation: {const: remove-barrier}
+              required: [operation]
+            then:
+              properties:
+                result: {$ref: '#/components/schemas/ManualBarrierRemovalCompleted'}
+        else:
+          if:
+            properties:
+              state: {const: failed}
+            required: [state]
+          then:
+            properties:
+              result: {$ref: '#/components/schemas/JobError'}
+          else:
+            properties:
+              result: {type: 'null'}
+    JobError:
+      type: object
+      properties:
+        error: {type: string}
+        lock_busy: {type: boolean}
+        remote_busy: {type: boolean}
+        insufficient_disk_space: {type: boolean}
+        empty_local_blocked: {type: boolean}
+        sync: {$ref: '#/components/schemas/SyncCompleted'}
+        barrier_removal:
+          type: object
+          properties:
+            barrier_identifier: {type: string}
+            stage: {$ref: '#/components/schemas/BarrierRemovalStage'}
+            mutation_state: {$ref: '#/components/schemas/BarrierRemovalMutationState'}
+          required: [barrier_identifier, stage, mutation_state]
+      required: [error]
+    JobSnapshot:
+      type: object
+      properties:
+        id: {type: integer, format: int64, minimum: 0}
+        profile: {type: string}
+        operation:
+          type: string
+          enum: [preview, sync, fsck, gc, repack, resolve-missing, remove-writer, remove-barrier]
+        state:
+          type: string
+          enum: [running, completed, failed]
+        progress:
+          anyOf:
+          - {$ref: '#/components/schemas/ActivityProgress'}
+          - {$ref: '#/components/schemas/FsckProgress'}
+          - {$ref: '#/components/schemas/SyncProgress'}
+          - {$ref: '#/components/schemas/GarbageCollectProgress'}
+          - {type: 'null'}
+      required: [id, profile, operation, state, progress]
+    KeyStorage:
+      type: string
+      enum: [vault, file, memory]
+    LocalConflictArtifact:
+      type: object
+      properties:
+        path: {type: string}
+        origin: {$ref: '#/components/schemas/ConflictOrigin'}
+        origin_tag: {type: string}
+        size: {type: integer, format: int64, minimum: 0}
+        modified_at: {type: integer, format: int64}
+      required: [path, origin, origin_tag, size, modified_at]
+    LocalConflictGroup:
+      type: object
+      properties:
+        canonical_path: {type: string}
+        canonical_exists: {type: boolean}
+        canonical_size: {type: integer, format: int64, minimum: 0}
+        canonical_modified_at: {type: integer, format: int64}
+        artifacts:
+          type: array
+          items: {$ref: '#/components/schemas/LocalConflictArtifact'}
+      required: [canonical_path, canonical_exists, canonical_size, canonical_modified_at, artifacts]
+    LocalConflictsReport:
+      type: object
+      properties:
+        profile_name: {type: string}
+        local_dir: {type: string}
+        total_artifacts: {type: integer, format: int64, minimum: 0}
+        groups:
+          type: array
+          items: {$ref: '#/components/schemas/LocalConflictGroup'}
+      required: [profile_name, local_dir, total_artifacts, groups]
+    LogHistory:
+      type: object
+      properties:
+        events:
+          type: array
+          items:
+            type: object
+            properties:
+              seq: {type: integer, format: int64, minimum: 0}
+              timestamp_unix: {type: integer, format: int64}
+              profile_name: {type: string}
+              kind: {type: string}
+              detail: {type: string}
+            required: [seq, timestamp_unix, profile_name, kind]
+        latest_seq: {type: integer, format: int64, minimum: 0}
+      required: [events, latest_seq]
+    LoginSession:
+      type: object
+      properties:
+        authenticated: {const: true}
+        csrf_token: {type: string, pattern: '^[A-Fa-f0-9]{64}$'}
+      required: [authenticated, csrf_token]
+    LogoutResponse:
+      type: object
+      properties:
+        authenticated: {const: false}
+      required: [authenticated]
+    ManualBarrierRemovalCompleted:
+      type: object
+      properties:
+        identifier: {type: string}
+        outcome: {$ref: '#/components/schemas/BarrierRemovalOutcome'}
+        active_writers_count: {type: integer, format: int64, minimum: 0}
+        remaining_barriers_count: {type: integer, format: int64, minimum: 0}
+        warning: {type: string}
+      required: [identifier, outcome, active_writers_count, remaining_barriers_count]
+    ManualWriterRemovalCompleted:
+      type: object
+      properties:
+        identifier: {type: string}
+        warning: {type: string}
+      required: [identifier]
+    MasterKeyCredentials:
+      type: object
+      properties:
+        master_key: {type: string, pattern: '^[A-Fa-f0-9]{64}$'}
+      required: [master_key]
+    PasswordCredentials:
+      type: object
+      properties:
+        password: {type: string, minLength: 12, format: password}
+        salt_password: {type: string, minLength: 16, format: password}
+      required: [password, salt_password]
+    PlanAction:
+      type: string
+      enum: [rename_local, upload, create_local_directory, create_remote_directory, move_local, download, delete_local,
+        delete_local_directory, delete_remote, delete_remote_directory, copy_local, delete_ignored_local_file, count]
+    PlanItem:
+      type: object
+      properties:
+        action: {$ref: '#/components/schemas/PlanAction'}
+        path: {type: string}
+        alternative_path: {type: string}
+        size: {type: integer, format: int64, minimum: 0}
+      required: [action, path, alternative_path, size]
+    PlanReport:
+      type: object
+      properties:
+        target_generation: {type: integer, format: int64, minimum: 0}
+        action_counts:
+          type: array
+          items: {type: integer, format: int64, minimum: 0}
+          minItems: 12
+          maxItems: 12
+        upload_bytes: {type: integer, format: int64, minimum: 0}
+        download_bytes: {type: integer, format: int64, minimum: 0}
+        has_conflicts: {type: boolean}
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/PlanItem'}
+        pending_paths:
+          type: array
+          items: {type: string}
+        warning: {type: string}
+      required: [target_generation, action_counts, upload_bytes, download_bytes, has_conflicts, items, pending_paths]
+    Profile:
+      type: object
+      properties:
+        name: {type: string}
+        local_dir: {type: string}
+        remote_dir: {type: string}
+        min_history_depth: {type: integer, format: int64, minimum: 0}
+        min_history_age_hours: {type: integer, format: int64, minimum: 0}
+        key_storage: {$ref: '#/components/schemas/KeyStorage'}
+        bandwidth_limit:
+          anyOf:
+          - {type: string}
+          - {type: 'null'}
+        transfer_concurrency:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        rclone_config:
+          anyOf:
+          - {type: string}
+          - {type: 'null'}
+        watch_enabled:
+          anyOf:
+          - {type: boolean}
+          - {type: 'null'}
+        sync_interval_seconds:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        paused: {type: boolean}
+      required: [name, local_dir, remote_dir, min_history_depth, min_history_age_hours, key_storage, bandwidth_limit,
+        transfer_concurrency, rclone_config, watch_enabled, sync_interval_seconds, paused]
+    ProfileActivityReport:
+      type: object
+      properties:
+        database_present: {type: boolean}
+        accepted_commit:
+          anyOf:
+          - {$ref: '#/components/schemas/ProfileCommitAuthorship'}
+          - {type: 'null'}
+        last_attempt:
+          anyOf:
+          - {$ref: '#/components/schemas/ProfileExecutionSummary'}
+          - {type: 'null'}
+        last_complete_sync:
+          anyOf:
+          - {$ref: '#/components/schemas/ProfileExecutionSummary'}
+          - {type: 'null'}
+        recent_executions:
+          type: array
+          items: {$ref: '#/components/schemas/ProfileExecutionSummary'}
+        cached_remote_activities:
+          type: array
+          items: {$ref: '#/components/schemas/ProfileCachedRemoteActivity'}
+      required: [database_present, accepted_commit, last_attempt, last_complete_sync, recent_executions, cached_remote_activities]
+    ProfileCachedRemoteActivity:
+      type: object
+      properties:
+        event_id: {type: string}
+        operation: {type: integer, format: int64, minimum: 0}
+        outcome: {type: integer, format: int64, minimum: 0}
+        machine_id_hex: {type: string}
+        machine_name: {type: string}
+        started_at: {type: integer, format: int64}
+        finished_at: {type: integer, format: int64}
+        duration_ms: {type: integer, format: int64, minimum: 0}
+        metric_primary: {type: integer, format: int64, minimum: 0}
+        metric_secondary: {type: integer, format: int64, minimum: 0}
+        metric_bytes: {type: integer, format: int64, minimum: 0}
+        flags: {type: integer, format: int64, minimum: 0}
+        stage: {type: string}
+        detail: {type: string}
+        cached_at: {type: integer, format: int64}
+      required: [event_id, operation, outcome, machine_id_hex, machine_name, started_at, finished_at, duration_ms,
+        metric_primary, metric_secondary, metric_bytes, flags, stage, detail, cached_at]
+    ProfileCommitAuthorship:
+      type: object
+      properties:
+        commit_id: {type: string}
+        height: {type: integer, format: int64, minimum: 0}
+        created_at: {type: integer, format: int64}
+        origin_operation: {type: integer, format: int64, minimum: 0}
+        machine_id_hex: {type: string}
+        machine_name: {type: string}
+        accepted_at: {type: integer, format: int64}
+      required: [commit_id, height, created_at, origin_operation, machine_id_hex, machine_name, accepted_at]
+    ProfileConnectionReport:
+      type: object
+      properties:
+        profile_name: {type: string}
+        remote_dir: {type: string}
+        transport_ok: {type: boolean}
+        ready: {type: boolean}
+        vault_state: {$ref: '#/components/schemas/RemoteVaultState'}
+        head_count: {type: integer, format: int64, minimum: 0}
+        epoch_sequence:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        epoch_id: {type: string}
+        detail: {type: string}
+      required: [profile_name, remote_dir, transport_ok, ready, vault_state, head_count, epoch_sequence, epoch_id,
+        detail]
+    ProfileCredentials:
+      anyOf:
+      - {$ref: '#/components/schemas/MasterKeyCredentials'}
+      - {$ref: '#/components/schemas/PasswordCredentials'}
+    ProfileDetails:
+      allOf:
+      - {$ref: '#/components/schemas/Profile'}
+      - type: object
+        properties:
+          state: {$ref: '#/components/schemas/ProfileLocalState'}
+          problem: {$ref: '#/components/schemas/ProfileLocalProblem'}
+          activity: {$ref: '#/components/schemas/ProfileActivityReport'}
+          daemon:
+            anyOf:
+            - {$ref: '#/components/schemas/DaemonProfileStatus'}
+            - {type: 'null'}
+        required: [state, problem, activity, daemon]
+    ProfileDiagnostic:
+      type: object
+      properties:
+        profile: {$ref: '#/components/schemas/Profile'}
+        local_state: {$ref: '#/components/schemas/ProfileLocalState'}
+        local_problem: {$ref: '#/components/schemas/ProfileLocalProblem'}
+        local_dir_exists: {type: boolean}
+        local_dir_writable: {type: boolean}
+        local_free_bytes:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        local_capacity_bytes:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        uses_rclone: {type: boolean}
+        lock_active: {type: boolean}
+        journal_present: {type: boolean}
+        key_accessible: {type: boolean}
+        healthy: {type: boolean}
+        detail: {type: string}
+        activity: {$ref: '#/components/schemas/ProfileActivityReport'}
+        ignore_file_present: {type: boolean}
+        ignore_file_valid: {type: boolean}
+        ignore_error_line:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        ignore_error_detail: {type: string}
+        daemon_state:
+          anyOf:
+          - {type: string}
+          - {type: 'null'}
+        daemon_active_stage: {type: string}
+        daemon_watcher_active: {type: boolean}
+        daemon_error: {type: string}
+      required: [profile, local_state, local_problem, local_dir_exists, local_dir_writable, local_free_bytes, local_capacity_bytes,
+        uses_rclone, lock_active, journal_present, key_accessible, healthy, detail, activity, ignore_file_present,
+        ignore_file_valid, ignore_error_line, ignore_error_detail, daemon_state, daemon_active_stage, daemon_watcher_active,
+        daemon_error]
+    ProfileExecutionStatus:
+      type: string
+      enum: [in_progress, succeeded, succeeded_no_changes, succeeded_downloaded_only, succeeded_partial, issues_found,
+        blocked, cancelled, failed, uncertain, interrupted]
+    ProfileExecutionSummary:
+      type: object
+      properties:
+        execution_id: {type: string}
+        operation: {$ref: '#/components/schemas/ProfileOperationKind'}
+        machine_id_hex: {type: string}
+        machine_name: {type: string}
+        started_at: {type: integer, format: int64}
+        finished_at:
+          anyOf:
+          - {type: integer, format: int64}
+          - {type: 'null'}
+        duration_ms: {type: integer, format: int64, minimum: 0}
+        status: {$ref: '#/components/schemas/ProfileExecutionStatus'}
+        recovered: {type: boolean}
+        stage: {type: string}
+        detail: {type: string}
+        commit_id: {type: string}
+        summary_a: {type: integer, format: int64, minimum: 0}
+        summary_b: {type: integer, format: int64, minimum: 0}
+        summary_c: {type: integer, format: int64, minimum: 0}
+        summary_bytes: {type: integer, format: int64, minimum: 0}
+        flags: {type: integer, format: int64, minimum: 0}
+        remote_publish_state: {$ref: '#/components/schemas/ProfileRemotePublishState'}
+      required: [execution_id, operation, machine_id_hex, machine_name, started_at, finished_at, duration_ms, status,
+        recovered, stage, detail, commit_id, summary_a, summary_b, summary_c, summary_bytes, flags, remote_publish_state]
+    ProfileLocalProblem:
+      type: string
+      enum: [none, invalid_name, paths, directory, key, database, lock, sidecar, journal, workspace, snapshot, cleanup,
+        count]
+    ProfileLocalState:
+      type: string
+      enum: [initialized, ready, pending, running, problem]
+    ProfileOperationKind:
+      type: string
+      enum: [sync, fsck, garbage_collect, repack, resolve_missing, remove_writer, remove_barrier]
+    ProfilePatch:
+      type: object
+      properties:
+        local_dir: {type: string}
+        remote_dir: {type: string}
+        min_history_depth: {type: integer, format: int64, minimum: 0}
+        min_history_age_hours: {type: integer, format: int64, minimum: 0}
+        bandwidth_limit:
+          anyOf:
+          - {type: string}
+          - {type: 'null'}
+        transfer_concurrency:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        rclone_config:
+          anyOf:
+          - {type: string}
+          - {type: 'null'}
+        watch_enabled:
+          anyOf:
+          - {type: boolean}
+          - {type: 'null'}
+        sync_interval_seconds:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        paused: {type: boolean}
+        allow_empty_local: {type: boolean, default: false}
+      additionalProperties: false
+    ProfileRemotePublishState:
+      type: string
+      enum: [not_applicable, published, pending]
+    Profiles:
+      type: object
+      properties:
+        profiles:
+          type: array
+          items: {$ref: '#/components/schemas/ProfileDetails'}
+      required: [profiles]
+    RcloneRemotesInfo:
+      type: object
+      properties:
+        available: {type: boolean}
+        remotes:
+          type: array
+          items: {type: string}
+        detail: {type: string}
+      required: [available, remotes, detail]
+    RemoteActivityInfo:
+      type: object
+      properties:
+        event_id: {type: string}
+        operation: {$ref: '#/components/schemas/RemoteActivityOperation'}
+        outcome: {$ref: '#/components/schemas/RemoteActivityOutcome'}
+        machine_id_hex: {type: string}
+        machine_name: {type: string}
+        started_at: {type: integer, format: int64}
+        finished_at: {type: integer, format: int64}
+        duration_ms: {type: integer, format: int64, minimum: 0}
+        metric_primary: {type: integer, format: int64, minimum: 0}
+        metric_secondary: {type: integer, format: int64, minimum: 0}
+        metric_bytes: {type: integer, format: int64, minimum: 0}
+        flags: {type: integer, format: int64, minimum: 0}
+        stage: {type: string}
+        detail: {type: string}
+      required: [event_id, operation, outcome, machine_id_hex, machine_name, started_at, finished_at, duration_ms,
+        metric_primary, metric_secondary, metric_bytes, flags, stage, detail]
+    RemoteActivityOperation:
+      type: string
+      enum: [fsck, garbage_collect, remove_writer, remove_barrier]
+    RemoteActivityOutcome:
+      type: string
+      enum: [succeeded, issues_found, blocked, cancelled, failed, uncertain]
+    RemoteBarrierInfo:
+      type: object
+      properties:
+        identifier: {type: string}
+        legacy: {type: boolean}
+        structurally_valid: {type: boolean}
+        machine_name:
+          anyOf:
+          - {type: string}
+          - {type: 'null'}
+        pid:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        started_at_unix:
+          anyOf:
+          - {type: integer, format: int64}
+          - {type: 'null'}
+      required: [identifier, legacy, structurally_valid, machine_name, pid, started_at_unix]
+    RemoteChunkInfo:
+      type: object
+      properties:
+        hash: {type: string}
+        size: {type: integer, format: int64, minimum: 0}
+      required: [hash, size]
+    RemoteCommitAuthorship:
+      type: object
+      properties:
+        operation: {$ref: '#/components/schemas/RemoteCommitOrigin'}
+        machine_id_hex: {type: string}
+        machine_name: {type: string}
+      required: [operation, machine_id_hex, machine_name]
+    RemoteCommitInfo:
+      type: object
+      properties:
+        commit_id: {type: string}
+        height: {type: integer, format: int64, minimum: 0}
+        created_at: {type: integer, format: int64}
+        parent_ids:
+          type: array
+          items: {type: string}
+        logical_head: {type: boolean}
+        physically_marked: {type: boolean}
+        ancestral_marked: {type: boolean}
+        root_hash: {type: string}
+        total_bytes: {type: integer, format: int64, minimum: 0}
+        entry_count: {type: integer, format: int64, minimum: 0}
+        authorship:
+          anyOf:
+          - {$ref: '#/components/schemas/RemoteCommitAuthorship'}
+          - {type: 'null'}
+      required: [commit_id, height, created_at, parent_ids, logical_head, physically_marked, ancestral_marked, root_hash,
+        total_bytes, entry_count, authorship]
+    RemoteCommitOrigin:
+      type: string
+      enum: [unknown, sync, repack, resolve_missing]
+    RemoteCommitReport:
+      type: object
+      properties:
+        commit: {$ref: '#/components/schemas/RemoteCommitInfo'}
+        variants:
+          type: array
+          items: {$ref: '#/components/schemas/RemoteCommitVariantInfo'}
+      required: [commit, variants]
+    RemoteCommitVariantInfo:
+      type: object
+      properties:
+        ciphertext_id: {type: string}
+        object_identifier: {type: string}
+        state: {$ref: '#/components/schemas/RemoteCommitVariantState'}
+      required: [ciphertext_id, object_identifier, state]
+    RemoteCommitVariantState:
+      type: string
+      enum: [valid, invalid_ciphertext, invalid_commit]
+    RemoteCommitsReport:
+      type: object
+      properties:
+        history_present: {type: boolean}
+        observed_height: {type: integer, format: int64, minimum: 0}
+        logical_head_ids:
+          type: array
+          items: {type: string}
+        commits:
+          type: array
+          items: {$ref: '#/components/schemas/RemoteCommitInfo'}
+      required: [history_present, observed_height, logical_head_ids, commits]
+    RemoteEpochAnchorInfo:
+      type: object
+      properties:
+        commit_id: {type: string}
+        height: {type: integer, format: int64, minimum: 0}
+      required: [commit_id, height]
+    RemoteEpochInfo:
+      type: object
+      properties:
+        vault_id: {type: string}
+        sequence: {type: integer, format: int64, minimum: 0}
+        epoch_id: {type: string}
+        issued_at: {type: integer, format: int64}
+        min_history_depth: {type: integer, format: int64, minimum: 0}
+        min_history_age_hours: {type: integer, format: int64, minimum: 0}
+        anchors:
+          type: array
+          items: {$ref: '#/components/schemas/RemoteEpochAnchorInfo'}
+        previous_epoch_id: {type: string}
+        next_epoch_id: {type: string}
+      required: [vault_id, sequence, epoch_id, issued_at, min_history_depth, min_history_age_hours, anchors, previous_epoch_id,
+        next_epoch_id]
+    RemoteEpochsReport:
+      type: object
+      properties:
+        epochs:
+          type: array
+          items: {$ref: '#/components/schemas/RemoteEpochInfo'}
+      required: [epochs]
+    RemoteHeadInfo:
+      type: object
+      properties:
+        commit_id: {type: string}
+        height: {type: integer, format: int64, minimum: 0}
+        created_at: {type: integer, format: int64}
+        parent_ids:
+          type: array
+          items: {type: string}
+        root_hash: {type: string}
+        file_count: {type: integer, format: int64, minimum: 0}
+        directory_count: {type: integer, format: int64, minimum: 0}
+        total_bytes: {type: integer, format: int64, minimum: 0}
+        authorship:
+          anyOf:
+          - {$ref: '#/components/schemas/RemoteCommitAuthorship'}
+          - {type: 'null'}
+      required: [commit_id, height, created_at, parent_ids, root_hash, file_count, directory_count, total_bytes,
+        authorship]
+    RemoteHeadsReport:
+      type: object
+      properties:
+        history_present: {type: boolean}
+        observed_height: {type: integer, format: int64, minimum: 0}
+        physical_marker_count: {type: integer, format: int64, minimum: 0}
+        ancestral_marker_count: {type: integer, format: int64, minimum: 0}
+        heads:
+          type: array
+          items: {$ref: '#/components/schemas/RemoteHeadInfo'}
+      required: [history_present, observed_height, physical_marker_count, ancestral_marker_count, heads]
+    RemoteHealthReport:
+      type: object
+      properties:
+        state: {$ref: '#/components/schemas/RemoteHealthState'}
+        marker_count: {type: integer, format: int64, minimum: 0}
+        reachable_commit_count: {type: integer, format: int64, minimum: 0}
+        orphan_count: {type: integer, format: int64, minimum: 0}
+        missing_content_count: {type: integer, format: int64, minimum: 0}
+        invalid_content_count: {type: integer, format: int64, minimum: 0}
+        writer_count: {type: integer, format: int64, minimum: 0}
+        unknown_object_count: {type: integer, format: int64, minimum: 0}
+        reasons:
+          type: array
+          items: {type: string}
+      required: [state, marker_count, reachable_commit_count, orphan_count, missing_content_count, invalid_content_count,
+        writer_count, unknown_object_count, reasons]
+    RemoteHealthState:
+      type: string
+      enum: [healthy, degraded, critical]
+    RemoteLogEntry:
+      type: object
+      properties:
+        commit_id: {type: string}
+        height: {type: integer, format: int64, minimum: 0}
+        created_at: {type: integer, format: int64}
+        logical_head: {type: boolean}
+        change: {$ref: '#/components/schemas/RemotePathChangeKind'}
+        type:
+          anyOf:
+          - {$ref: '#/components/schemas/RemoteTreeEntryType'}
+          - {type: 'null'}
+        logical_hash: {type: string}
+        size: {type: integer, format: int64, minimum: 0}
+        modified_at_unix_nanoseconds: {type: integer, format: int64}
+        authorship:
+          anyOf:
+          - {$ref: '#/components/schemas/RemoteCommitAuthorship'}
+          - {type: 'null'}
+      required: [commit_id, height, created_at, logical_head, change, type, logical_hash, size, modified_at_unix_nanoseconds,
+        authorship]
+    RemoteLogReport:
+      type: object
+      properties:
+        path: {type: string}
+        observed_height: {type: integer, format: int64, minimum: 0}
+        present_in_current_tree: {type: boolean}
+        entries:
+          type: array
+          items: {$ref: '#/components/schemas/RemoteLogEntry'}
+      required: [path, observed_height, present_in_current_tree, entries]
+    RemoteObjectCategory:
+      type: string
+      enum: [content, commit_variant, head_marker, epoch, writer, barrier, protocol, activity, unknown]
+    RemoteObjectInfo:
+      type: object
+      properties:
+        identifier: {type: string}
+        category: {$ref: '#/components/schemas/RemoteObjectCategory'}
+        structurally_valid: {type: boolean}
+        relation: {type: string}
+      required: [identifier, category, structurally_valid, relation]
+    RemoteObjectsReport:
+      type: object
+      properties:
+        unknown_count: {type: integer, format: int64, minimum: 0}
+        objects:
+          type: array
+          items: {$ref: '#/components/schemas/RemoteObjectInfo'}
+      required: [unknown_count, objects]
+    RemoteOrphanInfo:
+      type: object
+      properties:
+        identifier: {type: string}
+        kind: {$ref: '#/components/schemas/RemoteOrphanKind'}
+        removal_candidate: {type: boolean}
+      required: [identifier, kind, removal_candidate]
+    RemoteOrphanKind:
+      type: string
+      enum: [commit, commit_variant, redundant_variant, invalid_variant, content, protected_epoch, unknown]
+    RemoteOrphansReport:
+      type: object
+      properties:
+        objects:
+          type: array
+          items: {$ref: '#/components/schemas/RemoteOrphanInfo'}
+      required: [objects]
+    RemotePathChangeKind:
+      type: string
+      enum: [added, modified, deleted, observed]
+    RemoteRestoreReport:
+      type: object
+      properties:
+        dry_run: {type: boolean}
+        commit_id:
+          anyOf:
+          - {type: string}
+          - {type: 'null'}
+        observed_height: {type: integer, format: int64, minimum: 0}
+        source_prefix: {type: string}
+        destination_path: {type: string}
+        file_count: {type: integer, format: int64, minimum: 0}
+        directory_count: {type: integer, format: int64, minimum: 0}
+        total_bytes: {type: integer, format: int64, minimum: 0}
+      required: [dry_run, commit_id, observed_height, source_prefix, destination_path, file_count, directory_count,
+        total_bytes]
+    RemoteSpaceUsage:
+      type: object
+      properties:
+        current_content_bytes: {type: integer, format: int64, minimum: 0}
+        retained_content_bytes: {type: integer, format: int64, minimum: 0}
+        orphan_content_bytes: {type: integer, format: int64, minimum: 0}
+        unknown_sizes: {type: integer, format: int64, minimum: 0}
+      required: [current_content_bytes, retained_content_bytes, orphan_content_bytes, unknown_sizes]
+    RemoteStatReport:
+      type: object
+      properties:
+        observed_height: {type: integer, format: int64, minimum: 0}
+        has_conflicts: {type: boolean}
+        commit_id:
+          anyOf:
+          - {type: string}
+          - {type: 'null'}
+        path: {type: string}
+        type: {$ref: '#/components/schemas/RemoteTreeEntryType'}
+        logical_hash: {type: string}
+        size: {type: integer, format: int64, minimum: 0}
+        modified_at_unix_nanoseconds: {type: integer, format: int64}
+        pack_hash:
+          anyOf:
+          - {type: string}
+          - {type: 'null'}
+        chunks:
+          type: array
+          items: {$ref: '#/components/schemas/RemoteChunkInfo'}
+      required: [observed_height, has_conflicts, commit_id, path, type, logical_hash, size, modified_at_unix_nanoseconds,
+        pack_hash, chunks]
+    RemoteSummaryReport:
+      type: object
+      properties:
+        history_present: {type: boolean}
+        observed_height: {type: integer, format: int64, minimum: 0}
+        reachable_commit_count: {type: integer, format: int64, minimum: 0}
+        logical_head_count: {type: integer, format: int64, minimum: 0}
+        has_conflicts: {type: boolean}
+        missing_content_count: {type: integer, format: int64, minimum: 0}
+        orphan_content_count: {type: integer, format: int64, minimum: 0}
+        active_writer_count: {type: integer, format: int64, minimum: 0}
+        recent_activities:
+          type: array
+          items: {$ref: '#/components/schemas/RemoteActivityInfo'}
+        invalid_activity_count: {type: integer, format: int64, minimum: 0}
+        space_usage:
+          anyOf:
+          - {$ref: '#/components/schemas/RemoteSpaceUsage'}
+          - {type: 'null'}
+      required: [history_present, observed_height, reachable_commit_count, logical_head_count, has_conflicts, missing_content_count,
+        orphan_content_count, active_writer_count, recent_activities, invalid_activity_count, space_usage]
+    RemoteTextDiff:
+      type: object
+      properties:
+        from:
+          anyOf:
+          - {$ref: '#/components/schemas/TextRevision'}
+          - {type: 'null'}
+        to:
+          anyOf:
+          - {$ref: '#/components/schemas/TextRevision'}
+          - {type: 'null'}
+      required: [from, to]
+    RemoteTreeDiff:
+      type: object
+      properties:
+        from: {type: string, pattern: '^[a-f0-9]{64}$'}
+        to: {type: string, pattern: '^[a-f0-9]{64}$'}
+        changes:
+          type: array
+          items:
+            type: object
+            properties:
+              kind:
+                type: string
+                enum: [added, modified, deleted, renamed]
+              path: {type: string}
+              from: {type: string}
+            required: [kind, path]
+      required: [from, to, changes]
+    RemoteTreeEntry:
+      type: object
+      properties:
+        path: {type: string}
+        type: {$ref: '#/components/schemas/RemoteTreeEntryType'}
+        logical_hash: {type: string}
+        size: {type: integer, format: int64, minimum: 0}
+      required: [path, type, logical_hash, size]
+    RemoteTreeEntryType:
+      type: string
+      enum: [file, directory]
+    RemoteTreeReport:
+      type: object
+      properties:
+        history_present: {type: boolean}
+        commit_id: {type: string}
+        height: {type: integer, format: int64, minimum: 0}
+        created_at: {type: integer, format: int64}
+        root_hash: {type: string}
+        total_bytes: {type: integer, format: int64, minimum: 0}
+        file_count: {type: integer, format: int64, minimum: 0}
+        directory_count: {type: integer, format: int64, minimum: 0}
+        entries:
+          type: array
+          items: {$ref: '#/components/schemas/RemoteTreeEntry'}
+      required: [history_present, commit_id, height, created_at, root_hash, total_bytes, file_count, directory_count,
+        entries]
+    RemoteVaultState:
+      type: string
+      enum: [empty_ready_for_init, authenticated_vault, key_mismatch_or_invalid_history, transport_failure]
+    RemoteWriterInfo:
+      type: object
+      properties:
+        identifier: {type: string}
+        state: {$ref: '#/components/schemas/RemoteWriterState'}
+        machine_name:
+          anyOf:
+          - {type: string}
+          - {type: 'null'}
+        pid:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+        started_at_unix:
+          anyOf:
+          - {type: integer, format: int64}
+          - {type: 'null'}
+      required: [identifier, state, machine_name, pid, started_at_unix]
+    RemoteWriterState:
+      type: string
+      enum: [indeterminate, invalid]
+    RemoteWritersReport:
+      type: object
+      properties:
+        barrier_present: {type: boolean}
+        barrier_identifier:
+          anyOf:
+          - {type: string}
+          - {type: 'null'}
+        maintenance_blocked: {type: boolean}
+        protocol_consistent: {type: boolean}
+        barriers:
+          type: array
+          items: {$ref: '#/components/schemas/RemoteBarrierInfo'}
+        writers:
+          type: array
+          items: {$ref: '#/components/schemas/RemoteWriterInfo'}
+      required: [barrier_present, barrier_identifier, maintenance_blocked, protocol_consistent, barriers, writers]
+    RepackCompleted:
+      type: object
+      properties:
+        dry_run: {type: boolean}
+        actionable: {type: boolean}
+        published: {type: boolean}
+        live_small_blobs: {type: integer, format: int64, minimum: 0}
+        existing_packs: {type: integer, format: int64, minimum: 0}
+        healthy_packs_kept: {type: integer, format: int64, minimum: 0}
+        dirty_packs_detected: {type: integer, format: int64, minimum: 0}
+        loose_small_blobs_detected: {type: integer, format: int64, minimum: 0}
+        source_loose_blobs: {type: integer, format: int64, minimum: 0}
+        source_clean_packs: {type: integer, format: int64, minimum: 0}
+        source_dirty_packs: {type: integer, format: int64, minimum: 0}
+        new_packs: {type: integer, format: int64, minimum: 0}
+        repacked_blobs: {type: integer, format: int64, minimum: 0}
+        repacked_plaintext_bytes: {type: integer, format: int64, minimum: 0}
+        published_commit_id: {type: string}
+        published_height: {type: integer, format: int64, minimum: 0}
+        pruned_markers: {type: integer, format: int64, minimum: 0}
+        wire_upload_bytes: {type: integer, format: int64, minimum: 0}
+        physical_objects_uploaded: {type: integer, format: int64, minimum: 0}
+        warning: {type: string}
+      required: [dry_run, actionable, published, live_small_blobs, existing_packs, healthy_packs_kept, dirty_packs_detected,
+        loose_small_blobs_detected, source_loose_blobs, source_clean_packs, source_dirty_packs, new_packs, repacked_blobs,
+        repacked_plaintext_bytes, published_commit_id, published_height, pruned_markers, wire_upload_bytes, physical_objects_uploaded]
+    ReplaceKey:
+      allOf:
+      - {$ref: '#/components/schemas/ProfileCredentials'}
+      - type: object
+        properties:
+          replace: {type: boolean, default: false}
+    ResolveConflictReport:
+      type: object
+      properties:
+        profile_name: {type: string}
+        canonical_path: {type: string}
+        choice: {$ref: '#/components/schemas/ConflictResolutionChoice'}
+        selected_artifact:
+          anyOf:
+          - {type: string}
+          - {type: 'null'}
+        dry_run: {type: boolean}
+        removed_artifacts:
+          type: array
+          items: {type: string}
+      required: [profile_name, canonical_path, choice, selected_artifact, dry_run, removed_artifacts]
+    ResolveMissingCompleted:
+      type: object
+      properties:
+        resolved_count: {type: integer, format: int64, minimum: 0}
+        resolved_paths:
+          type: array
+          items: {type: string}
+        published: {type: boolean}
+        dry_run: {type: boolean}
+        warning: {type: string}
+      required: [resolved_count, resolved_paths, published, dry_run]
+    RotatePassword:
+      type: object
+      properties:
+        current_password: {type: string, format: password}
+        username: {$ref: '#/components/schemas/WebUsername'}
+        password: {$ref: '#/components/schemas/WebPassword'}
+      required: [current_password, password]
+    WebUsername:
+      type: string
+      minLength: 1
+      maxLength: 256
+      description: Case-sensitive printable username, limited to 256 UTF-8 bytes.
+    WebPassword:
+      type: string
+      minLength: 8
+      maxLength: 1024
+      format: password
+      description: New Web UI password, limited to 1024 UTF-8 bytes.
+    SetPasswordResponse:
+      type: object
+      properties:
+        configured: {const: true}
+      required: [configured]
+    StreamStatus:
+      type: object
+      properties:
+        profiles:
+          type: array
+          items: {$ref: '#/components/schemas/DaemonProfileStatus'}
+        uptime_seconds: {type: integer, format: int64, minimum: 0}
+        jobs:
+          type: array
+          items: {$ref: '#/components/schemas/JobSnapshot'}
+      required: [profiles, uptime_seconds, jobs]
+    SyncCompleted:
+      type: object
+      properties:
+        total: {type: integer, format: int64, minimum: 0}
+        uploaded: {type: integer, format: int64, minimum: 0}
+        downloaded: {type: integer, format: int64, minimum: 0}
+        removed: {type: integer, format: int64, minimum: 0}
+        renamed: {type: integer, format: int64, minimum: 0}
+        copied: {type: integer, format: int64, minimum: 0}
+        created_dirs: {type: integer, format: int64, minimum: 0}
+        removed_dirs: {type: integer, format: int64, minimum: 0}
+        repaired: {type: integer, format: int64, minimum: 0}
+        upload_bytes: {type: integer, format: int64, minimum: 0}
+        download_bytes: {type: integer, format: int64, minimum: 0}
+        published: {type: boolean}
+        pending: {type: integer, format: int64, minimum: 0}
+        pending_paths:
+          type: array
+          items: {type: string}
+        partial: {type: boolean}
+        wire_upload_bytes: {type: integer, format: int64, minimum: 0}
+        wire_download_bytes: {type: integer, format: int64, minimum: 0}
+        local_delta_reused_bytes: {type: integer, format: int64, minimum: 0}
+        physical_objects_uploaded: {type: integer, format: int64, minimum: 0}
+        physical_objects_downloaded: {type: integer, format: int64, minimum: 0}
+        duration_ms:
+          anyOf:
+          - {type: number}
+          - {type: 'null'}
+        inventory_audit: {$ref: '#/components/schemas/InventoryAuditReport'}
+        warning: {type: string}
+      required: [total, uploaded, downloaded, removed, renamed, copied, created_dirs, removed_dirs, repaired, upload_bytes,
+        download_bytes, published, pending, pending_paths, partial, wire_upload_bytes, wire_download_bytes, local_delta_reused_bytes,
+        physical_objects_uploaded, physical_objects_downloaded, duration_ms]
+    SyncProgress:
+      type: object
+      properties:
+        stage: {$ref: '#/components/schemas/SyncStage'}
+        total_items: {type: integer, format: int64, minimum: 0}
+        applied_items:
+          anyOf:
+          - {type: integer, format: int64, minimum: 0}
+          - {type: 'null'}
+      required: [stage, total_items, applied_items]
+    SyncStage:
+      type: string
+      enum: [observing, calculating, applying, publishing, finalizing]
+    SyncTriggered:
+      type: object
+      properties:
+        profiles:
+          type: array
+          items: {type: string}
+        completed: {type: boolean}
+        failures:
+          type: array
+          items:
+            type: object
+            properties:
+              profile: {type: string}
+              detail: {type: string}
+            required: [profile, detail]
+      required: [profiles, completed, failures]
+    TextRevision:
+      type: object
+      properties:
+        path: {type: string}
+        hash: {type: string}
+        text: {type: string}
+      required: [path, hash, text]
