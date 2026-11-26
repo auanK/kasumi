@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.30.0]
+
+### Added
+
+- **Embedded Local Web UI (`kasumi web` & `web/`)**:
+  - Added a Vue 3 + Vite web interface compiled and compressed into the `kasumi` binary via `scripts/generate_webui_embedded.py` (`KASUMI_ENABLE_WEBUI=ON` by default) and served by the daemon HTTP listener on `http://127.0.0.1:3137/` (`kasumi web [--no-open]` / `kasumi web set-password [--username <name>]`, bilingual `en` / `pt-BR`).
+  - Includes browser session setup (`web-bootstrap.token` / `web-password.json`), profile Hub and creation wizard (`rclone` remote discovery and OS vault preflight), live System Console (daemon state, logs, diagnostics, autostart toggle), and Profile Workspace tabs: **Overview**, **Files** (local & remote explorers, folder trees, raster/text/video previews, byte-range media streaming, single-file & snapshot restore), **History** (commit log and side-by-side text diffs), **Conflicts** (side-by-side hex diffs and resolution), **Maintenance** (`fsck`, `repack`, `gc`, `resolve-missing` with dry-run previews and `.kasumiignore` rule tester), and **Settings**.
+- **Daemon Browser HTTP API (`/v1/*` & OpenAPI 3.1)**:
+  - Modularized the daemon runtime (`engine`, `scheduler`, `event_log`, `profile_state`, `error_classification`) and split OS credential vault backends (`vault_linux.cpp`, `vault_windows.cpp`).
+  - Added authenticated browser routes for single-user Argon2id authentication (`/v1/auth/*`), CSRF/Origin/Host/IP-backoff protections, SSE real-time streams (`/v1/events/stream`), profile CRUD/lock/diagnostics/ignore endpoints, indexed local tree snapshots, remote explorer endpoints with authenticated byte-range downloads, and asynchronous maintenance job tracking (`/v1/jobs/{id}`), documented in `docs/http-api.md` and `docs/api/openapi.yaml`.
+- **Desktop Launchers & Release Packaging**:
+  - Added Linux desktop entry (`packaging/linux/kasumi.desktop`) to `.deb`, `.rpm`, `.pkg.tar.zst`, and CMake `install()` targets, updated `packaging/arch/PKGBUILD` to build `web/` before CMake, and added embedded Web UI smoke gates to Linux and Windows release pipelines.
+  - Updated the Windows `.msi` installer (`packaging/wix/kasumi.wxs`) with a Start Menu shortcut (`Kasumi`), automatic `kasumi.exe stop` before upgrades/uninstalls, and an interactive finish option to enable sign-in startup / launch `kasumi web`.
+
+### Changed
+
+- **Unified Local State & Inspection**:
+  - Consolidated CLI/daemon profile state, activity timelines, Windows folder icon/thumbnail helpers (`folder_icon.cpp`), and authenticated remote file-range/diff inspection helpers behind shared `src/application/` interfaces.
+
+### Fixed
+
+- **Cross-Process Windows Credential Manager Serialization**:
+  - Serialized Windows Credential Manager operations (`read_vault`, `write_vault`, `delete_vault` in `src/runtime/vault_windows.cpp`) across processes using the named mutex `Local\KasumiWindowsCredentialManager` alongside transient `ERROR_NOT_FOUND` retries (`6` attempts in `read_vault`), preventing concurrent daemon/CLI/test races against `lsass.exe`.
+
 ## [0.29.2]
 
 ### Fixed
