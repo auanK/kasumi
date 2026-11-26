@@ -74,6 +74,14 @@ jobs:
             ccache-release-linux-
             ccache-ubuntu-gcc14-
 
+      - name: Build Web UI
+        working-directory: web
+        run: |
+          node --version
+          npm ci
+          npm test
+          npm run build
+
       - name: Build (Release)
         env:
           CCACHE_DIR: ${{ runner.temp }}/ccache-release-linux
@@ -270,6 +278,21 @@ jobs:
             Expand-Archive -Path $zip -DestinationPath $extractDir -Force
             $ccacheDir = (Get-ChildItem -Path $extractDir -Filter 'ccache.exe' -Recurse | Select-Object -First 1).Directory.FullName
             $ccacheDir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
+
+      - name: Build Web UI
+        shell: powershell
+        run: |
+          Push-Location web
+          try {
+            npm ci
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm test
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm run build
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Pop-Location
           }
 
       - name: Build (Release MSVC)

@@ -111,9 +111,10 @@ Official x86_64 installers and portable archives (`kasumi-v<version>-...`) are p
 | **Fedora / RHEL** | `kasumi-v<version>-linux-x86_64.rpm` | `sudo dnf install --nogpgcheck ./kasumi-v<version>-linux-x86_64.rpm` |
 | **Linux (Portable)** | `kasumi-v<version>-linux-x86_64.tar.gz` | Extract and place `kasumi` on `PATH` |
 
-**Build from source** (CMake 3.28+, Git, Ninja, Python 3, C++23 compiler — see [Build and Test](docs/build-and-test.md)):
+**Build from source** (CMake 3.28+, Git, Ninja, Python 3, C++23 compiler, plus Node.js 22+ to embed the Web UI — see [Build and Test](docs/build-and-test.md)):
 
 ```bash
+cd web && npm ci && npm run build && cd ..
 cmake --preset default && cmake --build --preset default
 ```
 
@@ -133,6 +134,7 @@ cmake --preset default && cmake --build --preset default
 | `kasumi status <profile>` | Preview synchronization changes against remote storage read-only |
 | `kasumi show <profile> [--full]` | Inspect profile settings, last complete sync, and recent history (`--full` expands details) |
 | `kasumi config` | Interactive profile wizard (`rclone` remote hints, paths, keys, and sync schedule) |
+| `kasumi web [--no-open]` | Open the embedded Web UI (or `kasumi web set-password` to set the login password) |
 | `kasumi conflicts <profile>` | Scan local folder read-only or `resolve <profile> <path>` preserved conflicts |
 | `kasumi diagnostics [<profile>]` | Inspect local environment, `rclone >= v1.60.0`, disk space, and profile health |
 | `kasumi remote <subcommand> <profile>` | Read-only inspection & restore (`summary`, `heads`, `tree`, `log`, `stat`/`get`/`restore`, `writers`) |

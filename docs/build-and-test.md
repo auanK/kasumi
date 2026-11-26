@@ -41,9 +41,21 @@ $files = @(git ls-files -- '*.cpp' '*.hpp')
 clang-format --dry-run --Werror @files
 ```
 
-## Embedded Locale Generation
+## Embedded Locale & Web UI Generation
 
-The build generates `generated/cli/i18n_embedded.hpp` from `locales/en.json`, `locales/pt-BR.json`, and `src/cli/i18n.hpp` using `scripts/generate_i18n_embedded.py`. The generated header is a build artifact, not a checked-in source file. The generator emits compile-time `std::string_view` tables indexed directly by `Key`. Keep the generated file under the build tree; do not hand-edit it.
+The build generates `generated/cli/i18n_embedded.hpp` from `locales/en.json`, `locales/pt-BR.json`, and `src/cli/i18n.hpp` using `scripts/generate_i18n_embedded.py`, and generates `generated/application/webui_embedded.hpp` from `web/dist/` using `scripts/generate_webui_embedded.py` (when `-DKASUMI_ENABLE_WEBUI=ON`, default `ON`). The generated headers are build artifacts, not checked-in source files; keep them under the build tree and do not hand-edit them.
+
+To test and bundle the Web UI before configuring CMake:
+
+```bash
+cd web
+npm ci
+npm test
+npm run build
+cd ..
+```
+
+When `-DKASUMI_ENABLE_WEBUI=OFF` or `web/dist/index.html` is absent, CMake generates an empty Web UI header (`kAvailable = false`) and `GET /` serves HTTP 503 with build instructions while `/v1/*` API endpoints continue operating normally.
 
 ## CMake Presets
 
