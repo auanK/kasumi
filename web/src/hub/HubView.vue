@@ -20,7 +20,7 @@ const route = useRoute()
 const { profiles, loading, loaded, error, daemonMap, refreshProfiles } = useProfiles()
 const search = ref('')
 const filter = ref('all')
-const selected = ref(typeof route.query.profile === 'string' ? route.query.profile : null)
+const selected = ref(typeof route.query.profile === 'string' ? route.query.profile : '')
 const systemTab = ref('')
 const wizardOpen = ref(false)
 const unlockTarget = ref(null)
@@ -51,10 +51,10 @@ const filteredRows = computed(() => {
     return !query || [profile.name, profile.local_dir, profile.remote_dir].join(' ').toLowerCase().includes(query)
   })
 })
-const expandedName = computed(() => selected.value ?? filteredRows.value[0]?.profile.name)
+const expandedName = computed(() => selected.value)
 
 function toggleProfile(name) {
-  selected.value = expandedName.value === name ? '' : name
+  selected.value = selected.value === name ? '' : name
 }
 
 function revealProfile(name) {
@@ -94,7 +94,7 @@ async function handleSyncAll() {
 }
 
 watch([search, filter], () => {
-  if (selected.value && !filteredRows.value.some(({ profile }) => profile.name === selected.value)) selected.value = null
+  if (selected.value && !filteredRows.value.some(({ profile }) => profile.name === selected.value)) selected.value = ''
 })
 onMounted(() => {
   if (!loaded.value) refresh()

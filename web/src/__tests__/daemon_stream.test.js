@@ -5,6 +5,7 @@ import { getProfile, listProfiles } from '../api/profiles.js'
 import { useDaemonStream } from '../composables/useDaemonStream.js'
 import { clearProfiles, useProfiles } from '../composables/useProfiles.js'
 import HubView from '../hub/HubView.vue'
+import ProfileCard from '../hub/ProfileCard.vue'
 import ServicePanel from '../hub/ServicePanel.vue'
 import SystemLogsTab from '../system/SystemLogsTab.vue'
 
@@ -187,4 +188,42 @@ it('does not start a fallback polling loop when stopDaemonStream disconnects', a
 
   await vi.advanceTimersByTimeAsync(15000)
   expect(fetchDaemonStatus).not.toHaveBeenCalled()
+})
+
+it('starts HubView with all profiles collapsed by default and toggles on user click', async () => {
+  listProfiles.mockResolvedValueOnce({
+    profiles: [
+      { name: 'alpha', local_dir: '/alpha', remote_dir: 'remote:alpha', key_storage: 'file', state: 'ready' },
+      { name: 'beta', local_dir: '/beta', remote_dir: 'remote:beta', key_storage: 'file', state: 'ready' },
+    ],
+  })
+  fetchDaemonStatus.mockResolvedValueOnce({
+    running: true,
+    profiles: [
+      { name: 'alpha', state: 'idle' },
+      { name: 'beta', state: 'idle' },
+    ],
+  })
+
+  const { refreshProfiles } = useProfiles()
+  await refreshProfiles()
+
+  const hubStubs = { RouterLink: { template: '<a><slot /></a>' }, SystemModal: true, PreviewChangesModal: true, CreateProfileWizardModal: true, UnlockModal: true }
+  const hub = mount(HubView, { global: { stubs: hubStubs } })
+  await flushPromises()
+
+  const cards = hub.findAllComponents(ProfileCard)
+  expect(cards).toHaveLength(2)
+  expect(cards[0].props('expanded')).toBe(false)
+  expect(cards[1].props('expanded')).toBe(false)
+
+  await cards[0].vm.$emit('toggle', 'alpha')
+  expect(cards[0].props('expanded')).toBe(true)
+  expect(cards[1].props('expanded')).toBe(false)
+
+  await cards[0].vm.$emit('toggle', 'alpha')
+  expect(cards[0].props('expanded')).toBe(false)
+  expect(cards[1].props('expanded')).toBe(false)
+
+  hub.unmount()
 })
