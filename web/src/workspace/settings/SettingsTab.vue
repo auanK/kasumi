@@ -53,7 +53,9 @@ const form = reactive({
 })
 
 const iconFileInput = ref(null)
-const isCustomIcon = computed(() => form.icon.startsWith('custom:'))
+const savedCustomIcon = ref('')
+const isCustomIcon = computed(() => form.icon.startsWith('custom:') || Boolean(savedCustomIcon.value))
+const customOptionValue = computed(() => (form.icon.startsWith('custom:') ? form.icon : savedCustomIcon.value))
 const iconOptions = [
   { value: '', key: 'settings.iconAuto' },
   { value: 'preset:default', key: 'settings.iconDefault' },
@@ -103,6 +105,7 @@ watch(
     form.rclone_config = prof.rclone_config || ''
     form.allow_empty_local = false
     form.icon = prof.icon === 'auto' ? '' : (prof.icon || '')
+    savedCustomIcon.value = form.icon.startsWith('custom:') ? form.icon : ''
     const controller = new AbortController()
     remotesRequest = controller
     try {
@@ -117,6 +120,16 @@ watch(
     }
   },
   { immediate: true }
+)
+
+watch(
+  () => props.profile?.icon,
+  (nextIcon) => {
+    if (!props.profile) return
+    const normalized = nextIcon === 'auto' ? '' : (nextIcon || '')
+    form.icon = normalized
+    savedCustomIcon.value = normalized.startsWith('custom:') ? normalized : ''
+  }
 )
 
 async function saveSettings() {
@@ -141,6 +154,9 @@ async function saveSettings() {
       icon: form.icon || '',
     })
     if (props.profile?.name !== targetName) return
+    if (!form.icon.startsWith('custom:')) {
+      savedCustomIcon.value = ''
+    }
     pushToast(t('settings.saved'), 'ok')
     emit('refresh')
   } catch (err) {
@@ -214,7 +230,10 @@ async function handleIconFile(event) {
   try {
     const res = await uploadProfileIcon(targetName, file)
     if (props.profile?.name !== targetName) return
-    if (res?.icon) form.icon = res.icon
+    if (res?.icon) {
+      form.icon = res.icon
+      savedCustomIcon.value = res.icon
+    }
     pushToast(t('settings.saved'), 'ok')
     emit('refresh')
   } catch (err) {
@@ -235,6 +254,7 @@ async function handleRemoveCustomIcon() {
     const res = await deleteProfileIcon(targetName)
     if (props.profile?.name !== targetName) return
     form.icon = res?.icon || ''
+    savedCustomIcon.value = ''
     pushToast(t('settings.saved'), 'ok')
     emit('refresh')
   } catch (err) {
@@ -382,9 +402,9 @@ async function confirmDelete() {
           <div class="k-field">
             <label for="settings-icon" class="k-field-label">{{ t('settings.iconLabel') }}</label>
             <div class="k-row k-row--wrap">
-              <VaultIcon :profile="profile.name" :icon="form.icon" size="md" />
+              <VaultIcon :profile="profile.name" :icon="form.icon" preview-auto size="md" />
               <select id="settings-icon" v-model="form.icon" class="k-input k-icon-select">
-                <option v-if="isCustomIcon" :value="form.icon">
+                <option v-if="customOptionValue" :value="customOptionValue">
                   {{ t('settings.iconCustom') }}
                 </option>
                 <option v-for="opt in iconOptions" :key="opt.value || 'auto'" :value="opt.value">
@@ -394,7 +414,7 @@ async function confirmDelete() {
               <input
                 ref="iconFileInput"
                 type="file"
-                accept=".png,.ico,.webp,.jpg,.jpeg,.bmp"
+                accept="image/png,image/x-icon,image/vnd.microsoft.icon,image/webp,image/jpeg,image/bmp,image/svg+xml,.png,.ico,.webp,.jpg,.jpeg,.bmp,.svg"
                 class="k-sr-only"
                 @change="handleIconFile"
               />
