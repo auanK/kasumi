@@ -1,49 +1,62 @@
 # Changelog
 
+## [0.31.0]
+
+### Added
+
+- **Batch Abandoned Writer Cleanup**:
+  - Added a **Remove all (`N`)** action in **Maintenance → Recovery** (backed by batch writer removal in the daemon API) so multiple stale writer markers can be cleared in a single confirmed operation with live progress and safe handling of markers that already disappeared.
+- **Editable Explorer Address Bar**:
+  - Clicking the path bar in **Files** (or pressing `Alt+D` / `Ctrl+L`) selects the full path for editing just like a desktop file manager, accepting `/` or `\` separators, jumping directly to folders or selecting files on `Enter`, offering folder suggestions, and cancelling on `Escape`.
+- **Live Maintenance Progress on the Hub**:
+  - Active maintenance tasks (`fsck`, `gc`, `repack`, `resolve-missing`, and marker removals) now display live progress steps and meters directly inside profile cards on the Hub, matching active syncs.
+
+### Changed
+
+- **Refined Hub Drawer & Consistent Login Screen**:
+  - Replaced the heavy purple fill on expanded profile headers with a neutral header and a continuous lavender side indicator spanning both expanded profile drawers and active sync/maintenance panels.
+  - Aligned the login and initial-setup screens with the app's persistent top bar and card header layout, added smart input focus, translated the show/hide password toggle, and kept the primary sign-in button visually active.
+
+### Fixed
+
+- **Stale Marker Lists After Removal**:
+  - Removing a writer or maintenance barrier now immediately updates and refreshes the Recovery list as soon as the task completes, preventing already-removed markers from remaining selectable and failing on retry.
+
 ## [0.30.4]
 
 ### Added
 
-- **Remote Vault Thumbnails & Preview-Saved Cache (`src/application/daemon/web_thumbnails.hpp`, `src/application/daemon/web_thumbnails.cpp`, `src/application/daemon/web_local.cpp`, `src/application/daemon/web_remote.cpp`, `src/application/daemon/server.cpp`, `src/application/inspection/inspect.cpp`, `web/src/workspace/files/*`)**:
-  - Added remote raster image thumbnail fallback (up to `5 MiB` in icon grids and `32 MiB` when clicked to preview) backed by a bounded in-memory LRU `RemoteThumbnailCache` (`24 MiB` / `512` thumbnails, cleared on profile lock or key/remote change) and throttled remote fetches (max `2` concurrent overall, `1` per profile, plus max `2` concurrent unseen thumbnails in the explorer grid).
-  - Clicking to preview a remote image or video saves its `160px` thumbnail in the cache (server-side for raster images, client canvas frame upload via `POST /v1/remote/{profile}/thumbnail` for videos) so the grid icon upgrades immediately and stays cached during browsing.
+- **Remote Vault Thumbnails & Preview-Saved Cache**:
+  - Browsing remote or historical snapshots in **Files** now displays real thumbnails for remote images (up to `5 MiB` in icon grids and `32 MiB` when clicked to preview), backed by a bounded in-memory per-profile cache (cleared on profile lock or key change) and throttled remote fetches so navigation stays responsive.
+  - Opening a remote image or video in the preview pane saves its thumbnail into the cache so the grid icon upgrades immediately and remains visible while browsing.
 
 ### Changed
 
-- **Epoch & Head Marker Caching in `CommitCache` (`src/application/history_storage/commit_cache.hpp`, `src/application/history_storage/commit_cache.cpp`, `src/application/history_storage/epoch.hpp`, `src/application/history_storage/epoch.cpp`, `src/application/history_storage/loading.cpp`)**:
-  - Cached verified epochs in memory (`max_epoch_entries = 128`) and as sealed `KEPA\x01` envelopes on disk (always re-authenticated via `epoch::open` with automatic corruption self-healing), cached validated head marker IDs in RAM (`max_validated_markers = 512`), and pruned deleted commits from daemon RAM whenever a complete `commits/` listing runs.
-- **Instant Historical Snapshot Trees & Diffs from Daemon RAM (`include/application/inspection/request.hpp`, `src/application/inspection/inspect.cpp`, `src/application/daemon/web_remote.cpp`, `src/application/daemon/server.cpp`, `web/src/api/remote.js`)**:
-  - Served historical `/v1/remote/{profile}/tree?commit=...` and `/v1/remote/{profile}/diff?from=...&to=...` directly from already authenticated commits in daemon RAM `CommitCache` with zero remote calls, while supporting `?refresh=1` (`bypass_commit_cache`) for explicit live revalidation.
+- **Faster Repeated History Listing & Instant Cached Snapshots**:
+  - Cached verified epoch records in memory and as encrypted envelopes on disk (always re-authenticated on read, with automatic self-healing if corrupted), cached validated head markers in memory while the daemon is warm, and pruned deleted commits from memory on full listings.
+  - Opening previously loaded historical snapshots and commit diffs in the Web UI now serves directly from daemon memory with zero cloud calls, while explicit refresh still revalidates live against the remote.
 
 ## [0.30.3]
 
 ### Changed
 
-- **Two-Tier Immutable Commit Cache & Parallel Local Decoding (`src/application/history_storage/commit_cache.hpp`, `src/application/history_storage/commit_cache.cpp`, `src/application/history_storage/loading.cpp`)**:
-  - Added a bounded two-tier `CommitCache` for immutable content-addressed commits: a warm per-profile in-memory LRU cache in the daemon (`128 MiB` / `1024` commits, cleared on profile lock or key/remote change) backed by a bounded encrypted-ciphertext disk cache under `cache/commits/` (`512` files / `256 MiB`, owner-only permissions).
-  - Updated `prefetch_commit_batch()` to skip commits already present in memory or disk cache, and parallelized local ciphertext verification, decryption, deserialization, and commit-ID authentication across worker threads overlapped with epoch and head marker reads.
-  - Preserved full remote-existence validation (`all_commits_listed` check) and automatic self-healing eviction when a cached disk ciphertext fails integrity checks.
-- **Scoped & Concurrent History Prefix Listing (`src/application/observation/history.cpp`, `src/transport/rclone/storage.cpp`)**:
-  - Updated `observation::history::observe()` and `open_remote_download()` to list only history prefixes (`heads/`, `commits/`, `epochs/`) via `transport::control_read_batch` when `complete_history` is requested without a content audit.
-  - Updated `rclone_control_read_batch()` to execute pure `list_prefixes` batches concurrently while keeping strict `concurrency = 1` sequential ordering whenever `LIST -> STAT` admission barriers are combined.
-- **Single-Observation Snapshot Diffs (`src/application/inspection/inspect.cpp`, `src/application/daemon/web_remote.cpp`)**:
-  - Added `inspect_commit_pair()` and wired `/v1/remote/{profile}/diff` through it so comparing two snapshots observes remote history once instead of running two separate full inspections.
-- **Instant Stale-While-Revalidate Snapshot Modal (`web/src/workspace/files/FilesTab.vue`)**:
-  - Populated the **Browse snapshots** modal immediately from `cachedRemoteReading(profile, 'commits')` (matching `HistoryTab.vue`) while revalidating in the background when stale.
+- **Encrypted Commit Cache & Parallel Local Decoding**:
+  - Added a bounded two-tier cache for immutable commits—a warm per-profile memory cache in the daemon (cleared on profile lock or key/remote change) backed by a bounded encrypted ciphertext cache on disk (owner-only permissions, always integrity-checked with automatic self-healing). Already-cached commits skip remote re-downloads and are verified and decoded in parallel across worker threads while preserving live remote-existence checks.
+- **Scoped Concurrent History Listing**:
+  - History and snapshot inspection commands now list only history namespaces (`heads/`, `commits/`, `epochs/`) concurrently instead of scanning all encrypted content objects when a full content audit is not requested.
+- **Single-Observation Snapshot Diffs & Instant Snapshot Modal**:
+  - Comparing two snapshots now observes remote history once instead of twice, and opening **Snapshots** in **Files** shows cached snapshots immediately while refreshing stale listings in the background.
 
 ## [0.30.2]
 
 ### Fixed
 
-- **Linux `.directory` Folder Icons, Freedesktop Themes & Safe SVG (`src/application/daemon/web_icons.cpp`)**:
-  - Prioritized `.directory` on Linux/Unix with fallback to `desktop.ini` (and vice versa on Windows) so synced folders containing both files resolve icons reliably on each OS.
-  - Added support in `.directory` for absolute paths, `file://` URIs, symlinked `local_dir` roots, and Freedesktop icon theme names (resolving active KDE/GTK icon themes across `$XDG_DATA_HOME/icons`, `$XDG_DATA_DIRS/icons`, and `/usr/share/pixmaps` with `index.theme` inheritance and `KASUMI_ICON_DIRS` / `KASUMI_ICON_THEME` overrides).
-  - Enabled validated SVG icons (`image/svg+xml`) for `.directory`, theme icons, and custom uploads while rejecting active content (`<script>`, `<foreignObject>`, `<!ENTITY`, `javascript:`, inline `on*=` handlers) and serving all icons with `Content-Security-Policy: sandbox; default-src 'none'` and `X-Content-Type-Options: nosniff`.
-  - Added `?mode=auto` preview support and `Cache-Control: private, no-cache` for auto-detected folder icons so on-disk `.directory` / `desktop.ini` updates reflect immediately without 5-minute stale browser caches.
-- **Clone Custom Profile Icons (`src/application/profile.cpp`)**:
-  - Copied `custom-icon.*` files atomically with full rollback tracking inside `clone_profile()` (and cleared dangling `custom:` icon metadata if no icon file exists on disk).
-- **Web UI Icon Picker & Linux Dark Theme Polish (`web/`)**:
-  - Updated `SettingsTab.vue` and `VaultIcon.vue` to pass `preview-auto` (`?mode=auto`) when previewing folder detection, keep the saved custom icon option selectable while previewing other presets before saving, sync `form.icon` on `profile.icon` prop updates, differentiate `preset:folder` from `preset:default`, expand `<input type="file" accept>` with MIME types + `.svg` for case-sensitive Linux file portals, style `<select>` `<option>` elements explicitly for Linux dark themes, and mention `.directory` + SVG in `en` / `pt-BR` labels.
+- **Linux Folder Icons, Desktop Themes & Safe SVG Support**:
+  - Prioritized `.directory` on Linux/Unix (with fallback to `desktop.ini`, and vice versa on Windows), added support for absolute paths, `file://` URIs, symlinked profile roots, and active Freedesktop icon themes, enabled sanitized SVG icons with strict CSP sandboxing, and ensured auto-detected folder icon updates refresh immediately without stale browser caching.
+- **Preserve Custom Icons When Cloning Profiles**:
+  - Cloning a profile now copies its custom icon atomically and clears dangling custom icon metadata if the source file is missing.
+- **Web UI Icon Picker & Linux Dark Theme Polish**:
+  - Fixed folder-detection previews, preserved saved custom icons while previewing presets, distinguished the default and folder emblem presets, expanded file-picker filters for Linux portals, and fixed dropdown contrast on Linux dark themes.
 
 ## [0.30.1]
 
