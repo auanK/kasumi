@@ -71,7 +71,7 @@ struct InspectionContext {
 };
 
 struct ActiveCommitCache {
-    std::optional<history_storage::CommitCache> owned_disk_cache;
+    std::unique_ptr<history_storage::CommitCache> owned_disk_cache;
     history_storage::CommitCache* ptr = nullptr;
 };
 
@@ -84,14 +84,15 @@ resolve_active_commit_cache(history_storage::CommitCache* caller_cache,
     if (app_data_dir.empty()) {
         return {};
     }
-    ActiveCommitCache result;
-    result.owned_disk_cache.emplace();
-    result.owned_disk_cache->disk_cache_root =
-        app_data_dir / "cache" / "commits";
-    result.owned_disk_cache->max_memory_bytes = 0;
-    result.owned_disk_cache->max_memory_entries = 0;
-    result.ptr = &*result.owned_disk_cache;
-    return result;
+    auto disk_cache = std::make_unique<history_storage::CommitCache>();
+    disk_cache->disk_cache_root = app_data_dir / "cache" / "commits";
+    disk_cache->max_memory_bytes = 0;
+    disk_cache->max_memory_entries = 0;
+    auto* ptr = disk_cache.get();
+    return ActiveCommitCache{
+        .owned_disk_cache = std::move(disk_cache),
+        .ptr = ptr,
+    };
 }
 
 bool requires_complete_history(InspectionOperation operation) noexcept {

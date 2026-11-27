@@ -2265,8 +2265,10 @@ TEST(HistoryStorageTest, CommitCacheReusesMemoryCommitsAndDownloadsOnlyNewOnes) 
     reset_fake_traffic(*state);
 
     std::size_t downloaded_batch_items = 0;
-    state->on_operation = [&](FakeState&, std::string_view op, std::string_view) {
-        if (op == "get") {
+    state->on_operation = [&](FakeState&,
+                              std::string_view op,
+                              std::string_view id) {
+        if (op == "get" && id.starts_with(test_layout().commits_prefix)) {
             ++downloaded_batch_items;
         }
     };
