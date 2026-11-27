@@ -1,20 +1,18 @@
-# Kasumi v0.31.0
+# Kasumi v0.31.1
 
 ## Highlights
 
-- **Live Maintenance Progress on the Hub**:
-  - Active maintenance operations (`fsck`, `gc`, `repack`, `resolve-missing`, and marker removals) now display step progress and meters directly inside profile cards on the Hub, matching active syncs with a cleaner neutral header and continuous lavender side indicator.
-- **Batch Abandoned Writer Cleanup & Live List Refresh**:
-  - Added a **Remove all (`N`)** action in **Maintenance → Recovery** (backed by batch writer removal in the daemon API), and updated Recovery lists to refresh automatically right after writer or barrier removal completes so deleted markers cannot remain selectable.
-- **Editable Explorer Address Bar in Files**:
-  - Clicking the path bar (or pressing `Alt+D` / `Ctrl+L`) selects the entire path for desktop-style editing with `/` or `\` separator support, folder suggestions, direct file jumping on `Enter`, and `Escape` cancellation.
-- **Consistent Login & Setup Screens**:
-  - Unified the Web UI login and initial-setup pages with the app's persistent top bar and card header layout, translated the password visibility toggle, added smart input autofocus, and kept the primary sign-in button visually active.
+- **Reliable Barrier & Writer Cleanup on Cancellation**:
+  - Cancelling garbage collection or stopping the daemon now reliably removes remote maintenance barriers and abandoned writer markers (and publishes the cancelled activity record) instead of leaving profiles blocked with `GC active on destination`.
+- **Faster Garbage Collection with Live Progress**:
+  - Garbage collection now reuses the local encrypted commit cache instead of re-downloading all historical commits from the cloud, streams live commit-verification progress to the Hub and CLI, and stops cloud transfers cleanly if cancelled.
+- **No Background Sync Collisions During Maintenance**:
+  - Scheduled daemon syncs now wait while a maintenance job is running on the same profile instead of failing with misleading lock-busy errors.
 
 ## Compatibility
 
-100% compatible with repositories, CLI commands, `--json` contracts, `config.toml`, and local/remote state created by `v0.19.x`–`v0.30.4` (`KCOM` v4, `KACT` v1, `KPAK\x01`, `state.db` v2, `transaction.bin.enc`).
+100% compatible with repositories, CLI commands, `--json` contracts, `config.toml`, and local/remote state created by `v0.19.x`–`v0.31.0` (`KCOM` v4, `KACT` v1, `KPAK\x01`, `state.db` v2, `transaction.bin.enc`).
 
 ## Installation
 
-Download the installer or portable archive for your platform (`kasumi-v0.31.0-windows-x86_64.msi`, `.zip`, `.deb`, `.rpm`, `.pkg.tar.zst`, or `.tar.gz`), verify it against `SHA256SUMS.txt` or `gh attestation verify`, check `kasumi --version` (or `kasumi version`), and run `kasumi web` to open the embedded Web UI.
+Download the installer or portable archive for your platform (`kasumi-v0.31.1-windows-x86_64.msi`, `.zip`, `.deb`, `.rpm`, `.pkg.tar.zst`, or `.tar.gz`), verify it against `SHA256SUMS.txt` or `gh attestation verify`, check `kasumi --version` (or `kasumi version`), and run `kasumi web` to open the embedded Web UI.

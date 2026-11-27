@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.31.1]
+
+### Fixed
+
+- **Reliable Barrier & Writer Cleanup on Cancellation**:
+  - Cancelling garbage collection or stopping the daemon now reliably removes remote maintenance barriers and writer markers (and publishes the cancelled activity record) instead of leaving profiles blocked with `GC active on destination`.
+- **Faster Garbage Collection with Live Progress**:
+  - Garbage collection now reuses the local encrypted commit cache instead of re-downloading all historical commits from the cloud, streams live commit-verification progress to the Hub and CLI, and stops cloud transfers cleanly if cancelled.
+- **No Background Sync Collisions During Maintenance**:
+  - Scheduled daemon syncs now wait while a maintenance job is running on the same profile instead of failing with misleading lock-busy errors.
+
 ## [0.31.0]
 
 ### Added
