@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onUnmounted, ref, shallowRef, watch } from 'vue'
-import { cachedLocalTree, cachedRemoteTree, fetchLocalTree, fetchRemoteCommits, fetchRemoteTree } from '../../api/remote.js'
+import { cachedLocalTree, cachedRemoteReading, cachedRemoteTree, fetchLocalTree, fetchRemoteCommits, fetchRemoteTree } from '../../api/remote.js'
 import { useProfileActivity } from '../../composables/useProfileActivity.js'
 import { formatTimestamp, friendlyBusyError } from '../../utils/format.js'
 import { t } from '../../i18n/index.js'
@@ -79,6 +79,14 @@ const selectedEntry = computed(() => fileIndex.value.files.get(selectedPath.valu
 
 async function loadVersions() {
   if (loadingVersions.value || props.locked) return
+  const cached = cachedRemoteReading(props.profile, 'commits')
+  if (cached) {
+    commits.value = cached.value?.commits || []
+    if (cached.fresh) {
+      versionError.value = ''
+      return
+    }
+  }
   const controller = new AbortController()
   versionsRequest = controller
   loadingVersions.value = true

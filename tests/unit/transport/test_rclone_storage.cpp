@@ -1903,6 +1903,45 @@ TEST(RcloneStorageTest, IndependentPresenceBatchUsesConcurrentExecution) {
     EXPECT_LE(captured_body.value("concurrency", 1), 16);
 }
 
+TEST(RcloneStorageTest, IndependentPrefixListBatchUsesConcurrentExecution) {
+    RcServerState remote;
+    nlohmann::json captured_body;
+    remote.server.Post(
+        "/rc/job/batch",
+        [&](const httplib::Request& input, httplib::Response& response) {
+            captured_body = nlohmann::json::parse(input.body);
+            nlohmann::json results = nlohmann::json::array();
+            for (const auto& item : captured_body.at("inputs")) {
+                const auto prefix = item.at("remote").get<std::string>();
+                results.push_back(nlohmann::json{
+                    {"list", {{{"Path", prefix + "/item_a"}}}},
+                    {"status", 200},
+                });
+            }
+            response.set_content(nlohmann::json{{"results", results}}.dump(),
+                                 "application/json");
+        });
+    auto& state = start_configured_state(remote, "bucket");
+    const auto operations = rclone_detail::make_storage_operations();
+
+    const kasumi::transport::ControlReadBatchRequest batch{
+        .list_prefixes = {"ns/heads", "ns/commits", "ns/epochs"},
+    };
+
+    const auto result = operations.control_read_batch(&state, batch);
+    stop_rc_server(remote);
+
+    ASSERT_TRUE(result.has_value())
+        << (result.has_value() ? ""
+                               : kasumi::transport::describe(result.error()));
+    EXPECT_EQ(captured_body.value("concurrency", 1), 3);
+    ASSERT_EQ(captured_body.at("inputs").size(), 3U);
+    ASSERT_EQ(result->listings.size(), 3U);
+    EXPECT_EQ(result->listings[0], (std::vector<std::string>{"item_a"}));
+    EXPECT_EQ(result->listings[1], (std::vector<std::string>{"item_a"}));
+    EXPECT_EQ(result->listings[2], (std::vector<std::string>{"item_a"}));
+}
+
 TEST(RcloneStorageTest,
      LargeIndependentPresenceBatchIsPartitionedIntoBoundedChunks) {
     RcServerState remote;

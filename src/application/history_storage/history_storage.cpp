@@ -179,28 +179,34 @@ publish_commit(transport::Transport& storage,
 
 LoadResult load_history(transport::Transport& storage,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                        const std::filesystem::path& workspace_root) {
+                        const std::filesystem::path& workspace_root,
+                        CommitCache* commit_cache) {
     return guard_alloc([&] {
-        return load_impl(storage, key, workspace_root);
+        return load_impl(storage,
+                         key,
+                         workspace_root,
+                         std::nullopt,
+                         nullptr,
+                         false,
+                         {},
+                         commit_cache);
     });
 }
 
 LoadResult load_history(transport::Transport& storage,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                         const std::filesystem::path& workspace_root,
-                        const KnownHistoryFrontier& frontier) {
+                        const KnownHistoryFrontier& frontier,
+                        CommitCache* commit_cache) {
     return guard_alloc([&] {
-        return detail::load_impl(
-            storage, key, workspace_root, std::nullopt, &frontier);
-    });
-}
-
-LoadResult load_history(transport::Transport& storage,
-                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                        const std::filesystem::path& workspace_root,
-                        std::span<const std::string> identifiers) {
-    return guard_alloc([&] {
-        return detail::load_impl(storage, key, workspace_root, identifiers);
+        return detail::load_impl(storage,
+                                 key,
+                                 workspace_root,
+                                 std::nullopt,
+                                 &frontier,
+                                 false,
+                                 {},
+                                 commit_cache);
     });
 }
 
@@ -208,10 +214,34 @@ LoadResult load_history(transport::Transport& storage,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                         const std::filesystem::path& workspace_root,
                         std::span<const std::string> identifiers,
-                        const KnownHistoryFrontier& frontier) {
+                        CommitCache* commit_cache) {
     return guard_alloc([&] {
-        return detail::load_impl(
-            storage, key, workspace_root, identifiers, &frontier);
+        return detail::load_impl(storage,
+                                 key,
+                                 workspace_root,
+                                 identifiers,
+                                 nullptr,
+                                 false,
+                                 {},
+                                 commit_cache);
+    });
+}
+
+LoadResult load_history(transport::Transport& storage,
+                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                        const std::filesystem::path& workspace_root,
+                        std::span<const std::string> identifiers,
+                        const KnownHistoryFrontier& frontier,
+                        CommitCache* commit_cache) {
+    return guard_alloc([&] {
+        return detail::load_impl(storage,
+                                 key,
+                                 workspace_root,
+                                 identifiers,
+                                 &frontier,
+                                 false,
+                                 {},
+                                 commit_cache);
     });
 }
 
@@ -220,7 +250,8 @@ load_history_scoped(transport::Transport& storage,
                     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                     const std::filesystem::path& workspace_root,
                     const KnownHistoryFrontier* frontier,
-                    std::span<const std::string> trusted_marker_identifiers) {
+                    std::span<const std::string> trusted_marker_identifiers,
+                    CommitCache* commit_cache) {
     return guard_alloc([&] {
         return detail::load_impl(storage,
                                  key,
@@ -228,7 +259,8 @@ load_history_scoped(transport::Transport& storage,
                                  std::nullopt,
                                  frontier,
                                  true,
-                                 trusted_marker_identifiers);
+                                 trusted_marker_identifiers,
+                                 commit_cache);
     });
 }
 

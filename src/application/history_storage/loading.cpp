@@ -1,3 +1,4 @@
+#include "application/history_storage/commit_cache.hpp"
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
@@ -9,6 +10,7 @@
 #include "platform/workspace.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <fstream>
 #include <future>
 #include <limits>
@@ -228,25 +230,155 @@ validate_ciphertext_size(const std::filesystem::path& path) {
     return size;
 }
 
+struct LocalAuthResult {
+    enum class Status { Ok, InvalidCiphertext, InvalidCommit, IoError };
+    Status status = Status::InvalidCiphertext;
+    std::optional<history::LoadedCommit> commit;
+    std::optional<Error> io_error;
+};
+
+LocalAuthResult authenticate_local_ciphertext(
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const HeadReference& reference,
+    const std::filesystem::path& ciphertext,
+    const std::filesystem::path& plaintext) {
+    auto cipher_size = validate_ciphertext_size(ciphertext);
+    if (!cipher_size) {
+        if (cipher_size.error().code == ErrorCode::LimitExceeded) {
+            return {.status = LocalAuthResult::Status::InvalidCiphertext};
+        }
+        return {.status = LocalAuthResult::Status::IoError,
+                .io_error = cipher_size.error()};
+    }
+    auto matches = ciphertext_matches(ciphertext, reference.ciphertext_id);
+    if (!matches) {
+        return {.status = LocalAuthResult::Status::IoError,
+                .io_error = matches.error()};
+    }
+    if (!*matches ||
+        !crypto::decrypt_file(
+            ciphertext, plaintext, key, crypto::FilePurpose::History)) {
+        return {.status = LocalAuthResult::Status::InvalidCiphertext};
+    }
+
+    auto bytes = read_file(plaintext, history::maximum_commit_plaintext_size);
+    if (!bytes) {
+        if (bytes.error().code == ErrorCode::LimitExceeded) {
+            return {.status = LocalAuthResult::Status::InvalidCommit};
+        }
+        return {.status = LocalAuthResult::Status::IoError,
+                .io_error = bytes.error()};
+    }
+    auto commit = history::deserialize(*bytes);
+    if (!commit) {
+        return {.status = LocalAuthResult::Status::InvalidCommit};
+    }
+    auto canonical = history::serialize(*commit);
+    if (!canonical) {
+        return {.status = LocalAuthResult::Status::InvalidCommit};
+    }
+    const bool valid_commit =
+        crypto::commit_identifier(key, *canonical) == reference.commit_id &&
+        *canonical == *bytes;
+    if (!valid_commit) {
+        return {.status = LocalAuthResult::Status::InvalidCommit};
+    }
+    return {
+        .status = LocalAuthResult::Status::Ok,
+        .commit = history::LoadedCommit{.id = reference.commit_id,
+                                        .commit = std::move(*commit)},
+    };
+}
+
+std::optional<history::LoadedCommit> try_load_local_variant_only(
+    const RemoteLayout& layout,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const HeadReference& reference,
+    const std::filesystem::path& workspace,
+    std::size_t sequence,
+    CommitCache* commit_cache) {
+    auto ciphertext =
+        workspace / (reference.commit_id + "_" + reference.ciphertext_id);
+    std::error_code prefetched_error;
+    const bool prefetched =
+        std::filesystem::is_regular_file(ciphertext, prefetched_error);
+    bool from_disk_cache = false;
+    if (!prefetched) {
+        if (commit_cache == nullptr) {
+            return std::nullopt;
+        }
+        auto cached_path = lookup_cached_ciphertext_path(
+            *commit_cache, layout.commits_prefix, reference);
+        if (!cached_path) {
+            return std::nullopt;
+        }
+        ciphertext = std::move(*cached_path);
+        from_disk_cache = true;
+    }
+
+    const auto plaintext =
+        workspace / ("predecode-plain-" + std::to_string(sequence));
+    auto auth = authenticate_local_ciphertext(key, reference, ciphertext, plaintext);
+    remove_file(plaintext);
+    if (auth.status != LocalAuthResult::Status::Ok || !auth.commit.has_value()) {
+        // Leave ciphertext intact so sequential fallback performs exact error
+        // classification or corrupt disk-cache self-healing.
+        return std::nullopt;
+    }
+    if (commit_cache != nullptr) {
+        store_cached_commit(*commit_cache,
+                            layout.commits_prefix,
+                            reference,
+                            *auth.commit,
+                            from_disk_cache ? nullptr : &ciphertext);
+    }
+    if (!from_disk_cache) {
+        remove_file(ciphertext);
+    }
+    return std::move(*auth.commit);
+}
+
 VariantResult
 try_load_variant(transport::Transport& storage,
                  const RemoteLayout& layout,
                  std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                  const HeadReference& reference,
                  const std::filesystem::path& workspace,
-                 std::size_t sequence) {
+                 std::size_t sequence,
+                 CommitCache* commit_cache,
+                 bool allow_cache_read) {
+    if (commit_cache != nullptr && allow_cache_read) {
+        if (auto cached = lookup_cached_commit(
+                *commit_cache, layout.commits_prefix, reference)) {
+            return LoadedVariant{
+                .state = VariantState::Valid,
+                .commit = std::move(*cached),
+            };
+        }
+    }
+
     auto ciphertext =
         workspace / (reference.commit_id + "_" + reference.ciphertext_id);
     std::error_code prefetched_error;
-    const bool prefetched =
+    bool prefetched =
         std::filesystem::is_regular_file(ciphertext, prefetched_error);
-    if (!prefetched) {
+    bool from_disk_cache = false;
+    if (!prefetched && commit_cache != nullptr && allow_cache_read) {
+        if (auto cached_path = lookup_cached_ciphertext_path(
+                *commit_cache, layout.commits_prefix, reference)) {
+            ciphertext = std::move(*cached_path);
+            from_disk_cache = true;
+        }
+    }
+    if (!prefetched && !from_disk_cache) {
         ciphertext = workspace / ("ciphertext-" + std::to_string(sequence));
     }
     const auto plaintext =
         workspace / ("plaintext-" + std::to_string(sequence));
     const auto cleanup = [&] {
-        remove_file(ciphertext);
+        if (!from_disk_cache) {
+            remove_file(ciphertext);
+        }
         remove_file(plaintext);
     };
     const auto finish_invalid = [&](VariantState state) -> VariantResult {
@@ -254,65 +386,62 @@ try_load_variant(transport::Transport& storage,
         return LoadedVariant{.state = state, .commit = std::nullopt};
     };
 
-    if (!prefetched) {
-        auto downloaded =
-            download_commit_candidate(storage, layout, reference, ciphertext);
-        if (!downloaded) {
-            cleanup();
-            if (downloaded.error().code == ErrorCode::MissingCommit) {
-                return LoadedVariant{.state = VariantState::Missing,
-                                     .commit = std::nullopt};
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const auto reset_from_corrupt_disk_cache = [&] {
+            evict_cached_ciphertext(
+                *commit_cache, layout.commits_prefix, reference);
+            remove_file(plaintext);
+            from_disk_cache = false;
+            prefetched = false;
+            ciphertext = workspace / ("ciphertext-" + std::to_string(sequence));
+        };
+
+        if (!prefetched && !from_disk_cache) {
+            auto downloaded =
+                download_commit_candidate(storage, layout, reference, ciphertext);
+            if (!downloaded) {
+                cleanup();
+                if (downloaded.error().code == ErrorCode::MissingCommit) {
+                    return LoadedVariant{.state = VariantState::Missing,
+                                         .commit = std::nullopt};
+                }
+                return std::unexpected(downloaded.error());
             }
-            return std::unexpected(downloaded.error());
         }
-    }
-    auto cipher_size = validate_ciphertext_size(ciphertext);
-    if (!cipher_size) {
-        if (cipher_size.error().code == ErrorCode::LimitExceeded) {
-            return finish_invalid(VariantState::InvalidCiphertext);
+        auto auth =
+            authenticate_local_ciphertext(key, reference, ciphertext, plaintext);
+        if (auth.status != LocalAuthResult::Status::Ok) {
+            if (from_disk_cache && attempt == 0) {
+                reset_from_corrupt_disk_cache();
+                continue;
+            }
+            if (auth.status == LocalAuthResult::Status::InvalidCiphertext) {
+                return finish_invalid(VariantState::InvalidCiphertext);
+            }
+            if (auth.status == LocalAuthResult::Status::InvalidCommit) {
+                return finish_invalid(VariantState::InvalidCommit);
+            }
+            cleanup();
+            return std::unexpected(std::move(*auth.io_error));
+        }
+        history::LoadedCommit loaded_commit = std::move(*auth.commit);
+        if (commit_cache != nullptr) {
+            store_cached_commit(*commit_cache,
+                                layout.commits_prefix,
+                                reference,
+                                loaded_commit,
+                                from_disk_cache ? nullptr : &ciphertext);
         }
         cleanup();
-        return std::unexpected(cipher_size.error());
-    }
-    auto matches = ciphertext_matches(ciphertext, reference.ciphertext_id);
-    if (!matches) {
-        cleanup();
-        return std::unexpected(matches.error());
-    }
-    if (!*matches ||
-        !crypto::decrypt_file(
-            ciphertext, plaintext, key, crypto::FilePurpose::History)) {
-        return finish_invalid(VariantState::InvalidCiphertext);
+        return LoadedVariant{
+            .state = VariantState::Valid,
+            .commit = std::move(loaded_commit),
+        };
     }
 
-    auto bytes = read_file(plaintext, history::maximum_commit_plaintext_size);
-    if (!bytes) {
-        if (bytes.error().code == ErrorCode::LimitExceeded) {
-            return finish_invalid(VariantState::InvalidCommit);
-        }
-        cleanup();
-        return std::unexpected(bytes.error());
-    }
-    auto commit = history::deserialize(*bytes);
-    if (!commit) {
-        return finish_invalid(VariantState::InvalidCommit);
-    }
-    auto canonical = history::serialize(*commit);
-    if (!canonical) {
-        return finish_invalid(VariantState::InvalidCommit);
-    }
-    const bool valid_commit =
-        crypto::commit_identifier(key, *canonical) == reference.commit_id &&
-        *canonical == *bytes;
     cleanup();
-    if (!valid_commit) {
-        return LoadedVariant{.state = VariantState::InvalidCommit,
-                             .commit = std::nullopt};
-    }
-    return LoadedVariant{
-        .state = VariantState::Valid,
-        .commit = history::LoadedCommit{.id = reference.commit_id,
-                                        .commit = std::move(*commit)}};
+    return LoadedVariant{.state = VariantState::InvalidCiphertext,
+                         .commit = std::nullopt};
 }
 
 std::expected<history::LoadedCommit, Error>
@@ -322,7 +451,9 @@ try_load_variants(transport::Transport& storage,
                   std::vector<HeadReference> references,
                   const std::filesystem::path& workspace,
                   std::size_t& sequence,
-                  HeadReference* authenticated_reference) {
+                  HeadReference* authenticated_reference,
+                  CommitCache* commit_cache,
+                  const ObjectMap* confirmed_physical_variants) {
     if (references.empty()) {
         return std::unexpected(
             error(ErrorCode::MissingCommit, "commit object is missing"));
@@ -330,9 +461,26 @@ try_load_variants(transport::Transport& storage,
     bool saw_invalid_ciphertext = false;
     bool saw_invalid_commit = false;
     sort_unique(references);
+    const std::vector<HeadReference>* confirmed_for_commit = nullptr;
+    if (confirmed_physical_variants != nullptr) {
+        if (const auto found =
+                confirmed_physical_variants->find(references.front().commit_id);
+            found != confirmed_physical_variants->end()) {
+            confirmed_for_commit = &found->second;
+        }
+    }
     for (const auto& reference : references) {
-        auto loaded = try_load_variant(
-            storage, layout, key, reference, workspace, sequence++);
+        const bool allow_cache_read =
+            confirmed_for_commit != nullptr &&
+            std::ranges::binary_search(*confirmed_for_commit, reference);
+        auto loaded = try_load_variant(storage,
+                                       layout,
+                                       key,
+                                       reference,
+                                       workspace,
+                                       sequence++,
+                                       commit_cache,
+                                       allow_cache_read);
         if (!loaded) {
             return std::unexpected(loaded.error());
         }
@@ -399,7 +547,8 @@ prefetch_commit_batch(transport::Transport& storage,
                       const RemoteLayout& layout,
                       const ObjectMap& commit_variants,
                       const std::filesystem::path& destination_root,
-                      std::size_t min_objects) {
+                      std::size_t min_objects,
+                      CommitCache* commit_cache) {
     if (storage.storage.get_batch == nullptr) {
         return {};
     }
@@ -411,6 +560,11 @@ prefetch_commit_batch(transport::Transport& storage,
     for (const auto& [unused, references] : commit_variants) {
         static_cast<void>(unused);
         for (const auto& reference : references) {
+            if (commit_cache != nullptr &&
+                has_cached_commit_or_ciphertext(
+                    *commit_cache, layout.commits_prefix, reference)) {
+                continue;
+            }
             batch.identifiers.push_back(reference.commit_id + "_" +
                                         reference.ciphertext_id);
         }
@@ -541,7 +695,8 @@ LoadResult load_impl(transport::Transport& storage,
                      std::optional<std::span<const std::string>> identifiers,
                      const KnownHistoryFrontier* frontier,
                      bool scoped,
-                     std::span<const std::string> trusted_marker_identifiers) {
+                     std::span<const std::string> trusted_marker_identifiers,
+                     CommitCache* commit_cache) {
     if (!transport::valid(storage)) {
         return std::unexpected(
             error(ErrorCode::InvalidInput, "invalid transport"));
@@ -674,6 +829,7 @@ LoadResult load_impl(transport::Transport& storage,
         return candidates;
     };
 
+    std::map<HeadReference, history::LoadedCommit> predecoded_commits;
     if (native_complete_batch) {
         auto marker_temporary = make_workspace(temporary_root);
         if (!marker_temporary) {
@@ -687,22 +843,88 @@ LoadResult load_impl(transport::Transport& storage,
             std::expected<std::map<std::string, std::vector<HeadReference>>,
                           Error>
                 marker_result;
+            std::map<HeadReference, history::LoadedCommit> predecoded_commits;
         } reads;
 
         auto fetch_commit_batch = [&]() -> std::expected<void, Error> {
             if (auto cancel = cancelled(true)) {
                 return std::unexpected(*cancel);
             }
-            if (auto prefetched =
-                    prefetch_commit_batch(storage,
-                                          layout,
-                                          inventory->commit_variants,
-                                          (*temporary)->workspace.root);
+            if (auto prefetched = prefetch_commit_batch(
+                    storage,
+                    layout,
+                    inventory->commit_variants,
+                    (*temporary)->workspace.root,
+                    1,
+                    commit_cache);
                 !prefetched) {
                 return prefetched;
             }
             if (auto cancel = cancelled(true)) {
                 return std::unexpected(*cancel);
+            }
+
+            std::vector<HeadReference> to_decode;
+            to_decode.reserve(inventory->commit_variants.size());
+            for (const auto& [unused, references] :
+                 inventory->commit_variants) {
+                static_cast<void>(unused);
+                for (const auto& reference : references) {
+                    if (commit_cache != nullptr) {
+                        if (auto cached = lookup_cached_commit(
+                                *commit_cache, layout.commits_prefix, reference)) {
+                            reads.predecoded_commits.emplace(
+                                reference, std::move(*cached));
+                            continue;
+                        }
+                    }
+                    to_decode.push_back(reference);
+                }
+            }
+
+            if (to_decode.size() >= 2U) {
+                const auto hardware_threads = static_cast<std::size_t>(
+                    std::thread::hardware_concurrency());
+                const std::size_t worker_count = std::min<std::size_t>(
+                    {to_decode.size(),
+                     std::max<std::size_t>(1U, hardware_threads),
+                     8U});
+                std::atomic<std::size_t> next_index{0};
+                std::vector<std::optional<history::LoadedCommit>> decoded(
+                    to_decode.size());
+                {
+                    std::vector<std::jthread> decode_workers;
+                    decode_workers.reserve(worker_count);
+                    for (std::size_t w = 0; w < worker_count; ++w) {
+                        decode_workers.emplace_back([&, stop_token] {
+                            const platform::cancellation::ScopedStopToken
+                                stop_scope{stop_token};
+                            for (;;) {
+                                if (platform::cancellation::requested()) {
+                                    break;
+                                }
+                                const auto idx = next_index.fetch_add(
+                                    1U, std::memory_order_relaxed);
+                                if (idx >= to_decode.size()) {
+                                    break;
+                                }
+                                decoded[idx] = try_load_local_variant_only(
+                                    layout,
+                                    key,
+                                    to_decode[idx],
+                                    (*temporary)->workspace.root,
+                                    idx,
+                                    commit_cache);
+                            }
+                        });
+                    }
+                }
+                for (std::size_t idx = 0; idx < to_decode.size(); ++idx) {
+                    if (decoded[idx].has_value()) {
+                        reads.predecoded_commits.emplace(
+                            to_decode[idx], std::move(*decoded[idx]));
+                    }
+                }
             }
             return {};
         };
@@ -743,6 +965,7 @@ LoadResult load_impl(transport::Transport& storage,
 
         discovered_epoch = std::move(*reads.epoch_result);
         marker_candidates = std::move(*reads.marker_result);
+        predecoded_commits = std::move(reads.predecoded_commits);
 
         if (discovered_epoch) {
             for (const auto& anchor : discovered_epoch->value.anchors) {
@@ -882,7 +1105,12 @@ LoadResult load_impl(transport::Transport& storage,
                 }
             }
             auto fetched = prefetch_commit_batch(
-                storage, layout, window, (*temporary)->workspace.root, 2);
+                storage,
+                layout,
+                window,
+                (*temporary)->workspace.root,
+                2,
+                inventory->all_commits_listed ? commit_cache : nullptr);
             if (!fetched) {
                 // Classify stale/missing variants through the normal loader.
                 for (const auto& [id, references] : window) {
@@ -908,7 +1136,7 @@ LoadResult load_impl(transport::Transport& storage,
         }
 
         HeadReference authenticated_reference;
-        auto attempt_load = [&]() {
+        auto attempt_load = [&]() -> std::expected<history::LoadedCommit, Error> {
             std::vector<HeadReference> variants;
             if (const auto found = inventory->commit_variants.find(commit_id);
                 found != inventory->commit_variants.end()) {
@@ -920,13 +1148,29 @@ LoadResult load_impl(transport::Transport& storage,
                                 marker_found->second.end());
             }
             sort_unique(variants);
-            return try_load_variants(storage,
-                                     layout,
-                                     key,
-                                     variants,
-                                     (*temporary)->workspace.root,
-                                     commit_sequence,
-                                     &authenticated_reference);
+            if (!predecoded_commits.empty()) {
+                for (const auto& variant : variants) {
+                    if (const auto predecoded =
+                            predecoded_commits.find(variant);
+                        predecoded != predecoded_commits.end()) {
+                        authenticated_reference = variant;
+                        auto extracted = std::move(predecoded->second);
+                        predecoded_commits.erase(predecoded);
+                        return extracted;
+                    }
+                }
+            }
+            return try_load_variants(
+                storage,
+                layout,
+                key,
+                variants,
+                (*temporary)->workspace.root,
+                commit_sequence,
+                &authenticated_reference,
+                commit_cache,
+                inventory->all_commits_listed ? &inventory->commit_variants
+                                              : nullptr);
         };
 
         auto commit = attempt_load();
@@ -1024,7 +1268,8 @@ LoadResult load_impl(transport::Transport& storage,
                              scoped ? std::nullopt : identifiers,
                              nullptr,
                              scoped,
-                             trusted_marker_identifiers);
+                             trusted_marker_identifiers,
+                             commit_cache);
         }
         loaded.emplace(
             cached_anchor->commit_id,

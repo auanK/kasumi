@@ -225,8 +225,7 @@ Json text_revision(const WebContext& ctx, InspectionRequest query) {
             {"text", std::string(bytes.begin(), bytes.end())}};
 }
 
-Snapshot revision_tree(const WebContext& ctx, const InspectionRequest& query) {
-    const auto report = std::get<RemoteTreeReport>(run(ctx, query).payload);
+Snapshot tree_report_to_snapshot(const RemoteTreeReport& report) {
     Snapshot tree;
     tree.rows.push_back(NodeRow{.path = "",
                                 .hash = hash_from_hex(report.root_hash).value(),
@@ -241,6 +240,11 @@ Snapshot revision_tree(const WebContext& ctx, const InspectionRequest& query) {
     return tree;
 }
 
+Snapshot revision_tree(const WebContext& ctx, const InspectionRequest& query) {
+    const auto report = std::get<RemoteTreeReport>(run(ctx, query).payload);
+    return tree_report_to_snapshot(report);
+}
+
 Json revision_diff(const WebContext& ctx, const httplib::Request& req) {
     InspectionRequest query{.operation = Op::RemoteTree,
                             .profile_name = req.matches[1].str()};
@@ -252,8 +256,20 @@ Json revision_diff(const WebContext& ctx, const httplib::Request& req) {
         return {{"from", text_revision(ctx, query)},
                 {"to", text_revision(ctx, other)}};
     }
-    auto from = revision_tree(ctx, query);
-    auto to = revision_tree(ctx, other);
+    Snapshot from;
+    Snapshot to;
+    if (ctx.inspect_commit_pair) {
+        auto pair = ctx.inspect_commit_pair(
+            query.profile_name, *query.commit_id, *other.commit_id);
+        if (!pair) {
+            throw_inspection_error(pair.error());
+        }
+        from = tree_report_to_snapshot(pair->from);
+        to = tree_report_to_snapshot(pair->to);
+    } else {
+        from = revision_tree(ctx, query);
+        to = revision_tree(ctx, other);
+    }
     Json changes = Json::array();
     std::map<std::string, std::vector<std::size_t>> removed, added;
     for (const auto& op : diff::compare_trees(from, from, to)) {

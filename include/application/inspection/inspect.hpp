@@ -27,8 +27,19 @@ struct RemoteDownloadSession {
         state{nullptr, &destroy_remote_download_session};
 };
 
+struct RemoteTreePair {
+    RemoteTreeReport from;
+    RemoteTreeReport to;
+};
+
 std::expected<InspectionResponse, InspectionError>
 inspect(InspectionInput input);
+
+// Observes remote history once and returns authenticated trees for two commits.
+std::expected<RemoteTreePair, InspectionError>
+inspect_commit_pair(InspectionInput input,
+                    std::string from_commit_id,
+                    std::string to_commit_id);
 
 // Opens a single-observation authenticated download session for one remote file.
 std::expected<RemoteDownloadSession, InspectionError>

@@ -604,6 +604,7 @@ add_library(kasumi_application STATIC
     src/application/history_storage/epoch.cpp
     src/application/history_storage/history_storage.cpp
     src/application/history_storage/inventory.cpp
+    src/application/history_storage/commit_cache.cpp
     src/application/history_storage/loading.cpp
     src/application/history_storage/reachability.cpp
     src/application/history_storage/content_reachability.cpp

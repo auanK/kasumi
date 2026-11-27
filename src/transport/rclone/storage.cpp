@@ -1803,15 +1803,24 @@ rclone_control_read_batch(void* context,
     constexpr std::size_t control_presence_concurrency = 8;
     constexpr std::size_t max_presence_batch_chunk_size = 128;
 
+    if (request.list_prefixes.empty() && request.presence_identifiers.empty()) {
+        return ControlReadBatchResult{};
+    }
+
+    // Pure prefix listings (e.g. heads/, commits/, epochs/) have no
+    // LIST -> STAT admission ordering dependency and can run concurrently.
+    if (!request.list_prefixes.empty() &&
+        request.presence_identifiers.empty()) {
+        const auto concurrency = std::min<std::size_t>(
+            request.list_prefixes.size(), control_presence_concurrency);
+        return execute_single_control_read_batch(**state, request, concurrency);
+    }
+
     // Admission depends on the ordering LIST writers -> STAT barrier;
     // rclone executes inputs sequentially when concurrency <= 1.
     if (!request.list_prefixes.empty() &&
         request.presence_identifiers.size() <= max_presence_batch_chunk_size) {
         return execute_single_control_read_batch(**state, request, 1);
-    }
-
-    if (request.list_prefixes.empty() && request.presence_identifiers.empty()) {
-        return ControlReadBatchResult{};
     }
 
     ControlReadBatchResult aggregated;
