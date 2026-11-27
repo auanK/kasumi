@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.31.2]
+
+### Fixed
+
+- **Eliminated False "In Use by CLI" Status**:
+  - Fixed concurrent background status checks colliding with each other on Windows and POSIX lock files, closed a brief race window when internal operations finish, and tracked conflict resolution locks properly so idle or Web UI–managed profiles no longer flash as **In use by CLI**.
+
+### Changed
+
+- **Collapsed Profile List on Hub Startup**:
+  - Opening the Hub now starts with all profiles collapsed by default instead of automatically expanding the first profile, while preserving direct links and newly created profile focus.
+
 ## [0.31.1]
 
 ### Fixed
