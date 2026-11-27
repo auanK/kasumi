@@ -12,7 +12,13 @@ import {
 const props = defineProps({ job: { type: Object, required: true } })
 
 const steps = computed(() => getJobSteps(props.job?.operation))
-const currentStage = computed(() => props.job?.progress?.stage || '')
+const currentStage = computed(() => {
+  const stage = props.job?.progress?.stage || ''
+  const activity = props.job?.progress?.activity || ''
+  if (stage && steps.value.includes(stage)) return stage
+  if (activity && steps.value.includes(activity)) return activity
+  return stage || activity
+})
 const stepIndex = computed(() => steps.value.indexOf(currentStage.value))
 const showModeBadge = computed(() => SIMULATION_OPS.has(props.job?.operation))
 const dryRun = computed(() => isDryRunJob(props.job))

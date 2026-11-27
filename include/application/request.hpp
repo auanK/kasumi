@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace kasumi::application {
 
@@ -36,6 +37,7 @@ struct Request {
     Operation operation = Operation::Sync;
     std::string profile_name;
     std::string writer_identifier;
+    std::vector<std::string> writer_identifiers;
     std::optional<std::string> barrier_identifier = std::nullopt;
     bool initial = false;
     bool audit_inventory = false;

@@ -181,6 +181,8 @@ struct ResolveMissingCompleted {
 
 struct ManualWriterRemovalCompleted {
     std::string identifier;
+    std::vector<std::string> removed_identifiers;
+    std::vector<std::string> already_absent_identifiers;
 };
 
 enum class BarrierRemovalOutcome : std::uint8_t {

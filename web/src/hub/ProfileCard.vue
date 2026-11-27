@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import StatusBadge from '../components/StatusBadge.vue'
+import JobProgressPanel from '../components/JobProgressPanel.vue'
 import SyncProgressPanel from '../components/SyncProgressPanel.vue'
 import VaultIcon from '../components/VaultIcon.vue'
 import ProfileOverview from '../workspace/ProfileOverview.vue'
@@ -21,7 +22,7 @@ const busy = ref(false)
 const live = computed(() => props.daemonState || props.profile.daemon || {})
 const isPaused = computed(() => Boolean(live.value.paused ?? props.profile.paused))
 const isLocked = computed(() => live.value.locked || live.value.state === 'locked')
-const { runningJob, blockedReason } = useProfileActivity(() => props.profile.name)
+const { runningJob, activeJob, blockedReason } = useProfileActivity(() => props.profile.name)
 const isRunning = computed(() => ['running_sync', 'syncing'].includes(live.value.state || props.profile.state))
 const state = computed(() => {
   if (isRunning.value) return 'running_sync'
@@ -70,7 +71,7 @@ function sync() {
 </script>
 
 <template>
-  <article class="k-profile-row" :class="{ 'is-open': expanded }">
+  <article class="k-profile-row" :class="{ 'is-open': expanded, 'is-syncing': isRunning || Boolean(activeJob) }">
     <button :id="'summary-' + profile.name" type="button" class="k-profile-summary" :aria-expanded="expanded"
       :aria-controls="expanded ? rowId : undefined" @click="emit('toggle', profile.name)">
       <span class="k-profile-ident">
@@ -85,6 +86,7 @@ function sync() {
       <span class="k-chevron" aria-hidden="true"></span>
     </button>
     <SyncProgressPanel v-if="isRunning" :live="live" />
+    <JobProgressPanel v-else-if="activeJob" :job="activeJob" />
     <div v-if="expanded" :id="rowId" class="k-profile-body">
       <ProfileOverview :profile="profile" :daemon-state="daemonState" />
       <footer class="k-profile-actions">

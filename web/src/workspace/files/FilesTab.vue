@@ -58,6 +58,10 @@ const historyIndex = ref(0)
 const showFolders = ref(false)
 const listPane = ref(null)
 const addressBar = ref(null)
+const addressInput = ref(null)
+const editingAddress = ref(false)
+const addressDraft = ref('')
+const addressError = ref('')
 const views = ['icons', 'details', 'list']
 const viewKey = 'kasumi.files.view.v2'
 function readSavedView() {
@@ -291,7 +295,77 @@ async function openFromList(path) {
   listPane.value?.focus({ preventScroll: true })
 }
 
+function cancelAddressEdit() {
+  editingAddress.value = false
+  addressError.value = ''
+}
+
+function resolveAddressTarget(raw) {
+  let cleaned = String(raw || '').trim().replace(/\\+/g, '/').replace(/^\/+|\/+$/g, '')
+  const rootNames = new Set(['root', t('files.root').toLowerCase()])
+  const firstSlash = cleaned.indexOf('/')
+  if (firstSlash === -1) {
+    if (!cleaned || rootNames.has(cleaned.toLowerCase())) return { folder: '' }
+  } else if (rootNames.has(cleaned.slice(0, firstSlash).toLowerCase())) {
+    cleaned = cleaned.slice(firstSlash + 1).replace(/^\/+/, '')
+    if (!cleaned) return { folder: '' }
+  }
+
+  const { folders, files } = fileIndex.value
+  if (folders.has(cleaned)) return { folder: cleaned }
+  const lower = cleaned.toLowerCase()
+  for (const key of folders.keys()) {
+    if (key.toLowerCase() === lower) return { folder: key }
+  }
+  if (files.has(cleaned)) return { folder: parentFolder(cleaned), select: cleaned }
+  for (const key of files.keys()) {
+    if (key.toLowerCase() === lower) return { folder: parentFolder(key), select: key }
+  }
+  return null
+}
+
+async function openAddressEditor() {
+  if (!tree.value) return
+  editingAddress.value = true
+  addressError.value = ''
+  addressDraft.value = currentPrefix.value || '/'
+  await nextTick()
+  const el = addressInput.value
+  if (el) {
+    el.focus()
+    el.select()
+  }
+}
+
+function submitAddress() {
+  const match = resolveAddressTarget(addressDraft.value)
+  if (!match) {
+    addressError.value = t('files.pathNotFound')
+    nextTick(() => addressInput.value?.select())
+    return
+  }
+  editingAddress.value = false
+  addressError.value = ''
+  openFolder(match.folder, match.select || '')
+  nextTick(() => listPane.value?.focus({ preventScroll: true }))
+}
+
+const addressSuggestions = computed(() => {
+  const paths = []
+  for (const key of fileIndex.value.folders.keys()) {
+    if (key) paths.push(key)
+    if (paths.length >= 100) break
+  }
+  return paths
+})
+
 function onNavigationKey(event) {
+  const key = event.key.toLowerCase()
+  if ((event.altKey && key === 'd') || ((event.ctrlKey || event.metaKey) && key === 'l')) {
+    event.preventDefault()
+    openAddressEditor()
+    return
+  }
   if (!event.altKey || event.target.matches('input, select, textarea')) return
   if (event.key === 'ArrowUp') levelUp()
   else if (event.key === 'ArrowLeft') moveHistory(-1)
@@ -306,6 +380,8 @@ function selectSnapshot(commit) {
   source.value = 'vault'
   selectedCommit.value = commit
 }
+
+watch([() => props.profile, source, selectedCommit], cancelAddressEdit)
 
 watch([search, currentPrefix, selectedCommit], () => {
   visibleLimit.value = 100
@@ -352,13 +428,41 @@ watch(
             :disabled="loading" :aria-label="t('common.refresh')" :title="t('common.refresh')"
             @click="reload++">↻</button>
         </div>
-        <nav ref="addressBar" class="k-explorer-path" :aria-label="t('files.folderPath')">
+        <nav
+          v-if="!editingAddress"
+          ref="addressBar"
+          class="k-explorer-path"
+          :aria-label="t('files.folderPath')"
+          @click="openAddressEditor"
+        >
           <template v-for="(folder, index) in breadcrumbs" :key="folder.path">
             <span v-if="index > 0" class="k-faint" aria-hidden="true">›</span>
             <span v-if="index === breadcrumbs.length - 1" class="k-current-folder" aria-current="location">{{ folder.name }}</span>
-            <button v-else type="button" class="k-path-button" @click="openFolder(folder.path)">{{ folder.name }}</button>
+            <button v-else type="button" class="k-path-button" @click.stop="openFolder(folder.path)">{{ folder.name }}</button>
           </template>
         </nav>
+        <form
+          v-else
+          class="k-explorer-path k-explorer-path--editing"
+          :class="{ 'k-explorer-path--invalid': Boolean(addressError) }"
+          @submit.prevent="submitAddress"
+        >
+          <input
+            ref="addressInput"
+            v-model="addressDraft"
+            type="text"
+            class="k-explorer-path-input"
+            :list="addressSuggestions.length ? `kasumi-folders-${profile}` : undefined"
+            :aria-label="t('files.pathInput')"
+            :title="addressError || undefined"
+            @input="addressError = ''"
+            @keydown.escape.stop.prevent="cancelAddressEdit"
+            @blur="cancelAddressEdit"
+          />
+          <datalist v-if="addressSuggestions.length" :id="`kasumi-folders-${profile}`">
+            <option v-for="folderPath in addressSuggestions" :key="folderPath" :value="folderPath" />
+          </datalist>
+        </form>
         <input v-model="search" type="search" class="k-input k-input--compact k-folder-search"
           :placeholder="t('files.searchFolder')" :aria-label="t('files.searchFolder')" />
       </div>
@@ -482,6 +586,24 @@ watch(
   border: 1px solid var(--k-border);
   border-radius: var(--k-radius-xs);
   font-size: 13px;
+  cursor: text;
+}
+.k-explorer-path--editing {
+  padding: 0;
+  border-color: var(--k-primary-strong);
+}
+.k-explorer-path--invalid {
+  border-color: var(--k-error);
+}
+.k-explorer-path-input {
+  width: 100%;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--k-text);
+  font: inherit;
+  outline: none;
 }
 
 .k-path-button {

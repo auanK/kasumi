@@ -45,6 +45,7 @@ struct OperationContext {
     std::intptr_t profile_lock = platform::invalid_profile_lock;
     runtime::vault::KeyBytes key{};
     std::string writer_identifier;
+    std::vector<std::string> writer_identifiers;
     std::optional<std::string> barrier_identifier = std::nullopt;
     transport::Transport storage;
     ProgressCallback on_progress{};

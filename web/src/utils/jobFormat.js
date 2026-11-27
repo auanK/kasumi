@@ -19,6 +19,9 @@ const STAGE_KEY_ALIASES = {
 const JOB_STEPS = {
   gc: ['preparing', 'analyzing', 'applying', 'finalizing'],
   fsck: ['preparing', 'observing', 'analyzing', 'auditing_content', 'finalizing'],
+  repack: ['scanning', 'preparing_remote', 'staging', 'uploading', 'verifying'],
+  resolve_missing: ['observing', 'calculating', 'applying', 'publishing', 'finalizing'],
+  'resolve-missing': ['observing', 'calculating', 'applying', 'publishing', 'finalizing'],
   sync: ['observing', 'calculating', 'applying', 'publishing', 'finalizing'],
 }
 
@@ -146,6 +149,13 @@ export function extractJobMetrics(job, t) {
   } else if (op === 'resolve-missing' || op === 'resolve_missing') {
     add('maintenance.resolvedPaths', value.resolved_count)
     add('maintenance.publishedLabel', value.published === undefined ? undefined : t(value.published ? 'maintenance.publishedYes' : 'maintenance.publishedNo'))
+  } else if (op === 'remove-writer' || op === 'remove_writer') {
+    if (Array.isArray(value.removed_identifiers)) {
+      add('maintenance.writersRemoved', value.removed_identifiers.length)
+    }
+    if (value.already_absent_identifiers?.length) {
+      add('maintenance.writersAlreadyAbsent', value.already_absent_identifiers.length)
+    }
   } else {
     add('overview.sendBytes', value.upload_bytes != null ? formatBytes(value.upload_bytes) : (value.wire_upload_bytes != null ? formatBytes(value.wire_upload_bytes) : undefined))
     add('overview.receiveBytes', value.download_bytes != null ? formatBytes(value.download_bytes) : (value.wire_download_bytes != null ? formatBytes(value.wire_download_bytes) : undefined))
@@ -196,6 +206,19 @@ export function formatJobHeadline(job, t) {
     return t(dryRun ? 'maintenance.summary.resolveSim' : 'maintenance.summary.resolveReal', {
       count: value.resolved_count ?? 0,
     })
+  }
+  if (op === 'remove-writer' || op === 'remove_writer') {
+    if (Array.isArray(value.removed_identifiers)) {
+      const removed = value.removed_identifiers.length
+      const absent = value.already_absent_identifiers?.length ?? 0
+      if (removed === 1 && absent === 0) {
+        return t('maintenance.summary.removeWriter', { id: value.removed_identifiers[0] })
+      }
+      return t('maintenance.summary.removeWritersBatch', { removed, absent })
+    }
+    if (value.identifier) {
+      return t('maintenance.summary.removeWriter', { id: value.identifier })
+    }
   }
   if (op === 'sync') {
     return t('maintenance.summary.sync', {

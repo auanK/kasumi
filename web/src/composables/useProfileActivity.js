@@ -6,6 +6,11 @@ export function useProfileActivity(profile) {
   const stream = useDaemonStream()
   const daemonState = computed(() => stream.daemonStatus?.profiles?.find((item) => item.name === toValue(profile)))
   const runningJob = computed(() => stream.jobs.some((job) => job.profile === toValue(profile) && job.state === 'running'))
+  const activeJob = computed(() =>
+    stream.jobs.find(
+      (job) => job.profile === toValue(profile) && job.state === 'running' && job.operation !== 'preview'
+    ) || null
+  )
   const externalBusy = computed(() =>
     Boolean(daemonState.value?.busy) &&
     daemonState.value?.state !== 'running_sync' &&
@@ -29,5 +34,5 @@ export function useProfileActivity(profile) {
     return ''
   })
 
-  return { serverBusy, runningJob, externalBusy, blockedReason }
+  return { serverBusy, runningJob, activeJob, externalBusy, blockedReason }
 }

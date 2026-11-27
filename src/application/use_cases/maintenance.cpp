@@ -406,16 +406,14 @@ std::expected<Response, Error> run_remove_barrier(OperationContext& context) {
 
 std::expected<Response, Error> run_remove_writer(OperationContext& context) {
     const auto layout = history_storage::derive_remote_layout(context.key);
-    auto removed = history_storage::maintenance_protocol::remove_writer(
-        context.storage, layout, context.writer_identifier);
-    if (!removed) {
+    auto handle_failure = [&](const history_storage::maintenance_protocol::Error&
+                                  err,
+                              bool invalid_id) {
         using P = history_storage::maintenance_protocol::ErrorCode;
         using AO = history_storage::activity::ActivityOutcome;
-        const auto& err = removed.error();
-        context.remote_observed = err.code != P::WorkspaceFailure &&
-                                  !(err.code == P::InvalidInput &&
-                                    !history_storage::valid_writer_identifier(
-                                        layout, context.writer_identifier));
+        context.remote_observed =
+            err.code != P::WorkspaceFailure &&
+            !(err.code == P::InvalidInput && invalid_id);
         context.maintenance_failure_stage = "removing-writer";
         context.maintenance_failure_detail = err.detail;
         context.maintenance_failure_outcome =
@@ -423,11 +421,61 @@ std::expected<Response, Error> run_remove_writer(OperationContext& context) {
             : err.code == P::Blocked            ? AO::Blocked
                                                 : AO::Failed;
         return fail_app(context, ErrorCode::WriterRemovalFailure, err.detail);
+    };
+
+    if (!context.writer_identifiers.empty()) {
+        ProgressMeter meter(context.on_progress, context.storage);
+        auto removed = history_storage::maintenance_protocol::remove_writers(
+            context.storage,
+            layout,
+            context.writer_identifiers,
+            [&](std::size_t done, std::size_t total, std::string_view current) {
+                notify_progress(
+                    meter,
+                    ActivityProgress{
+                        .activity = Activity::Removing,
+                        .objects = done,
+                        .total_objects = total,
+                        .item_path = std::string{current},
+                    });
+            });
+        if (!removed) {
+            const bool any_invalid = std::ranges::any_of(
+                context.writer_identifiers, [&](const std::string& id) {
+                    return !history_storage::valid_writer_identifier(layout,
+                                                                     id);
+                });
+            return handle_failure(removed.error(), any_invalid);
+        }
+        context.remote_observed = true;
+        std::string single_id;
+        if (removed->removed.size() == 1U) {
+            single_id = removed->removed.front();
+        }
+        return make_response(
+            context,
+            ManualWriterRemovalCompleted{
+                .identifier = std::move(single_id),
+                .removed_identifiers = std::move(removed->removed),
+                .already_absent_identifiers =
+                    std::move(removed->already_absent),
+            });
+    }
+
+    auto removed = history_storage::maintenance_protocol::remove_writer(
+        context.storage, layout, context.writer_identifier);
+    if (!removed) {
+        return handle_failure(removed.error(),
+                              !history_storage::valid_writer_identifier(
+                                  layout, context.writer_identifier));
     }
     context.remote_observed = true;
     return make_response(
         context,
-        ManualWriterRemovalCompleted{.identifier = context.writer_identifier});
+        ManualWriterRemovalCompleted{
+            .identifier = context.writer_identifier,
+            .removed_identifiers = {context.writer_identifier},
+        });
 }
 
 std::expected<Response, Error> run_repack(OperationContext& context) {
