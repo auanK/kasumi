@@ -38,7 +38,7 @@ bool is_profile_lock_held(const std::filesystem::path& lock_path) noexcept {
     const auto handle =
         CreateFileW(lock_path.c_str(),
                     GENERIC_READ,
-                    0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                     nullptr,
                     OPEN_EXISTING,
                     FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
@@ -68,7 +68,7 @@ bool is_profile_lock_held(const std::filesystem::path& lock_path) noexcept {
     }
     int flock_result = 0;
     do {
-        flock_result = ::flock(fd, LOCK_EX | LOCK_NB);
+        flock_result = ::flock(fd, LOCK_SH | LOCK_NB);
     } while (flock_result != 0 && errno == EINTR);
     if (flock_result == 0) {
         static_cast<void>(::flock(fd, LOCK_UN));
