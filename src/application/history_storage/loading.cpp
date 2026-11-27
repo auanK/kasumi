@@ -548,7 +548,8 @@ prefetch_commit_batch(transport::Transport& storage,
                       const ObjectMap& commit_variants,
                       const std::filesystem::path& destination_root,
                       std::size_t min_objects,
-                      CommitCache* commit_cache) {
+                      CommitCache* commit_cache,
+                      transport::TransportProgressCallback on_progress) {
     if (storage.storage.get_batch == nullptr) {
         return {};
     }
@@ -556,6 +557,7 @@ prefetch_commit_batch(transport::Transport& storage,
         .source_prefix =
             std::string{trim_trailing_slash(layout.commits_prefix)},
         .destination_root = destination_root,
+        .on_progress = std::move(on_progress),
     };
     for (const auto& [unused, references] : commit_variants) {
         static_cast<void>(unused);

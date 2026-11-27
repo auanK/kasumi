@@ -9,6 +9,8 @@
 
 namespace kasumi::application::history_storage {
 
+struct CommitCache;
+
 // Observed state of a head marker.
 enum class ReachabilityMarkerState {
     InvalidPath,
@@ -82,7 +84,8 @@ inventory_reachability(transport::Transport& storage,
                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                        std::span<const std::string> identifiers,
                        const std::filesystem::path& workspace_root,
-                       ReachabilityProgressCallback on_progress = {});
+                       ReachabilityProgressCallback on_progress = {},
+                       CommitCache* commit_cache = nullptr);
 
 // Also reuses the Epoch chain already authenticated in this observation.
 ReachabilityResult

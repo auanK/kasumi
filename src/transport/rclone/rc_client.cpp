@@ -325,6 +325,8 @@ post_rc_impl(State& state,
     client->set_read_timeout(read_timeout);
     std::this_thread::sleep_for(artificial_latency());
     const auto started = std::chrono::steady_clock::now();
+    const bool effective_honour_cancellation =
+        honour_cancellation && !platform::cancellation::ignoring();
     InFlightRequest in_flight{
         .client = client.get(),
         .started = started,
@@ -334,7 +336,7 @@ post_rc_impl(State& state,
         .report_status = state.report_status,
         .stop_token = platform::cancellation::current_stop_token(),
     };
-    if (honour_cancellation) {
+    if (effective_honour_cancellation) {
         std::lock_guard lock(runtime.watcher_mutex);
         runtime.active_requests.push_back(&in_flight);
     }
@@ -350,7 +352,8 @@ post_rc_impl(State& state,
                 entry = nullptr;
             }
         }
-    } request_guard{runtime, honour_cancellation ? &in_flight : nullptr};
+    } request_guard{
+        runtime, effective_honour_cancellation ? &in_flight : nullptr};
 
     const auto unregister_request = [&]() noexcept {
         if (request_guard.entry != nullptr) {
@@ -387,7 +390,7 @@ post_rc_impl(State& state,
         platform::perf_trace::finish(
             std::string{"rc/"} + std::string{path_suffix}, trace);
     }
-    if (honour_cancellation && platform::cancellation::requested()) {
+    if (effective_honour_cancellation && platform::cancellation::requested()) {
         return std::unexpected(
             make_error(ErrorCode::Cancelled, "operation cancelled by user"));
     }

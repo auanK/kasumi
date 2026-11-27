@@ -2,7 +2,9 @@
 
 #include "application/daemon/web_http.hpp"
 #include "application/daemon/web_job_json.hpp"
+#include "application/history_storage/commit_cache.hpp"
 #include "application/history_storage/remote_layout.hpp"
+#include "application/use_cases/context.hpp"
 #include "platform/clock.hpp"
 
 #include <array>
@@ -172,7 +174,13 @@ void run_job(const WebContext& ctx,
     Json result;
     std::string state = "failed";
     try {
-        auto report = execute(
+        auto commit_cache =
+            ctx.commit_cache ? ctx.commit_cache(request.profile_name) : nullptr;
+        detail::WarmExecutionContext warm{
+            .commit_cache = commit_cache.get(),
+            .origin_daemon = false,
+        };
+        auto report = detail::execute_warm(
             {.request = request,
              .credentials = ctx.credentials(request.profile_name),
              .environment = ctx.environment,
@@ -194,7 +202,13 @@ void run_job(const WebContext& ctx,
                                          {"removed_objects",
                                           progress.removed_objects},
                                          {"candidate_objects",
-                                          progress.candidate_count}};
+                                          progress.candidate_count},
+                                         {"listed_objects",
+                                          progress.listed_objects},
+                                         {"commits_processed",
+                                          progress.commits_processed},
+                                         {"commits_total",
+                                          progress.commits_total}};
                              else
                                  return Json(progress);
                          },
@@ -218,7 +232,8 @@ void run_job(const WebContext& ctx,
                      if (on_change)
                          on_change();
                  },
-             .stop_token = ctx.stop});
+             .stop_token = ctx.stop},
+            warm);
         if (report) {
             result = std::visit(
                 [](const auto& data) -> Json {

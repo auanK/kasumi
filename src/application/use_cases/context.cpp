@@ -190,40 +190,50 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         auto lock_detail = profile_lock.error();
         const bool is_lock_busy =
             lock_detail == "profile is already in use by another execution";
-        if (is_lock_busy) {
-            bool enriched_by_daemon = false;
-            if (is_daemon_running(input.environment)) {
-                if (const auto st = query_daemon_status(
-                        input.environment, input.request.profile_name);
-                    st && st->running && !st->profiles.empty()) {
-                    const auto& dp = st->profiles.front();
-                    if (dp.state == DaemonProfileState::RunningSync) {
-                        enriched_by_daemon = true;
-                        if (!dp.active_stage.empty()) {
-                            lock_detail =
-                                std::format("{} (daemon PID {}: {} - {})",
-                                            lock_detail,
-                                            st->pid,
-                                            to_string(dp.state),
-                                            dp.active_stage);
-                        } else {
-                            lock_detail = std::format("{} (daemon PID {}: {})",
-                                                      lock_detail,
-                                                      st->pid,
-                                                      to_string(dp.state));
-                        }
+    if (is_lock_busy) {
+        const bool from_daemon_scheduler =
+            warm != nullptr && warm->origin_daemon;
+        bool enriched_by_daemon = false;
+        if (is_daemon_running(input.environment)) {
+            if (const auto st = query_daemon_status(input.environment,
+                                                    input.request.profile_name);
+                st && st->running && !st->profiles.empty()) {
+                const auto& dp = st->profiles.front();
+                if (!dp.active_operation.empty() &&
+                    dp.active_operation != "sync") {
+                    enriched_by_daemon = true;
+                    lock_detail = std::format("{} (daemon PID {}: {})",
+                                              lock_detail,
+                                              st->pid,
+                                              dp.active_operation);
+                } else if (!from_daemon_scheduler &&
+                           dp.state == DaemonProfileState::RunningSync) {
+                    enriched_by_daemon = true;
+                    if (!dp.active_stage.empty()) {
+                        lock_detail =
+                            std::format("{} (daemon PID {}: {} - {})",
+                                        lock_detail,
+                                        st->pid,
+                                        to_string(dp.state),
+                                        dp.active_stage);
+                    } else {
+                        lock_detail = std::format("{} (daemon PID {}: {})",
+                                                  lock_detail,
+                                                  st->pid,
+                                                  to_string(dp.state));
                     }
                 }
             }
-            if (!enriched_by_daemon) {
-                if (const auto active_op =
-                        active_profile_operation(inspect_profile_activity(
-                            input.environment, input.request.profile_name))) {
-                    lock_detail =
-                        std::format("{} (running {})", lock_detail, *active_op);
-                }
+        }
+        if (!enriched_by_daemon) {
+            if (const auto active_op =
+                    active_profile_operation(inspect_profile_activity(
+                        input.environment, input.request.profile_name))) {
+                lock_detail =
+                    std::format("{} (running {})", lock_detail, *active_op);
             }
         }
+    }
         const auto summary = output.summary;
         wipe_operation(output);
         return std::unexpected(Error{
@@ -486,6 +496,7 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     output.storage = std::move(*opened_storage);
     if (warm != nullptr) {
         output.warm_observation = warm->warm_observation;
+        output.commit_cache = warm->commit_cache;
     }
     return {};
 }
@@ -509,6 +520,7 @@ void wipe_operation(OperationContext& context) noexcept {
     context.maintenance_flags = 0;
     context.gc_kept_activities.clear();
     context.warm_observation = nullptr;
+    context.commit_cache = nullptr;
     platform::release_profile_lock(context.profile_lock);
 }
 

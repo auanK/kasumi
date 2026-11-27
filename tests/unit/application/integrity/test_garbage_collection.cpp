@@ -1,4 +1,5 @@
 #include "application/history_storage/activity.hpp"
+#include "application/history_storage/commit_cache.hpp"
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/reachability.hpp"
@@ -22,6 +23,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -3528,6 +3530,160 @@ TEST(
         }
         fixture.state->objects.erase(peer_control);
     }
+}
+
+TEST(GarbageCollectionTest, ScopedIgnoreCancellationShieldsStopTokenAndGlobalFlag) {
+    ResetCancellation reset_guard;
+    std::stop_source stop_source;
+    const kasumi::platform::cancellation::ScopedStopToken stop_scope{
+        stop_source.get_token()};
+
+    EXPECT_FALSE(kasumi::platform::cancellation::ignoring());
+    EXPECT_FALSE(kasumi::platform::cancellation::requested());
+
+    stop_source.request_stop();
+    kasumi::platform::cancellation::request();
+    EXPECT_TRUE(kasumi::platform::cancellation::requested());
+    EXPECT_TRUE(
+        kasumi::platform::cancellation::current_stop_token().stop_requested());
+
+    {
+        const kasumi::platform::cancellation::ScopedIgnoreCancellation outer;
+        EXPECT_TRUE(kasumi::platform::cancellation::ignoring());
+        EXPECT_FALSE(kasumi::platform::cancellation::requested());
+        EXPECT_FALSE(kasumi::platform::cancellation::current_stop_token()
+                         .stop_requested());
+        {
+            const kasumi::platform::cancellation::ScopedIgnoreCancellation inner;
+            EXPECT_TRUE(kasumi::platform::cancellation::ignoring());
+            EXPECT_FALSE(kasumi::platform::cancellation::requested());
+        }
+        EXPECT_TRUE(kasumi::platform::cancellation::ignoring());
+        EXPECT_FALSE(kasumi::platform::cancellation::requested());
+    }
+
+    EXPECT_FALSE(kasumi::platform::cancellation::ignoring());
+    EXPECT_TRUE(kasumi::platform::cancellation::requested());
+    EXPECT_TRUE(
+        kasumi::platform::cancellation::current_stop_token().stop_requested());
+}
+
+TEST(GarbageCollectionTest,
+     CancellationMidAnalyzingStillReleasesBarrierWhenTransportHonoursCancel) {
+    FakeFixture fixture("gc-cancel-analyzing-releases-barrier");
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    fixture.put_content("orphan", "orphan");
+    fixture.state->remove_attempts.clear();
+
+    static auto raw_get = fixture.transport.storage.get;
+    static auto raw_remove = fixture.transport.storage.remove;
+    static auto raw_presence = fixture.transport.storage.presence;
+    raw_get = fixture.transport.storage.get;
+    raw_remove = fixture.transport.storage.remove;
+    raw_presence = fixture.transport.storage.presence;
+
+    auto cancel_error = []() -> kasumi::transport::Error {
+        return kasumi::transport::Error{
+            .code = kasumi::transport::ErrorCode::Cancelled,
+            .message = "operation cancelled by user",
+        };
+    };
+    fixture.transport.storage.get =
+        +[](void* ctx,
+             std::string_view id,
+             const std::filesystem::path& dst) -> kasumi::transport::Result {
+        if (kasumi::platform::cancellation::requested()) {
+            return std::unexpected(kasumi::transport::Error{
+                .code = kasumi::transport::ErrorCode::Cancelled,
+                .message = "operation cancelled by user",
+            });
+        }
+        return raw_get(ctx, id, dst);
+    };
+    fixture.transport.storage.remove =
+        +[](void* ctx, std::string_view id)
+            -> kasumi::transport::RemovalResult {
+        if (kasumi::platform::cancellation::requested()) {
+            return std::unexpected(kasumi::transport::Error{
+                .code = kasumi::transport::ErrorCode::Cancelled,
+                .message = "operation cancelled by user",
+            });
+        }
+        return raw_remove(ctx, id);
+    };
+    fixture.transport.storage.presence =
+        +[](void* ctx, std::string_view id)
+            -> kasumi::transport::PresenceResult {
+        if (kasumi::platform::cancellation::requested()) {
+            return std::unexpected(kasumi::transport::Error{
+                .code = kasumi::transport::ErrorCode::Cancelled,
+                .message = "operation cancelled by user",
+            });
+        }
+        return raw_presence(ctx, id);
+    };
+    static_cast<void>(cancel_error);
+
+    ResetCancellation reset_guard;
+    std::stop_source stop_source;
+    const kasumi::platform::cancellation::ScopedStopToken stop_scope{
+        stop_source.get_token()};
+
+    const auto result = fixture.collect_with_options(
+        gc_int::GarbageCollectOptions{.min_orphan_age = std::chrono::seconds{0}},
+        [&](const GarbageCollectProgress& progress) {
+            if (progress.stage == GarbageCollectStage::Analyzing &&
+                progress.sub_stage ==
+                    GarbageCollectSubStage::AuthenticatingHistory) {
+                stop_source.request_stop();
+            }
+        });
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, GcErrorCode::TransportFailure);
+    ASSERT_TRUE(result.error().garbage_collection.has_value());
+    const auto& diagnostic = *result.error().garbage_collection;
+    EXPECT_EQ(diagnostic.stage, GarbageCollectStage::Analyzing);
+    EXPECT_TRUE(diagnostic.barrier_release_attempted);
+    EXPECT_TRUE(diagnostic.barrier_release_confirmed);
+    EXPECT_FALSE(diagnostic.barrier_cleanup_error.has_value());
+    EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
+    EXPECT_FALSE(find_active_barrier(*fixture.state, layout()).has_value());
+}
+
+TEST(GarbageCollectionTest, GcReusesCommitCacheToSkipRemoteCommitDownloads) {
+    FakeFixture fixture("gc-reuses-commit-cache");
+    const auto c0 = commit_with_file("v1");
+    const auto c1 =
+        kasumi::history::make_commit(1, {commit_id(c0)}, make_tree("f.txt", "v2"))
+            .value();
+    fixture.publish(c0, "c0", false);
+    fixture.publish(c1, "c1", true);
+    fixture.put_content("v1", "v1");
+    fixture.put_content("v2", "v2");
+    fixture.put_content("orphan", "orphan");
+
+    kasumi::application::history_storage::CommitCache commit_cache;
+    commit_cache.disk_cache_root =
+        kasumi::test::workspace_path(fixture.workspace, "commit-cache");
+
+    const gc_int::GarbageCollectOptions opts{
+        .dry_run = true,
+        .min_orphan_age = std::chrono::seconds{0},
+        .commit_cache = &commit_cache,
+    };
+
+    const auto first = fixture.collect_with_options(opts);
+    ASSERT_TRUE(first.has_value()) << first.error().detail;
+    EXPECT_EQ(first->candidate_objects, 1U); // "orphan" only; "v1" is reachable via c0
+    EXPECT_EQ(fixture.state->commit_get_count, 2U);
+
+    reset_remote_counts(*fixture.state);
+    const auto second = fixture.collect_with_options(opts);
+    ASSERT_TRUE(second.has_value()) << second.error().detail;
+    EXPECT_EQ(second->candidate_objects, first->candidate_objects);
+    EXPECT_EQ(fixture.state->commit_get_count, 0U);
 }
 
 } // namespace
