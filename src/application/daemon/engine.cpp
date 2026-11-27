@@ -259,6 +259,8 @@ std::optional<std::string> detect_held_profile_operation(
         return current_job->second;
     if (internal_web_locked)
         return std::nullopt;
+    if (!platform::is_profile_lock_held(lock_path))
+        return std::nullopt;
     return std::string{"external"};
 }
 
