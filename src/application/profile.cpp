@@ -1770,10 +1770,13 @@ clone_profile(const ExecutionEnvironment& environment,
         while (!error && entry != end) {
             const auto path = entry->path();
             const auto name = path.filename();
-            const bool known = name == "key.bin" || name == "db.sqlite" ||
-                               name == "db.sqlite-wal" ||
-                               name == "db.sqlite-shm" ||
-                               name == "db.sqlite-journal";
+            const bool known =
+                name == "key.bin" || name == "db.sqlite" ||
+                name == "db.sqlite-wal" || name == "db.sqlite-shm" ||
+                name == "db.sqlite-journal" || name == "custom-icon.png" ||
+                name == "custom-icon.ico" || name == "custom-icon.webp" ||
+                name == "custom-icon.jpg" || name == "custom-icon.bmp" ||
+                name == "custom-icon.svg";
             const auto info = query_entry(path);
             if (!known || !is_plain_file(info)) {
                 return std::unexpected("destination contains unknown data");
@@ -1979,9 +1982,45 @@ clone_profile(const ExecutionEnvironment& environment,
         return fail_with_rollback("failed to initialize profile database");
     }
 
+    bool copied_custom_icon = false;
+    if (source_it->icon.starts_with("custom:")) {
+        constexpr std::array<std::string_view, 6> kIconExts{
+            ".png", ".ico", ".webp", ".jpg", ".bmp", ".svg"};
+        for (const auto ext : kIconExts) {
+            const auto icon_filename = std::string("custom-icon").append(ext);
+            const auto src_icon = source_paths_res->profile_dir / icon_filename;
+            auto icon_input =
+                platform::private_storage::open_regular_file(src_icon);
+            if (!icon_input || icon_input->size == 0 ||
+                icon_input->size > 512ULL * 1024ULL) {
+                continue;
+            }
+            std::string icon_bytes(static_cast<std::size_t>(icon_input->size),
+                                   '\0');
+            if (!platform::private_storage::read_regular_file_exact(
+                    *icon_input,
+                    std::span<std::uint8_t>(
+                        reinterpret_cast<std::uint8_t*>(icon_bytes.data()),
+                        icon_bytes.size()))) {
+                continue;
+            }
+            const auto dest_icon = dest_paths_res->profile_dir / icon_filename;
+            if (!platform::private_storage::write_atomically(dest_icon,
+                                                             icon_bytes) ||
+                !remember_clone_file(dest_icon, true)) {
+                return fail_with_rollback("failed to copy custom profile icon");
+            }
+            copied_custom_icon = true;
+            break;
+        }
+    }
+
     auto cloned_profile = *source_it;
     cloned_profile.name = std::string(destination_profile_name);
     cloned_profile.paused = true;
+    if (cloned_profile.icon.starts_with("custom:") && !copied_custom_icon) {
+        cloned_profile.icon.clear();
+    }
     loaded->profiles.push_back(std::move(cloned_profile));
 
     std::expected<void, runtime::Error> save_res;
@@ -2122,7 +2161,8 @@ prepare_local_inspection(const ExecutionEnvironment& environment,
         return std::unexpected(ProfileLocalProblem::Database);
     }
 
-    const auto sidecars = detail::sqlite_sidecar_paths(prep.paths.database_path);
+    const auto sidecars =
+        detail::sqlite_sidecar_paths(prep.paths.database_path);
     prep.wal = query_entry(sidecars[0]);
     prep.shm = query_entry(sidecars[1]);
     prep.rollback = query_entry(sidecars[2]);
@@ -2143,7 +2183,8 @@ sync::journal::InspectionResult inspect_profile_journal_readonly(
         retired_dir.state == EntryState::Error) {
         return sync::journal::InspectionResult::Corrupted;
     }
-    if ((active_dir.state == EntryState::Present && !is_plain_dir(active_dir)) ||
+    if ((active_dir.state == EntryState::Present &&
+         !is_plain_dir(active_dir)) ||
         (retired_dir.state == EntryState::Present &&
          !is_plain_dir(retired_dir)) ||
         (active_dir.state == EntryState::Present &&
@@ -2169,8 +2210,9 @@ sync::journal::InspectionResult inspect_profile_journal_readonly(
                : sync::journal::InspectionResult::Active;
 }
 
-std::optional<std::filesystem::path> create_snapshot_temp_dir(
-    std::string_view prefix, InspectionTempDirectory& guard) {
+std::optional<std::filesystem::path>
+create_snapshot_temp_dir(std::string_view prefix,
+                         InspectionTempDirectory& guard) {
     auto random_id = platform::random::hex_id(16);
     std::error_code temp_error;
     const auto temp_root = std::filesystem::temp_directory_path(temp_error);
@@ -2622,12 +2664,12 @@ inspect_profile_local_summary(const ExecutionEnvironment& environment,
     if (lock_probe == LockProbe::Active) {
         summary.state = ProfileLocalState::Running;
         summary.problem = ProfileLocalProblem::None;
-        if (const auto act = snapshot_local_activity_best_effort(
-                prep->paths.database_path,
-                prep->wal,
-                prep->shm,
-                prep->rollback,
-                "kasumi_sum_")) {
+        if (const auto act =
+                snapshot_local_activity_best_effort(prep->paths.database_path,
+                                                    prep->wal,
+                                                    prep->shm,
+                                                    prep->rollback,
+                                                    "kasumi_sum_")) {
             populate_profile_activity(summary.activity, *act, true);
         }
         return summary;
@@ -2714,12 +2756,12 @@ inspect_profile_activity(const ExecutionEnvironment& environment,
     if (!prep) {
         return report;
     }
-    const auto loaded_activity = snapshot_local_activity_best_effort(
-        prep->paths.database_path,
-        prep->wal,
-        prep->shm,
-        prep->rollback,
-        "kasumi_act_");
+    const auto loaded_activity =
+        snapshot_local_activity_best_effort(prep->paths.database_path,
+                                            prep->wal,
+                                            prep->shm,
+                                            prep->rollback,
+                                            "kasumi_act_");
     if (!loaded_activity) {
         return report;
     }

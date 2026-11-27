@@ -6,10 +6,11 @@ const props = defineProps({
   profile: { type: String, required: true },
   icon: { type: String, default: '' },
   size: { type: String, default: 'sm' },
+  previewAuto: { type: Boolean, default: false },
 })
 
 const imageFailed = ref(false)
-watch([() => props.profile, () => props.icon], () => {
+watch([() => props.profile, () => props.icon, () => props.previewAuto], () => {
   imageFailed.value = false
 })
 
@@ -17,7 +18,11 @@ const isPreset = computed(() => props.icon?.startsWith('preset:'))
 const isRemoteImage = computed(() => !isPreset.value && !imageFailed.value)
 const iconUrl = computed(() => {
   const version = props.icon || 'auto'
-  return `/v1/profiles/${encodeSegment(props.profile)}/icon?v=${encodeURIComponent(version)}`
+  const base = `/v1/profiles/${encodeSegment(props.profile)}/icon?v=${encodeURIComponent(version)}`
+  if (props.previewAuto && (!props.icon || props.icon === 'auto')) {
+    return `${base}&mode=auto`
+  }
+  return base
 })
 const preset = computed(() => (isPreset.value ? props.icon.slice(7) : 'default'))
 </script>
@@ -60,6 +65,10 @@ const preset = computed(() => (isPreset.value ? props.icon.slice(7) : 'default')
     <svg v-else-if="preset === 'shield'" viewBox="0 0 20 20" fill="none" class="k-vault-icon-svg">
       <path d="M10 2.8l6 2.4v4.6c0 3.7-2.5 6.3-6 7.4-3.5-1.1-6-3.7-6-7.4V5.2l6-2.4z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
       <path d="M7.8 10.2l1.6 1.6 3-3.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>
+    <svg v-else-if="preset === 'folder'" viewBox="0 0 20 20" fill="none" class="k-vault-icon-svg">
+      <path d="M2.5 6a1.5 1.5 0 011.5-1.5h3.8l1.6 1.8h6.6a1.5 1.5 0 011.5 1.5v6.7a1.5 1.5 0 01-1.5 1.5H4a1.5 1.5 0 01-1.5-1.5V6z" fill="var(--k-folder-bg)" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
+      <path d="M6.5 10.5h7M6.5 13h4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
     </svg>
     <svg v-else viewBox="0 0 20 20" fill="none" class="k-vault-icon-svg">
       <path d="M2.5 6a1.5 1.5 0 011.5-1.5h3.8l1.6 1.8h6.6a1.5 1.5 0 011.5 1.5v6.7a1.5 1.5 0 01-1.5 1.5H4a1.5 1.5 0 01-1.5-1.5V6z" fill="var(--k-folder-bg)" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />

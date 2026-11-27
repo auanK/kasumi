@@ -1378,7 +1378,7 @@ TEST(WebApiTest, ProfileIconValidationAndSafeFolderIconDetection) {
     ASSERT_TRUE(spoofed);
     EXPECT_EQ(spoofed->status, 204);
 
-    // Traversal and unsupported extensions (.svg / .dll) fail closed to 204.
+    // Traversal and unsafe SVG (<script> / onload) fail closed to 204.
     std::filesystem::remove(local / "desktop.ini");
     kasumi::test::write_text(local.parent_path() / "escape.png", fake_png);
     kasumi::test::write_text(
@@ -1388,14 +1388,109 @@ TEST(WebApiTest, ProfileIconValidationAndSafeFolderIconDetection) {
     ASSERT_TRUE(escaped);
     EXPECT_EQ(escaped->status, 204);
 
-    kasumi::test::write_text(local / "bad.svg", "<svg></svg>");
+    kasumi::test::write_text(local / "bad.svg",
+                             "<svg><script>alert(1)</script></svg>");
     std::filesystem::remove(local / "desktop.ini");
     kasumi::test::write_text(local / ".directory",
                              "[Desktop Entry]\nIcon=bad.svg\n");
-    auto svg = api.client->Get("/v1/profiles/demo/icon", api.headers);
-    ASSERT_TRUE(svg);
-    EXPECT_EQ(svg->status, 204);
+    auto evil_script_svg =
+        api.client->Get("/v1/profiles/demo/icon", api.headers);
+    ASSERT_TRUE(evil_script_svg);
+    EXPECT_EQ(evil_script_svg->status, 204);
 
+    kasumi::test::write_text(local / "onload.svg",
+                             "<svg onload=\"alert(1)\"></svg>");
+    kasumi::test::write_text(local / ".directory",
+                             "[Desktop Entry]\nIcon=onload.svg\n");
+    auto evil_onload_svg =
+        api.client->Get("/v1/profiles/demo/icon", api.headers);
+    ASSERT_TRUE(evil_onload_svg);
+    EXPECT_EQ(evil_onload_svg->status, 204);
+
+    // Valid safe SVG in .directory serves image/svg+xml cleanly.
+    const std::string valid_svg =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\">"
+        "<rect width=\"16\" height=\"16\" fill=\"#6b54c8\"/></svg>";
+    kasumi::test::write_text(local / "safe.svg", valid_svg);
+    kasumi::test::write_text(local / ".directory",
+                             "[Desktop Entry]\nIcon=./safe.svg\n");
+    auto served_svg = api.client->Get("/v1/profiles/demo/icon", api.headers);
+    ASSERT_TRUE(served_svg);
+    EXPECT_EQ(served_svg->status, 200);
+    EXPECT_EQ(served_svg->get_header_value("Content-Type"), "image/svg+xml");
+    EXPECT_EQ(served_svg->get_header_value("Content-Security-Policy"),
+              "sandbox; default-src 'none'");
+    EXPECT_EQ(served_svg->body, valid_svg);
+
+    // Absolute path and file:// URI in .directory resolve safe external icons.
+    const auto abs_icon = api.workspace->root / "external-folder.png";
+    kasumi::test::write_text(abs_icon, fake_png);
+    kasumi::test::write_text(
+        local / ".directory",
+        "[Desktop Entry]\nIcon=" +
+            kasumi::platform::path::to_logical_utf8(abs_icon) + "\n");
+    auto abs_res = api.client->Get("/v1/profiles/demo/icon", api.headers);
+    ASSERT_TRUE(abs_res);
+    EXPECT_EQ(abs_res->status, 200);
+    EXPECT_EQ(abs_res->get_header_value("Content-Type"), "image/png");
+    EXPECT_EQ(abs_res->body, fake_png);
+
+    auto uri_path = kasumi::platform::path::to_logical_utf8(abs_icon);
+    if (!uri_path.starts_with('/'))
+        uri_path.insert(uri_path.begin(), '/');
+    kasumi::test::write_text(local / ".directory",
+                             "[Desktop Entry]\nIcon=file://" + uri_path + "\n");
+    auto uri_res = api.client->Get("/v1/profiles/demo/icon", api.headers);
+    ASSERT_TRUE(uri_res);
+    EXPECT_EQ(uri_res->status, 200);
+    EXPECT_EQ(uri_res->body, fake_png);
+
+    // Freedesktop theme name resolves under KASUMI_ICON_DIRS and falls back
+    // even when an unresolvable desktop.ini is also present.
+    const auto theme_root = api.workspace->root / "icons";
+    kasumi::test::write_text(theme_root / "breeze" / "places" / "64" /
+                                 "folder-music.svg",
+                             valid_svg);
+    auto icon_dirs_env = kasumi::test::scoped_environment_variable(
+        "KASUMI_ICON_DIRS", kasumi::platform::path::to_utf8(theme_root));
+    auto icon_theme_env = kasumi::test::scoped_environment_variable(
+        "KASUMI_ICON_THEME", "breeze");
+    kasumi::test::write_text(
+        local / "desktop.ini",
+        "[.ShellClassInfo]\nIconResource=missing-only-on-other-os.ico,0\n");
+    kasumi::test::write_text(local / ".directory",
+                             "[Desktop Entry]\nIcon=folder-music\n");
+    auto theme_res = api.client->Get("/v1/profiles/demo/icon", api.headers);
+    ASSERT_TRUE(theme_res);
+    EXPECT_EQ(theme_res->status, 200);
+    EXPECT_EQ(theme_res->get_header_value("Content-Type"), "image/svg+xml");
+    EXPECT_EQ(theme_res->get_header_value("Cache-Control"),
+              "private, no-cache");
+    EXPECT_EQ(theme_res->body, valid_svg);
+
+    // Preview mode=auto returns the folder's .directory icon even while
+    // preset:code is saved.
+    ASSERT_EQ(api.client
+                  ->Patch("/v1/profiles/demo",
+                          api.headers,
+                          Json{{"icon", "preset:code"}}.dump(),
+                          "application/json")
+                  ->status,
+              200);
+    auto preview_auto =
+        api.client->Get("/v1/profiles/demo/icon?mode=auto", api.headers);
+    ASSERT_TRUE(preview_auto);
+    EXPECT_EQ(preview_auto->status, 200);
+    EXPECT_EQ(preview_auto->body, valid_svg);
+    EXPECT_EQ(api.client
+                  ->Patch("/v1/profiles/demo",
+                          api.headers,
+                          Json{{"icon", "auto"}}.dump(),
+                          "application/json")
+                  ->status,
+              200);
+
+    std::filesystem::remove(local / "desktop.ini");
     kasumi::test::write_text(local / "badge.ico",
                              std::string("\x00\x00\x01\x00ICO-BYTES", 13));
     kasumi::test::write_text(local / ".directory",
@@ -1419,12 +1514,14 @@ TEST(WebApiTest, ProfileIconValidationAndSafeFolderIconDetection) {
     EXPECT_TRUE(win_ico->body.starts_with("\x89PNG\r\n\x1a\n"));
 #endif
 
-    // Upload custom icon via Base64 PNG, verify storage & DELETE reset.
-    auto bad_upload =
-        api.client->Post("/v1/profiles/demo/icon",
-                         api.headers,
-                         Json{{"data_base64", "PHN2Zz48L3N2Zz4="}}.dump(),
-                         "application/json");
+    // Reject malicious SVG upload (400), accept safe SVG upload (200).
+    auto bad_upload = api.client->Post(
+        "/v1/profiles/demo/icon",
+        api.headers,
+        Json{
+            {"data_base64", "PHN2Zz48c2NyaXB0PmFsZXJ0KDEpPC9zY3JpcHQ+PC9zdmc+"}}
+            .dump(),
+        "application/json");
     ASSERT_TRUE(bad_upload);
     EXPECT_EQ(bad_upload->status, 400);
 
@@ -1450,6 +1547,19 @@ TEST(WebApiTest, ProfileIconValidationAndSafeFolderIconDetection) {
     EXPECT_EQ(served_custom->get_header_value("Content-Security-Policy"),
               "sandbox; default-src 'none'");
     EXPECT_TRUE(served_custom->body.starts_with("\x89PNG\r\n\x1a\n"));
+
+    // Cloning preserves custom-icon.* files alongside icon metadata.
+    auto cloned_resp = api.client->Post("/v1/profiles/demo/clone",
+                                        api.headers,
+                                        Json{{"name", "demo_clone"}}.dump(),
+                                        "application/json");
+    ASSERT_TRUE(cloned_resp);
+    EXPECT_EQ(cloned_resp->status, 200);
+    auto cloned_icon = api.client->Get(
+        "/v1/profiles/demo_clone/icon?v=" + uploaded_icon, api.headers);
+    ASSERT_TRUE(cloned_icon);
+    EXPECT_EQ(cloned_icon->status, 200);
+    EXPECT_EQ(cloned_icon->body, served_custom->body);
 
     auto deleted_custom = api.client->Delete(
         "/v1/profiles/demo/icon", api.headers, "{}", "application/json");

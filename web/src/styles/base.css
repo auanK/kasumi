@@ -64,6 +64,12 @@ textarea {
   border-color: var(--k-primary);
 }
 
+select option,
+select optgroup {
+  background: var(--k-surface-elevated);
+  color: var(--k-text);
+}
+
 .k-input::placeholder,
 .k-textarea::placeholder {
   color: var(--k-text-faint);
