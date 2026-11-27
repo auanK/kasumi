@@ -1,3 +1,4 @@
+#include "application/history_storage/commit_cache.hpp"
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/reachability.hpp"
 #include "kasumi/test/filesystem.hpp"
@@ -1252,6 +1253,90 @@ TEST(ReachabilityTest,
                           kasumi::test::workspace_root(storage.workspace));
     ASSERT_TRUE(chain.has_value()) << chain.error().detail;
     ASSERT_EQ(chain->size(), 1U);
+}
+
+TEST(ReachabilityTest,
+     PrefetchReportsAsyncProgressAndCommitCacheSkipsRedownload) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("reachability-prefetch-cache");
+    FakeState* state = nullptr;
+    auto transport = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(transport));
+
+    const auto c0 = make_commit(0, {}, "a.txt", "a").value();
+    const auto c1 = make_commit(1, {commit_id(c0)}, "b.txt", "b").value();
+    const auto c2 = make_commit(2, {commit_id(c1)}, "c.txt", "c").value();
+    add_fake_commit(transport, workspace, c0, "c0", false);
+    add_fake_commit(transport, workspace, c1, "c1", false);
+    add_fake_commit(transport, workspace, c2, "c2", true);
+
+    static std::size_t commit_batch_progress_callbacks = 0;
+    commit_batch_progress_callbacks = 0;
+    transport.storage.get_batch =
+        +[](void* ctx, const kasumi::transport::GetBatch& batch)
+            -> kasumi::transport::Result {
+        const auto layout =
+            kasumi::application::history_storage::derive_remote_layout(
+                test_key());
+        const bool is_commits =
+            !batch.source_prefix.empty() &&
+            layout.commits_prefix.starts_with(batch.source_prefix);
+        if (is_commits && batch.on_progress) {
+            ++commit_batch_progress_callbacks;
+            kasumi::transport::TransferProgress tp;
+            tp.objects_completed = 1;
+            tp.total_objects = batch.identifiers.size();
+            batch.on_progress(tp);
+        }
+        auto res = fake_reachability_get_batch(ctx, batch);
+        if (is_commits && batch.on_progress) {
+            kasumi::transport::TransferProgress tp;
+            tp.objects_completed = batch.identifiers.size();
+            tp.total_objects = batch.identifiers.size();
+            batch.on_progress(tp);
+        }
+        return res;
+    };
+
+    auto listed = kasumi::transport::list(transport).value();
+    kasumi::application::history_storage::CommitCache cache;
+    cache.disk_cache_root = kasumi::test::workspace_path(workspace, "cache");
+
+    std::vector<std::pair<std::size_t, std::size_t>> events;
+    const auto first =
+        kasumi::application::history_storage::inventory_reachability(
+            transport,
+            test_key(),
+            listed,
+            kasumi::test::workspace_root(workspace),
+            [&](std::size_t done, std::size_t total) {
+                events.emplace_back(done, total);
+            },
+            &cache);
+    ASSERT_TRUE(first.has_value()) << first.error().detail;
+    EXPECT_EQ(commit_batch_progress_callbacks, 1U);
+    ASSERT_FALSE(events.empty());
+    EXPECT_EQ(events.front(), (std::pair<std::size_t, std::size_t>{0U, 3U}));
+    EXPECT_EQ(events.back(), (std::pair<std::size_t, std::size_t>{3U, 3U}));
+    for (std::size_t i = 1; i < events.size(); ++i) {
+        EXPECT_GE(events[i].first, events[i - 1].first);
+    }
+
+    state->get_batch_count = 0;
+    state->commit_get_count = 0;
+    commit_batch_progress_callbacks = 0;
+    const auto second =
+        kasumi::application::history_storage::inventory_reachability(
+            transport,
+            test_key(),
+            listed,
+            kasumi::test::workspace_root(workspace),
+            {},
+            &cache);
+    ASSERT_TRUE(second.has_value()) << second.error().detail;
+    EXPECT_EQ(state->get_batch_count, 0U);
+    EXPECT_EQ(state->commit_get_count, 0U);
+    EXPECT_EQ(second->reachable_commits, first->reachable_commits);
 }
 
 } // namespace

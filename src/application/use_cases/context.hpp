@@ -20,6 +20,10 @@
 #include <utility>
 #include <vector>
 
+namespace kasumi::application::history_storage {
+struct CommitCache;
+}
+
 namespace kasumi::application::detail {
 
 // Resolved resources for an application execution.
@@ -59,11 +63,13 @@ struct OperationContext {
     std::uint32_t maintenance_flags = 0;
     std::vector<history_storage::activity::LoadedActivity> gc_kept_activities;
     observation::LocalObservationSession* warm_observation = nullptr;
+    history_storage::CommitCache* commit_cache = nullptr;
 };
 
 struct WarmExecutionContext {
     transport::Transport* borrowed_transport = nullptr;
     observation::LocalObservationSession* warm_observation = nullptr;
+    history_storage::CommitCache* commit_cache = nullptr;
     std::function<void()> on_lock_acquired{};
     bool origin_daemon = false;
 };

@@ -137,6 +137,7 @@ struct BarrierCleanup {
                                             "barrier cleanup is unconfirmed")));
         }
         cleanup_started = true;
+        const platform::cancellation::ScopedIgnoreCancellation ignore_cancel;
 
         if (storage == nullptr ||
             !protocol::registration_active(registration)) {
@@ -366,6 +367,7 @@ observe(transport::Transport& storage,
         std::uint32_t effective_min_age_hours,
         std::optional<std::string_view> barrier_identifier,
         const std::filesystem::path& workspace_root,
+        history_storage::CommitCache* commit_cache,
         ProgressState& progress) {
     emit_gc_progress(progress,
                      GarbageCollectStage::Analyzing,
@@ -430,7 +432,8 @@ observe(transport::Transport& storage,
             emit_gc_progress(progress,
                              GarbageCollectStage::Analyzing,
                              GarbageCollectSubStage::AuthenticatingHistory);
-        });
+        },
+        commit_cache);
     if (!history) {
         return std::unexpected(history_error(history.error()));
     }
@@ -861,6 +864,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                                      effective_min_age_hours,
                                      std::nullopt,
                                      workspace_root,
+                                     options.commit_cache,
                                      progress);
         if (!observed_plan) {
             auto err = observed_plan.error();
@@ -1016,6 +1020,7 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                                      effective_min_age_hours,
                                      cleanup.registration.identifier,
                                      workspace_root,
+                                     options.commit_cache,
                                      progress);
         if (!observed_plan) {
             return finish(std::unexpected(observed_plan.error()));

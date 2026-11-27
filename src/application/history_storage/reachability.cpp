@@ -1,5 +1,6 @@
 #include "application/history_storage/reachability.hpp"
 
+#include "application/history_storage/commit_cache.hpp"
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/remote_layout.hpp"
 
@@ -91,7 +92,8 @@ ReachabilityResult inventory_impl(
     std::optional<std::span<const std::string>> identifiers = std::nullopt,
     std::optional<std::span<const epoch::VerifiedEpoch>> verified_epochs =
         std::nullopt,
-    ReachabilityProgressCallback on_progress = {}) {
+    ReachabilityProgressCallback on_progress = {},
+    CommitCache* commit_cache = nullptr) {
     if (!transport::valid(storage)) {
         return std::unexpected(
             detail::error(ErrorCode::InvalidInput, "invalid transport"));
@@ -110,33 +112,45 @@ ReachabilityResult inventory_impl(
         return std::unexpected(listed.error());
     }
 
-    if (auto prefetched =
-            detail::prefetch_commit_batch(storage,
-                                          layout,
-                                          listed->commit_variants,
-                                          (*temporary)->workspace.root,
-                                          2);
-        !prefetched) {
-        return std::unexpected(prefetched.error());
-    }
-
     std::size_t total_commit_variants = 0;
     for (const auto& [unused, references] : listed->commit_variants) {
         static_cast<void>(unused);
         total_commit_variants += references.size();
     }
-    std::size_t processed_commit_variants = 0;
+    std::size_t reported_commit_progress = 0;
     const auto notify_commit_progress = [&](std::size_t done) noexcept {
+        reported_commit_progress = std::max(reported_commit_progress, done);
         if (!on_progress) {
             return;
         }
         try {
-            on_progress(done, total_commit_variants);
+            on_progress(reported_commit_progress, total_commit_variants);
         } catch (...) {
             // Progress reporting cannot alter reachability analysis.
         }
     };
     notify_commit_progress(0);
+
+    transport::TransportProgressCallback prefetch_progress;
+    if (on_progress && total_commit_variants > 0) {
+        prefetch_progress = [&](const transport::TransferProgress& tp) {
+            notify_commit_progress(
+                std::min(tp.objects_completed, total_commit_variants));
+        };
+    }
+    if (auto prefetched =
+            detail::prefetch_commit_batch(storage,
+                                          layout,
+                                          listed->commit_variants,
+                                          (*temporary)->workspace.root,
+                                          2,
+                                          commit_cache,
+                                          std::move(prefetch_progress));
+        !prefetched) {
+        return std::unexpected(prefetched.error());
+    }
+
+    std::size_t processed_commit_variants = 0;
 
     CommitList commits;
     commits.reserve(listed->commit_variants.size() +
@@ -152,7 +166,9 @@ ReachabilityResult inventory_impl(
                                                    key,
                                                    reference,
                                                    (*temporary)->workspace.root,
-                                                   sequence++);
+                                                   sequence++,
+                                                   commit_cache,
+                                                   true);
             if (!loaded) {
                 return std::unexpected(loaded.error());
             }
@@ -180,11 +196,23 @@ ReachabilityResult inventory_impl(
         };
         for (const auto& identifier : listed->identifiers) {
             if (!identifier.starts_with(layout.heads_prefix) &&
-                !parse_commit_object(layout, identifier) &&
-                epoch::parse_object_identifier(layout, identifier) &&
-                identifier.starts_with(layout.epochs_prefix)) {
-                epoch_batch.identifiers.push_back(
-                    identifier.substr(layout.epochs_prefix.size()));
+                !parse_commit_object(layout, identifier)) {
+                auto ep_ref = epoch::parse_object_identifier(layout, identifier);
+                if (ep_ref && identifier.starts_with(layout.epochs_prefix)) {
+                    if (commit_cache != nullptr &&
+                        (lookup_cached_epoch(*commit_cache,
+                                             layout.epochs_prefix,
+                                             *ep_ref)
+                             .has_value() ||
+                         read_cached_sealed_epoch(*commit_cache,
+                                                  layout.epochs_prefix,
+                                                  *ep_ref)
+                             .has_value())) {
+                        continue;
+                    }
+                    epoch_batch.identifiers.push_back(
+                        identifier.substr(layout.epochs_prefix.size()));
+                }
             }
         }
         if (epoch_batch.identifiers.size() >= 2) {
@@ -249,6 +277,14 @@ ReachabilityResult inventory_impl(
                 }
                 continue;
             }
+            if (commit_cache != nullptr) {
+                if (auto cached_epoch = lookup_cached_epoch(
+                        *commit_cache, layout.epochs_prefix, *epoch_reference)) {
+                    loaded_epochs.emplace_back(
+                        identifier, std::move(*cached_epoch));
+                    continue;
+                }
+            }
             std::filesystem::path path;
             std::error_code fs_err;
             const auto prefetched_epoch =
@@ -263,6 +299,27 @@ ReachabilityResult inventory_impl(
             if (has_prefetched) {
                 path = prefetched_epoch;
             } else {
+                if (commit_cache != nullptr) {
+                    if (auto cached_sealed = read_cached_sealed_epoch(
+                            *commit_cache,
+                            layout.epochs_prefix,
+                            *epoch_reference)) {
+                        auto opened_cached = epoch::open(
+                            *cached_sealed, *epoch_reference, key);
+                        if (opened_cached) {
+                            store_cached_epoch(*commit_cache,
+                                               layout.epochs_prefix,
+                                               *opened_cached,
+                                               nullptr);
+                            loaded_epochs.emplace_back(
+                                identifier, std::move(*opened_cached));
+                            continue;
+                        }
+                        evict_cached_epoch(*commit_cache,
+                                           layout.epochs_prefix,
+                                           *epoch_reference);
+                    }
+                }
                 path = (*temporary)->workspace.root /
                        ("epoch-" + std::to_string(sequence++));
                 auto downloaded = detail::download(storage, identifier, path);
@@ -272,12 +329,15 @@ ReachabilityResult inventory_impl(
             }
             auto bytes =
                 detail::read_file(path, epoch::maximum_encoded_size + 64U);
-            if (has_prefetched) {
-                detail::remove_file(path);
-            }
             if (bytes) {
                 auto opened = epoch::open(*bytes, *epoch_reference, key);
                 if (opened) {
+                    if (commit_cache != nullptr) {
+                        store_cached_epoch(*commit_cache,
+                                           layout.epochs_prefix,
+                                           *opened,
+                                           &path);
+                    }
                     loaded_epochs.push_back(
                         std::make_pair(identifier, std::move(*opened)));
                 } else {
@@ -285,6 +345,9 @@ ReachabilityResult inventory_impl(
                 }
             } else {
                 result.unknown_history_objects.push_back(identifier);
+            }
+            if (has_prefetched) {
+                detail::remove_file(path);
             }
         }
     }
@@ -506,14 +569,16 @@ inventory_reachability(transport::Transport& storage,
                        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                        std::span<const std::string> identifiers,
                        const std::filesystem::path& workspace_root,
-                       ReachabilityProgressCallback on_progress) {
+                       ReachabilityProgressCallback on_progress,
+                       CommitCache* commit_cache) {
     return detail::guard_alloc([&] {
         return inventory_impl(storage,
                               key,
                               workspace_root,
                               identifiers,
                               std::nullopt,
-                              std::move(on_progress));
+                              std::move(on_progress),
+                              commit_cache);
     });
 }
 

@@ -101,6 +101,7 @@ describe('IgnoreRulesCard ignore tester & presets', () => {
   })
 })
 
+import { extractJobProgressMeter } from '../utils/jobFormat.js'
 import { useDaemonStream } from '../composables/useDaemonStream.js'
 
 describe('JobProgressPanel & JobsActivityCard feedback', () => {
@@ -145,6 +146,42 @@ describe('JobProgressPanel & JobsActivityCard feedback', () => {
     expect(real.text()).toContain('Real execution')
     expect(real.text()).toContain('25%')
     real.unmount()
+
+    const tMock = (key, params) => `${key}:${JSON.stringify(params || {})}`
+    expect(
+      extractJobProgressMeter(
+        {
+          operation: 'gc',
+          progress: {
+            stage: 'analyzing',
+            sub_stage: 'authenticating_history',
+            commits_processed: 45,
+            commits_total: 100,
+          },
+        },
+        tMock
+      )
+    ).toMatchObject({ current: 45, total: 100, percent: 45 })
+
+    const analyzing = mount(JobProgressPanel, {
+      props: {
+        job: {
+          id: 13,
+          profile: 'Pictures',
+          operation: 'gc',
+          state: 'running',
+          dry_run: false,
+          progress: {
+            stage: 'analyzing',
+            sub_stage: 'authenticating_history',
+            commits_processed: 45,
+            commits_total: 100,
+          },
+        },
+      },
+    })
+    expect(analyzing.text()).toContain('45%')
+    analyzing.unmount()
   })
 
   it('renders inline simulation vs real summary cards and full modal metrics in JobsActivityCard', async () => {

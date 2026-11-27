@@ -11,6 +11,10 @@
 #include <string>
 #include <string_view>
 
+namespace kasumi::application::history_storage {
+struct CommitCache;
+}
+
 namespace kasumi::application::daemon_detail {
 
 struct WebContext {
@@ -20,6 +24,8 @@ struct WebContext {
     std::function<DaemonStatusReport()> status;
     std::function<void()> reload;
     std::function<void(std::string_view, bool)> track_internal_lock;
+    std::function<std::shared_ptr<history_storage::CommitCache>(std::string_view)>
+        commit_cache;
     std::function<std::expected<InspectionResponse, InspectionError>(
         InspectionRequest)>
         inspect;

@@ -394,6 +394,8 @@ std::expected<Response, Error> execute_warm(ExecutionInput input,
                     record.flags |= act.flags;
 
                     if (result.has_value() || context.remote_observed) {
+                        const platform::cancellation::ScopedIgnoreCancellation
+                            ignore_cancel;
                         const auto layout =
                             history_storage::derive_remote_layout(context.key);
                         bool published = false;

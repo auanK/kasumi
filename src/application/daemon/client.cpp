@@ -538,6 +538,9 @@ query_daemon_status(const ExecutionEnvironment& environment,
                         p.value("fast_noop_polls", std::uint64_t{0}),
                     .last_outcome = p.value("last_outcome", std::string{}),
                     .last_error = p.value("last_error", std::string{}),
+                    .busy = p.value("busy", false),
+                    .active_operation =
+                        p.value("active_operation", std::string{}),
                 });
             }
         }

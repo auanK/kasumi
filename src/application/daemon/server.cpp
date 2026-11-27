@@ -628,6 +628,10 @@ void register_daemon_routes(httplib::Server& server,
             [&state](std::string_view name, bool active) {
                 track_internal_profile_lock(state, name, active);
             },
+        .commit_cache =
+            [&state](std::string_view name) {
+                return borrow_warm_commit_cache(state, name);
+            },
         .inspect =
             [&state](InspectionRequest request) {
                 return inspect_web_request(state, std::move(request));

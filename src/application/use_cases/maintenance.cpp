@@ -3,6 +3,7 @@
 #include "application/concurrency.hpp"
 #include "application/detail.hpp"
 #include "application/history_storage/activity.hpp"
+#include "application/history_storage/commit_cache.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/integrity/repack.hpp"
@@ -232,6 +233,14 @@ std::expected<Response, Error> run_fsck(OperationContext& context) {
 
 std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
     std::optional<GarbageCollectProgress> last_progress;
+    std::optional<history_storage::CommitCache> cli_commit_cache;
+    auto* effective_commit_cache = context.commit_cache;
+    if (effective_commit_cache == nullptr && !context.app_data_dir.empty()) {
+        cli_commit_cache.emplace();
+        cli_commit_cache->disk_cache_root =
+            context.app_data_dir / "cache" / "commits";
+        effective_commit_cache = &*cli_commit_cache;
+    }
     const integrity::GarbageCollectOptions options{
         .dry_run = context.dry_run,
         .min_orphan_age =
@@ -244,6 +253,7 @@ std::expected<Response, Error> run_garbage_collect(OperationContext& context) {
             context.machine_identity.has_value()
                 ? std::optional<std::string>{context.machine_identity->name}
                 : std::nullopt,
+        .commit_cache = effective_commit_cache,
     };
     if (context.dry_run) {
         const auto journal_paths = sync::journal::make_paths(

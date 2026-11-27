@@ -512,6 +512,7 @@ release_registration(RegistrationState& registration) {
     if (!registration_active(registration)) {
         return {};
     }
+    const platform::cancellation::ScopedIgnoreCancellation ignore_cancel;
     auto* storage = std::exchange(registration.storage, nullptr);
     if (registration.verify_owner) {
         auto matches = registration_matches(*storage, registration);

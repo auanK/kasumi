@@ -17,6 +17,10 @@
 #include <string>
 #include <vector>
 
+namespace kasumi::application::history_storage {
+struct CommitCache;
+}
+
 namespace kasumi::application::integrity {
 
 // Failure categories for integrity routines.
@@ -68,6 +72,9 @@ struct GarbageCollectOptions {
     // Periodic barrier exclusivity revalidation cadence during Applying.
     std::size_t apply_revalidation_batch_interval = 16;
     std::chrono::seconds apply_revalidation_time_interval{30};
+    // Optional commit/epoch cache to avoid re-downloading immutable history
+    // objects during GC analysis.
+    history_storage::CommitCache* commit_cache = nullptr;
 };
 
 // Counts produced by global-plan garbage collection.

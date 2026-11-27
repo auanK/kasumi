@@ -123,7 +123,8 @@ prefetch_commit_batch(transport::Transport& storage,
                       const ObjectMap& commit_variants,
                       const std::filesystem::path& destination_root,
                       std::size_t min_objects = 1,
-                      CommitCache* commit_cache = nullptr);
+                      CommitCache* commit_cache = nullptr,
+                      transport::TransportProgressCallback on_progress = {});
 
 // Verifies remote SHA-256 against local_hash; returns false when the backend
 // does not support remote physical hashing.

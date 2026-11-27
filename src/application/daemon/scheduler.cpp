@@ -3,6 +3,7 @@
 #include "application/daemon/fast_poll.hpp"
 #include "application/daemon/profile_state.hpp"
 #include "application/daemon/session_state.hpp"
+#include "application/daemon/web_jobs.hpp"
 #include "application/detail.hpp"
 #include "application/execute.hpp"
 #include "application/observation/file_metadata.hpp"
@@ -1146,6 +1147,12 @@ void scheduler_loop(DaemonSessionState& state) {
 
         // 3. Scan hot SoA scheduling array contiguously up to
         // max_parallel_profiles and max_parallel_per_remote.
+        lock.unlock();
+        const auto active_web_jobs = active_job_operations(state.web_jobs);
+        lock.lock();
+        if (state.stop_requested) {
+            break;
+        }
         struct ScheduledJob {
             std::string name;
             std::optional<std::string> rclone_remote;
@@ -1194,6 +1201,11 @@ void scheduler_loop(DaemonSessionState& state) {
                 continue;
             }
             const auto& name = state.profiles.names[idx];
+            if (std::ranges::any_of(active_web_jobs, [&](const auto& pair) {
+                    return pair.first == name;
+                })) {
+                continue;
+            }
             const auto remote_name = daemon_detail::extract_rclone_remote_name(
                 cold.config.remote_dir);
             if (hot.immediate_sync_requested) {
