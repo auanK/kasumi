@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.30.1]
+
+### Added
+
+- **Username-Only Editing (`POST /v1/auth/username` & Account Modal Tabs)**:
+  - Split account credential management in `ChangePasswordModal.vue` into dedicated **Change username** and **Change password** tabs (`en` and `pt-BR`).
+  - Changing the login username now requires only the new username, current password, and a second confirmation dialog (`ConfirmModal`), keeping active browser sessions logged in instead of forcing new/confirm password entry or signing the session out.
+- **Syncthing-Style Web UI Network Listener Settings (`GET/PATCH /v1/web/config` & `kasumi web listen`)**:
+  - Added listener configuration endpoints (`/v1/web/config`) and a **Web UI & network access** section under **System -> Service** with one-click presets (`127.0.0.1` loopback, `0.0.0.0` all interfaces for Tailscale/LAN/servers, or custom bind address), port, comma-separated `allowed_hosts` (`*.domain` wildcards), and `skip_host_check`.
+  - Added `kasumi web listen <addr[:port]> [--allow-host <host>] [--skip-host-check | --no-skip-host-check]` to configure `web.json` directly from the terminal while failing closed when setting a non-loopback bind before a Web UI password exists.
+  - When bound to `0.0.0.0` or `::`, direct IPv4/IPv6 IP literals (such as Tailscale `100.x.y.z` and LAN addresses) are accepted automatically in `Host`.
+
+### Changed
+
+- **Persistent Local Web UI Sessions (`web-sessions.json`)**:
+  - Extended browser session lifetimes to **7 days** idle / **30 days** maximum (`Max-Age=2592000`) and persisted BLAKE2b-hashed session records across daemon restarts in owner-only `web-sessions.json` (`0600`), while still revoking all sessions on explicit logout (`POST /v1/auth/logout`) or password changes.
+
 ## [0.30.0]
 
 ### Added
