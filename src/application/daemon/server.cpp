@@ -197,6 +197,36 @@ inspect_web_request(DaemonSessionState& state, InspectionRequest request) {
     return inspect_profile();
 }
 
+std::expected<RemoteTreePair, InspectionError>
+inspect_commit_pair_web_request(DaemonSessionState& state,
+                                std::string_view name,
+                                std::string from_commit_id,
+                                std::string to_commit_id) {
+    if (!runtime::is_valid_profile_name(name))
+        throw daemon_detail::HttpError{400, "invalid profile name"};
+    auto config = runtime::load_profile(
+        state.environment.app_data_dir / "config.toml", name);
+    if (!config)
+        throw daemon_detail::HttpError{404, "profile unavailable"};
+    auto lease = borrow_warm_transport(state, name, *config);
+    auto commit_cache = borrow_warm_commit_cache(state, name);
+    auto result = inspect_commit_pair(
+        {.request = InspectionRequest{.operation = InspectionOperation::RemoteTree,
+                                      .profile_name = std::string{name}},
+         .credentials = web_credentials(state, name),
+         .environment = state.environment,
+         .stop_token = state.master_stop.get_token(),
+         .transport_cache = &lease.transport,
+         .commit_cache = commit_cache.get()},
+        std::move(from_commit_id),
+        std::move(to_commit_id));
+    if (result) {
+        return_warm_transport(
+            state, name, lease.generation, std::move(lease.transport));
+    }
+    return result;
+}
+
 std::expected<std::shared_ptr<RemoteDownloadSession>, InspectionError>
 open_web_download(DaemonSessionState& state, InspectionRequest request) {
     const auto name = request.profile_name;
@@ -491,6 +521,15 @@ void register_daemon_routes(httplib::Server& server,
         .inspect =
             [&state](InspectionRequest request) {
                 return inspect_web_request(state, std::move(request));
+            },
+        .inspect_commit_pair =
+            [&state](std::string_view profile_name,
+                     std::string from_commit_id,
+                     std::string to_commit_id) {
+                return inspect_commit_pair_web_request(state,
+                                                       profile_name,
+                                                       std::move(from_commit_id),
+                                                       std::move(to_commit_id));
             },
         .open_download =
             [&state](InspectionRequest request) {

@@ -2750,4 +2750,74 @@ TEST(ApplicationInspectionTest,
               InspectionErrorCode::RemotePathIsDirectory);
 }
 
+TEST(ApplicationInspectionTest,
+     InspectCommitPairObservesHistoryOnceAndReturnsBothTrees) {
+    auto fixture = make_local_storage();
+    const auto workspace =
+        kasumi::test::make_temp_workspace("application-inspect-pair");
+    write_profile(workspace,
+                  kasumi::test::workspace_path(fixture.workspace, "storage"));
+
+    auto c1 = make_commit(0, {}, "a.txt", "v1").value();
+    auto p1 = publish(fixture, c1);
+
+    Snapshot second_tree = c1.tree;
+    second_tree.rows[1].hash = kasumi::hasher::hash_string("v2");
+    second_tree.rows[1].size = 2;
+    second_tree.rows.push_back(kasumi::NodeRow{
+        .path = "b.txt",
+        .hash = kasumi::hasher::hash_string("new"),
+        .size = 3,
+        .mtime = {},
+        .is_directory = false,
+    });
+    kasumi::finalize_snapshot(second_tree);
+    auto c2 = kasumi::history::make_commit(1, {p1.head.commit_id}, second_tree)
+                  .value();
+    auto p2 = publish(fixture, c2);
+
+    auto pair = kasumi::application::inspect_commit_pair(
+        kasumi::application::InspectionInput{
+            .request = InspectionRequest{InspectionOperation::RemoteTree,
+                                         "demo"},
+            .credentials = Credentials{MasterKeyHex{test_key_hex()}},
+            .environment = ExecutionEnvironment{
+                kasumi::test::workspace_path(workspace, "app")},
+        },
+        p1.head.commit_id,
+        p2.head.commit_id);
+    ASSERT_TRUE(pair.has_value()) << pair.error().detail;
+    EXPECT_EQ(pair->from.commit_id, p1.head.commit_id);
+    EXPECT_EQ(pair->from.entries.size(), 1U);
+    EXPECT_EQ(pair->from.entries[0].path, "a.txt");
+    EXPECT_EQ(pair->to.commit_id, p2.head.commit_id);
+    EXPECT_EQ(pair->to.entries.size(), 2U);
+
+    auto invalid = kasumi::application::inspect_commit_pair(
+        kasumi::application::InspectionInput{
+            .request = InspectionRequest{InspectionOperation::RemoteTree,
+                                         "demo"},
+            .credentials = Credentials{MasterKeyHex{test_key_hex()}},
+            .environment = ExecutionEnvironment{
+                kasumi::test::workspace_path(workspace, "app")},
+        },
+        "not-a-commit-id",
+        p2.head.commit_id);
+    ASSERT_FALSE(invalid.has_value());
+    EXPECT_EQ(invalid.error().code, InspectionErrorCode::InvalidRequest);
+
+    auto missing = kasumi::application::inspect_commit_pair(
+        kasumi::application::InspectionInput{
+            .request = InspectionRequest{InspectionOperation::RemoteTree,
+                                         "demo"},
+            .credentials = Credentials{MasterKeyHex{test_key_hex()}},
+            .environment = ExecutionEnvironment{
+                kasumi::test::workspace_path(workspace, "app")},
+        },
+        std::string(64, '0'),
+        p2.head.commit_id);
+    ASSERT_FALSE(missing.has_value());
+    EXPECT_EQ(missing.error().code, InspectionErrorCode::RemoteCommitNotFound);
+}
+
 } // namespace

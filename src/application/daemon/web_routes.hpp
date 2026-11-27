@@ -20,6 +20,9 @@ struct WebContext {
     std::function<std::expected<InspectionResponse, InspectionError>(
         InspectionRequest)>
         inspect;
+    std::function<std::expected<RemoteTreePair, InspectionError>(
+        std::string_view, std::string, std::string)>
+        inspect_commit_pair;
     std::function<std::expected<std::shared_ptr<RemoteDownloadSession>,
                                 InspectionError>(InspectionRequest)>
         open_download;

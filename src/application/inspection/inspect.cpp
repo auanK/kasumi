@@ -2980,6 +2980,139 @@ void finish_inspection(InspectionInput& input, InspectionContext& context) {
     wipe_credentials(input.credentials);
 }
 
+std::expected<RemoteTreePair, InspectionError>
+run_commit_pair_inspection(InspectionInput& input,
+                           InspectionContext& context,
+                           transport::Transport* cache,
+                           std::string_view from_commit_id,
+                           std::string_view to_commit_id) {
+    const auto operation = InspectionOperation::RemoteTree;
+    const auto& req = input.request;
+    const auto invalid = [&](std::string msg) {
+        return fail(
+            operation, InspectionErrorCode::InvalidRequest, std::move(msg));
+    };
+    if (!history::valid_commit_id(from_commit_id) ||
+        !history::valid_commit_id(to_commit_id)) {
+        return invalid("requested commit ID is invalid");
+    }
+    if (req.transfer_concurrency &&
+        (*req.transfer_concurrency < 1U ||
+         *req.transfer_concurrency >
+             maximum_experimental_content_concurrency)) {
+        return invalid("--concurrency must be between 1 and 16");
+    }
+    if (req.bandwidth_limit) {
+        if (const auto valid_bw =
+                transport::validate_bandwidth_limit(*req.bandwidth_limit);
+            !valid_bw) {
+            return invalid(valid_bw.error().message);
+        }
+    }
+
+    auto runtime_data = runtime::resolve(input.environment.app_data_dir,
+                                         req.profile_name,
+                                         runtime::AccessMode::ReadOnly,
+                                         false);
+    if (!runtime_data) {
+        return std::unexpected(
+            map_runtime_error(operation, runtime_data.error()));
+    }
+    context.runtime = *runtime_data;
+
+    const ScopedContentConcurrency concurrency_scope{resolve_content_concurrency(
+        req.transfer_concurrency, context.runtime.transfer_concurrency)};
+
+    auto key =
+        resolve_key(input.credentials, context.runtime, context.key, operation);
+    if (!key) {
+        return std::unexpected(key.error());
+    }
+    context.layout = history_storage::derive_remote_layout(context.key);
+    context.hints =
+        make_observation_hints(context.runtime, operation, context.layout);
+
+    if (cache && transport::valid(*cache)) {
+        context.storage = transport::borrow_transport(*cache);
+    } else {
+        auto opened = transport::open_transport(
+            context.runtime.storage_location,
+            transport::TransportOptions{
+                .forbidden_executable_root = context.runtime.local_dir,
+                .rclone_config = context.runtime.rclone_config,
+                .bandwidth_limit = req.bandwidth_limit
+                                       ? req.bandwidth_limit
+                                       : context.runtime.bandwidth_limit,
+            });
+        if (!opened) {
+            return fail(operation,
+                        InspectionErrorCode::RuntimeFailure,
+                        "failed to open remote storage");
+        }
+        if (cache) {
+            *cache = std::move(*opened);
+            context.storage = transport::borrow_transport(*cache);
+        } else {
+            context.storage = std::move(*opened);
+        }
+    }
+
+    ProgressMeter meter(input.on_progress,
+                        context.storage,
+                        static_cast<bool>(input.on_progress));
+    context.progress = &meter;
+    begin_progress_phase(meter, Activity::Listing);
+
+    auto workspace = platform::create_workspace("remote-inspection");
+    if (!workspace) {
+        return obs_fail(operation, "failed to prepare remote observation");
+    }
+    context.workspace = std::move(*workspace);
+
+    const auto active_commit_cache = resolve_active_commit_cache(
+        input.commit_cache, input.environment.app_data_dir);
+    begin_progress_phase(meter, Activity::Authenticating);
+    auto observed = observation::history::observe(
+        context.storage,
+        context.key,
+        context.workspace->root,
+        false,
+        nullptr,
+        context.hints.trusted_marker_identifiers,
+        true,
+        false,
+        active_commit_cache.ptr);
+    if (!observed) {
+        return obs_fail(operation, "failed to observe remote history");
+    }
+
+    meter.work.store(observed->reachable_commits.size(),
+                     std::memory_order_relaxed);
+    auto heads = make_head_infos(*observed, operation);
+    if (!heads) {
+        return std::unexpected(heads.error());
+    }
+
+    InspectionRequest from_req{.operation = operation,
+                               .profile_name = req.profile_name,
+                               .commit_id = std::string{from_commit_id}};
+    InspectionRequest to_req{.operation = operation,
+                             .profile_name = req.profile_name,
+                             .commit_id = std::string{to_commit_id}};
+    auto from_report = make_tree_report(from_req, *observed, *heads, operation);
+    if (!from_report) {
+        return std::unexpected(from_report.error());
+    }
+    auto to_report = make_tree_report(to_req, *observed, *heads, operation);
+    if (!to_report) {
+        return std::unexpected(to_report.error());
+    }
+    return RemoteTreePair{
+        .from = std::move(*from_report),
+        .to = std::move(*to_report),
+    };
+}
+
 } // namespace
 
 std::expected<InventoryAuditReport, std::string>
@@ -3064,6 +3197,36 @@ inspect(InspectionInput input) {
         result = run_inspection(input, context, input.transport_cache);
     } catch (...) {
         result = std::unexpected(error(input.request.operation,
+                                       InspectionErrorCode::RuntimeFailure,
+                                       "exception during remote inspection"));
+    }
+    finish_inspection(input, context);
+    platform::perf_trace::finish("total inspection", total_trace);
+    platform::perf_trace::report(result ? "inspection-success"
+                                        : "inspection-error");
+    return result;
+}
+
+std::expected<RemoteTreePair, InspectionError>
+inspect_commit_pair(InspectionInput input,
+                    std::string from_commit_id,
+                    std::string to_commit_id) {
+    const platform::cancellation::ScopedStopToken stop_scope{input.stop_token};
+    platform::perf_trace::reset();
+    const auto total_trace = platform::perf_trace::begin();
+    InspectionContext context;
+    std::expected<RemoteTreePair, InspectionError> result =
+        std::unexpected(error(InspectionOperation::RemoteTree,
+                              InspectionErrorCode::RuntimeFailure,
+                              "remote inspection failure"));
+    try {
+        result = run_commit_pair_inspection(input,
+                                            context,
+                                            input.transport_cache,
+                                            from_commit_id,
+                                            to_commit_id);
+    } catch (...) {
+        result = std::unexpected(error(InspectionOperation::RemoteTree,
                                        InspectionErrorCode::RuntimeFailure,
                                        "exception during remote inspection"));
     }
