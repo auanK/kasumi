@@ -93,7 +93,8 @@ observe(transport::Transport& storage,
         bool audit_content_objects,
         const history_storage::KnownHistoryFrontier* frontier = nullptr,
         std::span<const std::string> trusted_marker_identifiers = {},
-        bool complete_history = false);
+        bool complete_history = false,
+        bool full_physical_inventory = true);
 
 } // namespace kasumi::application::observation::history
 

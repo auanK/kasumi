@@ -9,6 +9,7 @@
 #include "state_storage/database.hpp"
 
 #include <algorithm>
+#include <array>
 #include <exception>
 #include <iterator>
 #include <limits>
@@ -173,6 +174,86 @@ validate_resolution(const kasumi::history::Resolution& resolution,
     return ancestral_heads(marked, resolution.heads);
 }
 
+std::string_view trim_trailing_slash(std::string_view prefix) noexcept {
+    while (!prefix.empty() && prefix.back() == '/') {
+        prefix.remove_suffix(1);
+    }
+    return prefix;
+}
+
+void append_prefixed_identifiers(std::vector<std::string>& out,
+                                 std::string_view prefix,
+                                 std::span<const std::string> entries) {
+    out.reserve(out.size() + entries.size());
+    for (const auto& name : entries) {
+        if (name.starts_with(prefix)) {
+            out.push_back(name);
+        } else {
+            out.push_back(std::string{prefix} + name);
+        }
+    }
+}
+
+std::expected<std::vector<std::string>, Error>
+list_history_prefixes(transport::Transport& storage,
+                      const history_storage::RemoteLayout& layout) {
+    const std::array<std::string_view, 3> prefixes{
+        layout.heads_prefix, layout.commits_prefix, layout.epochs_prefix};
+    transport::ControlReadBatchRequest batch_req;
+    batch_req.list_prefixes.reserve(prefixes.size());
+    for (const auto prefix : prefixes) {
+        batch_req.list_prefixes.emplace_back(trim_trailing_slash(prefix));
+    }
+
+    auto batch = transport::control_read_batch(storage, batch_req);
+    if (batch) {
+        if (batch->listings.size() == prefixes.size()) {
+            std::vector<std::string> combined;
+            for (std::size_t i = 0; i < prefixes.size(); ++i) {
+                append_prefixed_identifiers(
+                    combined, prefixes[i], batch->listings[i]);
+            }
+            return combined;
+        }
+    } else if (batch.error().code != transport::ErrorCode::Unsupported) {
+        return std::unexpected(Error{
+            .code = ErrorCode::TransportFailure,
+            .detail = transport::describe(batch.error()),
+        });
+    }
+
+    if (storage.storage.list_prefix != nullptr) {
+        std::vector<std::string> combined;
+        for (const auto prefix : prefixes) {
+            auto listed = transport::list(storage, trim_trailing_slash(prefix));
+            if (!listed) {
+                if (listed.error().code ==
+                    transport::ErrorCode::StorageNotFound) {
+                    continue;
+                }
+                return std::unexpected(Error{
+                    .code = ErrorCode::TransportFailure,
+                    .detail = transport::describe(listed.error()),
+                });
+            }
+            append_prefixed_identifiers(combined, prefix, *listed);
+        }
+        return combined;
+    }
+
+    auto listing = transport::list(storage);
+    if (!listing) {
+        if (listing.error().code == transport::ErrorCode::StorageNotFound) {
+            return std::vector<std::string>{};
+        }
+        return std::unexpected(Error{
+            .code = ErrorCode::TransportFailure,
+            .detail = transport::describe(listing.error()),
+        });
+    }
+    return std::move(*listing);
+}
+
 } // namespace
 
 namespace detail {
@@ -198,7 +279,8 @@ ObserveResult observe(transport::Transport& storage,
                       bool audit_content_objects_requested,
                       const history_storage::KnownHistoryFrontier* frontier,
                       std::span<const std::string> trusted_marker_identifiers,
-                      bool complete_history) {
+                      bool complete_history,
+                      bool full_physical_inventory) {
     try {
         if (!transport::valid(storage)) {
             return std::unexpected(invalid_input("invalid transport"));
@@ -210,7 +292,8 @@ ObserveResult observe(transport::Transport& storage,
         }
 
         std::optional<std::vector<std::string>> remote_inventory;
-        if (audit_content_objects_requested || complete_history) {
+        if (audit_content_objects_requested ||
+            (complete_history && full_physical_inventory)) {
             auto listing = transport::list(storage);
             if (!listing) {
                 if (listing.error().code ==
@@ -225,6 +308,13 @@ ObserveResult observe(transport::Transport& storage,
             } else {
                 remote_inventory = std::move(*listing);
             }
+        } else if (complete_history) {
+            auto listing = list_history_prefixes(
+                storage, history_storage::derive_remote_layout(key));
+            if (!listing) {
+                return std::unexpected(listing.error());
+            }
+            remote_inventory = std::move(*listing);
         }
 
         StorageView result;

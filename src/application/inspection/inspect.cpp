@@ -622,10 +622,10 @@ resolve_destination(const InspectionRequest& request,
 }
 
 template <typename Writer>
-std::expected<void, InspectionError> write_and_publish_private_file(
-    const std::filesystem::path& destination,
-    InspectionOperation operation,
-    Writer&& writer) {
+std::expected<void, InspectionError>
+write_and_publish_private_file(const std::filesystem::path& destination,
+                               InspectionOperation operation,
+                               Writer&& writer) {
     auto token = platform::random::hex_id();
     if (!token) {
         return dest_fail(operation, "failed to prepare destination");
@@ -666,20 +666,22 @@ std::expected<void, InspectionError> install_remote_file(
             -> std::expected<void, InspectionError> {
             std::array<std::uint8_t, 65536> buffer{};
             std::expected<void, InspectionError> write_error;
-            const auto streamed = platform::private_storage::stream_regular_file(
-                plaintext,
-                buffer,
-                [&](std::span<const std::uint8_t> chunk) {
-                    if (!platform::private_storage::write_private_file(
-                            private_tmp, chunk.data(), chunk.size())) {
-                        write_error = dest_fail(
-                            operation, "failed to prepare destination file");
-                        return false;
-                    }
-                    return true;
-                },
-                std::nullopt,
-                slice);
+            const auto streamed =
+                platform::private_storage::stream_regular_file(
+                    plaintext,
+                    buffer,
+                    [&](std::span<const std::uint8_t> chunk) {
+                        if (!platform::private_storage::write_private_file(
+                                private_tmp, chunk.data(), chunk.size())) {
+                            write_error =
+                                dest_fail(operation,
+                                          "failed to prepare destination file");
+                            return false;
+                        }
+                        return true;
+                    },
+                    std::nullopt,
+                    slice);
             if (!write_error) {
                 return write_error;
             }
@@ -731,11 +733,11 @@ struct RemoteDownloadTarget {
     std::optional<std::filesystem::path> cached_plaintext;
 };
 
-RemoteDownloadTarget make_download_target(
-    const NodeRow& row,
-    const history::StorageManifest& manifest,
-    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-    std::optional<std::string> commit_id) {
+RemoteDownloadTarget
+make_download_target(const NodeRow& row,
+                     const history::StorageManifest& manifest,
+                     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                     std::optional<std::string> commit_id) {
     RemoteDownloadTarget target{
         .file_hash = row.hash,
         .file_size = row.size,
@@ -820,8 +822,7 @@ std::expected<RemoteFileReport, InspectionError> download_target_to_destination(
 
     if (target.pack_hash) {
         const auto encrypted = workspace_root / "remote-pack.enc";
-        auto downloaded =
-            transport::get(storage, target.content_id, encrypted);
+        auto downloaded = transport::get(storage, target.content_id, encrypted);
         if (!downloaded) {
             const bool not_found =
                 downloaded.error().code == transport::ErrorCode::ObjectNotFound;
@@ -844,8 +845,8 @@ std::expected<RemoteFileReport, InspectionError> download_target_to_destination(
                         InspectionErrorCode::RemoteContentInvalid,
                         "remote pack failed cryptographic authentication");
         }
-        const auto member =
-            crypto::pack::find_verified_pack_member(*verified, target.file_hash);
+        const auto member = crypto::pack::find_verified_pack_member(
+            *verified, target.file_hash);
         if (!member || member->size() != target.file_size) {
             return fail(operation,
                         InspectionErrorCode::RemoteContentInvalid,
@@ -934,8 +935,7 @@ std::expected<RemoteFileReport, InspectionError> download_target_to_destination(
                 }
             }
             if (!cached_hit) {
-                const auto cid =
-                    crypto::content_identifier(key, chunk.hash);
+                const auto cid = crypto::content_identifier(key, chunk.hash);
                 chunk_plain =
                     verified_chunks != nullptr
                         ? (workspace_root / ("chunk-" + chex + ".plain"))
@@ -946,9 +946,8 @@ std::expected<RemoteFileReport, InspectionError> download_target_to_destination(
                     static_cast<void>(
                         platform::private_storage::remove_private_file_if_owned(
                             *private_out));
-                    const bool not_found =
-                        downloaded.error().code ==
-                        transport::ErrorCode::ObjectNotFound;
+                    const bool not_found = downloaded.error().code ==
+                                           transport::ErrorCode::ObjectNotFound;
                     return fail(
                         operation,
                         not_found
@@ -1018,7 +1017,7 @@ std::expected<RemoteFileReport, InspectionError> download_target_to_destination(
             begin_progress_phase(*progress, Activity::Verifying, 1);
         }
         if (!slice && !crypto::content::verify_file(
-                         plaintext, target.logical_hash, target.file_size)) {
+                          plaintext, target.logical_hash, target.file_size)) {
             return fail(operation,
                         InspectionErrorCode::RemoteContentInvalid,
                         "assembled remote content failed verification");
@@ -1028,8 +1027,7 @@ std::expected<RemoteFileReport, InspectionError> download_target_to_destination(
     } else {
         const auto encrypted = workspace_root / "remote-content.enc";
         std::error_code rm_ec;
-        auto downloaded =
-            transport::get(storage, target.content_id, encrypted);
+        auto downloaded = transport::get(storage, target.content_id, encrypted);
         if (!downloaded) {
             std::filesystem::remove(encrypted, rm_ec);
             const bool not_found =
@@ -1044,10 +1042,10 @@ std::expected<RemoteFileReport, InspectionError> download_target_to_destination(
         if (progress) {
             begin_progress_phase(*progress, Activity::Verifying, 1);
         }
-        const bool verified =
-            crypto::decrypt_file(encrypted, plaintext, key) &&
-            crypto::content::verify_file(
-                plaintext, target.logical_hash, target.file_size);
+        const bool verified = crypto::decrypt_file(encrypted, plaintext, key) &&
+                              crypto::content::verify_file(plaintext,
+                                                           target.logical_hash,
+                                                           target.file_size);
         std::filesystem::remove(encrypted, rm_ec);
         if (!verified) {
             std::filesystem::remove(plaintext, rm_ec);
@@ -2776,7 +2774,8 @@ run_inspection(InspectionInput& input,
             ? nullptr
             : (context.hints.frontier ? &*context.hints.frontier : nullptr),
         context.hints.trusted_marker_identifiers,
-        need_complete_history);
+        need_complete_history,
+        audit_content_objects);
     if (!observed) {
         return obs_fail(operation, "failed to observe remote history");
     }
@@ -3059,7 +3058,8 @@ struct RemoteDownloadSessionState {
     std::deque<std::string> verified_chunk_order;
 };
 
-void destroy_remote_download_session(RemoteDownloadSessionState* state) noexcept {
+void destroy_remote_download_session(
+    RemoteDownloadSessionState* state) noexcept {
     if (!state) {
         return;
     }
@@ -3090,7 +3090,8 @@ open_remote_download(InspectionInput input) {
             return fail(
                 operation, InspectionErrorCode::InvalidRequest, std::move(msg));
         };
-        if (!req.logical_path || !kasumi::valid_logical_path(*req.logical_path)) {
+        if (!req.logical_path ||
+            !kasumi::valid_logical_path(*req.logical_path)) {
             return invalid("remote path is invalid");
         }
         if (req.head_commit_id || req.content_id || req.epoch_selector ||
@@ -3223,11 +3224,11 @@ open_remote_download(InspectionInput input) {
             }
         }
         session.state->stat = std::move(stat);
-        session.state->target = make_download_target(
-            *row,
-            *resolved->commit.manifest,
-            session.state->key,
-            resolved->commit.commit_id);
+        session.state->target =
+            make_download_target(*row,
+                                 *resolved->commit.manifest,
+                                 session.state->key,
+                                 resolved->commit.commit_id);
         return session;
     } catch (...) {
         return fail(operation,
