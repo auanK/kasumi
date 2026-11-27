@@ -258,8 +258,10 @@ Snapshot revision_tree(const WebContext& ctx, const InspectionRequest& query) {
 }
 
 Json revision_diff(const WebContext& ctx, const httplib::Request& req) {
+    const bool bypass_commit_cache = req.has_param("refresh");
     InspectionRequest query{.operation = Op::RemoteTree,
-                            .profile_name = req.matches[1].str()};
+                            .profile_name = req.matches[1].str(),
+                            .bypass_commit_cache = bypass_commit_cache};
     query.commit_id = req.get_param_value("from");
     auto other = query;
     other.commit_id = req.get_param_value("to");
@@ -271,8 +273,10 @@ Json revision_diff(const WebContext& ctx, const httplib::Request& req) {
     Snapshot from;
     Snapshot to;
     if (ctx.inspect_commit_pair) {
-        auto pair = ctx.inspect_commit_pair(
-            query.profile_name, *query.commit_id, *other.commit_id);
+        auto pair = ctx.inspect_commit_pair(query.profile_name,
+                                            *query.commit_id,
+                                            *other.commit_id,
+                                            bypass_commit_cache);
         if (!pair) {
             throw_inspection_error(pair.error());
         }
@@ -358,6 +362,8 @@ void register_remote_routes(httplib::Server& server, const WebContext& ctx) {
                 query.head_commit_id = req.get_param_value("head");
             if (req.has_param("path"))
                 query.logical_path = req.get_param_value("path");
+            if (req.has_param("refresh"))
+                query.bypass_commit_cache = true;
             auto report = run(ctx, std::move(query));
             if (auto* tree = std::get_if<RemoteTreeReport>(&report.payload);
                 tree && req.has_param("prefix")) {

@@ -343,6 +343,38 @@ std::vector<std::string> head_ids(const std::vector<RemoteHeadInfo>& heads) {
 }
 
 std::expected<RemoteTreeReport, InspectionError>
+make_tree_report_from_commit(const kasumi::history::LoadedCommit& loaded,
+                             InspectionOperation operation) {
+    if (!valid_commit_snapshot(loaded)) {
+        return obs_fail(operation,
+                        "logical head does not have a valid observed commit");
+    }
+    const auto& tree = loaded.commit.tree;
+    const auto& root = tree.rows.front();
+    RemoteTreeReport report{
+        .history_present = true,
+        .commit_id = loaded.id,
+        .height = loaded.commit.height,
+        .created_at = loaded.commit.created_at,
+        .root_hash = hash_hex(root.hash),
+        .total_bytes = root.size,
+    };
+    report.entries.reserve(tree.rows.size() - 1);
+    for (std::size_t index = 1; index < tree.rows.size(); ++index) {
+        const auto& row = tree.rows[index];
+        report.entries.push_back(RemoteTreeEntry{
+            .path = row.path,
+            .type = row.is_directory ? RemoteTreeEntryType::Directory
+                                     : RemoteTreeEntryType::File,
+            .logical_hash = hash_hex(row.hash),
+            .size = row.size,
+        });
+    }
+    count_tree_entries(tree, report.directory_count, report.file_count);
+    return report;
+}
+
+std::expected<RemoteTreeReport, InspectionError>
 make_tree_report(const InspectionRequest& request,
                  const observation::history::StorageView& observed,
                  const std::vector<RemoteHeadInfo>& heads,
@@ -394,32 +426,15 @@ make_tree_report(const InspectionRequest& request,
         return fail(operation,
                     InspectionErrorCode::RemoteCommitNotFound,
                     "commit is not reachable");
-    if (selected == observed.reachable_commits.end() ||
-        !valid_commit_snapshot(*selected)) {
+    if (selected == observed.reachable_commits.end()) {
         return obs_fail(operation,
                         "logical head does not have a valid observed commit");
     }
-
-    const auto& tree = selected->commit.tree;
-    const auto& root = tree.rows.front();
-    report.commit_id = selected->id;
-    report.height = selected->commit.height;
-    report.created_at = selected->commit.created_at;
-    report.root_hash = hash_hex(root.hash);
-    report.total_bytes = root.size;
-    report.entries.reserve(tree.rows.size() - 1);
-    for (std::size_t index = 1; index < tree.rows.size(); ++index) {
-        const auto& row = tree.rows[index];
-        report.entries.push_back(RemoteTreeEntry{
-            .path = row.path,
-            .type = row.is_directory ? RemoteTreeEntryType::Directory
-                                     : RemoteTreeEntryType::File,
-            .logical_hash = hash_hex(row.hash),
-            .size = row.size,
-        });
+    auto built = make_tree_report_from_commit(*selected, operation);
+    if (built) {
+        built->history_present = observed.history_present;
     }
-    count_tree_entries(tree, report.directory_count, report.file_count);
-    return report;
+    return built;
 }
 
 RemoteCommitInfo make_commit_info(const kasumi::history::LoadedCommit& loaded,
@@ -2734,6 +2749,19 @@ run_inspection(InspectionInput& input,
     }
     context.layout = history_storage::derive_remote_layout(context.key);
 
+    if (operation == Op::RemoteTree && input.allow_cached_commit &&
+        !req.bypass_commit_cache && req.commit_id && !req.head_commit_id &&
+        history::valid_commit_id(*req.commit_id) &&
+        input.commit_cache != nullptr) {
+        if (auto cached = history_storage::lookup_cached_commit_by_id(
+                *input.commit_cache,
+                context.layout.commits_prefix,
+                *req.commit_id)) {
+            return make_response(
+                operation, make_tree_report_from_commit(*cached, operation));
+        }
+    }
+
     context.hints =
         make_observation_hints(context.runtime, operation, context.layout);
 
@@ -3030,6 +3058,35 @@ run_commit_pair_inspection(InspectionInput& input,
         return std::unexpected(key.error());
     }
     context.layout = history_storage::derive_remote_layout(context.key);
+    if (input.allow_cached_commit && !req.bypass_commit_cache &&
+        input.commit_cache != nullptr) {
+        auto from_cached = history_storage::lookup_cached_commit_by_id(
+            *input.commit_cache,
+            context.layout.commits_prefix,
+            from_commit_id);
+        auto to_cached = from_cached
+                             ? history_storage::lookup_cached_commit_by_id(
+                                   *input.commit_cache,
+                                   context.layout.commits_prefix,
+                                   to_commit_id)
+                             : std::nullopt;
+        if (from_cached && to_cached) {
+            auto from_report =
+                make_tree_report_from_commit(*from_cached, operation);
+            if (!from_report) {
+                return std::unexpected(from_report.error());
+            }
+            auto to_report =
+                make_tree_report_from_commit(*to_cached, operation);
+            if (!to_report) {
+                return std::unexpected(to_report.error());
+            }
+            return RemoteTreePair{
+                .from = std::move(*from_report),
+                .to = std::move(*to_report),
+            };
+        }
+    }
     context.hints =
         make_observation_hints(context.runtime, operation, context.layout);
 

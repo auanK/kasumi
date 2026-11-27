@@ -249,7 +249,8 @@ inspect_web_request(DaemonSessionState& state, InspectionRequest request) {
                                .environment = state.environment,
                                .stop_token = state.master_stop.get_token(),
                                .transport_cache = &lease.transport,
-                               .commit_cache = commit_cache.get()});
+                               .commit_cache = commit_cache.get(),
+                               .allow_cached_commit = true});
         if (result) {
             return_warm_transport(
                 state, name, lease.generation, std::move(lease.transport));
@@ -272,7 +273,8 @@ std::expected<RemoteTreePair, InspectionError>
 inspect_commit_pair_web_request(DaemonSessionState& state,
                                 std::string_view name,
                                 std::string from_commit_id,
-                                std::string to_commit_id) {
+                                std::string to_commit_id,
+                                bool bypass_commit_cache) {
     if (!runtime::is_valid_profile_name(name))
         throw daemon_detail::HttpError{400, "invalid profile name"};
     auto config = runtime::load_profile(
@@ -283,12 +285,15 @@ inspect_commit_pair_web_request(DaemonSessionState& state,
     auto commit_cache = borrow_warm_commit_cache(state, name);
     auto result = inspect_commit_pair(
         {.request = InspectionRequest{.operation = InspectionOperation::RemoteTree,
-                                      .profile_name = std::string{name}},
+                                      .profile_name = std::string{name},
+                                      .bypass_commit_cache =
+                                          bypass_commit_cache},
          .credentials = web_credentials(state, name),
          .environment = state.environment,
          .stop_token = state.master_stop.get_token(),
          .transport_cache = &lease.transport,
-         .commit_cache = commit_cache.get()},
+         .commit_cache = commit_cache.get(),
+         .allow_cached_commit = true},
         std::move(from_commit_id),
         std::move(to_commit_id));
     if (result) {
@@ -630,11 +635,13 @@ void register_daemon_routes(httplib::Server& server,
         .inspect_commit_pair =
             [&state](std::string_view profile_name,
                      std::string from_commit_id,
-                     std::string to_commit_id) {
+                     std::string to_commit_id,
+                     bool bypass_commit_cache) {
                 return inspect_commit_pair_web_request(state,
                                                        profile_name,
                                                        std::move(from_commit_id),
-                                                       std::move(to_commit_id));
+                                                       std::move(to_commit_id),
+                                                       bypass_commit_cache);
             },
         .open_download =
             [&state](InspectionRequest request) {

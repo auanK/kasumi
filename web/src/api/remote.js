@@ -51,10 +51,18 @@ async function retryInspection(request, signal) {
   }
 }
 
-function inspect(profile, url, signal, { cacheable = true, refresh = false, priority = 'normal', tier = 'head' } = {}) {
-  return readInspection(profile, url,
-    (sharedSignal) => retryInspection(() => apiRequest(url, { signal: sharedSignal }), sharedSignal),
-    { signal, cacheable, refresh, priority, tier })
+function inspect(
+  profile,
+  url,
+  signal,
+  { cacheable = true, refresh = false, priority = 'normal', tier = 'head', requestUrl = url } = {},
+) {
+  return readInspection(
+    profile,
+    url,
+    (sharedSignal) => retryInspection(() => apiRequest(requestUrl, { signal: sharedSignal }), sharedSignal),
+    { signal, cacheable, refresh, priority, tier },
+  )
 }
 
 export function cachedRemoteReading(profile, kind) {
@@ -74,9 +82,15 @@ export function cachedRemoteTree(profile, query) {
 }
 
 export function fetchRemoteTree(profile, { commit, head, prefix, signal, refresh } = {}) {
-  return inspect(profile, treeUrl(profile, { commit, head, prefix }), signal, {
+  const url = treeUrl(profile, { commit, head, prefix })
+  const requestUrl =
+    refresh && commit && !head
+      ? treeUrl(profile, { commit, head, prefix, refresh: 1 })
+      : url
+  return inspect(profile, url, signal, {
     refresh,
     tier: commit ? 'immutable' : 'head',
+    requestUrl,
   })
 }
 
