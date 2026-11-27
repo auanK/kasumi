@@ -865,4 +865,59 @@ TEST(MaintenanceProtocolV024Test,
     EXPECT_FALSE(state->objects.contains(id2));
 }
 
+TEST(ManualWriterRemovalTest,
+     RemoveWritersRemovesMultipleInBatchReportsAbsentAndChecksBarriers) {
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    const auto layout = history::derive_remote_layout(test_key());
+    const std::string w1 = layout.writers_prefix + std::string(32, '1');
+    const std::string w2 = layout.writers_prefix + std::string(32, '2');
+    const std::string missing_w = layout.writers_prefix + std::string(32, '3');
+    const std::string kept = layout.writers_prefix + std::string(32, '4');
+
+    state->objects[w1] = {'a'};
+    state->objects[w2] = {'b'};
+    state->objects[kept] = {'k'};
+
+    // Blocked when a barrier is present.
+    const std::string barrier_id =
+        layout.barriers_prefix + std::string(32, 'f');
+    state->objects[barrier_id] = {'x'};
+    const std::vector<std::string> blocked_targets{w1};
+    const auto blocked =
+        protocol::remove_writers(storage, layout, blocked_targets);
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.error().code, protocol::ErrorCode::Blocked);
+    state->objects.erase(barrier_id);
+
+    // Invalid IDs fail before mutating anything.
+    const std::vector<std::string> invalid_targets{w1, "bad/id"};
+    const auto invalid =
+        protocol::remove_writers(storage, layout, invalid_targets);
+    ASSERT_FALSE(invalid.has_value());
+    EXPECT_EQ(invalid.error().code, protocol::ErrorCode::InvalidInput);
+    EXPECT_TRUE(state->objects.contains(w1));
+
+    // Batch removal deduplicates, removes w1 & w2, reports missing_w as
+    // already_absent, and leaves unrelated markers untouched.
+    std::vector<std::pair<std::size_t, std::size_t>> steps;
+    const std::vector<std::string> targets{w1, w2, w1, missing_w};
+    const auto batch = protocol::remove_writers(
+        storage,
+        layout,
+        targets,
+        [&](std::size_t done, std::size_t total, std::string_view) {
+            steps.emplace_back(done, total);
+        });
+    ASSERT_TRUE(batch.has_value()) << batch.error().detail;
+    EXPECT_EQ(batch->removed, (std::vector<std::string>{w1, w2}));
+    EXPECT_EQ(batch->already_absent, (std::vector<std::string>{missing_w}));
+    EXPECT_FALSE(state->objects.contains(w1));
+    EXPECT_FALSE(state->objects.contains(w2));
+    EXPECT_TRUE(state->objects.contains(kept));
+    ASSERT_FALSE(steps.empty());
+    EXPECT_EQ(steps.back(), (std::pair<std::size_t, std::size_t>{3U, 3U}));
+}
+
 } // namespace

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -141,6 +142,21 @@ read_marker_metadata(transport::Transport& storage,
 std::expected<void, Error> remove_writer(transport::Transport& storage,
                                          const RemoteLayout& layout,
                                          std::string_view identifier);
+
+struct WriterBatchRemovalResult {
+    std::vector<std::string> removed;
+    std::vector<std::string> already_absent;
+};
+
+// Removes each explicitly selected writer marker after checking that no
+// maintenance barrier is present, reporting idempotent misses cleanly.
+std::expected<WriterBatchRemovalResult, Error> remove_writers(
+    transport::Transport& storage,
+    const RemoteLayout& layout,
+    std::span<const std::string> identifiers,
+    const std::function<void(std::size_t done,
+                               std::size_t total,
+                               std::string_view current)>& on_step = {});
 
 enum class BarrierRemovalOutcome : std::uint8_t {
     Removed,

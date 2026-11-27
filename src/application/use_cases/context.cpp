@@ -42,6 +42,7 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
     output.allow_empty_local = input.request.allow_empty_local;
     output.gc_min_age_hours = input.request.gc_min_age_hours;
     output.writer_identifier = input.request.writer_identifier;
+    output.writer_identifiers = input.request.writer_identifiers;
     output.barrier_identifier = input.request.barrier_identifier;
     output.on_progress = input.on_progress;
     const auto invalid_request = [&](std::string_view detail) {
@@ -494,6 +495,8 @@ void wipe_operation(OperationContext& context) noexcept {
     context.app_data_dir.clear();
     context.machine_identity.reset();
     context.accepted_commit_id.clear();
+    context.writer_identifier.clear();
+    context.writer_identifiers.clear();
     context.recovered_transaction = false;
     context.sync_mutated = false;
     context.remote_observed = false;

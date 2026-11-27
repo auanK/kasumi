@@ -36,7 +36,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_ONLY_SERIALIZE(InventoryAuditReport,
                                                   unknown_objects)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_ONLY_SERIALIZE(ManualWriterRemovalCompleted,
-                                                  identifier)
+                                                  identifier,
+                                                  removed_identifiers,
+                                                  already_absent_identifiers)
 
 NLOHMANN_JSON_SERIALIZE_ENUM(BarrierRemovalOutcome,
                              {{BarrierRemovalOutcome::Removed, "removed"},

@@ -336,9 +336,24 @@ std::expected<Response, Error> execute_warm(ExecutionInput input,
                         } else if (const auto* rwc = std::get_if<
                                        ManualWriterRemovalCompleted>(
                                        &result->data)) {
+                            act.metric_primary =
+                                rwc->removed_identifiers.size();
+                            act.metric_secondary =
+                                rwc->already_absent_identifiers.size();
+                            std::string label = rwc->identifier;
+                            if (label.empty() &&
+                                !rwc->removed_identifiers.empty()) {
+                                label =
+                                    rwc->removed_identifiers.size() == 1U
+                                        ? rwc->removed_identifiers.front()
+                                        : ("batch:" +
+                                           std::to_string(
+                                               rwc->removed_identifiers
+                                                   .size()));
+                            }
                             act.detail =
                                 history_storage::activity::sanitize_text(
-                                    rwc->identifier,
+                                    label,
                                     history_storage::activity::
                                         maximum_detail_bytes);
                         } else if (const auto* rbc = std::get_if<

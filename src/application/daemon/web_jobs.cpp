@@ -18,12 +18,15 @@ std::int64_t now_unix_seconds() noexcept {
 Json compact_job_summary(const WebJob& job) {
     if (!job.result.is_object())
         return Json(nullptr);
-    static constexpr std::array<const char*, 31> kSummaryKeys{
+    static constexpr std::array<const char*, 34> kSummaryKeys{
         "error",
         "warning",
         "dry_run",
         "actionable",
         "published",
+        "identifier",
+        "removed_identifiers",
+        "already_absent_identifiers",
         "checked_objects",
         "checked_plaintext_bytes",
         "wire_download_bytes",
@@ -110,10 +113,26 @@ job_request(Operation operation, const std::string& name, const Json& body) {
                     unsigned_job_field(body, "transfer_concurrency");
             break;
         case Operation::RemoveWriter:
-            request.writer_identifier = body.at("writer_id").get<std::string>();
-            if (!history_storage::valid_writer_identifier(
-                    request.writer_identifier))
-                throw HttpError{400, "invalid writer identifier"};
+            if (body.contains("writer_ids")) {
+                const auto& ids = body.at("writer_ids");
+                if (!ids.is_array() || ids.empty() || ids.size() > 256U)
+                    throw HttpError{400, "invalid writer identifiers"};
+                request.writer_identifiers.reserve(ids.size());
+                for (const auto& entry : ids) {
+                    if (!entry.is_string())
+                        throw HttpError{400, "invalid writer identifier"};
+                    auto id = entry.get<std::string>();
+                    if (!history_storage::valid_writer_identifier(id))
+                        throw HttpError{400, "invalid writer identifier"};
+                    request.writer_identifiers.push_back(std::move(id));
+                }
+            } else {
+                request.writer_identifier =
+                    body.at("writer_id").get<std::string>();
+                if (!history_storage::valid_writer_identifier(
+                        request.writer_identifier))
+                    throw HttpError{400, "invalid writer identifier"};
+            }
             break;
         case Operation::RemoveBarrier:
             request.confirm_abandoned = body.value("confirm_abandoned", false);
@@ -182,7 +201,19 @@ void run_job(const WebContext& ctx,
                          p);
                      {
                          std::lock_guard lock(jobs.mutex);
-                         jobs.rows.at(id).progress = std::move(update);
+                         auto& existing = jobs.rows.at(id).progress;
+                         if (update.is_object() && existing.is_object()) {
+                             if (!update.contains("stage") &&
+                                 existing.contains("stage")) {
+                                 update["stage"] = existing.at("stage");
+                             }
+                             if (!update.contains("sub_stage") &&
+                                 existing.contains("sub_stage")) {
+                                 update["sub_stage"] =
+                                     existing.at("sub_stage");
+                             }
+                         }
+                         existing = std::move(update);
                      }
                      if (on_change)
                          on_change();

@@ -1775,4 +1775,42 @@ TEST(WebApiTest, RemoteThumbnailFallsBackToVaultAndSavesClickedPreviewThumbnail)
 #endif
 }
 
+TEST(WebApiTest, RemoveWriterBatchRemovesMultipleAndReportsAlreadyAbsent) {
+    auto api = start_api();
+    create(api);
+    const auto remote =
+        kasumi::platform::path::to_utf8(api.workspace->root / "remote");
+    auto storage = kasumi::transport::open_transport(remote);
+    ASSERT_TRUE(storage);
+    ASSERT_TRUE(kasumi::transport::initialize(*storage));
+    const auto stage = api.workspace->root / "writer-batch-stage";
+    ASSERT_TRUE(std::filesystem::create_directory(stage));
+    kasumi::crypto::Key key{};
+    key.fill(0x77);
+    namespace hs = app::history_storage;
+    namespace protocol = hs::maintenance_protocol;
+    const auto layout = hs::derive_remote_layout(key);
+
+    auto w1 = protocol::register_writer(*storage, layout, stage);
+    auto w2 = protocol::register_writer(*storage, layout, stage);
+    ASSERT_TRUE(w1 && w2);
+    const std::string absent_id = layout.writers_prefix + std::string(32, 'e');
+    const std::string route = "/v1/maintenance/demo/remove-writer";
+
+    post(api, route, {{"writer_ids", Json::array()}}, 400);
+    post(api, route, {{"writer_ids", {"not-valid"}}}, 400);
+
+    const auto batch = job_result(
+        api,
+        route,
+        {{"writer_ids", {w1->identifier, w2->identifier, absent_id}}});
+    EXPECT_EQ(batch.at("removed_identifiers"),
+              Json({w1->identifier, w2->identifier}));
+    EXPECT_EQ(batch.at("already_absent_identifiers"), Json({absent_id}));
+    EXPECT_EQ(kasumi::transport::presence(*storage, w1->identifier).value(),
+              kasumi::transport::Presence::Absent);
+    EXPECT_EQ(kasumi::transport::presence(*storage, w2->identifier).value(),
+              kasumi::transport::Presence::Absent);
+}
+
 } // namespace

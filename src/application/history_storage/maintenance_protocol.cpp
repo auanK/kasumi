@@ -3,6 +3,7 @@
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "crypto/physical_hash.hpp"
+#include "platform/cancellation.hpp"
 #include "platform/machine.hpp"
 #include "platform/path.hpp"
 #include "platform/random.hpp"
@@ -13,6 +14,7 @@
 #include <ranges>
 #include <span>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 
 namespace kasumi::application::history_storage::maintenance_protocol {
@@ -789,6 +791,112 @@ std::expected<void, Error> remove_writer(transport::Transport& storage,
                                      "writer marker remains listed"));
     }
     return {};
+}
+
+std::expected<WriterBatchRemovalResult, Error>
+remove_writers(transport::Transport& storage,
+               const RemoteLayout& layout,
+               std::span<const std::string> identifiers,
+               const std::function<void(std::size_t done,
+                                          std::size_t total,
+                                          std::string_view current)>& on_step) {
+    if (!transport::valid(storage) || identifiers.empty()) {
+        return std::unexpected(
+            error(ErrorCode::InvalidInput, "invalid writer marker identifiers"));
+    }
+
+    std::vector<std::string> unique_ids;
+    unique_ids.reserve(identifiers.size());
+    std::unordered_set<std::string> seen;
+    seen.reserve(identifiers.size());
+    for (const auto& id : identifiers) {
+        if (!valid_writer_identifier(layout, id)) {
+            return std::unexpected(error(ErrorCode::InvalidInput,
+                                         "invalid writer marker identifier"));
+        }
+        if (seen.insert(id).second) {
+            unique_ids.push_back(id);
+        }
+    }
+
+    auto snapshot = read_control_snapshot(storage, layout, false);
+    if (!snapshot) {
+        return std::unexpected(snapshot.error());
+    }
+    if (any_barrier_present(*snapshot)) {
+        return std::unexpected(
+            error(ErrorCode::Blocked,
+                  "maintenance barrier is present; writer removal is blocked"));
+    }
+
+    auto writers = active_writers(storage, layout);
+    if (!writers) {
+        return std::unexpected(writers.error());
+    }
+    std::unordered_set<std::string> listed(writers->begin(), writers->end());
+
+    WriterBatchRemovalResult result;
+    const auto total = unique_ids.size();
+    for (std::size_t index = 0; index < total; ++index) {
+        if (platform::cancellation::requested()) {
+            return std::unexpected(error(ErrorCode::TransportFailure,
+                                         "operation cancelled by user"));
+        }
+        const auto& id = unique_ids[index];
+        if (on_step) {
+            on_step(index, total, id);
+        }
+        if (!listed.contains(id)) {
+            result.already_absent.push_back(id);
+            continue;
+        }
+        auto present = transport::presence(storage, id);
+        if (!present) {
+            return std::unexpected(transport_error(present.error()));
+        }
+        if (*present != transport::Presence::Present) {
+            result.already_absent.push_back(id);
+            continue;
+        }
+        auto removed = transport::remove(storage, id);
+        if (!removed) {
+            return std::unexpected(transport_error(removed.error()));
+        }
+        if (*removed != transport::Removal::Removed) {
+            result.already_absent.push_back(id);
+            continue;
+        }
+        present = transport::presence(storage, id);
+        if (!present) {
+            return std::unexpected(transport_error(present.error()));
+        }
+        if (*present != transport::Presence::Absent) {
+            return std::unexpected(
+                error(ErrorCode::VerificationFailure,
+                      "writer marker remains after removal"));
+        }
+        result.removed.push_back(id);
+    }
+    if (on_step) {
+        on_step(total, total, {});
+    }
+
+    if (!result.removed.empty()) {
+        writers = active_writers(storage, layout);
+        if (!writers) {
+            return std::unexpected(writers.error());
+        }
+        const std::unordered_set<std::string> removed_set(result.removed.begin(),
+                                                          result.removed.end());
+        for (const auto& remaining : *writers) {
+            if (removed_set.contains(remaining)) {
+                return std::unexpected(
+                    error(ErrorCode::VerificationFailure,
+                          "writer marker remains listed"));
+            }
+        }
+    }
+    return result;
 }
 
 std::expected<BarrierRemovalResult, Error>
