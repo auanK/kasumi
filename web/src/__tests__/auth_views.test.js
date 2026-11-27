@@ -1,7 +1,9 @@
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import ChangePasswordModal from '../auth/ChangePasswordModal.vue'
 import LoginView from '../auth/LoginView.vue'
 import SetupView from '../auth/SetupView.vue'
+import { useAuth } from '../composables/useAuth.js'
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({ replace: vi.fn() }),
@@ -64,5 +66,82 @@ describe('LoginView', () => {
     await new Promise((r) => setTimeout(r, 0))
 
     expect(wrapper.find('[role="alert"]').exists()).toBe(true)
+  })
+})
+
+describe('ChangePasswordModal', () => {
+  it('updates username with current password and second confirmation without password change fields', async () => {
+    const { auth } = useAuth()
+    auth.authenticated = true
+    auth.username = 'admin'
+
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      Response.json({ username: 'kauan' })
+    )
+
+    const wrapper = mount(ChangePasswordModal, {
+      props: { open: true },
+      global: { stubs: { Teleport: true } },
+    })
+
+    expect(wrapper.find('#change-username-form').exists()).toBe(true)
+    expect(wrapper.find('input[autocomplete="new-password"]').exists()).toBe(false)
+
+    await wrapper.get('#change-username-form input[autocomplete="username"]').setValue('kauan')
+    await wrapper.get('#change-username-form input[autocomplete="current-password"]').setValue('secret1234')
+    await wrapper.get('#change-username-form').trigger('submit.prevent')
+
+    expect(fetch).not.toHaveBeenCalled()
+    const dialogs = wrapper.findAll('[role="dialog"]')
+    expect(dialogs).toHaveLength(2)
+    expect(dialogs[1].text()).toContain('kauan')
+
+    await dialogs[1].get('button.k-btn--primary').trigger('click')
+    await flushPromises()
+
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fetch.mock.calls[0][0]).toContain('/v1/auth/username')
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({
+      current_password: 'secret1234',
+      username: 'kauan',
+    })
+    expect(auth.authenticated).toBe(true)
+    expect(auth.username).toBe('kauan')
+    wrapper.unmount()
+  })
+
+  it('changes password in the password tab without resetting username field and revokes session', async () => {
+    const { auth } = useAuth()
+    auth.authenticated = true
+    auth.username = 'kauan'
+
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      Response.json({ configured: true })
+    )
+
+    const wrapper = mount(ChangePasswordModal, {
+      props: { open: true },
+      global: { stubs: { Teleport: true } },
+    })
+
+    await wrapper.findAll('button[role="tab"]')[1].trigger('click')
+    expect(wrapper.find('#change-pw-form').exists()).toBe(true)
+    expect(wrapper.find('input[autocomplete="username"]').exists()).toBe(false)
+
+    await wrapper.get('#pw-current').setValue('secret1234')
+    await wrapper.get('#pw-next').setValue('new-secret-99')
+    await wrapper.get('#pw-confirm').setValue('new-secret-99')
+    await wrapper.get('#change-pw-form').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.find('[role="alert"]').exists() ? wrapper.find('[role="alert"]').text() : '').toBe('')
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fetch.mock.calls[0][0]).toContain('/v1/auth/password')
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({
+      current_password: 'secret1234',
+      password: 'new-secret-99',
+    })
+    expect(auth.authenticated).toBe(false)
+    wrapper.unmount()
   })
 })

@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
@@ -39,8 +40,10 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <atomic>
+// clang-format off
 #include <windows.h>
 #include <shellapi.h>
+// clang-format on
 #else
 #include <signal.h>
 #include <unistd.h>
@@ -239,23 +242,20 @@ int run(int argc, char* argv[]) {
         sanitized[3].front() != '-' && sanitized[2] != "autostart" &&
         sanitized[2] != "run";
     const bool supports_daemon_full =
-        is_daemon_sub &&
-        (sanitized[2] == "status" || sanitized[2] == "logs");
+        is_daemon_sub && (sanitized[2] == "status" || sanitized[2] == "logs");
     const bool supports_command_full =
-        (has_profile_arg &&
-         (cmd == "sync" || cmd == "status" || cmd == "repack" ||
-          cmd == "show")) ||
+        (has_profile_arg && (cmd == "sync" || cmd == "status" ||
+                             cmd == "repack" || cmd == "show")) ||
         cmd == "list" || is_bare_overview || is_logs_cmd || is_start_cmd;
     const bool supports_remote_full =
         is_remote_sub && (sanitized[2] == "summary" || sanitized[2] == "log");
     const bool supports_full =
         supports_command_full || supports_remote_full || supports_daemon_full;
     const std::size_t full_start_index =
-        is_bare_overview
-            ? 1U
-            : ((cmd == "list" || is_logs_cmd || is_start_cmd)
-                   ? 2U
-                   : (supports_remote_full ? 4U : 3U));
+        is_bare_overview ? 1U
+                         : ((cmd == "list" || is_logs_cmd || is_start_cmd)
+                                ? 2U
+                                : (supports_remote_full ? 4U : 3U));
 
     const bool supports_quiet =
         is_bare_overview || is_logs_cmd || is_start_cmd || is_stop_cmd ||
@@ -269,17 +269,16 @@ int run(int argc, char* argv[]) {
         is_gc_subcommand || is_profile_subcommand || is_ignore_subcommand ||
         is_conflicts_subcommand || is_remote_sub || is_daemon_sub;
     const std::size_t quiet_start_index =
-        is_bare_overview
-            ? 1U
-            : ((cmd == "list" || cmd == "web" ||
-                (cmd == "diagnostics" && !has_profile_arg) ||
-                is_logs_cmd || is_start_cmd || is_stop_cmd)
-                   ? 2U
-                   : ((is_gc_subcommand || is_profile_subcommand ||
-                       is_ignore_subcommand || is_conflicts_subcommand ||
-                       is_remote_sub)
-                          ? 4U
-                          : 3U));
+        is_bare_overview ? 1U
+                         : ((cmd == "list" || cmd == "web" ||
+                             (cmd == "diagnostics" && !has_profile_arg) ||
+                             is_logs_cmd || is_start_cmd || is_stop_cmd)
+                                ? 2U
+                                : ((is_gc_subcommand || is_profile_subcommand ||
+                                    is_ignore_subcommand ||
+                                    is_conflicts_subcommand || is_remote_sub)
+                                       ? 4U
+                                       : 3U));
 
     const bool supports_remote_summary_or_writers =
         is_remote_sub &&
@@ -305,8 +304,8 @@ int run(int argc, char* argv[]) {
         is_bare_overview
             ? 1U
             : ((cmd == "list" || cmd == "web" ||
-                (cmd == "diagnostics" && !has_profile_arg) ||
-                is_logs_cmd || is_start_cmd || is_stop_cmd)
+                (cmd == "diagnostics" && !has_profile_arg) || is_logs_cmd ||
+                is_start_cmd || is_stop_cmd)
                    ? 2U
                    : ((is_profile_subcommand || is_ignore_subcommand ||
                        is_conflicts_subcommand ||
@@ -526,8 +525,7 @@ int run(int argc, char* argv[]) {
     const auto environment = application::default_execution_environment();
 
     if (std::holds_alternative<OverviewInvocation>(*parse_result)) {
-        const int code =
-            run_overview_command(environment, full, quiet, json);
+        const int code = run_overview_command(environment, full, quiet, json);
         return json ? code
                     : log_text_entry(
                           {.status = code == 0 ? "OK" : "ERROR",
@@ -537,6 +535,222 @@ int run(int argc, char* argv[]) {
     }
 
     if (const auto* web_inv = std::get_if<WebInvocation>(&*parse_result)) {
+        if (web_inv->configure_listen) {
+            auto current = application::read_web_listener_config(environment);
+            if (!current) {
+                if (json) {
+                    return present_json_daemon_error(
+                        "web listen", "", current.error(), elapsed());
+                }
+                return finish(present(current.error()));
+            }
+            application::WebListenerConfig next = *current;
+            const std::string_view addr =
+                web_inv->listen_address.value_or(std::string{});
+            auto parse_port_str =
+                [](std::string_view raw) -> std::optional<int> {
+                if (raw.empty()) {
+                    return std::nullopt;
+                }
+                int port_val = -1;
+                const auto [end, ec] = std::from_chars(
+                    raw.data(), raw.data() + raw.size(), port_val);
+                if (ec != std::errc{} || end != raw.data() + raw.size() ||
+                    port_val < 0 || port_val > 65535) {
+                    return std::nullopt;
+                }
+                return port_val;
+            };
+            bool valid_addr = !addr.empty();
+            if (valid_addr && addr.starts_with('[')) {
+                const auto close = addr.find(']');
+                if (close == std::string_view::npos || close <= 1) {
+                    valid_addr = false;
+                } else {
+                    next.bind = std::string{addr.substr(1, close - 1)};
+                    const auto tail = addr.substr(close + 1);
+                    if (!tail.empty()) {
+                        if (!tail.starts_with(':')) {
+                            valid_addr = false;
+                        } else if (const auto p =
+                                       parse_port_str(tail.substr(1))) {
+                            next.port = *p;
+                        } else {
+                            valid_addr = false;
+                        }
+                    }
+                }
+            } else if (valid_addr && std::ranges::count(addr, ':') == 1) {
+                const auto colon = addr.find(':');
+                next.bind = std::string{addr.substr(0, colon)};
+                if (const auto p = parse_port_str(addr.substr(colon + 1))) {
+                    next.port = *p;
+                } else {
+                    valid_addr = false;
+                }
+            } else if (valid_addr) {
+                next.bind = std::string{addr};
+            }
+            if (!valid_addr) {
+                const application::DaemonError err{
+                    .code = application::DaemonErrorCode::ConfigFailure,
+                    .detail = "invalid listen address or port",
+                };
+                if (json) {
+                    return present_json_daemon_error(
+                        "web listen", "", err, elapsed());
+                }
+                return finish(present(err));
+            }
+            if (!web_inv->allow_hosts.empty()) {
+                next.allowed_hosts = web_inv->allow_hosts;
+            }
+            if (web_inv->skip_host_check.has_value()) {
+                next.skip_host_check = *web_inv->skip_host_check;
+            }
+            const auto saved =
+                application::write_web_listener_config(environment, next);
+            if (!saved) {
+                if (json) {
+                    return present_json_daemon_error(
+                        "web listen", "", saved.error(), elapsed());
+                }
+                return finish(present(saved.error()));
+            }
+            const bool daemon_up = application::is_daemon_running(environment);
+            if (json) {
+                nlohmann::json out{
+                    {"command", "web listen"},
+                    {"status", "ok"},
+                    {"bind", saved->bind},
+                    {"port", saved->port},
+                    {"allowed_hosts", saved->allowed_hosts},
+                    {"skip_host_check", saved->skip_host_check},
+                    {"restart_required", daemon_up},
+                };
+                std::println("{}", out.dump());
+                return 0;
+            }
+            if (!quiet) {
+                print_ok_line(std::format("Web UI listener configured on {}:{}",
+                                          saved->bind,
+                                          saved->port));
+                if (daemon_up) {
+                    std::println(
+                        "Restart the daemon ('kasumi stop && kasumi start') "
+                        "to apply the new listener settings.");
+                }
+            }
+            return 0;
+        }
+        if (web_inv->configure_listen) {
+            auto current = application::read_web_listener_config(environment);
+            if (!current) {
+                if (json) {
+                    return present_json_daemon_error(
+                        "web listen", "", current.error(), elapsed());
+                }
+                return finish(present(current.error()));
+            }
+            application::WebListenerConfig next = *current;
+            const std::string_view addr =
+                web_inv->listen_address.value_or(std::string{});
+            auto parse_port_str =
+                [](std::string_view raw) -> std::optional<int> {
+                if (raw.empty()) {
+                    return std::nullopt;
+                }
+                int port_val = -1;
+                const auto [end, ec] = std::from_chars(
+                    raw.data(), raw.data() + raw.size(), port_val);
+                if (ec != std::errc{} || end != raw.data() + raw.size() ||
+                    port_val < 0 || port_val > 65535) {
+                    return std::nullopt;
+                }
+                return port_val;
+            };
+            bool valid_addr = !addr.empty();
+            if (valid_addr && addr.starts_with('[')) {
+                const auto close = addr.find(']');
+                if (close == std::string_view::npos || close <= 1) {
+                    valid_addr = false;
+                } else {
+                    next.bind = std::string{addr.substr(1, close - 1)};
+                    const auto tail = addr.substr(close + 1);
+                    if (!tail.empty()) {
+                        if (!tail.starts_with(':')) {
+                            valid_addr = false;
+                        } else if (const auto p =
+                                       parse_port_str(tail.substr(1))) {
+                            next.port = *p;
+                        } else {
+                            valid_addr = false;
+                        }
+                    }
+                }
+            } else if (valid_addr && std::ranges::count(addr, ':') == 1) {
+                const auto colon = addr.find(':');
+                next.bind = std::string{addr.substr(0, colon)};
+                if (const auto p = parse_port_str(addr.substr(colon + 1))) {
+                    next.port = *p;
+                } else {
+                    valid_addr = false;
+                }
+            } else if (valid_addr) {
+                next.bind = std::string{addr};
+            }
+            if (!valid_addr) {
+                const application::DaemonError err{
+                    .code = application::DaemonErrorCode::ConfigFailure,
+                    .detail = "invalid listen address or port",
+                };
+                if (json) {
+                    return present_json_daemon_error(
+                        "web listen", "", err, elapsed());
+                }
+                return finish(present(err));
+            }
+            if (!web_inv->allow_hosts.empty()) {
+                next.allowed_hosts = web_inv->allow_hosts;
+            }
+            if (web_inv->skip_host_check.has_value()) {
+                next.skip_host_check = *web_inv->skip_host_check;
+            }
+            const auto saved =
+                application::write_web_listener_config(environment, next);
+            if (!saved) {
+                if (json) {
+                    return present_json_daemon_error(
+                        "web listen", "", saved.error(), elapsed());
+                }
+                return finish(present(saved.error()));
+            }
+            const bool daemon_up = application::is_daemon_running(environment);
+            if (json) {
+                nlohmann::json out{
+                    {"command", "web listen"},
+                    {"status", "ok"},
+                    {"bind", saved->bind},
+                    {"port", saved->port},
+                    {"allowed_hosts", saved->allowed_hosts},
+                    {"skip_host_check", saved->skip_host_check},
+                    {"restart_required", daemon_up},
+                };
+                std::println("{}", out.dump());
+                return 0;
+            }
+            if (!quiet) {
+                print_ok_line(std::format("Web UI listener configured on {}:{}",
+                                          saved->bind,
+                                          saved->port));
+                if (daemon_up) {
+                    std::println(
+                        "Restart the daemon ('kasumi stop && kasumi start') "
+                        "to apply the new listener settings.");
+                }
+            }
+            return 0;
+        }
         if (web_inv->set_password) {
             std::string password = credentials::read_secret(
                 "KASUMI_WEB_PASSWORD",
@@ -639,12 +853,14 @@ int run(int argc, char* argv[]) {
         }
         if (!web_inv->no_open) {
 #ifdef _WIN32
-            ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr,
-                          SW_SHOWNORMAL);
+            ShellExecuteA(
+                nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 #else
             const pid_t child = ::fork();
             if (child == 0) {
-                ::execlp("xdg-open", "xdg-open", url.c_str(),
+                ::execlp("xdg-open",
+                         "xdg-open",
+                         url.c_str(),
                          static_cast<char*>(nullptr));
                 ::_exit(127);
             }
@@ -661,12 +877,12 @@ int run(int argc, char* argv[]) {
         const std::size_t query_limit =
             full ? log_lines
                  : (std::min<std::size_t>)(log_lines * 5U, std::size_t{1000});
-        const auto initial = application::query_daemon_events(
-            environment,
-            application::DaemonLogQuery{
-                .profile_name = profile_name,
-                .max_lines = query_limit,
-            });
+        const auto initial =
+            application::query_daemon_events(environment,
+                                             application::DaemonLogQuery{
+                                                 .profile_name = profile_name,
+                                                 .max_lines = query_limit,
+                                             });
         if (!initial) {
             if (json) {
                 return present_json_daemon_error(
@@ -696,11 +912,10 @@ int run(int argc, char* argv[]) {
                 }
             }
             if (filtered.size() > log_lines) {
-                filtered.erase(
-                    filtered.begin(),
-                    filtered.begin() +
-                        static_cast<std::ptrdiff_t>(filtered.size() -
-                                                    log_lines));
+                filtered.erase(filtered.begin(),
+                               filtered.begin() +
+                                   static_cast<std::ptrdiff_t>(filtered.size() -
+                                                               log_lines));
             }
             trimmed.events = std::move(filtered);
         }
@@ -744,8 +959,7 @@ int run(int argc, char* argv[]) {
 
         std::uint64_t last_seq = initial->latest_seq;
         while (!platform::cancellation::requested()) {
-            for (int tick = 0;
-                 tick < 7 && !platform::cancellation::requested();
+            for (int tick = 0; tick < 7 && !platform::cancellation::requested();
                  ++tick) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
@@ -855,10 +1069,10 @@ int run(int argc, char* argv[]) {
             }
             if (!quiet) {
                 if (full) {
-                    print_ok_line(i18n::format(
-                        i18n::Key::DaemonBackgroundStarted,
-                        report.pid,
-                        report.ipc_port));
+                    print_ok_line(
+                        i18n::format(i18n::Key::DaemonBackgroundStarted,
+                                     report.pid,
+                                     report.ipc_port));
                 } else {
                     print_ok_line(i18n::tr(i18n::Key::DaemonStartedCompact));
                 }
@@ -869,12 +1083,11 @@ int run(int argc, char* argv[]) {
                                 &application::DaemonProfileStatus::paused)) {
             i18n::println(i18n::Key::DaemonAllPausedHint);
         }
-        return log_text_entry(
-            {.status = "OK",
-             .command = "start",
-             .summary = format_compact_summary(report),
-             .duration = elapsed()},
-            finish(0));
+        return log_text_entry({.status = "OK",
+                               .command = "start",
+                               .summary = format_compact_summary(report),
+                               .duration = elapsed()},
+                              finish(0));
     }
     if (std::holds_alternative<StopInvocation>(*parse_result)) {
         if (!application::is_daemon_running(environment)) {
@@ -917,19 +1130,17 @@ int run(int argc, char* argv[]) {
         std::string summary;
         const int code = run_profile_toggle_command(
             environment, *toggle_inv, quiet, json, &summary);
-        const std::string_view cmd_lbl =
-            toggle_inv->pause ? "pause" : "resume";
+        const std::string_view cmd_lbl = toggle_inv->pause ? "pause" : "resume";
         const std::string prof_lbl =
             toggle_inv->all ? std::string{"--all"}
                             : toggle_inv->profile_name.value_or("");
         return json ? code
-                    : log_text_entry(
-                          {.status = code == 0 ? "OK" : "ERROR",
-                           .command = cmd_lbl,
-                           .profile = prof_lbl,
-                           .summary = summary,
-                           .duration = elapsed()},
-                          finish(code));
+                    : log_text_entry({.status = code == 0 ? "OK" : "ERROR",
+                                      .command = cmd_lbl,
+                                      .profile = prof_lbl,
+                                      .summary = summary,
+                                      .duration = elapsed()},
+                                     finish(code));
     }
 
     if (std::holds_alternative<ListInvocation>(*parse_result)) {

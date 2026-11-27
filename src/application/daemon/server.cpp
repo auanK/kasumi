@@ -127,8 +127,7 @@ void return_warm_transport(DaemonSessionState& state,
         return;
     std::lock_guard lock(state.mutex);
     auto slot = find_profile_slot(state.profiles, name);
-    if (slot &&
-        state.profiles.hot[*slot].config_generation == *generation &&
+    if (slot && state.profiles.hot[*slot].config_generation == *generation &&
         !state.profiles.hot[*slot].in_flight &&
         !state.profiles.warm[*slot].warm_transport) {
         state.profiles.warm[*slot].warm_transport = std::move(returned);
@@ -142,8 +141,9 @@ inspect_web_request(DaemonSessionState& state, InspectionRequest request) {
     const auto name = request.profile_name;
     if (!runtime::is_valid_profile_name(name))
         throw daemon_detail::HttpError{400, "invalid profile name"};
-    const bool writes = request.operation == InspectionOperation::RemoteRestore &&
-                        !request.dry_run;
+    const bool writes =
+        request.operation == InspectionOperation::RemoteRestore &&
+        !request.dry_run;
     auto inspect_profile = [&] {
         auto config = runtime::load_profile(
             state.environment.app_data_dir / "config.toml", name);
@@ -167,8 +167,8 @@ inspect_web_request(DaemonSessionState& state, InspectionRequest request) {
                 track_internal_profile_lock(state, n, active);
             },
             name);
-        return daemon_detail::with_profile_lock(state.environment, name,
-                                                inspect_profile);
+        return daemon_detail::with_profile_lock(
+            state.environment, name, inspect_profile);
     }
     return inspect_profile();
 }
@@ -236,11 +236,14 @@ probe_external_locked_profiles(DaemonSessionState& state) {
             candidates.push_back(name);
         }
     }
-    const auto active_jobs = daemon_detail::active_job_operations(state.web_jobs);
+    const auto active_jobs =
+        daemon_detail::active_job_operations(state.web_jobs);
     std::set<std::string> external;
     for (const auto& name : candidates) {
-        const bool has_job = std::ranges::any_of(
-            active_jobs, [&](const auto& pair) { return pair.first == name; });
+        const bool has_job =
+            std::ranges::any_of(active_jobs, [&](const auto& pair) {
+                return pair.first == name;
+            });
         if (has_job)
             continue;
         if (const auto op =
@@ -404,12 +407,14 @@ void register_stream(httplib::Server& server,
                             {"machine_name", status->machine_name},
                             {"profiles", status->profiles},
                             {"uptime_seconds", status->uptime_seconds},
-                            {"jobs", daemon_detail::job_snapshot(state.web_jobs)}};
-                        frame +=
-                            "event: status\ndata: " +
-                            snapshot.dump(
-                                -1, ' ', false, Json::error_handler_t::replace) +
-                            "\n\n";
+                            {"jobs",
+                             daemon_detail::job_snapshot(state.web_jobs)}};
+                        frame += "event: status\ndata: " +
+                                 snapshot.dump(-1,
+                                               ' ',
+                                               false,
+                                               Json::error_handler_t::replace) +
+                                 "\n\n";
                         last_rev = rev;
                         last_external.clear();
                         for (const auto& p : status->profiles) {
@@ -472,45 +477,44 @@ void register_daemon_routes(httplib::Server& server,
         notify_daemon_status_change(state);
     });
     register_stream(server, state, ctx);
-    server.Get(
-        "/v1/status",
-        [&state](const httplib::Request& req, httplib::Response& res) {
-            std::optional<std::string_view> profile_arg;
-            std::string profile_storage;
-            if (req.has_param("profile")) {
-                profile_storage = req.get_param_value("profile");
-                if (!profile_storage.empty()) {
-                    profile_arg = profile_storage;
-                }
-            }
-            auto report = status_session_state(state, profile_arg);
-            if (!report) {
-                set_ipc_error(res,
-                              report.error().code ==
-                                      DaemonErrorCode::ProfileNotFound
-                                  ? 404
-                                  : 400,
-                              report.error().code,
-                              report.error().detail);
-                return;
-            }
-            nlohmann::json body{
-                {"running", report->running},
-                {"api_version", report->api_version},
-                {"kasumi_version", report->kasumi_version},
-                {"machine_name", report->machine_name},
-                {"secure_pages_locked", report->secure_pages_locked},
-                {"pid", report->pid},
-                {"started_at_unix", report->started_at_unix},
-                {"daemon_instance", report->daemon_instance},
-                {"uptime_seconds", report->uptime_seconds},
-                {"ipc_port", report->ipc_port},
-                {"web_port", report->web_port},
-                {"autostart", report->autostart},
-                {"profiles", nlohmann::json(report->profiles)},
-            };
-            res.set_content(body.dump(), "application/json");
-        });
+    server.Get("/v1/status",
+               [&state](const httplib::Request& req, httplib::Response& res) {
+                   std::optional<std::string_view> profile_arg;
+                   std::string profile_storage;
+                   if (req.has_param("profile")) {
+                       profile_storage = req.get_param_value("profile");
+                       if (!profile_storage.empty()) {
+                           profile_arg = profile_storage;
+                       }
+                   }
+                   auto report = status_session_state(state, profile_arg);
+                   if (!report) {
+                       set_ipc_error(res,
+                                     report.error().code ==
+                                             DaemonErrorCode::ProfileNotFound
+                                         ? 404
+                                         : 400,
+                                     report.error().code,
+                                     report.error().detail);
+                       return;
+                   }
+                   nlohmann::json body{
+                       {"running", report->running},
+                       {"api_version", report->api_version},
+                       {"kasumi_version", report->kasumi_version},
+                       {"machine_name", report->machine_name},
+                       {"secure_pages_locked", report->secure_pages_locked},
+                       {"pid", report->pid},
+                       {"started_at_unix", report->started_at_unix},
+                       {"daemon_instance", report->daemon_instance},
+                       {"uptime_seconds", report->uptime_seconds},
+                       {"ipc_port", report->ipc_port},
+                       {"web_port", report->web_port},
+                       {"autostart", report->autostart},
+                       {"profiles", nlohmann::json(report->profiles)},
+                   };
+                   res.set_content(body.dump(), "application/json");
+               });
 
     server.Get(
         "/v1/events",
@@ -584,6 +588,108 @@ void register_daemon_routes(httplib::Server& server,
             std::lock_guard lock(state.mutex);
             state.cached_autostart = *result;
             return *result;
+        }));
+
+    server.Get("/v1/web/config",
+               daemon_detail::json_route([&state](const auto&) {
+                   const auto cfg = read_web_listener_config(state.environment);
+                   if (!cfg)
+                       throw daemon_detail::HttpError{400, cfg.error().detail};
+                   std::uint16_t active_port = 0;
+                   {
+                       std::lock_guard lock(state.mutex);
+                       active_port = state.web_port;
+                   }
+                   return nlohmann::json{
+                       {"bind", cfg->bind},
+                       {"port", cfg->port},
+                       {"active_port", active_port},
+                       {"allowed_hosts", cfg->allowed_hosts},
+                       {"skip_host_check", cfg->skip_host_check},
+                   };
+               }));
+
+    server.Patch(
+        "/v1/web/config", daemon_detail::json_route([&state](const auto& req) {
+            const auto current = read_web_listener_config(state.environment);
+            if (!current)
+                throw daemon_detail::HttpError{400, current.error().detail};
+            const auto body = daemon_detail::parse_body(req);
+            WebListenerConfig next = *current;
+            if (body->contains("bind"))
+                next.bind = (*body)["bind"].template get<std::string>();
+            if (body->contains("port"))
+                next.port = (*body)["port"].template get<int>();
+            if (body->contains("allowed_hosts"))
+                next.allowed_hosts =
+                    (*body)["allowed_hosts"]
+                        .template get<std::vector<std::string>>();
+            if (body->contains("skip_host_check"))
+                next.skip_host_check =
+                    (*body)["skip_host_check"].template get<bool>();
+            const auto saved =
+                write_web_listener_config(state.environment, next);
+            if (!saved) {
+                throw daemon_detail::HttpError{400, saved.error().detail};
+            }
+            return nlohmann::json{
+                {"bind", saved->bind},
+                {"port", saved->port},
+                {"allowed_hosts", saved->allowed_hosts},
+                {"skip_host_check", saved->skip_host_check},
+                {"restart_required", true},
+            };
+        }));
+
+    server.Get("/v1/web/config",
+               daemon_detail::json_route([&state](const auto&) {
+                   const auto cfg = read_web_listener_config(state.environment);
+                   if (!cfg)
+                       throw daemon_detail::HttpError{400, cfg.error().detail};
+                   std::uint16_t active_port = 0;
+                   {
+                       std::lock_guard lock(state.mutex);
+                       active_port = state.web_port;
+                   }
+                   return nlohmann::json{
+                       {"bind", cfg->bind},
+                       {"port", cfg->port},
+                       {"active_port", active_port},
+                       {"allowed_hosts", cfg->allowed_hosts},
+                       {"skip_host_check", cfg->skip_host_check},
+                   };
+               }));
+
+    server.Patch(
+        "/v1/web/config", daemon_detail::json_route([&state](const auto& req) {
+            const auto current = read_web_listener_config(state.environment);
+            if (!current)
+                throw daemon_detail::HttpError{400, current.error().detail};
+            const auto body = daemon_detail::parse_body(req);
+            WebListenerConfig next = *current;
+            if (body->contains("bind"))
+                next.bind = (*body)["bind"].template get<std::string>();
+            if (body->contains("port"))
+                next.port = (*body)["port"].template get<int>();
+            if (body->contains("allowed_hosts"))
+                next.allowed_hosts =
+                    (*body)["allowed_hosts"]
+                        .template get<std::vector<std::string>>();
+            if (body->contains("skip_host_check"))
+                next.skip_host_check =
+                    (*body)["skip_host_check"].template get<bool>();
+            const auto saved =
+                write_web_listener_config(state.environment, next);
+            if (!saved) {
+                throw daemon_detail::HttpError{400, saved.error().detail};
+            }
+            return nlohmann::json{
+                {"bind", saved->bind},
+                {"port", saved->port},
+                {"allowed_hosts", saved->allowed_hosts},
+                {"skip_host_check", saved->skip_host_check},
+                {"restart_required", true},
+            };
         }));
 
     server.Post("/v1/stop",

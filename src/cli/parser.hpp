@@ -58,7 +58,11 @@ struct CompletionInvocation {
 struct WebInvocation {
     bool set_password = false;
     bool no_open = false;
+    bool configure_listen = false;
     std::optional<std::string> username = std::nullopt;
+    std::optional<std::string> listen_address = std::nullopt;
+    std::vector<std::string> allow_hosts;
+    std::optional<bool> skip_host_check = std::nullopt;
 };
 enum class ProfileAction {
     Create,

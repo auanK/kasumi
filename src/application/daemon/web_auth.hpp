@@ -1,5 +1,6 @@
 #pragma once
 
+#include "application/daemon.hpp"
 #include "application/daemon/ipc_security.hpp"
 
 #include <chrono>
@@ -11,17 +12,14 @@
 
 namespace kasumi::application::daemon_detail {
 
-struct WebListener {
-    std::string bind = "127.0.0.1";
-    int port = 3137;
-    std::vector<std::string> allowed_hosts;
-};
+using WebListener = WebListenerConfig;
 
 using WebClock = std::chrono::steady_clock;
 struct WebSession {
     std::array<std::uint8_t, kTokenSize> csrf{};
     WebClock::time_point expires;
     WebClock::time_point idle;
+    WebClock::time_point last_persisted{};
 };
 struct LoginAttempts {
     unsigned failures{};
@@ -31,6 +29,7 @@ struct LoginAttempts {
 struct WebAuth {
     std::mutex mutex;
     std::filesystem::path dir;
+    WebListener listener;
     std::string username = "admin";
     std::string salt;
     std::array<std::uint8_t, kTokenSize> hash{};
