@@ -1,8 +1,9 @@
 openapi: 3.1.0
-info: {title: Kasumi daemon HTTP API, version: 1.0.0, description: The daemon validates Host against the local address
-    and configured allowed_hosts. Browser mutations require a matching Origin or Referer and JSON for requests with
-    a body. Browser session cookies and IPC tokens are accepted on their respective listeners. Registered GET routes
-    also accept HEAD through the HTTP server.}
+info: {title: Kasumi daemon HTTP API, version: 1.0.0, description: The daemon validates Host against the local address,
+    configured allowed_hosts (including *.domain wildcards), direct IP literals on wildcard binds, or explicit
+    skip_host_check. Browser mutations require a matching Origin or Referer and JSON for requests with a body. Browser
+    session cookies and IPC tokens are accepted on their respective listeners. Registered GET routes also accept HEAD
+    through the HTTP server.}
 servers:
 - {url: 'http://127.0.0.1:3137', description: Default Web API listener.}
 - url: http://127.0.0.1:{ipc_port}
@@ -123,6 +124,32 @@ paths:
             Set-Cookie:
               description: Session cookie or expiration directive.
               schema: {type: string}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '429': {$ref: '#/components/responses/Throttled'}
+        '500': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/auth/username:
+    post:
+      operationId: changeUsername
+      tags: [Authentication]
+      summary: Update the Web API login username without revoking the current session
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ChangeUsernameRequest'}
+      responses:
+        '200':
+          description: Username updated while keeping active sessions valid.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChangeUsernameResponse'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '415': {$ref: '#/components/responses/UnsupportedMedia'}
@@ -527,6 +554,43 @@ paths:
                 required: [stopping]
         '403': {$ref: '#/components/responses/Forbidden'}
         '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/web/config:
+    get:
+      operationId: getWebConfig
+      tags: [Daemon]
+      summary: Read Web UI network listener configuration
+      responses:
+        '200':
+          description: Success.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WebConfig'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        default: {$ref: '#/components/responses/Error'}
+    patch:
+      operationId: updateWebConfig
+      tags: [Daemon]
+      summary: Update Web UI network listener configuration in web.json
+      security:
+      - browserSession: []
+        csrfToken: []
+      - ipcToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/WebConfigPatch'}
+      responses:
+        '200':
+          description: Listener configuration saved; daemon restart required to rebind.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WebConfigUpdateResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '415': {$ref: '#/components/responses/UnsupportedMedia'}
+        '500': {$ref: '#/components/responses/Error'}
         default: {$ref: '#/components/responses/Error'}
   /v1/diagnostics:
     get:
@@ -2124,6 +2188,17 @@ components:
         properties:
           profile: {type: string, pattern: '^[A-Za-z0-9_-]+$'}
         required: [profile]
+    ChangeUsernameRequest:
+      type: object
+      properties:
+        current_password: {type: string, format: password}
+        username: {$ref: '#/components/schemas/WebUsername'}
+      required: [current_password, username]
+    ChangeUsernameResponse:
+      type: object
+      properties:
+        username: {$ref: '#/components/schemas/WebUsername'}
+      required: [username]
     ConflictOrigin:
       type: string
       enum: [local, remote, branch_commit]
@@ -3496,6 +3571,37 @@ components:
       maxLength: 1024
       format: password
       description: New Web UI password, limited to 1024 UTF-8 bytes.
+    WebConfig:
+      type: object
+      properties:
+        bind: {type: string}
+        port: {type: integer, format: int64, minimum: 0, maximum: 65535}
+        active_port: {type: integer, format: int64, minimum: 0, maximum: 65535}
+        allowed_hosts:
+          type: array
+          items: {type: string}
+        skip_host_check: {type: boolean}
+      required: [bind, port, active_port, allowed_hosts, skip_host_check]
+    WebConfigPatch:
+      type: object
+      properties:
+        bind: {type: string}
+        port: {type: integer, format: int64, minimum: 0, maximum: 65535}
+        allowed_hosts:
+          type: array
+          items: {type: string}
+        skip_host_check: {type: boolean}
+    WebConfigUpdateResponse:
+      type: object
+      properties:
+        bind: {type: string}
+        port: {type: integer, format: int64, minimum: 0, maximum: 65535}
+        allowed_hosts:
+          type: array
+          items: {type: string}
+        skip_host_check: {type: boolean}
+        restart_required: {const: true}
+      required: [bind, port, allowed_hosts, skip_host_check, restart_required]
     SetPasswordResponse:
       type: object
       properties:

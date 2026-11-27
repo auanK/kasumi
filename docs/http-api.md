@@ -6,17 +6,18 @@ The [OpenAPI contract](api/openapi.yaml) describes every registered operation, r
 
 ## Listener and login
 
-To change the browser address or allow a proxy host, create `web.json` beside `config.toml` and restart the daemon. For example, the following configuration accepts direct loopback requests and a reverse proxy serving `kasumi.example`.
+To change the browser address, port, or allowed proxy hosts, use the Web UI (**System -> Service -> Web UI & network access**), run `kasumi web listen <addr[:port]> [--allow-host <host>] [--skip-host-check | --no-skip-host-check]`, or create/edit `web.json` beside `config.toml` and restart the daemon. For example, the following configuration exposes the Web UI on all interfaces (`0.0.0.0:3137`, e.g. Tailscale/LAN servers) while also allowing a reverse proxy serving `kasumi.example` or `*.ts.net`.
 
 ```json
 {
-  "bind": "127.0.0.1",
+  "bind": "0.0.0.0",
   "port": 3137,
-  "allowed_hosts": ["kasumi.example"]
+  "allowed_hosts": ["kasumi.example", "*.ts.net"],
+  "skip_host_check": false
 }
 ```
 
-The browser listener accepts session cookies. The CLI uses a separate, dynamically assigned loopback IPC port with token authentication. Setting `"port": 0` on the default bind address selects a shared dynamic port. Configure the password on loopback before selecting an external bind address. For HTTPS termination, preserve the public Host and have a loopback proxy overwrite `X-Forwarded-Proto` with `https`. Include the public port in `allowed_hosts` when the browser sends it.
+The browser listener accepts session cookies. The CLI uses a separate, dynamically assigned loopback IPC port with token authentication. Setting `"port": 0` selects a dynamic port (`0` on default loopback shares cleanly with IPC/discovery). When bound to `0.0.0.0` or `::`, direct IPv4/IPv6 literals in `Host` (including Tailscale `100.x.y.z` and LAN addresses) are automatically accepted; `allowed_hosts` also supports `*.domain` wildcard patterns, and `"skip_host_check": true` bypasses `Host` checks behind trusted reverse proxies. Configure the Web UI password on loopback (or via `kasumi web set-password`) before selecting a non-loopback bind address; remote access refuses to start if no password is configured. For HTTPS termination, preserve the public Host and have a loopback proxy overwrite `X-Forwarded-Proto` with `https`. Include the public port in `allowed_hosts` when the browser sends it.
 
 Browser mutations with a body use `Content-Type: application/json`. Every browser mutation requires a matching `Origin` or `Referer`. After login, include the session cookie and an `X-CSRF-Token` header.
 
@@ -24,10 +25,11 @@ Browser mutations with a body use `Content-Type: application/json`. Every browse
 | --- | --- |
 | `GET /v1/auth/status` | Returns `configured`, `authenticated` and, for an authenticated browser, its `csrf_token`. |
 | `POST /v1/auth/password` | First setup takes `bootstrap_token` from the owner-only `web-bootstrap.token` file, a `password` of at least 8 characters, and an optional `username` (defaults to `admin`). Subsequent changes take `current_password`, the new `password`, session authentication and an optional new `username`. A successful change revokes all sessions. |
-| `POST /v1/auth/login` | Send the configured `username` and `password`. Returns the CSRF token and sets an HttpOnly, SameSite=Strict cookie. Failed attempts trigger progressive per-address backoff and HTTP 429. |
+| `POST /v1/auth/username` | Takes `current_password`, `username`, and session authentication (`X-CSRF-Token`). Updates the configured login username while keeping the current browser session active. |
+| `POST /v1/auth/login` | Send the configured `username` and `password`. Returns the CSRF token and sets an HttpOnly, SameSite=Strict cookie (`Max-Age=2592000`). Failed attempts trigger progressive per-address backoff and HTTP 429. |
 | `POST /v1/auth/logout` | Revokes the current session and clears its cookie. |
 
-The daemon stores a randomly salted Argon2id verifier in the private `web-password.json` file. Sessions expire after 30 minutes of inactivity or 12 hours total. Restarting the daemon invalidates every session and rotates any outstanding bootstrap token.
+The daemon stores a randomly salted Argon2id verifier in the private `web-password.json` file. Sessions expire after 7 days of inactivity or 30 days total and their hashed records are persisted in the owner-only `web-sessions.json` file across daemon restarts. Explicit logout (`POST /v1/auth/logout`) and password changes revoke all persisted sessions and clear the cookie. Restarting the daemon still rotates any outstanding `web-bootstrap.token`.
 
 ## Status and events
 
@@ -38,6 +40,8 @@ The existing `/v1/status`, `/v1/events`, `/v1/sync`, `/v1/pause`, `/v1/resume`, 
 | `GET /v1/events/stream` | Server-sent events. `log` events carry a sequence ID, timestamp, kind, profile name and detail. `status` events supply profile progress and job snapshots. Use `Last-Event-ID` or `?since=` to resume from the live ring. |
 | `GET /v1/logs` | Reads current and rotated logs. Optional `profile`, `lines` (1–1000) and `full=false` select the profile, history length and omission of detail. |
 | `POST /v1/autostart` | Send `enabled: true` or `false`. Updates user-session autostart and returns the resulting status. |
+| `GET /v1/web/config` | Returns configured `bind`, `port`, live `active_port`, `allowed_hosts`, and `skip_host_check`. |
+| `PATCH /v1/web/config` | Updates `bind`, `port`, `allowed_hosts`, and/or `skip_host_check` in `web.json` (fails closed on non-loopback bind without a configured password) and returns `restart_required: true`. |
 | `GET /v1/diagnostics` and `GET /v1/diagnostics/{profile}` | Local health, daemon, storage, rclone and ignore-file diagnostics. |
 
 ## Profiles

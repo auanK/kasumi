@@ -448,8 +448,9 @@ Objects exist in the remote storage directory that do not conform to Kasumi's ke
   kasumi stop && kasumi start   # reload daemon if it was already running
   ```
 
-### Port Already in Use or HTTP 503 ("Kasumi Web UI not bundled")
-- **Port conflict on `3137`**: Create or edit `web.json` beside `config.toml` (for example `{"port": 3138}`, or `{"port": 0}` for a dynamic port), then restart the daemon and run `kasumi web`. See the [HTTP API reference](http-api.md#listener-and-login).
+### Port Already in Use, Remote Access (Tailscale/LAN), or HTTP 503
+- **Port conflict on `3137`**: Run `kasumi web listen 127.0.0.1:3138` (or edit `web.json` beside `config.toml`, e.g. `{"port": 0}` for a dynamic port), then restart the daemon and run `kasumi web`. See the [HTTP API reference](http-api.md#listener-and-login).
+- **Exposing the Web UI over Tailscale or LAN**: First set your Web UI password (`kasumi web set-password`), then run `kasumi web listen 0.0.0.0:3137` (or switch to **All interfaces (0.0.0.0)** under **System -> Service -> Web UI & network access** in the Web UI) and restart the daemon. Direct Tailscale and LAN IP addresses work automatically when bound to `0.0.0.0` or `::`; for MagicDNS/reverse proxy names add `--allow-host *.ts.net`.
 - **HTTP 503 at `/`**: The binary was compiled without bundled frontend assets (`web/dist/index.html` absent or `-DKASUMI_ENABLE_WEBUI=OFF`). Build `web/` (`cd web && npm ci && npm run build`) and rebuild with `-DKASUMI_ENABLE_WEBUI=ON`, or install an official release package.
 
 ---
