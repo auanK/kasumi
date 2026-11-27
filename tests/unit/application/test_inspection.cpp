@@ -1,4 +1,5 @@
 #include "application/history_storage/activity.hpp"
+#include "application/history_storage/commit_cache.hpp"
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/remote_layout.hpp"
@@ -2818,6 +2819,105 @@ TEST(ApplicationInspectionTest,
         p2.head.commit_id);
     ASSERT_FALSE(missing.has_value());
     EXPECT_EQ(missing.error().code, InspectionErrorCode::RemoteCommitNotFound);
+}
+
+TEST(ApplicationInspectionTest,
+     AllowCachedCommitServesHistoricalTreeAndPairFromMemoryCache) {
+    auto fixture = make_local_storage();
+    const auto workspace =
+        kasumi::test::make_temp_workspace("application-inspect-ram-cache");
+    const auto storage_dir =
+        kasumi::test::workspace_path(fixture.workspace, "storage");
+    write_profile(workspace, storage_dir);
+
+    auto c1 = make_commit(0, {}, "a.txt", "v1").value();
+    auto p1 = publish(fixture, c1);
+
+    Snapshot second_tree = c1.tree;
+    second_tree.rows[1].hash = kasumi::hasher::hash_string("v2");
+    second_tree.rows[1].size = 2;
+    second_tree.rows.push_back(kasumi::NodeRow{
+        .path = "b.txt",
+        .hash = kasumi::hasher::hash_string("new"),
+        .size = 3,
+        .mtime = {},
+        .is_directory = false,
+    });
+    kasumi::finalize_snapshot(second_tree);
+    auto c2 = kasumi::history::make_commit(1, {p1.head.commit_id}, second_tree)
+                  .value();
+    auto p2 = publish(fixture, c2);
+
+    kasumi::application::history_storage::CommitCache cache;
+    const auto app_dir = kasumi::test::workspace_path(workspace, "app");
+
+    auto seeded = kasumi::application::inspect(
+        kasumi::application::InspectionInput{
+            .request = InspectionRequest{InspectionOperation::RemoteCommits,
+                                         "demo"},
+            .credentials = Credentials{MasterKeyHex{test_key_hex()}},
+            .environment = ExecutionEnvironment{app_dir},
+            .commit_cache = &cache,
+        });
+    ASSERT_TRUE(seeded.has_value()) << seeded.error().detail;
+
+    // Remove remote storage completely so any non-cached read must fail.
+    std::error_code rm_ec;
+    std::filesystem::remove_all(storage_dir, rm_ec);
+    ASSERT_FALSE(rm_ec);
+
+    auto tree = kasumi::application::inspect(
+        kasumi::application::InspectionInput{
+            .request =
+                InspectionRequest{
+                    .operation = InspectionOperation::RemoteTree,
+                    .profile_name = "demo",
+                    .commit_id = p1.head.commit_id,
+                },
+            .credentials = Credentials{MasterKeyHex{test_key_hex()}},
+            .environment = ExecutionEnvironment{app_dir},
+            .commit_cache = &cache,
+            .allow_cached_commit = true,
+        });
+    ASSERT_TRUE(tree.has_value()) << tree.error().detail;
+    const auto& report =
+        std::get<kasumi::application::RemoteTreeReport>(tree->payload);
+    EXPECT_EQ(report.commit_id, p1.head.commit_id);
+    EXPECT_EQ(report.entries.size(), 1U);
+
+    auto pair = kasumi::application::inspect_commit_pair(
+        kasumi::application::InspectionInput{
+            .request =
+                InspectionRequest{
+                    .operation = InspectionOperation::RemoteTree,
+                    .profile_name = "demo",
+                },
+            .credentials = Credentials{MasterKeyHex{test_key_hex()}},
+            .environment = ExecutionEnvironment{app_dir},
+            .commit_cache = &cache,
+            .allow_cached_commit = true,
+        },
+        p1.head.commit_id,
+        p2.head.commit_id);
+    ASSERT_TRUE(pair.has_value()) << pair.error().detail;
+    EXPECT_EQ(pair->from.entries.size(), 1U);
+    EXPECT_EQ(pair->to.entries.size(), 2U);
+
+    auto bypassed = kasumi::application::inspect(
+        kasumi::application::InspectionInput{
+            .request =
+                InspectionRequest{
+                    .operation = InspectionOperation::RemoteTree,
+                    .profile_name = "demo",
+                    .commit_id = p1.head.commit_id,
+                    .bypass_commit_cache = true,
+                },
+            .credentials = Credentials{MasterKeyHex{test_key_hex()}},
+            .environment = ExecutionEnvironment{app_dir},
+            .commit_cache = &cache,
+            .allow_cached_commit = true,
+        });
+    EXPECT_FALSE(bypassed.has_value());
 }
 
 } // namespace

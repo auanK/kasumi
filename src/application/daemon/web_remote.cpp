@@ -1,6 +1,7 @@
 #include "application/daemon/web_file.hpp"
 #include "application/daemon/web_remote_json.hpp"
 #include "application/daemon/web_routes.hpp"
+#include "application/daemon/web_thumbnails.hpp"
 #include "core/diff.hpp"
 #include "platform/path.hpp"
 #include "platform/workspace.hpp"
@@ -66,6 +67,7 @@ using platform::private_storage::RegularFileInput;
 
 std::shared_ptr<RegularFileInput>
 stage_session_slice(const WebContext& ctx,
+                    std::string_view profile_name,
                     RemoteDownloadSession& session,
                     const RemoteStatReport& info,
                     std::optional<FileSlice> slice) {
@@ -83,6 +85,12 @@ stage_session_slice(const WebContext& ctx,
     auto input = platform::private_storage::open_regular_file(file);
     if (!input || input->size != (slice ? slice->size : info.size))
         throw HttpError{500, "download file is unavailable"};
+    if (!slice && ctx.thumbnail_cache) {
+        if (auto cache = ctx.thumbnail_cache(profile_name)) {
+            try_cache_grid_thumbnail_from_file(
+                *cache, info.path, info.logical_hash, file, info.size);
+        }
+    }
     return {new RegularFileInput(std::move(*input)),
             [workspace](RegularFileInput* handle) {
                 delete handle;
@@ -119,6 +127,7 @@ void download(const WebContext& ctx,
     query.logical_path = req.get_param_value("path");
     if (req.has_param("commit"))
         query.commit_id = req.get_param_value("commit");
+    const auto profile_name = query.profile_name;
     auto session = open_download_session(ctx, std::move(query));
     const auto info = remote_download_stat(*session);
     std::optional<FileSlice> slice;
@@ -131,7 +140,8 @@ void download(const WebContext& ctx,
     auto windows =
         download_windows(info, slice.value_or(FileSlice{0, info.size}));
     if (windows.size() == 1) {
-        auto input = stage_session_slice(ctx, *session, info, slice);
+        auto input =
+            stage_session_slice(ctx, profile_name, *session, info, slice);
         session.reset();
         set_file_stream(res,
                         info.path,
@@ -142,12 +152,14 @@ void download(const WebContext& ctx,
     }
     // Authenticate the first window before sending headers. Remaining windows
     // reuse the validated commit/manifest session without re-observing history.
-    auto input = stage_session_slice(ctx, *session, info, windows.front());
+    auto input = stage_session_slice(
+        ctx, profile_name, *session, info, windows.front());
     set_file_provider(
         res,
         info.path,
         info.size,
         [ctx,
+         profile_name,
          session = std::move(session),
          info,
          windows = std::move(windows),
@@ -165,8 +177,8 @@ void download(const WebContext& ctx,
                         if (ctx.stop.stop_requested() || !sink.is_writable() ||
                             !session)
                             return false;
-                        input =
-                            stage_session_slice(ctx, *session, info, window);
+                        input = stage_session_slice(
+                            ctx, profile_name, *session, info, window);
                         if (index + 1 == windows.size())
                             session.reset();
                     }
@@ -246,8 +258,10 @@ Snapshot revision_tree(const WebContext& ctx, const InspectionRequest& query) {
 }
 
 Json revision_diff(const WebContext& ctx, const httplib::Request& req) {
+    const bool bypass_commit_cache = req.has_param("refresh");
     InspectionRequest query{.operation = Op::RemoteTree,
-                            .profile_name = req.matches[1].str()};
+                            .profile_name = req.matches[1].str(),
+                            .bypass_commit_cache = bypass_commit_cache};
     query.commit_id = req.get_param_value("from");
     auto other = query;
     other.commit_id = req.get_param_value("to");
@@ -259,8 +273,10 @@ Json revision_diff(const WebContext& ctx, const httplib::Request& req) {
     Snapshot from;
     Snapshot to;
     if (ctx.inspect_commit_pair) {
-        auto pair = ctx.inspect_commit_pair(
-            query.profile_name, *query.commit_id, *other.commit_id);
+        auto pair = ctx.inspect_commit_pair(query.profile_name,
+                                            *query.commit_id,
+                                            *other.commit_id,
+                                            bypass_commit_cache);
         if (!pair) {
             throw_inspection_error(pair.error());
         }
@@ -346,6 +362,8 @@ void register_remote_routes(httplib::Server& server, const WebContext& ctx) {
                 query.head_commit_id = req.get_param_value("head");
             if (req.has_param("path"))
                 query.logical_path = req.get_param_value("path");
+            if (req.has_param("refresh"))
+                query.bypass_commit_cache = true;
             auto report = run(ctx, std::move(query));
             if (auto* tree = std::get_if<RemoteTreeReport>(&report.payload);
                 tree && req.has_param("prefix")) {

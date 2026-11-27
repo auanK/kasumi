@@ -16,6 +16,7 @@
 #include <vector>
 
 namespace kasumi::application::history_storage {
+struct CommitCache;
 struct RemoteLayout;
 }
 
@@ -165,7 +166,8 @@ LatestResult
 load_latest(transport::Transport& storage,
             std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
             const std::filesystem::path& workspace_root,
-            std::optional<Reference> trusted_ancestor = std::nullopt);
+            std::optional<Reference> trusted_ancestor = std::nullopt,
+            CommitCache* commit_cache = nullptr);
 
 // Incremental variant using an already observed listing.
 LatestResult
@@ -173,7 +175,8 @@ load_latest(transport::Transport& storage,
             std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
             const std::filesystem::path& workspace_root,
             std::span<const std::string> identifiers,
-            std::optional<Reference> trusted_ancestor = std::nullopt);
+            std::optional<Reference> trusted_ancestor = std::nullopt,
+            CommitCache* commit_cache = nullptr);
 
 // Discovers and authenticates the full remote chain, from genesis to the
 // current Epoch.

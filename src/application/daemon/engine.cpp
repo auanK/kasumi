@@ -861,6 +861,9 @@ lock_session_state(DaemonSessionState& state, std::string_view profile_name) {
         if (warm.commit_cache) {
             history_storage::clear_memory_cache(*warm.commit_cache);
         }
+        if (warm.thumbnail_cache) {
+            daemon_detail::clear_remote_thumbnail_cache(*warm.thumbnail_cache);
+        }
     }
     transport_to_close.reset();
     emit_daemon_event(

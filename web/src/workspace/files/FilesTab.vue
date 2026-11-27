@@ -1,6 +1,16 @@
 <script setup>
 import { computed, nextTick, onUnmounted, ref, shallowRef, watch } from 'vue'
-import { cachedLocalTree, cachedRemoteReading, cachedRemoteTree, fetchLocalTree, fetchRemoteCommits, fetchRemoteTree } from '../../api/remote.js'
+import {
+  cachedLocalTree,
+  cachedRemoteReading,
+  cachedRemoteTree,
+  clearSavedRemoteThumbnails,
+  fetchLocalTree,
+  fetchRemoteCommits,
+  fetchRemoteTree,
+  getSavedRemoteThumbnail,
+  saveRemoteThumbnail,
+} from '../../api/remote.js'
 import { useProfileActivity } from '../../composables/useProfileActivity.js'
 import { formatTimestamp, friendlyBusyError } from '../../utils/format.js'
 import { t } from '../../i18n/index.js'
@@ -76,6 +86,21 @@ const restoreModal = ref({ open: false, prefix: '' })
 let versionsRequest
 let pathToPreserve = ''
 const selectedEntry = computed(() => fileIndex.value.files.get(selectedPath.value))
+const thumbRevisions = ref({})
+const savedThumbs = ref({})
+
+function onPreviewReady(payload) {
+  const hash = payload?.hash
+  if (!hash) return
+  if (payload.dataUrl) {
+    saveRemoteThumbnail(props.profile, hash, payload.dataUrl)
+    savedThumbs.value = { ...savedThumbs.value, [hash]: payload.dataUrl }
+  }
+  thumbRevisions.value = {
+    ...thumbRevisions.value,
+    [hash]: (thumbRevisions.value[hash] || 0) + 1,
+  }
+}
 
 async function loadVersions() {
   if (loadingVersions.value || props.locked) return
@@ -169,6 +194,9 @@ watch(() => props.locked, (locked) => {
   snapshotsOpen.value = false
   loadingVersions.value = false
   versionError.value = ''
+  clearSavedRemoteThumbnails(props.profile)
+  savedThumbs.value = {}
+  thumbRevisions.value = {}
 }, { immediate: true })
 watch([() => props.profile, source, selectedCommit, reload], loadTree, { immediate: true })
 watch(serverBusy, (busy, wasBusy) => {
@@ -205,6 +233,26 @@ const visibleItems = computed(() => {
   }
   return matches.sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name, undefined, { numeric: true }))
 })
+
+watch([() => props.profile, visibleItems, isVault], ([profile], oldArgs) => {
+  const prevProfile = oldArgs?.[0]
+  if (prevProfile !== undefined && profile !== prevProfile) {
+    savedThumbs.value = {}
+    thumbRevisions.value = {}
+  }
+  if (!isVault.value || !profile) return
+  const next = { ...savedThumbs.value }
+  let changed = false
+  for (const item of visibleItems.value) {
+    if (!item.logical_hash || next[item.logical_hash]) continue
+    const cached = getSavedRemoteThumbnail(profile, item.logical_hash)
+    if (cached) {
+      next[item.logical_hash] = cached
+      changed = true
+    }
+  }
+  if (changed) savedThumbs.value = next
+}, { immediate: true })
 
 function nearestFolder(path) {
   while (path && !fileIndex.value.folders.has(path)) path = parentFolder(path)
@@ -357,6 +405,7 @@ watch(
 
         <FileExplorerList v-if="tree" :view="view" :items="visibleItems.slice(0, visibleLimit)"
           :selected-path="selectedPath" :profile="profile" :local="!isVault"
+          :commit="listedCommit" :thumb-revisions="thumbRevisions" :saved-thumbs="savedThumbs"
           @select-item="selectedPath = $event.path" @open-folder="openFromList" />
         <button v-if="visibleItems.length > visibleLimit" type="button" class="k-btn k-btn--compact"
           @click="visibleLimit += 100">{{ t('files.showMore', { remaining: visibleItems.length - visibleLimit }) }}</button>
@@ -376,6 +425,7 @@ watch(
           :entry="selectedEntry"
           :disabled="loadingVersions"
           @select-commit="selectSnapshot"
+          @preview-ready="onPreviewReady"
         />
       </aside>
     </div>

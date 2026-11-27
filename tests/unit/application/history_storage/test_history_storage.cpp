@@ -2414,4 +2414,159 @@ TEST(HistoryStorageTest, CommitCacheRespectsMemoryEvictionAndClear) {
     EXPECT_EQ(cache.current_memory_bytes, 0U);
 }
 
+TEST(HistoryStorageTest, CommitCacheLookupByIdFindsCachedCommitAcrossNamespaces) {
+    auto workspace = kasumi::test::make_temp_workspace("commit-cache-by-id");
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    storage.storage.get_batch = safe_fake_get_batch;
+    storage.storage.get = safe_fake_get;
+    storage.storage.list_prefix = reobservation_locked_list;
+
+    const auto root = kasumi::test::workspace_root(workspace);
+    auto c0 = make_commit(0, {}, "a.txt", "alpha").value();
+    auto r0 = publish(storage, workspace, c0).head;
+
+    kasumi::application::history_storage::CommitCache cache;
+    auto first = kasumi::application::history_storage::load_history(
+        storage, test_key(), root, &cache);
+    ASSERT_TRUE(first) << first.error().detail;
+
+    auto hit = kasumi::application::history_storage::lookup_cached_commit_by_id(
+        cache, test_layout().commits_prefix, r0.commit_id);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->id, r0.commit_id);
+    EXPECT_EQ(hit->commit.tree, c0.tree);
+
+    EXPECT_FALSE(
+        kasumi::application::history_storage::lookup_cached_commit_by_id(
+            cache, "deadbeef/01234567/", r0.commit_id)
+            .has_value());
+    EXPECT_FALSE(
+        kasumi::application::history_storage::lookup_cached_commit_by_id(
+            cache, test_layout().commits_prefix, "not-a-hex-id")
+            .has_value());
+}
+
+TEST(HistoryStorageTest, CommitCacheReusesCachedEpochsAndValidatedMarkers) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("commit-cache-epoch-marker");
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    storage.storage.get_batch = safe_fake_get_batch;
+    storage.storage.get = safe_fake_get;
+    storage.storage.list_prefix = reobservation_locked_list;
+
+    const auto root = kasumi::test::workspace_root(workspace);
+    auto c0 = make_commit(0, {}, "a.txt", "alpha").value();
+    auto r0 = publish(storage, workspace, c0).head;
+    auto c1 = make_commit(1, {r0.commit_id}, "b.txt", "beta").value();
+    auto r1 = publish(storage, workspace, c1).head;
+    auto c2 = make_commit(2, {r1.commit_id}, "c.txt", "gamma").value();
+    auto r2 = publish(storage, workspace, c2).head;
+    state->objects.erase(marker_path(r0));
+    state->objects.erase(marker_path(r1));
+
+    kasumi::application::history_storage::epoch::Epoch epoch_value{
+        .vault_id = r0.commit_id,
+        .sequence = 0,
+        .issued_at = 1,
+        .anchors = {{r1.commit_id, 1}},
+    };
+    auto sealed_epoch =
+        kasumi::application::history_storage::epoch::seal(epoch_value, test_key())
+            .value();
+    ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
+        storage, test_key(), sealed_epoch, root));
+
+    kasumi::application::history_storage::CommitCache warm_cache;
+    warm_cache.disk_cache_root =
+        kasumi::test::workspace_path(workspace, "disk-cache");
+
+    reset_fake_traffic(*state);
+    auto first = kasumi::application::history_storage::load_history(
+        storage, test_key(), root, &warm_cache);
+    ASSERT_TRUE(first) << first.error().detail;
+    EXPECT_EQ(state->epoch_get_count, 1U);
+    EXPECT_EQ(state->marker_get_count, 1U);
+
+    // Warm in-memory cache skips epoch, marker, and commit downloads cleanly.
+    reset_fake_traffic(*state);
+    auto second = kasumi::application::history_storage::load_history(
+        storage, test_key(), root, &warm_cache);
+    ASSERT_TRUE(second) << second.error().detail;
+    EXPECT_EQ(second->commits.size(), 2U);
+    EXPECT_EQ(state->epoch_get_count, 0U);
+    EXPECT_EQ(state->marker_get_count, 0U);
+    EXPECT_EQ(state->get_batch_count, 0U);
+    EXPECT_EQ(state->commit_get_count, 0U);
+
+    // Cold RAM with same disk cache still skips epoch download by opening and
+    // authenticating the sealed KEPA file on disk.
+    kasumi::application::history_storage::CommitCache disk_only_cache;
+    disk_only_cache.disk_cache_root = warm_cache.disk_cache_root;
+    reset_fake_traffic(*state);
+    auto third = kasumi::application::history_storage::load_history(
+        storage, test_key(), root, &disk_only_cache);
+    ASSERT_TRUE(third) << third.error().detail;
+    EXPECT_EQ(third->commits.size(), 2U);
+    EXPECT_EQ(state->epoch_get_count, 0U);
+    EXPECT_EQ(state->marker_get_count, 1U);
+    EXPECT_EQ(state->get_batch_count, 0U);
+    EXPECT_EQ(state->commit_get_count, 0U);
+
+    // Corrupt the cached sealed epoch file on disk and verify self-healing.
+    std::filesystem::path cached_epoch_file;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(
+             warm_cache.disk_cache_root)) {
+        if (entry.is_regular_file() &&
+            entry.path().filename().string().ends_with(
+                "_" + sealed_epoch.reference.epoch_id)) {
+            cached_epoch_file = entry.path();
+            break;
+        }
+    }
+    ASSERT_FALSE(cached_epoch_file.empty());
+    kasumi::test::write_text(cached_epoch_file, "corrupted-epoch-envelope");
+
+    kasumi::application::history_storage::CommitCache corrupted_disk_cache;
+    corrupted_disk_cache.disk_cache_root = warm_cache.disk_cache_root;
+    reset_fake_traffic(*state);
+    auto healed = kasumi::application::history_storage::load_history(
+        storage, test_key(), root, &corrupted_disk_cache);
+    ASSERT_TRUE(healed) << healed.error().detail;
+    EXPECT_EQ(state->epoch_get_count, 1U);
+
+    kasumi::application::history_storage::CommitCache after_heal_cache;
+    after_heal_cache.disk_cache_root = warm_cache.disk_cache_root;
+    reset_fake_traffic(*state);
+    auto after_heal = kasumi::application::history_storage::load_history(
+        storage, test_key(), root, &after_heal_cache);
+    ASSERT_TRUE(after_heal) << after_heal.error().detail;
+    EXPECT_EQ(state->epoch_get_count, 0U);
+
+    // Complete listing prunes deleted remote commits (even pre-seeded ones)
+    // from RAM CommitCache.
+    kasumi::application::history_storage::store_cached_commit(
+        warm_cache,
+        test_layout().commits_prefix,
+        r0,
+        kasumi::history::LoadedCommit{.id = r0.commit_id, .commit = c0});
+    ASSERT_TRUE(
+        kasumi::application::history_storage::lookup_cached_commit_by_id(
+            warm_cache, test_layout().commits_prefix, r0.commit_id)
+            .has_value());
+    ASSERT_TRUE(kasumi::transport::remove(storage, object_path(r0)));
+
+    reset_fake_traffic(*state);
+    auto fourth = kasumi::application::history_storage::load_history(
+        storage, test_key(), root, &warm_cache);
+    ASSERT_TRUE(fourth) << fourth.error().detail;
+    EXPECT_EQ(state->epoch_get_count, 0U);
+    EXPECT_EQ(state->marker_get_count, 0U);
+    EXPECT_FALSE(
+        kasumi::application::history_storage::lookup_cached_commit_by_id(
+            warm_cache, test_layout().commits_prefix, r0.commit_id)
+            .has_value());
+}
+
 } // namespace

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <httplib.h>
@@ -158,6 +159,76 @@ borrow_warm_commit_cache(DaemonSessionState& state, std::string_view name) {
     return standalone;
 }
 
+std::shared_ptr<daemon_detail::RemoteThumbnailCache>
+borrow_warm_thumbnail_cache(DaemonSessionState& state, std::string_view name) {
+    std::lock_guard lock(state.mutex);
+    if (auto slot = find_profile_slot(state.profiles, name)) {
+        auto& cache = state.profiles.warm[*slot].thumbnail_cache;
+        if (!cache) {
+            cache = std::make_shared<daemon_detail::RemoteThumbnailCache>();
+        }
+        return cache;
+    }
+    return std::make_shared<daemon_detail::RemoteThumbnailCache>();
+}
+
+struct RemoteThumbnailGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::size_t total_active = 0;
+    std::unordered_map<std::string, std::size_t> by_profile;
+};
+
+RemoteThumbnailGate& remote_thumbnail_gate() {
+    static RemoteThumbnailGate gate;
+    return gate;
+}
+
+struct RemoteThumbnailPermit {
+    RemoteThumbnailGate& gate;
+    std::string profile;
+    bool acquired = false;
+
+    RemoteThumbnailPermit(std::string_view profile_name, std::stop_token stop)
+        : gate(remote_thumbnail_gate()), profile(profile_name) {
+        std::stop_callback stop_wake{stop, [&] { gate.cv.notify_all(); }};
+        std::unique_lock lock(gate.mutex);
+        gate.cv.wait(lock, [&] {
+            return stop.stop_requested() ||
+                   (gate.total_active < 2U && gate.by_profile[profile] < 1U);
+        });
+        if (!stop.stop_requested()) {
+            ++gate.total_active;
+            ++gate.by_profile[profile];
+            acquired = true;
+        }
+    }
+
+    ~RemoteThumbnailPermit() {
+        if (!acquired) {
+            return;
+        }
+        {
+            std::lock_guard lock(gate.mutex);
+            if (gate.total_active > 0U) {
+                --gate.total_active;
+            }
+            if (const auto it = gate.by_profile.find(profile);
+                it != gate.by_profile.end()) {
+                if (it->second <= 1U) {
+                    gate.by_profile.erase(it);
+                } else {
+                    --it->second;
+                }
+            }
+        }
+        gate.cv.notify_all();
+    }
+
+    RemoteThumbnailPermit(const RemoteThumbnailPermit&) = delete;
+    RemoteThumbnailPermit& operator=(const RemoteThumbnailPermit&) = delete;
+};
+
 std::expected<InspectionResponse, InspectionError>
 inspect_web_request(DaemonSessionState& state, InspectionRequest request) {
     const auto name = request.profile_name;
@@ -178,7 +249,8 @@ inspect_web_request(DaemonSessionState& state, InspectionRequest request) {
                                .environment = state.environment,
                                .stop_token = state.master_stop.get_token(),
                                .transport_cache = &lease.transport,
-                               .commit_cache = commit_cache.get()});
+                               .commit_cache = commit_cache.get(),
+                               .allow_cached_commit = true});
         if (result) {
             return_warm_transport(
                 state, name, lease.generation, std::move(lease.transport));
@@ -201,7 +273,8 @@ std::expected<RemoteTreePair, InspectionError>
 inspect_commit_pair_web_request(DaemonSessionState& state,
                                 std::string_view name,
                                 std::string from_commit_id,
-                                std::string to_commit_id) {
+                                std::string to_commit_id,
+                                bool bypass_commit_cache) {
     if (!runtime::is_valid_profile_name(name))
         throw daemon_detail::HttpError{400, "invalid profile name"};
     auto config = runtime::load_profile(
@@ -212,12 +285,15 @@ inspect_commit_pair_web_request(DaemonSessionState& state,
     auto commit_cache = borrow_warm_commit_cache(state, name);
     auto result = inspect_commit_pair(
         {.request = InspectionRequest{.operation = InspectionOperation::RemoteTree,
-                                      .profile_name = std::string{name}},
+                                      .profile_name = std::string{name},
+                                      .bypass_commit_cache =
+                                          bypass_commit_cache},
          .credentials = web_credentials(state, name),
          .environment = state.environment,
          .stop_token = state.master_stop.get_token(),
          .transport_cache = &lease.transport,
-         .commit_cache = commit_cache.get()},
+         .commit_cache = commit_cache.get(),
+         .allow_cached_commit = true},
         std::move(from_commit_id),
         std::move(to_commit_id));
     if (result) {
@@ -263,6 +339,40 @@ open_web_download(DaemonSessionState& state, InspectionRequest request) {
             }
             delete ptr;
         });
+}
+
+std::expected<std::optional<RemoteThumbnailSource>, InspectionError>
+fetch_remote_thumbnail_source_web_request(DaemonSessionState& state,
+                                          RemoteThumbnailSourceRequest req) {
+    const auto name = req.profile_name;
+    if (!runtime::is_valid_profile_name(name))
+        throw daemon_detail::HttpError{400, "invalid profile name"};
+    const auto stop = state.master_stop.get_token();
+    RemoteThumbnailPermit permit(name, stop);
+    if (!permit.acquired) {
+        return std::optional<RemoteThumbnailSource>{std::nullopt};
+    }
+    auto config = runtime::load_profile(
+        state.environment.app_data_dir / "config.toml", name);
+    if (!config) {
+        return std::optional<RemoteThumbnailSource>{std::nullopt};
+    }
+    auto lease = borrow_warm_transport(state, name, *config);
+    auto commit_cache = borrow_warm_commit_cache(state, name);
+    auto result = fetch_remote_thumbnail_source(
+        {.request = InspectionRequest{.operation = InspectionOperation::RemoteGet,
+                                      .profile_name = name},
+         .credentials = web_credentials(state, name),
+         .environment = state.environment,
+         .stop_token = stop,
+         .transport_cache = &lease.transport,
+         .commit_cache = commit_cache.get()},
+        req);
+    if (result) {
+        return_warm_transport(
+            state, name, lease.generation, std::move(lease.transport));
+    }
+    return result;
 }
 
 std::uint64_t parse_http_count(std::string_view text) {
@@ -525,15 +635,26 @@ void register_daemon_routes(httplib::Server& server,
         .inspect_commit_pair =
             [&state](std::string_view profile_name,
                      std::string from_commit_id,
-                     std::string to_commit_id) {
+                     std::string to_commit_id,
+                     bool bypass_commit_cache) {
                 return inspect_commit_pair_web_request(state,
                                                        profile_name,
                                                        std::move(from_commit_id),
-                                                       std::move(to_commit_id));
+                                                       std::move(to_commit_id),
+                                                       bypass_commit_cache);
             },
         .open_download =
             [&state](InspectionRequest request) {
                 return open_web_download(state, std::move(request));
+            },
+        .thumbnail_cache =
+            [&state](std::string_view name) {
+                return borrow_warm_thumbnail_cache(state, name);
+            },
+        .fetch_remote_thumbnail_source =
+            [&state](RemoteThumbnailSourceRequest req) {
+                return fetch_remote_thumbnail_source_web_request(
+                    state, std::move(req));
             }};
     daemon_detail::register_profile_routes(server, ctx);
     daemon_detail::register_remote_routes(server, ctx);

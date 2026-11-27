@@ -22,7 +22,7 @@ const props = defineProps({
   disabled: Boolean,
 })
 
-const emit = defineEmits(['select-commit'])
+const emit = defineEmits(['select-commit', 'preview-ready'])
 
 const fileLog = ref([])
 const logLoading = ref(false)
@@ -67,7 +67,12 @@ const previewMediaUrl = computed(() => {
   if (usingScaledImage.value) {
     return props.local
       ? buildLocalThumbnailUrl(props.profile, props.path, 1280)
-      : buildRemoteThumbnailUrl(props.profile, { path: props.path, hash: props.entry.logical_hash, size: 1280 })
+      : buildRemoteThumbnailUrl(props.profile, {
+          path: props.path,
+          hash: props.entry.logical_hash,
+          commit: props.commit || undefined,
+          size: 1280,
+        })
   }
   return downloadUrl.value
 })
@@ -78,9 +83,52 @@ const videoPosterUrl = computed(() => {
     return buildLocalThumbnailUrl(props.profile, props.path, 640)
   }
   return props.entry?.logical_hash
-    ? buildRemoteThumbnailUrl(props.profile, { path: props.path, hash: props.entry.logical_hash, size: 640 })
+    ? buildRemoteThumbnailUrl(props.profile, {
+        path: props.path,
+        hash: props.entry.logical_hash,
+        commit: props.commit || undefined,
+        size: 640,
+      })
     : ''
 })
+
+function onImageLoad() {
+  mediaState.value = 'loaded'
+  if (!props.local && props.entry?.logical_hash) {
+    emit('preview-ready', { path: props.path, hash: props.entry.logical_hash })
+  }
+}
+
+function captureVideoFrameDataUrl(el) {
+  try {
+    if (!el || !el.videoWidth || !el.videoHeight) return ''
+    const maxDim = 160
+    const scale = Math.min(1, maxDim / Math.max(el.videoWidth, el.videoHeight))
+    const width = Math.max(1, Math.round(el.videoWidth * scale))
+    const height = Math.max(1, Math.round(el.videoHeight * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return ''
+    ctx.drawImage(el, 0, 0, width, height)
+    return canvas.toDataURL('image/jpeg', 0.82)
+  } catch {
+    return ''
+  }
+}
+
+function onVideoLoaded() {
+  mediaState.value = 'loaded'
+  if (!props.local && props.entry?.logical_hash) {
+    const dataUrl = captureVideoFrameDataUrl(mediaEl.value)
+    emit('preview-ready', {
+      path: props.path,
+      hash: props.entry.logical_hash,
+      ...(dataUrl ? { dataUrl } : {}),
+    })
+  }
+}
 
 function onImageError() {
   if (usingScaledImage.value) {
@@ -231,7 +279,7 @@ onUnmounted(() => {
             decoding="async"
             class="k-preview-media"
             :class="{ 'k-preview-media--loading': mediaState !== 'loaded' }"
-            @load="mediaState = 'loaded'"
+            @load="onImageLoad"
             @error="onImageError"
           />
         </template>
@@ -250,7 +298,7 @@ onUnmounted(() => {
             controls
             preload="metadata"
             class="k-preview-media"
-            @loadeddata="mediaState = 'loaded'"
+            @loadeddata="onVideoLoaded"
             @error="mediaState = 'error'"
           />
         </template>

@@ -343,6 +343,38 @@ std::vector<std::string> head_ids(const std::vector<RemoteHeadInfo>& heads) {
 }
 
 std::expected<RemoteTreeReport, InspectionError>
+make_tree_report_from_commit(const kasumi::history::LoadedCommit& loaded,
+                             InspectionOperation operation) {
+    if (!valid_commit_snapshot(loaded)) {
+        return obs_fail(operation,
+                        "logical head does not have a valid observed commit");
+    }
+    const auto& tree = loaded.commit.tree;
+    const auto& root = tree.rows.front();
+    RemoteTreeReport report{
+        .history_present = true,
+        .commit_id = loaded.id,
+        .height = loaded.commit.height,
+        .created_at = loaded.commit.created_at,
+        .root_hash = hash_hex(root.hash),
+        .total_bytes = root.size,
+    };
+    report.entries.reserve(tree.rows.size() - 1);
+    for (std::size_t index = 1; index < tree.rows.size(); ++index) {
+        const auto& row = tree.rows[index];
+        report.entries.push_back(RemoteTreeEntry{
+            .path = row.path,
+            .type = row.is_directory ? RemoteTreeEntryType::Directory
+                                     : RemoteTreeEntryType::File,
+            .logical_hash = hash_hex(row.hash),
+            .size = row.size,
+        });
+    }
+    count_tree_entries(tree, report.directory_count, report.file_count);
+    return report;
+}
+
+std::expected<RemoteTreeReport, InspectionError>
 make_tree_report(const InspectionRequest& request,
                  const observation::history::StorageView& observed,
                  const std::vector<RemoteHeadInfo>& heads,
@@ -394,32 +426,15 @@ make_tree_report(const InspectionRequest& request,
         return fail(operation,
                     InspectionErrorCode::RemoteCommitNotFound,
                     "commit is not reachable");
-    if (selected == observed.reachable_commits.end() ||
-        !valid_commit_snapshot(*selected)) {
+    if (selected == observed.reachable_commits.end()) {
         return obs_fail(operation,
                         "logical head does not have a valid observed commit");
     }
-
-    const auto& tree = selected->commit.tree;
-    const auto& root = tree.rows.front();
-    report.commit_id = selected->id;
-    report.height = selected->commit.height;
-    report.created_at = selected->commit.created_at;
-    report.root_hash = hash_hex(root.hash);
-    report.total_bytes = root.size;
-    report.entries.reserve(tree.rows.size() - 1);
-    for (std::size_t index = 1; index < tree.rows.size(); ++index) {
-        const auto& row = tree.rows[index];
-        report.entries.push_back(RemoteTreeEntry{
-            .path = row.path,
-            .type = row.is_directory ? RemoteTreeEntryType::Directory
-                                     : RemoteTreeEntryType::File,
-            .logical_hash = hash_hex(row.hash),
-            .size = row.size,
-        });
+    auto built = make_tree_report_from_commit(*selected, operation);
+    if (built) {
+        built->history_present = observed.history_present;
     }
-    count_tree_entries(tree, report.directory_count, report.file_count);
-    return report;
+    return built;
 }
 
 RemoteCommitInfo make_commit_info(const kasumi::history::LoadedCommit& loaded,
@@ -2734,6 +2749,19 @@ run_inspection(InspectionInput& input,
     }
     context.layout = history_storage::derive_remote_layout(context.key);
 
+    if (operation == Op::RemoteTree && input.allow_cached_commit &&
+        !req.bypass_commit_cache && req.commit_id && !req.head_commit_id &&
+        history::valid_commit_id(*req.commit_id) &&
+        input.commit_cache != nullptr) {
+        if (auto cached = history_storage::lookup_cached_commit_by_id(
+                *input.commit_cache,
+                context.layout.commits_prefix,
+                *req.commit_id)) {
+            return make_response(
+                operation, make_tree_report_from_commit(*cached, operation));
+        }
+    }
+
     context.hints =
         make_observation_hints(context.runtime, operation, context.layout);
 
@@ -3030,6 +3058,35 @@ run_commit_pair_inspection(InspectionInput& input,
         return std::unexpected(key.error());
     }
     context.layout = history_storage::derive_remote_layout(context.key);
+    if (input.allow_cached_commit && !req.bypass_commit_cache &&
+        input.commit_cache != nullptr) {
+        auto from_cached = history_storage::lookup_cached_commit_by_id(
+            *input.commit_cache,
+            context.layout.commits_prefix,
+            from_commit_id);
+        auto to_cached = from_cached
+                             ? history_storage::lookup_cached_commit_by_id(
+                                   *input.commit_cache,
+                                   context.layout.commits_prefix,
+                                   to_commit_id)
+                             : std::nullopt;
+        if (from_cached && to_cached) {
+            auto from_report =
+                make_tree_report_from_commit(*from_cached, operation);
+            if (!from_report) {
+                return std::unexpected(from_report.error());
+            }
+            auto to_report =
+                make_tree_report_from_commit(*to_cached, operation);
+            if (!to_report) {
+                return std::unexpected(to_report.error());
+            }
+            return RemoteTreePair{
+                .from = std::move(*from_report),
+                .to = std::move(*to_report),
+            };
+        }
+    }
     context.hints =
         make_observation_hints(context.runtime, operation, context.layout);
 
@@ -3498,6 +3555,177 @@ take_remote_download_transport(RemoteDownloadSession& session) noexcept {
     transport::Transport taken = std::move(session.state->storage);
     session.state->storage = {};
     return taken;
+}
+
+std::expected<std::optional<RemoteThumbnailSource>, InspectionError>
+fetch_remote_thumbnail_source(InspectionInput input,
+                              const RemoteThumbnailSourceRequest& req) {
+    const auto operation = InspectionOperation::RemoteGet;
+    const platform::cancellation::ScopedStopToken stop_scope{input.stop_token};
+    InspectionContext context;
+    std::expected<std::optional<RemoteThumbnailSource>, InspectionError>
+        result = std::optional<RemoteThumbnailSource>{std::nullopt};
+
+    try {
+        if (!kasumi::valid_logical_path(req.logical_path) ||
+            !history::valid_commit_id(req.commit_id) ||
+            !is_lowercase_hex(req.expected_logical_hash) ||
+            req.max_bytes == 0) {
+            finish_inspection(input, context);
+            return result;
+        }
+
+        auto runtime_data = runtime::resolve(input.environment.app_data_dir,
+                                             req.profile_name,
+                                             runtime::AccessMode::ReadOnly,
+                                             false);
+        if (!runtime_data) {
+            finish_inspection(input, context);
+            return std::unexpected(
+                map_runtime_error(operation, runtime_data.error()));
+        }
+        context.runtime = *runtime_data;
+
+        const ScopedContentConcurrency concurrency_scope{
+            resolve_content_concurrency(input.request.transfer_concurrency,
+                                        context.runtime.transfer_concurrency)};
+
+        auto key = resolve_key(
+            input.credentials, context.runtime, context.key, operation);
+        if (!key) {
+            finish_inspection(input, context);
+            return std::unexpected(key.error());
+        }
+        context.layout = history_storage::derive_remote_layout(context.key);
+        context.hints =
+            make_observation_hints(context.runtime, operation, context.layout);
+
+        if (input.transport_cache && transport::valid(*input.transport_cache)) {
+            context.storage = transport::borrow_transport(*input.transport_cache);
+        } else {
+            auto opened = transport::open_transport(
+                context.runtime.storage_location,
+                transport::TransportOptions{
+                    .forbidden_executable_root = context.runtime.local_dir,
+                    .rclone_config = context.runtime.rclone_config,
+                    .bandwidth_limit = input.request.bandwidth_limit
+                                           ? input.request.bandwidth_limit
+                                           : context.runtime.bandwidth_limit,
+                });
+            if (!opened) {
+                finish_inspection(input, context);
+                return fail(operation,
+                            InspectionErrorCode::RuntimeFailure,
+                            "failed to open remote storage");
+            }
+            if (input.transport_cache) {
+                *input.transport_cache = std::move(*opened);
+                context.storage =
+                    transport::borrow_transport(*input.transport_cache);
+            } else {
+                context.storage = std::move(*opened);
+            }
+        }
+
+        auto workspace = platform::create_workspace("remote-thumb");
+        if (!workspace) {
+            finish_inspection(input, context);
+            return obs_fail(operation, "failed to prepare remote thumbnail");
+        }
+        context.workspace = std::move(*workspace);
+
+        const auto active_commit_cache = resolve_active_commit_cache(
+            input.commit_cache, input.environment.app_data_dir);
+        std::optional<history::LoadedCommit> target_commit;
+        if (active_commit_cache.ptr != nullptr) {
+            target_commit = history_storage::lookup_cached_commit_by_id(
+                *active_commit_cache.ptr,
+                context.layout.commits_prefix,
+                req.commit_id);
+        }
+        if (!target_commit) {
+            auto observed = observation::history::observe(
+                context.storage,
+                context.key,
+                context.workspace->root,
+                false,
+                nullptr,
+                context.hints.trusted_marker_identifiers,
+                true,
+                false,
+                active_commit_cache.ptr);
+            if (!observed) {
+                finish_inspection(input, context);
+                return obs_fail(operation, "failed to observe remote history");
+            }
+            const auto found = std::ranges::find(observed->reachable_commits,
+                                                 req.commit_id,
+                                                 &history::LoadedCommit::id);
+            if (found != observed->reachable_commits.end()) {
+                target_commit = *found;
+            }
+        }
+
+        if (!target_commit || !valid_commit_snapshot(*target_commit)) {
+            finish_inspection(input, context);
+            return std::optional<RemoteThumbnailSource>{std::nullopt};
+        }
+
+        const auto* row =
+            find_row(target_commit->commit.tree, req.logical_path);
+        if (row == nullptr || row->is_directory || row->size == 0 ||
+            row->size > req.max_bytes ||
+            hash_hex(row->hash) != req.expected_logical_hash) {
+            finish_inspection(input, context);
+            return std::optional<RemoteThumbnailSource>{std::nullopt};
+        }
+
+        auto dl_target = make_download_target(
+            *row, target_commit->commit.storage, context.key, req.commit_id);
+        const auto dest = context.workspace->root / "thumb-source";
+        auto fetched = download_target_to_destination(
+            context.storage,
+            context.key,
+            context.workspace->root,
+            nullptr,
+            operation,
+            dl_target,
+            dest,
+            std::nullopt);
+        if (!fetched) {
+            finish_inspection(input, context);
+            return std::unexpected(fetched.error());
+        }
+
+        auto file = platform::private_storage::open_regular_file(dest);
+        if (!file || file->size != row->size) {
+            finish_inspection(input, context);
+            return fail(operation,
+                        InspectionErrorCode::RuntimeFailure,
+                        "downloaded thumbnail source size mismatch");
+        }
+        RemoteThumbnailSource source{
+            .bytes = std::vector<std::uint8_t>(
+                static_cast<std::size_t>(file->size)),
+            .logical_hash = hash_hex(row->hash),
+            .size = file->size,
+        };
+        if (!platform::private_storage::read_regular_file_exact(
+                *file, source.bytes)) {
+            finish_inspection(input, context);
+            return fail(operation,
+                        InspectionErrorCode::RuntimeFailure,
+                        "failed to read downloaded thumbnail source");
+        }
+        result = std::move(source);
+    } catch (...) {
+        result = fail(operation,
+                      InspectionErrorCode::RuntimeFailure,
+                      "exception while fetching remote thumbnail");
+    }
+
+    finish_inspection(input, context);
+    return result;
 }
 
 } // namespace kasumi::application

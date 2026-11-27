@@ -1674,4 +1674,105 @@ TEST(WebApiTest, LocalThumbnailScalesRasterImagesAndRejectsUnsafePaths) {
 #endif
 }
 
+TEST(WebApiTest, RemoteThumbnailFallsBackToVaultAndSavesClickedPreviewThumbnail) {
+    auto api = start_api();
+    auto local = create(api);
+
+    auto make_bmp = [](std::uint32_t w, std::uint32_t h) {
+        const std::uint32_t pixel_bytes = w * h * 3U;
+        const std::uint32_t total_size = 54U + pixel_bytes;
+        std::string bmp(total_size, '\0');
+        bmp[0] = 'B';
+        bmp[1] = 'M';
+        auto put_u32 = [&](std::size_t off, std::uint32_t v) {
+            bmp[off] = static_cast<char>(v & 0xFFU);
+            bmp[off + 1] = static_cast<char>((v >> 8) & 0xFFU);
+            bmp[off + 2] = static_cast<char>((v >> 16) & 0xFFU);
+            bmp[off + 3] = static_cast<char>((v >> 24) & 0xFFU);
+        };
+        put_u32(2, total_size);
+        put_u32(10, 54);
+        put_u32(14, 40);
+        put_u32(18, w);
+        put_u32(22, h);
+        bmp[26] = 1;
+        bmp[28] = 24;
+        return bmp;
+    };
+
+    kasumi::test::write_text(local / "keep.txt", "anchor");
+    kasumi::test::write_text(local / "small.bmp", make_bmp(200, 200));
+    // > 5 MiB (1400 * 1300 * 3 + 54 = 5,460,054 bytes): excluded from automatic
+    // 160px grid fallback, included up to 32 MiB when previewed.
+    kasumi::test::write_text(local / "large.bmp", make_bmp(1400, 1300));
+    sync(api);
+
+    const auto tree = get(api, "/v1/remote/demo/tree");
+    const auto commit_v0 = tree.at("commit_id").get<std::string>();
+    std::string small_hash;
+    std::string large_hash;
+    for (const auto& entry : tree.at("entries")) {
+        const auto p = entry.at("path").get<std::string>();
+        if (p == "small.bmp") {
+            small_hash = entry.at("logical_hash").get<std::string>();
+        } else if (p == "large.bmp") {
+            large_hash = entry.at("logical_hash").get<std::string>();
+        }
+    }
+    ASSERT_EQ(commit_v0.size(), 64U);
+    ASSERT_EQ(small_hash.size(), 64U);
+    ASSERT_EQ(large_hash.size(), 64U);
+
+    // Delete both images locally so neither exists on disk.
+    ASSERT_TRUE(std::filesystem::remove(local / "small.bmp"));
+    ASSERT_TRUE(std::filesystem::remove(local / "large.bmp"));
+    sync(api);
+
+    auto local_gone = api.client->Get(
+        "/v1/local/demo/thumbnail?path=small.bmp&size=160", api.headers);
+    ASSERT_TRUE(local_gone);
+    EXPECT_EQ(local_gone->status, 404);
+
+#ifdef _WIN32
+    // 1. Small remote-only image falls back to vault cleanly when commit is
+    // provided.
+    auto small_grid = api.client->Get(
+        "/v1/remote/demo/thumbnail?path=small.bmp&hash=" + small_hash +
+            "&commit=" + commit_v0 + "&size=160",
+        api.headers);
+    ASSERT_TRUE(small_grid);
+    EXPECT_EQ(small_grid->status, 200);
+    EXPECT_EQ(small_grid->get_header_value("Content-Type"), "image/png");
+    EXPECT_EQ(small_grid->get_header_value("Content-Security-Policy"),
+              "sandbox; default-src 'none'");
+
+    // 2. Large (> 5 MiB) remote-only image skips automatic 160px grid fallback.
+    auto large_grid_before = api.client->Get(
+        "/v1/remote/demo/thumbnail?path=large.bmp&hash=" + large_hash +
+            "&commit=" + commit_v0 + "&size=160",
+        api.headers);
+    ASSERT_TRUE(large_grid_before);
+    EXPECT_EQ(large_grid_before->status, 204);
+
+    // 3. Clicking to preview (size=1280) fetches up to 32 MiB and also saves
+    // the 160px grid thumbnail into RemoteThumbnailCache.
+    auto large_preview = api.client->Get(
+        "/v1/remote/demo/thumbnail?path=large.bmp&hash=" + large_hash +
+            "&commit=" + commit_v0 + "&size=1280",
+        api.headers);
+    ASSERT_TRUE(large_preview);
+    EXPECT_EQ(large_preview->status, 200);
+    EXPECT_EQ(large_preview->get_header_value("Content-Type"), "image/jpeg");
+
+    // 4. Subsequent 160px grid request hits the saved cache even without commit.
+    auto large_grid_after = api.client->Get(
+        "/v1/remote/demo/thumbnail?path=large.bmp&hash=" + large_hash +
+            "&size=160",
+        api.headers);
+    ASSERT_TRUE(large_grid_after);
+    EXPECT_EQ(large_grid_after->status, 200);
+    EXPECT_EQ(large_grid_after->get_header_value("Content-Type"), "image/png");
+#endif
+}
+
 } // namespace

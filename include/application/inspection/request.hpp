@@ -61,6 +61,7 @@ struct InspectionRequest {
     std::optional<std::uint32_t> transfer_concurrency = std::nullopt;
     std::optional<DownloadSlice> download_slice = std::nullopt;
     bool include_space_usage = false;
+    bool bypass_commit_cache = false;
 };
 
 struct InspectionInput {
@@ -73,6 +74,9 @@ struct InspectionInput {
     transport::Transport* transport_cache = nullptr;
     // Optional thread-safe commit cache shared across inspections.
     history_storage::CommitCache* commit_cache = nullptr;
+    // When true, historical tree/pair inspections may be served directly from
+    // an already authenticated commit in commit_cache.
+    bool allow_cached_commit = false;
 };
 
 } // namespace kasumi::application
