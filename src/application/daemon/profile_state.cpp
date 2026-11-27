@@ -561,6 +561,9 @@ sync_profiles_from_disk_locked(DaemonSessionState& state,
             if (warm.commit_cache) {
                 history_storage::clear_memory_cache(*warm.commit_cache);
             }
+            if (warm.thumbnail_cache) {
+                clear_remote_thumbnail_cache(*warm.thumbnail_cache);
+            }
             platform::erase_secure_key(state.key_arena,
                                        state.profiles.names[idx]);
             erase_profile_slot(state.profiles, idx);
@@ -604,6 +607,7 @@ sync_profiles_from_disk_locked(DaemonSessionState& state,
                 std::make_shared<history_storage::CommitCache>();
             warm.commit_cache->disk_cache_root =
                 state.environment.app_data_dir / "cache" / "commits";
+            warm.thumbnail_cache = std::make_shared<RemoteThumbnailCache>();
 
             insert_profile_slot(state.profiles,
                                 cfg.name,
@@ -659,6 +663,9 @@ sync_profiles_from_disk_locked(DaemonSessionState& state,
                 }
                 if (warm.commit_cache) {
                     history_storage::clear_memory_cache(*warm.commit_cache);
+                }
+                if (warm.thumbnail_cache) {
+                    clear_remote_thumbnail_cache(*warm.thumbnail_cache);
                 }
             }
             if (transport_changed || key_mode_changed || key_changed ||

@@ -1,6 +1,8 @@
 #include "application/daemon/web_file.hpp"
 #include "application/daemon/web_routes.hpp"
+#include "application/daemon/web_thumbnails.hpp"
 #include "core/hasher.hpp"
+#include "core/history.hpp"
 #include "core/node.hpp"
 #include "platform/folder_icon.hpp"
 #include "platform/path.hpp"
@@ -94,33 +96,6 @@ void local_download(const WebContext& ctx,
         res, path, size, std::make_shared<RegularFileInput>(std::move(*file)));
 }
 
-struct ThumbnailMeta {
-    bool supported = false;
-    bool prefer_jpeg = false;
-    bool is_video = false;
-};
-
-ThumbnailMeta classify_thumbnail_ext(std::string_view path) {
-    const auto slash = path.find_last_of('/');
-    const auto dot = path.find_last_of('.');
-    if (dot == path.npos || (slash != path.npos && dot < slash))
-        return {};
-    std::string ext(path.substr(dot));
-    std::ranges::transform(ext, ext.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
-    if (ext == ".jpg" || ext == ".jpeg" || ext == ".jfif")
-        return {.supported = true, .prefer_jpeg = true};
-    if (ext == ".png" || ext == ".webp" || ext == ".bmp" || ext == ".gif" ||
-        ext == ".ico" || ext == ".cur" || ext == ".tif" || ext == ".tiff" ||
-        ext == ".avif")
-        return {.supported = true, .prefer_jpeg = false};
-    if (ext == ".mp4" || ext == ".mov" || ext == ".webm" || ext == ".mkv" ||
-        ext == ".m4v" || ext == ".ogv" || ext == ".avi")
-        return {.supported = true, .prefer_jpeg = true, .is_video = true};
-    return {};
-}
-
 std::uint32_t parse_thumbnail_size(const httplib::Request& req) {
     if (!req.has_param("size"))
         return 160U;
@@ -173,39 +148,61 @@ struct ThumbnailDecodePermit {
     ThumbnailDecodePermit& operator=(const ThumbnailDecodePermit&) = delete;
 };
 
-void serve_mapped_thumbnail(const WebContext& ctx,
+void write_thumbnail_response(httplib::Response& res,
+                              std::string body,
+                              std::string mime,
+                              std::string_view cache_control) {
+    res.headers.erase("Cache-Control");
+    res.set_header("Cache-Control", std::string{cache_control});
+    res.headers.erase("X-Content-Type-Options");
+    res.set_header("X-Content-Type-Options", "nosniff");
+    res.headers.erase("Content-Security-Policy");
+    res.set_header("Content-Security-Policy", "sandbox; default-src 'none'");
+    res.set_content(std::move(body), std::move(mime));
+}
+
+bool serve_mapped_thumbnail(const WebContext& ctx,
                             const httplib::Request& req,
                             httplib::Response& res,
-                            std::optional<std::string_view> expected_hash) {
+                            std::optional<std::string_view> expected_hash,
+                            RemoteThumbnailCache* remote_cache) {
     const auto path = req.get_param_value("path");
     if (!valid_logical_path(path))
         throw HttpError{400, "invalid local path"};
-    if (expected_hash &&
-        (expected_hash->size() != HASH_HEX_SIZE ||
-         !is_lowercase_hex(*expected_hash))) {
+    if (expected_hash && !is_lowercase_hex(*expected_hash)) {
         res.status = 204;
-        return;
+        return true;
     }
     const auto meta = classify_thumbnail_ext(path);
     if (!meta.supported) {
         res.status = 204;
-        return;
+        return true;
     }
-    const auto resolved = resolve_local_runtime(ctx, req);
+    runtime::RuntimeData resolved;
+    try {
+        resolved = resolve_local_runtime(ctx, req);
+    } catch (...) {
+        if (expected_hash) {
+            return false;
+        }
+        throw;
+    }
     const auto entry =
         state_storage::lookup_mapped_path(resolved.database_path, path);
-    if (!entry)
+    if (!entry) {
+        if (expected_hash) {
+            return false;
+        }
         throw HttpError{422, "cannot read local synchronization map"};
+    }
     if (!*entry || (*entry)->is_directory) {
         if (expected_hash) {
-            res.status = 204;
-            return;
+            return false;
         }
         throw HttpError{404, "local file is not mapped"};
     }
     if (expected_hash && (*entry)->hash_hex != *expected_hash) {
-        res.status = 204;
-        return;
+        return false;
     }
 
     const auto relative = platform::path::from_utf8(path);
@@ -213,20 +210,18 @@ void serve_mapped_thumbnail(const WebContext& ctx,
     auto file = open_browsed_file(root, relative);
     if (!file) {
         if (expected_hash) {
-            res.status = 204;
-            return;
+            return false;
         }
         throw HttpError{404, "local file is unavailable"};
     }
     const auto full_path = root / relative;
     if (file->size == 0) {
         res.status = 204;
-        return;
+        return true;
     }
     if (is_reparse_or_symlink(full_path)) {
         if (expected_hash) {
-            res.status = 204;
-            return;
+            return false;
         }
         throw HttpError{404, "local file is unavailable"};
     }
@@ -254,13 +249,11 @@ void serve_mapped_thumbnail(const WebContext& ctx,
         if (const auto it = cache.find(key);
             it != cache.end() && it->second.mtime == mtime &&
             it->second.file_size == file->size) {
-            res.headers.erase("Cache-Control");
-            res.set_header("Cache-Control", "private, max-age=300");
-            res.headers.erase("Content-Security-Policy");
-            res.set_header("Content-Security-Policy",
-                           "sandbox; default-src 'none'");
-            res.set_content(it->second.bytes, it->second.mime);
-            return;
+            write_thumbnail_response(res,
+                                     it->second.bytes,
+                                     it->second.mime,
+                                     "private, max-age=300");
+            return true;
         }
     }
 
@@ -272,8 +265,11 @@ void serve_mapped_thumbnail(const WebContext& ctx,
         } else {
             std::vector<std::uint8_t> raw(static_cast<std::size_t>(file->size));
             if (!read_regular_file_exact(*file, raw)) {
+                if (expected_hash) {
+                    return false;
+                }
                 res.status = 204;
-                return;
+                return true;
             }
             scaled = platform::scale_image_thumbnail(
                 raw, target_size, meta.prefer_jpeg);
@@ -284,12 +280,20 @@ void serve_mapped_thumbnail(const WebContext& ctx,
         }
     }
     if (!scaled) {
+        if (expected_hash) {
+            return false;
+        }
         res.status = 204;
-        return;
+        return true;
     }
     std::string body(reinterpret_cast<const char*>(scaled->bytes.data()),
                      scaled->bytes.size());
     std::string mime(scaled->mime);
+
+    if (remote_cache && expected_hash) {
+        store_remote_thumbnail(
+            *remote_cache, *expected_hash, target_size, mime, body);
+    }
 
     {
         std::lock_guard lock(cache_mutex);
@@ -321,11 +325,104 @@ void serve_mapped_thumbnail(const WebContext& ctx,
         }
     }
 
-    res.headers.erase("Cache-Control");
-    res.set_header("Cache-Control", "private, max-age=300");
-    res.headers.erase("Content-Security-Policy");
-    res.set_header("Content-Security-Policy", "sandbox; default-src 'none'");
-    res.set_content(std::move(body), std::move(mime));
+    write_thumbnail_response(
+        res, std::move(body), std::move(mime), "private, max-age=300");
+    return true;
+}
+
+void serve_remote_thumbnail(const WebContext& ctx,
+                            const httplib::Request& req,
+                            httplib::Response& res) {
+    const auto profile = req.matches[1].str();
+    if (!runtime::is_valid_profile_name(profile))
+        throw HttpError{400, "invalid profile name"};
+    const auto path = req.get_param_value("path");
+    if (!valid_logical_path(path))
+        throw HttpError{400, "invalid local path"};
+    if (!req.has_param("hash")) {
+        res.status = 204;
+        return;
+    }
+    const auto hash = req.get_param_value("hash");
+    if (!is_lowercase_hex(hash)) {
+        res.status = 204;
+        return;
+    }
+    const auto meta = classify_thumbnail_ext(path);
+    if (!meta.supported) {
+        res.status = 204;
+        return;
+    }
+
+    const auto target_size = parse_thumbnail_size(req);
+    auto remote_cache =
+        ctx.thumbnail_cache ? ctx.thumbnail_cache(profile) : nullptr;
+    if (remote_cache) {
+        if (auto cached =
+                lookup_remote_thumbnail(*remote_cache, hash, target_size)) {
+            write_thumbnail_response(res,
+                                     std::move(cached->bytes),
+                                     std::move(cached->mime),
+                                     "private, max-age=3600");
+            return;
+        }
+    }
+
+    if (serve_mapped_thumbnail(ctx, req, res, hash, remote_cache.get())) {
+        return;
+    }
+
+    if (meta.is_video || !req.has_param("commit") ||
+        !ctx.fetch_remote_thumbnail_source) {
+        res.status = 204;
+        return;
+    }
+
+    const auto commit = req.get_param_value("commit");
+    if (!history::valid_commit_id(commit)) {
+        res.status = 204;
+        return;
+    }
+
+    const std::uint64_t max_bytes = target_size > 256U
+                                        ? kMaxRemotePreviewThumbSourceBytes
+                                        : kMaxRemoteGridThumbSourceBytes;
+    auto fetched = ctx.fetch_remote_thumbnail_source({
+        .profile_name = profile,
+        .logical_path = path,
+        .commit_id = commit,
+        .expected_logical_hash = hash,
+        .max_bytes = max_bytes,
+    });
+    if (!fetched || !fetched->has_value()) {
+        res.status = 204;
+        return;
+    }
+
+    std::optional<platform::ThumbnailResult> scaled;
+    {
+        ThumbnailDecodePermit permit;
+        scaled = platform::scale_image_thumbnail(
+            (*fetched)->bytes, target_size, meta.prefer_jpeg);
+    }
+    if (!scaled || scaled->bytes.empty()) {
+        res.status = 204;
+        return;
+    }
+
+    std::string body(reinterpret_cast<const char*>(scaled->bytes.data()),
+                     scaled->bytes.size());
+    std::string mime(scaled->mime);
+    if (remote_cache) {
+        store_remote_thumbnail(*remote_cache, hash, target_size, mime, body);
+        if (target_size != kGridThumbnailSize) {
+            try_cache_grid_thumbnail_from_bytes(
+                *remote_cache, path, hash, (*fetched)->bytes);
+        }
+    }
+
+    write_thumbnail_response(
+        res, std::move(body), std::move(mime), "private, max-age=3600");
 }
 } // namespace
 
@@ -338,16 +435,11 @@ void register_local_routes(httplib::Server& server, const WebContext& ctx) {
     });
     server.Get("/v1/local/([^/]+)/thumbnail",
                [ctx](const auto& req, auto& res) {
-                   serve_mapped_thumbnail(ctx, req, res, std::nullopt);
+                   serve_mapped_thumbnail(ctx, req, res, std::nullopt, nullptr);
                });
     server.Get("/v1/remote/([^/]+)/thumbnail",
                [ctx](const auto& req, auto& res) {
-                   if (!req.has_param("hash")) {
-                       res.status = 204;
-                       return;
-                   }
-                   serve_mapped_thumbnail(
-                       ctx, req, res, req.get_param_value("hash"));
+                   serve_remote_thumbnail(ctx, req, res);
                });
 }
 } // namespace kasumi::application::daemon_detail

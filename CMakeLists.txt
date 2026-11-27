@@ -636,6 +636,7 @@ add_library(kasumi_application STATIC
     src/application/integrity/repack.cpp
     src/application/daemon/web_remote.cpp
     src/application/daemon/web_local.cpp
+    src/application/daemon/web_thumbnails.cpp
     src/application/daemon/web_jobs.cpp
     src/application/daemon/web_icons.cpp
     src/application/daemon/web_profiles.cpp

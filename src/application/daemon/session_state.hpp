@@ -6,6 +6,7 @@
 #include "application/daemon/ipc_security.hpp"
 #include "application/daemon/web_auth.hpp"
 #include "application/daemon/web_jobs.hpp"
+#include "application/daemon/web_thumbnails.hpp"
 #include "application/history_storage/commit_cache.hpp"
 #include "application/observation/state.hpp"
 #include "core/ignore.hpp"
@@ -129,6 +130,7 @@ struct ProfileWarmSlot {
     std::chrono::steady_clock::time_point warm_transport_last_used{};
     observation::LocalObservationSession warm_observation;
     std::shared_ptr<history_storage::CommitCache> commit_cache;
+    std::shared_ptr<daemon_detail::RemoteThumbnailCache> thumbnail_cache;
     std::unique_ptr<std::stop_source> task_stop_source;
 };
 
