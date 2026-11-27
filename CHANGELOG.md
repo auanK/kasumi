@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.30.2]
+
+### Fixed
+
+- **Linux `.directory` Folder Icons, Freedesktop Themes & Safe SVG (`src/application/daemon/web_icons.cpp`)**:
+  - Prioritized `.directory` on Linux/Unix with fallback to `desktop.ini` (and vice versa on Windows) so synced folders containing both files resolve icons reliably on each OS.
+  - Added support in `.directory` for absolute paths, `file://` URIs, symlinked `local_dir` roots, and Freedesktop icon theme names (resolving active KDE/GTK icon themes across `$XDG_DATA_HOME/icons`, `$XDG_DATA_DIRS/icons`, and `/usr/share/pixmaps` with `index.theme` inheritance and `KASUMI_ICON_DIRS` / `KASUMI_ICON_THEME` overrides).
+  - Enabled validated SVG icons (`image/svg+xml`) for `.directory`, theme icons, and custom uploads while rejecting active content (`<script>`, `<foreignObject>`, `<!ENTITY`, `javascript:`, inline `on*=` handlers) and serving all icons with `Content-Security-Policy: sandbox; default-src 'none'` and `X-Content-Type-Options: nosniff`.
+  - Added `?mode=auto` preview support and `Cache-Control: private, no-cache` for auto-detected folder icons so on-disk `.directory` / `desktop.ini` updates reflect immediately without 5-minute stale browser caches.
+- **Clone Custom Profile Icons (`src/application/profile.cpp`)**:
+  - Copied `custom-icon.*` files atomically with full rollback tracking inside `clone_profile()` (and cleared dangling `custom:` icon metadata if no icon file exists on disk).
+- **Web UI Icon Picker & Linux Dark Theme Polish (`web/`)**:
+  - Updated `SettingsTab.vue` and `VaultIcon.vue` to pass `preview-auto` (`?mode=auto`) when previewing folder detection, keep the saved custom icon option selectable while previewing other presets before saving, sync `form.icon` on `profile.icon` prop updates, differentiate `preset:folder` from `preset:default`, expand `<input type="file" accept>` with MIME types + `.svg` for case-sensitive Linux file portals, style `<select>` `<option>` elements explicitly for Linux dark themes, and mention `.directory` + SVG in `en` / `pt-BR` labels.
+
 ## [0.30.1]
 
 ### Added
