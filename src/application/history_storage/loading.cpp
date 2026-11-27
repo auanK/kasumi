@@ -10,6 +10,7 @@
 #include "platform/workspace.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <fstream>
 #include <future>
 #include <limits>
@@ -229,6 +230,114 @@ validate_ciphertext_size(const std::filesystem::path& path) {
     return size;
 }
 
+struct LocalAuthResult {
+    enum class Status { Ok, InvalidCiphertext, InvalidCommit, IoError };
+    Status status = Status::InvalidCiphertext;
+    std::optional<history::LoadedCommit> commit;
+    std::optional<Error> io_error;
+};
+
+LocalAuthResult authenticate_local_ciphertext(
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const HeadReference& reference,
+    const std::filesystem::path& ciphertext,
+    const std::filesystem::path& plaintext) {
+    auto cipher_size = validate_ciphertext_size(ciphertext);
+    if (!cipher_size) {
+        if (cipher_size.error().code == ErrorCode::LimitExceeded) {
+            return {.status = LocalAuthResult::Status::InvalidCiphertext};
+        }
+        return {.status = LocalAuthResult::Status::IoError,
+                .io_error = cipher_size.error()};
+    }
+    auto matches = ciphertext_matches(ciphertext, reference.ciphertext_id);
+    if (!matches) {
+        return {.status = LocalAuthResult::Status::IoError,
+                .io_error = matches.error()};
+    }
+    if (!*matches ||
+        !crypto::decrypt_file(
+            ciphertext, plaintext, key, crypto::FilePurpose::History)) {
+        return {.status = LocalAuthResult::Status::InvalidCiphertext};
+    }
+
+    auto bytes = read_file(plaintext, history::maximum_commit_plaintext_size);
+    if (!bytes) {
+        if (bytes.error().code == ErrorCode::LimitExceeded) {
+            return {.status = LocalAuthResult::Status::InvalidCommit};
+        }
+        return {.status = LocalAuthResult::Status::IoError,
+                .io_error = bytes.error()};
+    }
+    auto commit = history::deserialize(*bytes);
+    if (!commit) {
+        return {.status = LocalAuthResult::Status::InvalidCommit};
+    }
+    auto canonical = history::serialize(*commit);
+    if (!canonical) {
+        return {.status = LocalAuthResult::Status::InvalidCommit};
+    }
+    const bool valid_commit =
+        crypto::commit_identifier(key, *canonical) == reference.commit_id &&
+        *canonical == *bytes;
+    if (!valid_commit) {
+        return {.status = LocalAuthResult::Status::InvalidCommit};
+    }
+    return {
+        .status = LocalAuthResult::Status::Ok,
+        .commit = history::LoadedCommit{.id = reference.commit_id,
+                                        .commit = std::move(*commit)},
+    };
+}
+
+std::optional<history::LoadedCommit> try_load_local_variant_only(
+    const RemoteLayout& layout,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const HeadReference& reference,
+    const std::filesystem::path& workspace,
+    std::size_t sequence,
+    CommitCache* commit_cache) {
+    auto ciphertext =
+        workspace / (reference.commit_id + "_" + reference.ciphertext_id);
+    std::error_code prefetched_error;
+    const bool prefetched =
+        std::filesystem::is_regular_file(ciphertext, prefetched_error);
+    bool from_disk_cache = false;
+    if (!prefetched) {
+        if (commit_cache == nullptr) {
+            return std::nullopt;
+        }
+        auto cached_path = lookup_cached_ciphertext_path(
+            *commit_cache, layout.commits_prefix, reference);
+        if (!cached_path) {
+            return std::nullopt;
+        }
+        ciphertext = std::move(*cached_path);
+        from_disk_cache = true;
+    }
+
+    const auto plaintext =
+        workspace / ("predecode-plain-" + std::to_string(sequence));
+    auto auth = authenticate_local_ciphertext(key, reference, ciphertext, plaintext);
+    remove_file(plaintext);
+    if (auth.status != LocalAuthResult::Status::Ok || !auth.commit.has_value()) {
+        // Leave ciphertext intact so sequential fallback performs exact error
+        // classification or corrupt disk-cache self-healing.
+        return std::nullopt;
+    }
+    if (commit_cache != nullptr) {
+        store_cached_commit(*commit_cache,
+                            layout.commits_prefix,
+                            reference,
+                            *auth.commit,
+                            from_disk_cache ? nullptr : &ciphertext);
+    }
+    if (!from_disk_cache) {
+        remove_file(ciphertext);
+    }
+    return std::move(*auth.commit);
+}
+
 VariantResult
 try_load_variant(transport::Transport& storage,
                  const RemoteLayout& layout,
@@ -299,79 +408,23 @@ try_load_variant(transport::Transport& storage,
                 return std::unexpected(downloaded.error());
             }
         }
-        auto cipher_size = validate_ciphertext_size(ciphertext);
-        if (!cipher_size) {
+        auto auth =
+            authenticate_local_ciphertext(key, reference, ciphertext, plaintext);
+        if (auth.status != LocalAuthResult::Status::Ok) {
             if (from_disk_cache && attempt == 0) {
                 reset_from_corrupt_disk_cache();
                 continue;
             }
-            if (cipher_size.error().code == ErrorCode::LimitExceeded) {
+            if (auth.status == LocalAuthResult::Status::InvalidCiphertext) {
                 return finish_invalid(VariantState::InvalidCiphertext);
             }
-            cleanup();
-            return std::unexpected(cipher_size.error());
-        }
-        auto matches = ciphertext_matches(ciphertext, reference.ciphertext_id);
-        if (!matches) {
-            if (from_disk_cache && attempt == 0) {
-                reset_from_corrupt_disk_cache();
-                continue;
-            }
-            cleanup();
-            return std::unexpected(matches.error());
-        }
-        if (!*matches ||
-            !crypto::decrypt_file(
-                ciphertext, plaintext, key, crypto::FilePurpose::History)) {
-            if (from_disk_cache && attempt == 0) {
-                reset_from_corrupt_disk_cache();
-                continue;
-            }
-            return finish_invalid(VariantState::InvalidCiphertext);
-        }
-
-        auto bytes = read_file(plaintext, history::maximum_commit_plaintext_size);
-        if (!bytes) {
-            if (from_disk_cache && attempt == 0) {
-                reset_from_corrupt_disk_cache();
-                continue;
-            }
-            if (bytes.error().code == ErrorCode::LimitExceeded) {
+            if (auth.status == LocalAuthResult::Status::InvalidCommit) {
                 return finish_invalid(VariantState::InvalidCommit);
             }
             cleanup();
-            return std::unexpected(bytes.error());
+            return std::unexpected(std::move(*auth.io_error));
         }
-        auto commit = history::deserialize(*bytes);
-        if (!commit) {
-            if (from_disk_cache && attempt == 0) {
-                reset_from_corrupt_disk_cache();
-                continue;
-            }
-            return finish_invalid(VariantState::InvalidCommit);
-        }
-        auto canonical = history::serialize(*commit);
-        if (!canonical) {
-            if (from_disk_cache && attempt == 0) {
-                reset_from_corrupt_disk_cache();
-                continue;
-            }
-            return finish_invalid(VariantState::InvalidCommit);
-        }
-        const bool valid_commit =
-            crypto::commit_identifier(key, *canonical) == reference.commit_id &&
-            *canonical == *bytes;
-        if (!valid_commit) {
-            if (from_disk_cache && attempt == 0) {
-                reset_from_corrupt_disk_cache();
-                continue;
-            }
-            cleanup();
-            return LoadedVariant{.state = VariantState::InvalidCommit,
-                                 .commit = std::nullopt};
-        }
-        history::LoadedCommit loaded_commit{.id = reference.commit_id,
-                                            .commit = std::move(*commit)};
+        history::LoadedCommit loaded_commit = std::move(*auth.commit);
         if (commit_cache != nullptr) {
             store_cached_commit(*commit_cache,
                                 layout.commits_prefix,
@@ -776,6 +829,7 @@ LoadResult load_impl(transport::Transport& storage,
         return candidates;
     };
 
+    std::map<HeadReference, history::LoadedCommit> predecoded_commits;
     if (native_complete_batch) {
         auto marker_temporary = make_workspace(temporary_root);
         if (!marker_temporary) {
@@ -789,6 +843,7 @@ LoadResult load_impl(transport::Transport& storage,
             std::expected<std::map<std::string, std::vector<HeadReference>>,
                           Error>
                 marker_result;
+            std::map<HeadReference, history::LoadedCommit> predecoded_commits;
         } reads;
 
         auto fetch_commit_batch = [&]() -> std::expected<void, Error> {
@@ -807,6 +862,69 @@ LoadResult load_impl(transport::Transport& storage,
             }
             if (auto cancel = cancelled(true)) {
                 return std::unexpected(*cancel);
+            }
+
+            std::vector<HeadReference> to_decode;
+            to_decode.reserve(inventory->commit_variants.size());
+            for (const auto& [unused, references] :
+                 inventory->commit_variants) {
+                static_cast<void>(unused);
+                for (const auto& reference : references) {
+                    if (commit_cache != nullptr) {
+                        if (auto cached = lookup_cached_commit(
+                                *commit_cache, layout.commits_prefix, reference)) {
+                            reads.predecoded_commits.emplace(
+                                reference, std::move(*cached));
+                            continue;
+                        }
+                    }
+                    to_decode.push_back(reference);
+                }
+            }
+
+            if (to_decode.size() >= 2U) {
+                const auto hardware_threads = static_cast<std::size_t>(
+                    std::thread::hardware_concurrency());
+                const std::size_t worker_count = std::min<std::size_t>(
+                    {to_decode.size(),
+                     std::max<std::size_t>(1U, hardware_threads),
+                     8U});
+                std::atomic<std::size_t> next_index{0};
+                std::vector<std::optional<history::LoadedCommit>> decoded(
+                    to_decode.size());
+                {
+                    std::vector<std::jthread> decode_workers;
+                    decode_workers.reserve(worker_count);
+                    for (std::size_t w = 0; w < worker_count; ++w) {
+                        decode_workers.emplace_back([&, stop_token] {
+                            const platform::cancellation::ScopedStopToken
+                                stop_scope{stop_token};
+                            for (;;) {
+                                if (platform::cancellation::requested()) {
+                                    break;
+                                }
+                                const auto idx = next_index.fetch_add(
+                                    1U, std::memory_order_relaxed);
+                                if (idx >= to_decode.size()) {
+                                    break;
+                                }
+                                decoded[idx] = try_load_local_variant_only(
+                                    layout,
+                                    key,
+                                    to_decode[idx],
+                                    (*temporary)->workspace.root,
+                                    idx,
+                                    commit_cache);
+                            }
+                        });
+                    }
+                }
+                for (std::size_t idx = 0; idx < to_decode.size(); ++idx) {
+                    if (decoded[idx].has_value()) {
+                        reads.predecoded_commits.emplace(
+                            to_decode[idx], std::move(*decoded[idx]));
+                    }
+                }
             }
             return {};
         };
@@ -847,6 +965,7 @@ LoadResult load_impl(transport::Transport& storage,
 
         discovered_epoch = std::move(*reads.epoch_result);
         marker_candidates = std::move(*reads.marker_result);
+        predecoded_commits = std::move(reads.predecoded_commits);
 
         if (discovered_epoch) {
             for (const auto& anchor : discovered_epoch->value.anchors) {
@@ -1017,7 +1136,7 @@ LoadResult load_impl(transport::Transport& storage,
         }
 
         HeadReference authenticated_reference;
-        auto attempt_load = [&]() {
+        auto attempt_load = [&]() -> std::expected<history::LoadedCommit, Error> {
             std::vector<HeadReference> variants;
             if (const auto found = inventory->commit_variants.find(commit_id);
                 found != inventory->commit_variants.end()) {
@@ -1029,6 +1148,18 @@ LoadResult load_impl(transport::Transport& storage,
                                 marker_found->second.end());
             }
             sort_unique(variants);
+            if (!predecoded_commits.empty()) {
+                for (const auto& variant : variants) {
+                    if (const auto predecoded =
+                            predecoded_commits.find(variant);
+                        predecoded != predecoded_commits.end()) {
+                        authenticated_reference = variant;
+                        auto extracted = std::move(predecoded->second);
+                        predecoded_commits.erase(predecoded);
+                        return extracted;
+                    }
+                }
+            }
             return try_load_variants(
                 storage,
                 layout,
