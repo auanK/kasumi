@@ -1,5 +1,5 @@
 <script setup>
-import { onUnmounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import AuthShell from './AuthShell.vue'
 import PasswordField from '../components/PasswordField.vue'
@@ -13,12 +13,22 @@ const username = ref(auth.username)
 const password = ref('')
 const busy = ref(false)
 const error = ref('')
+const userInput = ref(null)
+
+onMounted(() => {
+  if (username.value.trim()) {
+    document.getElementById('login-password')?.focus()
+  } else {
+    userInput.value?.focus()
+  }
+})
 
 onUnmounted(() => {
   password.value = ''
 })
 
 async function onSubmit() {
+  if (!password.value) return
   error.value = ''
   busy.value = true
   try {
@@ -48,6 +58,7 @@ async function onSubmit() {
         <label for="login-user" class="k-field-label">{{ t('auth.username') }}</label>
         <input
           id="login-user"
+          ref="userInput"
           v-model="username"
           class="k-input"
           autocomplete="username"
@@ -65,9 +76,15 @@ async function onSubmit() {
         :disabled="busy"
       />
 
-      <button type="submit" class="k-btn k-btn--primary k-btn--block" :disabled="busy || !password">
+      <button type="submit" class="k-btn k-btn--primary k-btn--block k-auth-submit" :disabled="busy">
         {{ busy ? t('common.loading') : t('auth.signIn') }}
       </button>
     </form>
   </AuthShell>
 </template>
+
+<style scoped>
+.k-auth-submit {
+  margin-top: 4px;
+}
+</style>

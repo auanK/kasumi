@@ -52,6 +52,17 @@ describe('SetupView', () => {
 })
 
 describe('LoginView', () => {
+  it('renders consistent topbar, card header/body, active submit button, and localized password toggle', () => {
+    const wrapper = mount(LoginView)
+    expect(wrapper.find('.k-topbar .k-wordmark').text()).toBe('kasumi')
+    expect(wrapper.find('.k-topbar').text()).toContain('Português')
+    expect(wrapper.find('.k-auth-header h1').text()).toBe('Sign in')
+    expect(wrapper.find('.k-auth-body').exists()).toBe(true)
+    expect(wrapper.find('.k-pw-toggle').text()).toBe('Show')
+    expect(wrapper.find('button[type="submit"]').element.disabled).toBe(false)
+    wrapper.unmount()
+  })
+
   it('renders clear error message on HTTP 429 rate limit', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ error: 'try again later' }), {

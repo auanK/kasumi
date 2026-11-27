@@ -1,5 +1,6 @@
 <script setup>
 import { ref } from 'vue'
+import { t } from '../i18n/index.js'
 
 defineProps({
   modelValue: { type: String, default: '' },
@@ -34,10 +35,10 @@ const visible = ref(false)
         type="button"
         class="k-pw-toggle"
         :disabled="disabled"
-        :aria-label="visible ? 'Hide secret' : 'Show secret'"
+        :aria-label="visible ? t('auth.hideSecret') : t('auth.showSecret')"
         @click="visible = !visible"
       >
-        {{ visible ? 'Hide' : 'Show' }}
+        {{ visible ? t('common.hide') : t('common.show') }}
       </button>
     </div>
   </div>
