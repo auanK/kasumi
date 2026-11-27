@@ -345,6 +345,8 @@ void register_profile_routes(httplib::Server& server, const WebContext& ctx) {
                 throw HttpError{400, "unknown conflict resolution"};
             action.artifact_selector = body->value("artifact", std::string{});
             action.dry_run = body->value("dry_run", false);
+            InternalProfileLockGuard lock_guard(ctx.track_internal_lock,
+                                                action.profile_name);
             return require(resolve_local_conflict(ctx.environment, action));
         }));
 }

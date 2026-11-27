@@ -1074,4 +1074,59 @@ TEST(ProfileLockTest,
     EXPECT_FALSE(kasumi::platform::is_profile_lock_held(lock_path));
 }
 
+TEST(ProfileLockTest, ConcurrentLockProbesDoNotProduceFalsePositives) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("profile-lock-concurrent-probes");
+    const auto lock_path =
+        kasumi::test::workspace_path(workspace, "profile-demo.lock");
+
+    // Seed an idle lock file matching a profile whose lock was released.
+    auto initial = kasumi::platform::acquire_profile_lock(lock_path);
+    ASSERT_TRUE(initial.has_value()) << initial.error();
+    kasumi::platform::release_profile_lock(*initial);
+    ASSERT_TRUE(std::filesystem::exists(lock_path));
+
+    constexpr int kThreads = 6;
+    constexpr int kIterations = 300;
+    std::vector<int> false_positives(kThreads, 0);
+    std::vector<std::thread> workers;
+    workers.reserve(kThreads);
+    for (int t = 0; t < kThreads; ++t) {
+        workers.emplace_back([&, t]() {
+            for (int i = 0; i < kIterations; ++i) {
+                if (kasumi::platform::is_profile_lock_held(lock_path)) {
+                    ++false_positives[t];
+                }
+            }
+        });
+    }
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    for (int count : false_positives) {
+        EXPECT_EQ(count, 0);
+    }
+
+    auto held = kasumi::platform::acquire_profile_lock(lock_path);
+    ASSERT_TRUE(held.has_value()) << held.error();
+    std::vector<int> missed_locks(kThreads, 0);
+    workers.clear();
+    for (int t = 0; t < kThreads; ++t) {
+        workers.emplace_back([&, t]() {
+            for (int i = 0; i < kIterations; ++i) {
+                if (!kasumi::platform::is_profile_lock_held(lock_path)) {
+                    ++missed_locks[t];
+                }
+            }
+        });
+    }
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    for (int count : missed_locks) {
+        EXPECT_EQ(count, 0);
+    }
+    kasumi::platform::release_profile_lock(*held);
+}
+
 } // namespace
