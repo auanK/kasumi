@@ -82,6 +82,10 @@ export function extractJobProgressMeter(job, t) {
     current = p.removed_objects ?? 0
     total = p.candidate_objects
     countLabel = t('sync.objects', { done: current, total })
+  } else if (p.commits_total > 0) {
+    current = p.commits_processed ?? 0
+    total = p.commits_total
+    countLabel = t('sync.objects', { done: current, total })
   } else if (p.total_items > 0) {
     current = p.applied_items ?? 0
     total = p.total_items
