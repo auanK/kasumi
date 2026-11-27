@@ -12,7 +12,22 @@ import QuickActionsCard from '../workspace/maintenance/QuickActionsCard.vue'
 import MaintenanceTab from '../workspace/maintenance/MaintenanceTab.vue'
 import FilesTab from '../workspace/files/FilesTab.vue'
 import { fetchJob, startMaintenanceJob, startPreviewJob } from '../api/maintenance.js'
-import { fetchLocalTree, fetchRemoteCommits, fetchRemoteHealth, fetchRemoteSummary, fetchRemoteTree } from '../api/remote.js'
+import {
+  buildLocalThumbnailUrl,
+  buildRemoteThumbnailUrl,
+  cachedLocalTree,
+  cachedRemoteReading,
+  cachedRemoteTree,
+  clearSavedRemoteThumbnails,
+  fetchLocalTree,
+  fetchRemoteCommits,
+  fetchRemoteHealth,
+  fetchRemoteSummary,
+  fetchRemoteTree,
+  fetchRemoteWriters,
+  getSavedRemoteThumbnail,
+  saveRemoteThumbnail,
+} from '../api/remote.js'
 import { useDaemonStream } from '../composables/useDaemonStream.js'
 import { formatTimestamp } from '../utils/format.js'
 
@@ -22,26 +37,30 @@ vi.mock('../api/maintenance.js', () => ({
   startPreviewJob: vi.fn(),
 }))
 
-vi.mock('../api/remote.js', () => ({
-  buildLocalThumbnailUrl: vi.fn((profile, path, size = 160) => `/v1/local/${profile}/thumbnail?path=${path}&size=${size}`),
-  buildRemoteThumbnailUrl: vi.fn((profile, { path, hash, commit, size = 160 } = {}) =>
-    hash ? `/v1/remote/${profile}/thumbnail?path=${path}&hash=${hash}${commit ? `&commit=${commit}` : ''}&size=${size}` : ''),
-  cachedLocalTree: vi.fn(),
-  cachedRemoteReading: vi.fn(),
-  cachedRemoteTree: vi.fn(),
-  clearSavedRemoteThumbnails: vi.fn(),
-  fetchRemoteHealth: vi.fn(),
-  fetchRemoteSummary: vi.fn(),
-  fetchRemoteTree: vi.fn(),
-  fetchLocalTree: vi.fn().mockResolvedValue({ entries: [] }),
-  fetchRemoteCommits: vi.fn(),
-  fetchRemoteWriters: vi.fn().mockResolvedValue({
-    writers: [{ identifier: 'writer-a' }],
-    barriers: [{ identifier: 'barrier-a' }],
-  }),
-  getSavedRemoteThumbnail: vi.fn(() => ''),
-  saveRemoteThumbnail: vi.fn(),
-}))
+vi.mock('../api/remote.js', async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    buildLocalThumbnailUrl: vi.fn((profile, path, size = 160) => `/v1/local/${profile}/thumbnail?path=${path}&size=${size}`),
+    buildRemoteThumbnailUrl: vi.fn((profile, { path, hash, commit, size = 160 } = {}) =>
+      hash ? `/v1/remote/${profile}/thumbnail?path=${path}&hash=${hash}${commit ? `&commit=${commit}` : ''}&size=${size}` : ''),
+    cachedLocalTree: vi.fn(),
+    cachedRemoteReading: vi.fn(),
+    cachedRemoteTree: vi.fn(),
+    clearSavedRemoteThumbnails: vi.fn(),
+    fetchRemoteHealth: vi.fn(),
+    fetchRemoteSummary: vi.fn(),
+    fetchRemoteTree: vi.fn(),
+    fetchLocalTree: vi.fn().mockResolvedValue({ entries: [] }),
+    fetchRemoteCommits: vi.fn(),
+    fetchRemoteWriters: vi.fn().mockResolvedValue({
+      writers: [{ identifier: 'writer-a' }],
+      barriers: [{ identifier: 'barrier-a' }],
+    }),
+    getSavedRemoteThumbnail: vi.fn(() => ''),
+    saveRemoteThumbnail: vi.fn(),
+  }
+})
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
@@ -134,6 +153,7 @@ describe('Hub & Workspace components', () => {
     expect(startMaintenanceJob).toHaveBeenCalledWith('docs', 'remove-barrier', {
       barrier_id: 'barrier-a', confirm_abandoned: true,
     })
+    wrapper.unmount()
   })
 
   it('shows maintenance immediately and only queries storage when requested', async () => {
@@ -373,5 +393,130 @@ describe('Hub & Workspace components', () => {
     expect(panel.text()).toContain('2.4s')
     panel.unmount()
     stream.logs = []
+  })
+
+  it('shows active maintenance job steps and syncing bar on Hub ProfileCard', async () => {
+    const stream = useDaemonStream()
+    stream.jobs = [
+      {
+        id: 21,
+        profile: 'docs',
+        operation: 'gc',
+        state: 'running',
+        dry_run: false,
+        progress: { stage: 'analyzing', sub_stage: 'analyzing_reachability', candidate_objects: 10, removed_objects: 3 },
+      },
+    ]
+    const wrapper = mount(ProfileCard, {
+      props: {
+        profile: { name: 'docs', local_dir: '/d', remote_dir: 'r', key_storage: 'vault' },
+        daemonState: { state: 'idle', busy: true },
+      },
+    })
+    expect(wrapper.classes()).toContain('is-syncing')
+    expect(wrapper.text()).toContain('Clean up vault')
+    expect(wrapper.findAll('.k-sync-steps li')).toHaveLength(4)
+    expect(wrapper.find('[aria-current="step"]').text()).toContain('Analyzing reachability')
+    wrapper.unmount()
+    stream.jobs = []
+  })
+
+  it('supports Windows-style address bar selection, backslash normalization, and file jumping', async () => {
+    fetchLocalTree.mockResolvedValueOnce({
+      root_hash: 'h',
+      total_bytes: 10,
+      entries: [
+        { path: 'Docs', type: 'directory', size: 0, logical_hash: 'd1' },
+        { path: 'Docs/Notes', type: 'directory', size: 0, logical_hash: 'd2' },
+        { path: 'Docs/Notes/todo.txt', type: 'file', size: 10, logical_hash: 'f1' },
+      ],
+    })
+
+    const wrapper = mount(FilesTab, {
+      props: { profile: 'demo' },
+      global: { stubs: { Teleport: true } },
+    })
+    await flushPromises()
+
+    await wrapper.find('.k-explorer-path').trigger('click')
+    const input = wrapper.find('.k-explorer-path-input')
+    expect(input.exists()).toBe(true)
+    expect(input.element.value).toBe('/')
+
+    await input.setValue('Docs\\Notes')
+    await input.trigger('submit')
+    await flushPromises()
+    expect(wrapper.find('.k-current-folder').text()).toBe('Notes')
+    expect(wrapper.text()).toContain('todo.txt')
+
+    await wrapper.find('.k-explorer-path').trigger('click')
+    const secondInput = wrapper.find('.k-explorer-path-input')
+    expect(secondInput.element.value).toBe('Docs/Notes')
+
+    // Invalid path keeps edit mode open and marks the field invalid.
+    await secondInput.setValue('Docs/Nope')
+    await secondInput.trigger('submit')
+    expect(wrapper.find('.k-explorer-path--invalid').exists()).toBe(true)
+
+    // Pasting a file path jumps to its parent folder and selects the file.
+    await secondInput.setValue('Root/Docs/Notes/todo.txt')
+    await secondInput.trigger('submit')
+    await flushPromises()
+    expect(wrapper.find('.k-current-folder').text()).toBe('Notes')
+    expect(wrapper.find('.k-explorer-preview').text()).toContain('todo.txt')
+
+    // Escape cancels editing.
+    await wrapper.find('.k-explorer-path').trigger('click')
+    expect(wrapper.find('.k-explorer-path-input').exists()).toBe(true)
+    await wrapper.find('.k-explorer-path-input').trigger('keydown.escape')
+    expect(wrapper.find('.k-explorer-path-input').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('prunes removed writers immediately on completion and supports removing all writers in batch', async () => {
+    const stream = useDaemonStream()
+    fetchRemoteWriters.mockResolvedValue({
+      writers: [{ identifier: 'w1' }, { identifier: 'w2' }],
+      barriers: [],
+    })
+    startMaintenanceJob.mockResolvedValue({ id: 55, state: 'running', profile: 'docs', operation: 'remove-writer' })
+
+    const wrapper = mount(QuickActionsCard, {
+      props: { profile: 'docs' },
+      global: { stubs: { Teleport: true } },
+    })
+    await wrapper.findAll('button').find((button) => button.text() === 'Inspect remote markers').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('select').at(1).findAll('option').map((o) => o.element.value)).toEqual(['', 'w1', 'w2'])
+
+    await wrapper.findAll('select').at(1).setValue('w1')
+    await wrapper.findAll('button').find((button) => button.text() === 'Remove writer').trigger('click')
+    await wrapper.findAll('[role="dialog"] button').find((button) => button.text() === 'Confirm').trigger('click')
+    await flushPromises()
+
+    fetchRemoteWriters.mockResolvedValueOnce({
+      writers: [{ identifier: 'w2' }],
+      barriers: [],
+    })
+    stream.jobs = [
+      {
+        id: 55,
+        profile: 'docs',
+        operation: 'remove-writer',
+        state: 'completed',
+        result: { identifier: 'w1', removed_identifiers: ['w1'], already_absent_identifiers: [] },
+      },
+    ]
+    await nextTick()
+    await flushPromises()
+
+    expect(wrapper.findAll('select').at(1).findAll('option').map((o) => o.element.value)).toEqual(['', 'w2'])
+
+    await wrapper.findAll('button').find((button) => button.text().includes('Remove all (1)')).trigger('click')
+    await wrapper.findAll('[role="dialog"] button').find((button) => button.text() === 'Confirm').trigger('click')
+    expect(startMaintenanceJob).toHaveBeenLastCalledWith('docs', 'remove-writer', { writer_ids: ['w2'] })
+
+    wrapper.unmount()
+    stream.jobs = []
   })
 })
