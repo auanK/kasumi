@@ -99,9 +99,51 @@ export function buildRemoteDownloadUrl(profile, { path, commit } = {}) {
   return `${base(profile)}/download${buildQuery({ path, commit })}`
 }
 
-export function buildRemoteThumbnailUrl(profile, { path, hash, size = 160 } = {}) {
+export function buildRemoteThumbnailUrl(profile, { path, hash, commit, size = 160, rev } = {}) {
   if (!hash) return ''
-  return `${base(profile)}/thumbnail${buildQuery({ path, hash, size })}`
+  return `${base(profile)}/thumbnail${buildQuery({
+    path,
+    hash,
+    commit: commit || undefined,
+    size,
+    rev: rev || undefined,
+  })}`
+}
+
+const MAX_SAVED_PREVIEW_THUMBS = 256
+const savedPreviewThumbs = new Map()
+
+export function getSavedRemoteThumbnail(profile, hash) {
+  if (!profile || !hash) return ''
+  const key = `${profile}|${hash}`
+  const value = savedPreviewThumbs.get(key)
+  if (!value) return ''
+  savedPreviewThumbs.delete(key)
+  savedPreviewThumbs.set(key, value)
+  return value
+}
+
+export function saveRemoteThumbnail(profile, hash, dataUrl) {
+  if (!profile || !hash || !dataUrl) return
+  const key = `${profile}|${hash}`
+  if (savedPreviewThumbs.has(key)) savedPreviewThumbs.delete(key)
+  savedPreviewThumbs.set(key, dataUrl)
+  while (savedPreviewThumbs.size > MAX_SAVED_PREVIEW_THUMBS) {
+    const oldest = savedPreviewThumbs.keys().next().value
+    if (oldest === undefined) break
+    savedPreviewThumbs.delete(oldest)
+  }
+}
+
+export function clearSavedRemoteThumbnails(profile) {
+  if (!profile) {
+    savedPreviewThumbs.clear()
+    return
+  }
+  const prefix = `${profile}|`
+  for (const key of [...savedPreviewThumbs.keys()]) {
+    if (key.startsWith(prefix)) savedPreviewThumbs.delete(key)
+  }
 }
 
 export function readFileChunk(profile, url, offset, maxBytes, signal) {

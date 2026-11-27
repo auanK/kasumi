@@ -12,43 +12,108 @@ const props = defineProps({
   view: { type: String, required: true },
   profile: { type: String, default: '' },
   local: { type: Boolean, default: false },
+  commit: { type: String, default: '' },
+  thumbRevisions: { type: Object, default: () => ({}) },
+  savedThumbs: { type: Object, default: () => ({}) },
 })
 const emit = defineEmits(['select-item', 'open-folder'])
 
+const MAX_CONCURRENT_REMOTE_THUMBS = 2
+const MAX_KNOWN_LOADED_THUMBS = 512
+const remoteLoadedHashes = new Set()
+
 const failedThumbs = ref(new Set())
-watch([() => props.profile, () => props.local, () => props.items], () => {
+const settledRemoteKeys = ref(new Set())
+watch([() => props.profile, () => props.local, () => props.items, () => props.commit], () => {
   failedThumbs.value = new Set()
+  settledRemoteKeys.value = new Set()
 })
+
+function thumbKey(item) {
+  if (props.local) return item.path
+  const rev = item.logical_hash ? (props.thumbRevisions[item.logical_hash] || 0) : 0
+  return `${item.path}|${item.logical_hash || ''}|${props.commit || ''}|${rev}`
+}
 
 function thumbUrl(item) {
   if (!props.profile) return ''
   if (props.local) {
     return buildLocalThumbnailUrl(props.profile, item.path, 160)
   }
+  if (item.logical_hash && props.savedThumbs[item.logical_hash]) {
+    return props.savedThumbs[item.logical_hash]
+  }
   return item.logical_hash
-    ? buildRemoteThumbnailUrl(props.profile, { path: item.path, hash: item.logical_hash, size: 160 })
+    ? buildRemoteThumbnailUrl(props.profile, {
+        path: item.path,
+        hash: item.logical_hash,
+        commit: props.commit || undefined,
+        size: 160,
+        rev: props.thumbRevisions[item.logical_hash] || undefined,
+      })
     : ''
 }
 
-const rows = computed(() =>
-  props.items.map((item) => {
+const rows = computed(() => {
+  let inFlight = 0
+  return props.items.map((item) => {
     const info = classifyFile(item)
-    const thumb = props.view === 'icons' && info.isThumbnailable ? thumbUrl(item) : ''
+    const url = props.view === 'icons' && info.isThumbnailable ? thumbUrl(item) : ''
+    const key = thumbKey(item)
+    const failed = failedThumbs.value.has(key)
+    let allowed = Boolean(url) && !failed
+    if (allowed && !props.local && !url.startsWith('data:')) {
+      const hashKey = item.logical_hash ? `${props.profile}|${item.logical_hash}` : ''
+      const loaded = Boolean(hashKey) && remoteLoadedHashes.has(hashKey)
+      if (!loaded && !settledRemoteKeys.value.has(key)) {
+        if (inFlight >= MAX_CONCURRENT_REMOTE_THUMBS) {
+          allowed = false
+        } else {
+          inFlight++
+        }
+      }
+    }
     return {
       item,
       info,
-      thumbUrl: thumb,
-      showThumb:
-        Boolean(thumb) &&
-        !failedThumbs.value.has(item.path),
+      thumbUrl: url,
+      thumbKey: key,
+      showThumb: allowed,
     }
   })
-)
+})
 
-function markThumbFailed(path) {
+function recordRemoteLoadedHash(hash) {
+  if (!props.profile || !hash) return
+  const key = `${props.profile}|${hash}`
+  if (remoteLoadedHashes.has(key)) remoteLoadedHashes.delete(key)
+  remoteLoadedHashes.add(key)
+  while (remoteLoadedHashes.size > MAX_KNOWN_LOADED_THUMBS) {
+    const oldest = remoteLoadedHashes.values().next().value
+    if (oldest === undefined) break
+    remoteLoadedHashes.delete(oldest)
+  }
+}
+
+function settleRemoteKey(row) {
+  if (props.local || settledRemoteKeys.value.has(row.thumbKey)) return
+  const next = new Set(settledRemoteKeys.value)
+  next.add(row.thumbKey)
+  settledRemoteKeys.value = next
+}
+
+function markThumbLoaded(row) {
+  if (!props.local && row.item.logical_hash) {
+    recordRemoteLoadedHash(row.item.logical_hash)
+  }
+  settleRemoteKey(row)
+}
+
+function markThumbFailed(row) {
   const next = new Set(failedThumbs.value)
-  next.add(path)
+  next.add(row.thumbKey)
   failedThumbs.value = next
+  settleRemoteKey(row)
 }
 
 function activate(item, event) {
@@ -81,7 +146,8 @@ function activate(item, event) {
               loading="lazy"
               decoding="async"
               class="k-explorer-thumb"
-              @error="markThumbFailed(row.item.path)"
+              @load="markThumbLoaded(row)"
+              @error="markThumbFailed(row)"
             />
             <span
               v-if="row.info.isVideo"

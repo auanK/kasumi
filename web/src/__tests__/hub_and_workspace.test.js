@@ -23,9 +23,13 @@ vi.mock('../api/maintenance.js', () => ({
 }))
 
 vi.mock('../api/remote.js', () => ({
+  buildLocalThumbnailUrl: vi.fn((profile, path, size = 160) => `/v1/local/${profile}/thumbnail?path=${path}&size=${size}`),
+  buildRemoteThumbnailUrl: vi.fn((profile, { path, hash, commit, size = 160 } = {}) =>
+    hash ? `/v1/remote/${profile}/thumbnail?path=${path}&hash=${hash}${commit ? `&commit=${commit}` : ''}&size=${size}` : ''),
   cachedLocalTree: vi.fn(),
   cachedRemoteReading: vi.fn(),
   cachedRemoteTree: vi.fn(),
+  clearSavedRemoteThumbnails: vi.fn(),
   fetchRemoteHealth: vi.fn(),
   fetchRemoteSummary: vi.fn(),
   fetchRemoteTree: vi.fn(),
@@ -35,6 +39,8 @@ vi.mock('../api/remote.js', () => ({
     writers: [{ identifier: 'writer-a' }],
     barriers: [{ identifier: 'barrier-a' }],
   }),
+  getSavedRemoteThumbnail: vi.fn(() => ''),
+  saveRemoteThumbnail: vi.fn(),
 }))
 
 vi.mock('vue-router', () => ({
