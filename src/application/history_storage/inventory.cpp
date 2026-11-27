@@ -105,9 +105,9 @@ build_history_inventory(transport::Transport& storage,
                         const RemoteLayout& layout) {
     auto listing = list_identifiers(storage);
     if (!listing || listing->empty()) {
-        return listing
-                   ? std::expected<HistoryInventory, Error>{HistoryInventory{}}
-                   : std::unexpected(listing.error());
+        return listing ? std::expected<HistoryInventory, Error>{HistoryInventory{
+                             .all_commits_listed = true}}
+                       : std::unexpected(listing.error());
     }
     return build_history_inventory(*listing, layout);
 }
@@ -116,6 +116,7 @@ std::expected<HistoryInventory, Error>
 build_history_inventory(std::span<const std::string> identifiers,
                         const RemoteLayout& layout) {
     HistoryInventory inventory;
+    inventory.all_commits_listed = true;
     inventory.identifiers.reserve(identifiers.size());
     for (const auto& identifier : identifiers) {
         if (is_history_object(layout, identifier) &&

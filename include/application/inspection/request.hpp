@@ -13,6 +13,10 @@ namespace kasumi::transport {
 struct Transport;
 }
 
+namespace kasumi::application::history_storage {
+struct CommitCache;
+}
+
 namespace kasumi::application {
 
 // Read-only inspection query provided by Application.
@@ -67,6 +71,8 @@ struct InspectionInput {
     std::stop_token stop_token{};
     // Optional transport owned exclusively by the caller for this profile.
     transport::Transport* transport_cache = nullptr;
+    // Optional thread-safe commit cache shared across inspections.
+    history_storage::CommitCache* commit_cache = nullptr;
 };
 
 } // namespace kasumi::application

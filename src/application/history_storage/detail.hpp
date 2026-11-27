@@ -122,7 +122,8 @@ prefetch_commit_batch(transport::Transport& storage,
                       const RemoteLayout& layout,
                       const ObjectMap& commit_variants,
                       const std::filesystem::path& destination_root,
-                      std::size_t min_objects = 1);
+                      std::size_t min_objects = 1,
+                      CommitCache* commit_cache = nullptr);
 
 // Verifies remote SHA-256 against local_hash; returns false when the backend
 // does not support remote physical hashing.
@@ -226,7 +227,9 @@ try_load_variant(transport::Transport& storage,
                  std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                  const HeadReference& reference,
                  const std::filesystem::path& workspace,
-                 std::size_t sequence);
+                 std::size_t sequence,
+                 CommitCache* commit_cache = nullptr,
+                 bool allow_cache_read = true);
 
 // Returns the first valid variant of the commit.
 std::expected<history::LoadedCommit, Error>
@@ -236,7 +239,9 @@ try_load_variants(transport::Transport& storage,
                   std::vector<HeadReference> references,
                   const std::filesystem::path& workspace,
                   std::size_t& sequence,
-                  HeadReference* authenticated_reference = nullptr);
+                  HeadReference* authenticated_reference = nullptr,
+                  CommitCache* commit_cache = nullptr,
+                  const ObjectMap* confirmed_physical_variants = nullptr);
 
 // Confirms that the remote commit matches the published one.
 std::expected<void, Error>
@@ -263,7 +268,8 @@ LoadResult load_impl(
     std::optional<std::span<const std::string>> identifiers = std::nullopt,
     const KnownHistoryFrontier* frontier = nullptr,
     bool scoped = false,
-    std::span<const std::string> trusted_marker_identifiers = {});
+    std::span<const std::string> trusted_marker_identifiers = {},
+    CommitCache* commit_cache = nullptr);
 
 } // namespace kasumi::application::history_storage::detail
 

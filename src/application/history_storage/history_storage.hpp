@@ -19,6 +19,7 @@
 namespace kasumi::application::history_storage {
 
 struct RemoteLayout;
+struct CommitCache;
 
 // Binds a canonical commit to its published encrypted variant.
 struct HeadReference {
@@ -152,19 +153,22 @@ publish_commit(transport::Transport& storage,
 // Loads and validates all remote history.
 LoadResult load_history(transport::Transport& storage,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-                        const std::filesystem::path& workspace_root);
+                        const std::filesystem::path& workspace_root,
+                        CommitCache* commit_cache = nullptr);
 
 // Loads from an already observed listing.
 LoadResult load_history(transport::Transport& storage,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                         const std::filesystem::path& workspace_root,
-                        std::span<const std::string> identifiers);
+                        std::span<const std::string> identifiers,
+                        CommitCache* commit_cache = nullptr);
 
 // Loads using a validated local anchor.
 LoadResult load_history(transport::Transport& storage,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                         const std::filesystem::path& workspace_root,
-                        const KnownHistoryFrontier& frontier);
+                        const KnownHistoryFrontier& frontier,
+                        CommitCache* commit_cache = nullptr);
 
 // Loads heads and discovers ancestors on demand.
 LoadResult load_history_scoped(
@@ -172,14 +176,16 @@ LoadResult load_history_scoped(
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
     const std::filesystem::path& workspace_root,
     const KnownHistoryFrontier* frontier = nullptr,
-    std::span<const std::string> trusted_marker_identifiers = {});
+    std::span<const std::string> trusted_marker_identifiers = {},
+    CommitCache* commit_cache = nullptr);
 
 // Combines the observed listing with a local anchor.
 LoadResult load_history(transport::Transport& storage,
                         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
                         const std::filesystem::path& workspace_root,
                         std::span<const std::string> identifiers,
-                        const KnownHistoryFrontier& frontier);
+                        const KnownHistoryFrontier& frontier,
+                        CommitCache* commit_cache = nullptr);
 
 // Removes all marker variants for the given commits.
 RemoveMarkersResult

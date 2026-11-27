@@ -280,7 +280,8 @@ ObserveResult observe(transport::Transport& storage,
                       const history_storage::KnownHistoryFrontier* frontier,
                       std::span<const std::string> trusted_marker_identifiers,
                       bool complete_history,
-                      bool full_physical_inventory) {
+                      bool full_physical_inventory,
+                      history_storage::CommitCache* commit_cache) {
     try {
         if (!transport::valid(storage)) {
             return std::unexpected(invalid_input("invalid transport"));
@@ -323,16 +324,21 @@ ObserveResult observe(transport::Transport& storage,
                                                           key,
                                                           workspace_root,
                                                           *remote_inventory,
-                                                          *frontier)
+                                                          *frontier,
+                                                          commit_cache)
                       : remote_inventory
-                          ? history_storage::load_history(
-                                storage, key, workspace_root, *remote_inventory)
+                          ? history_storage::load_history(storage,
+                                                          key,
+                                                          workspace_root,
+                                                          *remote_inventory,
+                                                          commit_cache)
                           : history_storage::load_history_scoped(
                                 storage,
                                 key,
                                 workspace_root,
                                 frontier,
-                                trusted_marker_identifiers);
+                                trusted_marker_identifiers,
+                                commit_cache);
         if (!loaded) {
             return std::unexpected(storage_error(loaded.error()));
         }

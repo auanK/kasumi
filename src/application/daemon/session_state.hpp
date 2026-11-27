@@ -6,6 +6,7 @@
 #include "application/daemon/ipc_security.hpp"
 #include "application/daemon/web_auth.hpp"
 #include "application/daemon/web_jobs.hpp"
+#include "application/history_storage/commit_cache.hpp"
 #include "application/observation/state.hpp"
 #include "core/ignore.hpp"
 #include "platform/directory_watcher.hpp"
@@ -127,6 +128,7 @@ struct ProfileWarmSlot {
     std::optional<transport::Transport> warm_transport;
     std::chrono::steady_clock::time_point warm_transport_last_used{};
     observation::LocalObservationSession warm_observation;
+    std::shared_ptr<history_storage::CommitCache> commit_cache;
     std::unique_ptr<std::stop_source> task_stop_source;
 };
 

@@ -86,15 +86,16 @@ struct StorageView {
 using ObserveResult = std::expected<StorageView, Error>;
 
 // Loads, validates, and resolves the observed remote history.
-ObserveResult
-observe(transport::Transport& storage,
-        std::span<const std::uint8_t, crypto::KEY_SIZE> key,
-        const std::filesystem::path& workspace_root,
-        bool audit_content_objects,
-        const history_storage::KnownHistoryFrontier* frontier = nullptr,
-        std::span<const std::string> trusted_marker_identifiers = {},
-        bool complete_history = false,
-        bool full_physical_inventory = true);
+ObserveResult observe(
+    transport::Transport& storage,
+    std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+    const std::filesystem::path& workspace_root,
+    bool audit_content_objects,
+    const history_storage::KnownHistoryFrontier* frontier = nullptr,
+    std::span<const std::string> trusted_marker_identifiers = {},
+    bool complete_history = false,
+    bool full_physical_inventory = true,
+    history_storage::CommitCache* commit_cache = nullptr);
 
 } // namespace kasumi::application::observation::history
 

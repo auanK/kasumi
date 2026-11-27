@@ -1,3 +1,4 @@
+#include "application/history_storage/commit_cache.hpp"
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/history_storage.hpp"
 #include "application/history_storage/publication.hpp"
@@ -2225,6 +2226,190 @@ TEST(HistoryStorageTest, ReobservationInvalidatesHintsWhenHeadOrEpochChanges) {
         EXPECT_EQ(fixture.state->get_batch_count, 0U);
         EXPECT_EQ(fixture.state->prefix_list_count, 3U);
     }
+}
+
+TEST(HistoryStorageTest, CommitCacheReusesMemoryCommitsAndDownloadsOnlyNewOnes) {
+    auto workspace = kasumi::test::make_temp_workspace("commit-cache-memory");
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    storage.storage.get_batch = safe_fake_get_batch;
+    storage.storage.get = safe_fake_get;
+    storage.storage.list_prefix = reobservation_locked_list;
+
+    const auto root = kasumi::test::workspace_root(workspace);
+    auto c0 = make_commit(0, {}, "a.txt", "alpha").value();
+    auto r0 = publish(storage, workspace, c0).head;
+    auto c1 = make_commit(1, {r0.commit_id}, "b.txt", "beta").value();
+    auto r1 = publish(storage, workspace, c1).head;
+
+    kasumi::application::history_storage::CommitCache cache;
+    reset_fake_traffic(*state);
+
+    auto first = kasumi::application::history_storage::load_history(
+        storage, test_key(), root, &cache);
+    ASSERT_TRUE(first) << first.error().detail;
+    EXPECT_EQ(first->commits.size(), 2U);
+    EXPECT_EQ(state->get_batch_count, 1U);
+    EXPECT_EQ(state->commit_get_count, 0U);
+
+    reset_fake_traffic(*state);
+    auto second = kasumi::application::history_storage::load_history(
+        storage, test_key(), root, &cache);
+    ASSERT_TRUE(second) << second.error().detail;
+    EXPECT_EQ(second->commits.size(), 2U);
+    EXPECT_EQ(state->get_batch_count, 0U);
+    EXPECT_EQ(state->commit_get_count, 0U);
+
+    auto c2 = make_commit(2, {r1.commit_id}, "c.txt", "gamma").value();
+    static_cast<void>(publish(storage, workspace, c2));
+    reset_fake_traffic(*state);
+
+    std::size_t downloaded_batch_items = 0;
+    state->on_operation = [&](FakeState&, std::string_view op, std::string_view) {
+        if (op == "get") {
+            ++downloaded_batch_items;
+        }
+    };
+    auto third = kasumi::application::history_storage::load_history(
+        storage, test_key(), root, &cache);
+    state->on_operation = nullptr;
+    ASSERT_TRUE(third) << third.error().detail;
+    EXPECT_EQ(third->commits.size(), 3U);
+    EXPECT_EQ(state->get_batch_count, 1U);
+    EXPECT_EQ(state->commit_get_count, 0U);
+    // Only the 1 newly published commit object should have been fetched.
+    EXPECT_EQ(downloaded_batch_items, 1U);
+}
+
+TEST(HistoryStorageTest, CommitCacheDiskCiphertextPersistsAndSelfHealsCorruption) {
+    auto workspace = kasumi::test::make_temp_workspace("commit-cache-disk");
+    const auto disk_root =
+        kasumi::test::workspace_path(workspace, "disk-cache");
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    storage.storage.get_batch = safe_fake_get_batch;
+    storage.storage.get = safe_fake_get;
+    storage.storage.list_prefix = reobservation_locked_list;
+
+    const auto root = kasumi::test::workspace_root(workspace);
+    auto c0 = make_commit(0, {}, "a.txt", "alpha").value();
+    auto r0 = publish(storage, workspace, c0).head;
+    auto c1 = make_commit(1, {r0.commit_id}, "b.txt", "beta").value();
+    auto r1 = publish(storage, workspace, c1).head;
+
+    {
+        kasumi::application::history_storage::CommitCache writer_cache;
+        writer_cache.disk_cache_root = disk_root;
+        writer_cache.max_memory_bytes = 0;
+        writer_cache.max_memory_entries = 0;
+        auto first = kasumi::application::history_storage::load_history(
+            storage, test_key(), root, &writer_cache);
+        ASSERT_TRUE(first) << first.error().detail;
+        EXPECT_EQ(first->commits.size(), 2U);
+    }
+
+    kasumi::application::history_storage::CommitCache reader_cache;
+    reader_cache.disk_cache_root = disk_root;
+    reader_cache.max_memory_bytes = 0;
+    reader_cache.max_memory_entries = 0;
+    reset_fake_traffic(*state);
+
+    auto second = kasumi::application::history_storage::load_history(
+        storage, test_key(), root, &reader_cache);
+    ASSERT_TRUE(second) << second.error().detail;
+    EXPECT_EQ(second->commits.size(), 2U);
+    EXPECT_EQ(state->get_batch_count, 0U);
+    EXPECT_EQ(state->commit_get_count, 0U);
+
+    // Corrupt one cached ciphertext file on disk and verify automatic self-heal.
+    auto cached_file =
+        kasumi::application::history_storage::lookup_cached_ciphertext_path(
+            reader_cache, test_layout().commits_prefix, r1);
+    ASSERT_TRUE(cached_file.has_value());
+    kasumi::test::write_text(*cached_file, "corrupted-ciphertext");
+
+    reset_fake_traffic(*state);
+    auto third = kasumi::application::history_storage::load_history(
+        storage, test_key(), root, &reader_cache);
+    ASSERT_TRUE(third) << third.error().detail;
+    EXPECT_EQ(third->commits.size(), 2U);
+    // Remote fallback fetched r1 once and re-healed it on disk.
+    EXPECT_EQ(state->commit_get_count, 1U);
+
+    reset_fake_traffic(*state);
+    auto fourth = kasumi::application::history_storage::load_history(
+        storage, test_key(), root, &reader_cache);
+    ASSERT_TRUE(fourth) << fourth.error().detail;
+    EXPECT_EQ(fourth->commits.size(), 2U);
+    EXPECT_EQ(state->get_batch_count, 0U);
+    EXPECT_EQ(state->commit_get_count, 0U);
+}
+
+TEST(HistoryStorageTest, CommitCacheDoesNotHideDeletedCommitWithDanglingMarker) {
+    auto workspace = kasumi::test::make_temp_workspace("commit-cache-dangling");
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    storage.storage.get_batch = safe_fake_get_batch;
+    storage.storage.get = safe_fake_get;
+    storage.storage.list_prefix = reobservation_locked_list;
+
+    const auto root = kasumi::test::workspace_root(workspace);
+    auto c0 = make_commit(0, {}, "a.txt", "alpha").value();
+    auto r0 = publish(storage, workspace, c0).head;
+
+    kasumi::application::history_storage::CommitCache cache;
+    cache.disk_cache_root =
+        kasumi::test::workspace_path(workspace, "disk-cache");
+
+    auto first = kasumi::application::history_storage::load_history(
+        storage, test_key(), root, &cache);
+    ASSERT_TRUE(first) << first.error().detail;
+    EXPECT_EQ(first->commits.size(), 1U);
+
+    // Delete the remote commit object while leaving its head marker intact.
+    ASSERT_TRUE(kasumi::transport::remove(storage, object_path(r0)));
+    auto second = kasumi::application::history_storage::load_history(
+        storage, test_key(), root, &cache);
+    ASSERT_FALSE(second.has_value());
+    EXPECT_EQ(second.error().code, ErrorCode::MissingCommit);
+}
+
+TEST(HistoryStorageTest, CommitCacheRespectsMemoryEvictionAndClear) {
+    auto workspace = kasumi::test::make_temp_workspace("commit-cache-evict");
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    storage.storage.get_batch = safe_fake_get_batch;
+    storage.storage.get = safe_fake_get;
+    storage.storage.list_prefix = reobservation_locked_list;
+
+    const auto root = kasumi::test::workspace_root(workspace);
+    auto c0 = make_commit(0, {}, "a.txt", "alpha").value();
+    auto r0 = publish(storage, workspace, c0).head;
+    auto c1 = make_commit(1, {r0.commit_id}, "b.txt", "beta").value();
+    auto r1 = publish(storage, workspace, c1).head;
+
+    kasumi::application::history_storage::CommitCache cache;
+    cache.max_memory_entries = 1U;
+
+    auto first = kasumi::application::history_storage::load_history(
+        storage, test_key(), root, &cache);
+    ASSERT_TRUE(first) << first.error().detail;
+    EXPECT_EQ(cache.memory_entries.size(), 1U);
+
+    // A different keyed namespace with identical commit/ciphertext IDs must not
+    // collide with the cached entry.
+    EXPECT_FALSE(
+        kasumi::application::history_storage::lookup_cached_commit(
+            cache, "deadbeef/01234567/", r0)
+            .has_value());
+    EXPECT_FALSE(
+        kasumi::application::history_storage::lookup_cached_commit(
+            cache, "deadbeef/01234567/", r1)
+            .has_value());
+
+    kasumi::application::history_storage::clear_memory_cache(cache);
+    EXPECT_TRUE(cache.memory_entries.empty());
+    EXPECT_EQ(cache.current_memory_bytes, 0U);
 }
 
 } // namespace

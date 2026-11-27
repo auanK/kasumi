@@ -3,6 +3,7 @@
 #include "application/concurrency.hpp"
 #include "application/detail.hpp"
 #include "application/history_storage/activity.hpp"
+#include "application/history_storage/commit_cache.hpp"
 #include "application/history_storage/content_reachability.hpp"
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/history_storage.hpp"
@@ -68,6 +69,30 @@ struct InspectionContext {
     observation::history::ObservationHints hints;
     ProgressMeter* progress = nullptr;
 };
+
+struct ActiveCommitCache {
+    std::optional<history_storage::CommitCache> owned_disk_cache;
+    history_storage::CommitCache* ptr = nullptr;
+};
+
+ActiveCommitCache
+resolve_active_commit_cache(history_storage::CommitCache* caller_cache,
+                            const std::filesystem::path& app_data_dir) {
+    if (caller_cache != nullptr) {
+        return ActiveCommitCache{.ptr = caller_cache};
+    }
+    if (app_data_dir.empty()) {
+        return {};
+    }
+    ActiveCommitCache result;
+    result.owned_disk_cache.emplace();
+    result.owned_disk_cache->disk_cache_root =
+        app_data_dir / "cache" / "commits";
+    result.owned_disk_cache->max_memory_bytes = 0;
+    result.owned_disk_cache->max_memory_entries = 0;
+    result.ptr = &*result.owned_disk_cache;
+    return result;
+}
 
 bool requires_complete_history(InspectionOperation operation) noexcept {
     return operation == InspectionOperation::RemoteCommits ||
@@ -2764,6 +2789,8 @@ run_inspection(InspectionInput& input,
         ((operation == Op::RemoteTree || operation == Op::RemoteStat ||
           operation == Op::RemoteGet || operation == Op::RemoteRestore) &&
          input.request.commit_id.has_value());
+    const auto active_commit_cache = resolve_active_commit_cache(
+        input.commit_cache, input.environment.app_data_dir);
     begin_progress_phase(meter, Activity::Authenticating);
     auto observed = observation::history::observe(
         context.storage,
@@ -2775,7 +2802,8 @@ run_inspection(InspectionInput& input,
             : (context.hints.frontier ? &*context.hints.frontier : nullptr),
         context.hints.trusted_marker_identifiers,
         need_complete_history,
-        audit_content_objects);
+        audit_content_objects,
+        active_commit_cache.ptr);
     if (!observed) {
         return obs_fail(operation, "failed to observe remote history");
     }
@@ -3177,6 +3205,8 @@ open_remote_download(InspectionInput input) {
         session.state->workspace = std::move(*workspace);
 
         const bool need_complete_history = req.commit_id.has_value();
+        const auto active_commit_cache = resolve_active_commit_cache(
+            input.commit_cache, input.environment.app_data_dir);
         auto observed = observation::history::observe(
             session.state->storage,
             session.state->key,
@@ -3186,7 +3216,9 @@ open_remote_download(InspectionInput input) {
                 ? nullptr
                 : (hints.frontier ? &*hints.frontier : nullptr),
             hints.trusted_marker_identifiers,
-            need_complete_history);
+            need_complete_history,
+            false,
+            active_commit_cache.ptr);
         if (!observed) {
             return obs_fail(operation, "failed to observe remote history");
         }
