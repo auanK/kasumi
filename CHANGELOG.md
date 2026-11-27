@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.30.3]
+
+### Changed
+
+- **Two-Tier Immutable Commit Cache & Parallel Local Decoding (`src/application/history_storage/commit_cache.hpp`, `src/application/history_storage/commit_cache.cpp`, `src/application/history_storage/loading.cpp`)**:
+  - Added a bounded two-tier `CommitCache` for immutable content-addressed commits: a warm per-profile in-memory LRU cache in the daemon (`128 MiB` / `1024` commits, cleared on profile lock or key/remote change) backed by a bounded encrypted-ciphertext disk cache under `cache/commits/` (`512` files / `256 MiB`, owner-only permissions).
+  - Updated `prefetch_commit_batch()` to skip commits already present in memory or disk cache, and parallelized local ciphertext verification, decryption, deserialization, and commit-ID authentication across worker threads overlapped with epoch and head marker reads.
+  - Preserved full remote-existence validation (`all_commits_listed` check) and automatic self-healing eviction when a cached disk ciphertext fails integrity checks.
+- **Scoped & Concurrent History Prefix Listing (`src/application/observation/history.cpp`, `src/transport/rclone/storage.cpp`)**:
+  - Updated `observation::history::observe()` and `open_remote_download()` to list only history prefixes (`heads/`, `commits/`, `epochs/`) via `transport::control_read_batch` when `complete_history` is requested without a content audit.
+  - Updated `rclone_control_read_batch()` to execute pure `list_prefixes` batches concurrently while keeping strict `concurrency = 1` sequential ordering whenever `LIST -> STAT` admission barriers are combined.
+- **Single-Observation Snapshot Diffs (`src/application/inspection/inspect.cpp`, `src/application/daemon/web_remote.cpp`)**:
+  - Added `inspect_commit_pair()` and wired `/v1/remote/{profile}/diff` through it so comparing two snapshots observes remote history once instead of running two separate full inspections.
+- **Instant Stale-While-Revalidate Snapshot Modal (`web/src/workspace/files/FilesTab.vue`)**:
+  - Populated the **Browse snapshots** modal immediately from `cachedRemoteReading(profile, 'commits')` (matching `HistoryTab.vue`) while revalidating in the background when stale.
+
 ## [0.30.2]
 
 ### Fixed
