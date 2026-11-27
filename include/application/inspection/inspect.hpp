@@ -32,6 +32,20 @@ struct RemoteTreePair {
     RemoteTreeReport to;
 };
 
+struct RemoteThumbnailSourceRequest {
+    std::string profile_name;
+    std::string logical_path;
+    std::string commit_id;
+    std::string expected_logical_hash;
+    std::uint64_t max_bytes = 5ULL * 1024ULL * 1024ULL;
+};
+
+struct RemoteThumbnailSource {
+    std::vector<std::uint8_t> bytes;
+    std::string logical_hash;
+    std::uint64_t size = 0;
+};
+
 std::expected<InspectionResponse, InspectionError>
 inspect(InspectionInput input);
 
@@ -40,6 +54,13 @@ std::expected<RemoteTreePair, InspectionError>
 inspect_commit_pair(InspectionInput input,
                     std::string from_commit_id,
                     std::string to_commit_id);
+
+// Fetches an authenticated remote file payload bounded by max_bytes for
+// thumbnail generation, reusing an already-authenticated CommitCache entry
+// when available to avoid redundant remote history listings.
+std::expected<std::optional<RemoteThumbnailSource>, InspectionError>
+fetch_remote_thumbnail_source(InspectionInput input,
+                              const RemoteThumbnailSourceRequest& req);
 
 // Opens a single-observation authenticated download session for one remote file.
 std::expected<RemoteDownloadSession, InspectionError>

@@ -2414,4 +2414,37 @@ TEST(HistoryStorageTest, CommitCacheRespectsMemoryEvictionAndClear) {
     EXPECT_EQ(cache.current_memory_bytes, 0U);
 }
 
+TEST(HistoryStorageTest, CommitCacheLookupByIdFindsCachedCommitAcrossNamespaces) {
+    auto workspace = kasumi::test::make_temp_workspace("commit-cache-by-id");
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    storage.storage.get_batch = safe_fake_get_batch;
+    storage.storage.get = safe_fake_get;
+    storage.storage.list_prefix = reobservation_locked_list;
+
+    const auto root = kasumi::test::workspace_root(workspace);
+    auto c0 = make_commit(0, {}, "a.txt", "alpha").value();
+    auto r0 = publish(storage, workspace, c0).head;
+
+    kasumi::application::history_storage::CommitCache cache;
+    auto first = kasumi::application::history_storage::load_history(
+        storage, test_key(), root, &cache);
+    ASSERT_TRUE(first) << first.error().detail;
+
+    auto hit = kasumi::application::history_storage::lookup_cached_commit_by_id(
+        cache, test_layout().commits_prefix, r0.commit_id);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->id, r0.commit_id);
+    EXPECT_EQ(hit->commit.tree, c0.tree);
+
+    EXPECT_FALSE(
+        kasumi::application::history_storage::lookup_cached_commit_by_id(
+            cache, "deadbeef/01234567/", r0.commit_id)
+            .has_value());
+    EXPECT_FALSE(
+        kasumi::application::history_storage::lookup_cached_commit_by_id(
+            cache, test_layout().commits_prefix, "not-a-hex-id")
+            .has_value());
+}
+
 } // namespace

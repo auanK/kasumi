@@ -59,6 +59,13 @@ lookup_cached_commit(CommitCache& cache,
                      std::string_view commits_prefix,
                      const HeadReference& reference);
 
+// Looks up any authenticated variant in memory matching commit_id within the
+// keyed commits namespace, promoting it in LRU order and returning a copy.
+std::optional<history::LoadedCommit>
+lookup_cached_commit_by_id(CommitCache& cache,
+                           std::string_view commits_prefix,
+                           std::string_view commit_id);
+
 // Returns true if the commit is cached in memory or exists as a bounded regular
 // ciphertext file on disk, allowing prefetch_commit_batch to skip re-download.
 bool has_cached_commit_or_ciphertext(CommitCache& cache,

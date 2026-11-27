@@ -297,6 +297,25 @@ lookup_cached_commit(CommitCache& cache,
     return it->second.commit;
 }
 
+std::optional<history::LoadedCommit>
+lookup_cached_commit_by_id(CommitCache& cache,
+                           std::string_view commits_prefix,
+                           std::string_view commit_id) {
+    if (commits_prefix.empty() || !detail::valid_hex_id(commit_id)) {
+        return std::nullopt;
+    }
+    std::lock_guard lock(cache.mutex);
+    for (auto& [key, entry] : cache.memory_entries) {
+        if (key.commits_prefix == commits_prefix &&
+            key.reference.commit_id == commit_id) {
+            cache.lru_order.splice(
+                cache.lru_order.begin(), cache.lru_order, entry.lru_it);
+            return entry.commit;
+        }
+    }
+    return std::nullopt;
+}
+
 bool has_cached_commit_or_ciphertext(CommitCache& cache,
                                      std::string_view commits_prefix,
                                      const HeadReference& reference) {

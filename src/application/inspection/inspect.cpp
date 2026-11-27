@@ -3500,4 +3500,175 @@ take_remote_download_transport(RemoteDownloadSession& session) noexcept {
     return taken;
 }
 
+std::expected<std::optional<RemoteThumbnailSource>, InspectionError>
+fetch_remote_thumbnail_source(InspectionInput input,
+                              const RemoteThumbnailSourceRequest& req) {
+    const auto operation = InspectionOperation::RemoteGet;
+    const platform::cancellation::ScopedStopToken stop_scope{input.stop_token};
+    InspectionContext context;
+    std::expected<std::optional<RemoteThumbnailSource>, InspectionError>
+        result = std::optional<RemoteThumbnailSource>{std::nullopt};
+
+    try {
+        if (!kasumi::valid_logical_path(req.logical_path) ||
+            !history::valid_commit_id(req.commit_id) ||
+            !is_lowercase_hex(req.expected_logical_hash) ||
+            req.max_bytes == 0) {
+            finish_inspection(input, context);
+            return result;
+        }
+
+        auto runtime_data = runtime::resolve(input.environment.app_data_dir,
+                                             req.profile_name,
+                                             runtime::AccessMode::ReadOnly,
+                                             false);
+        if (!runtime_data) {
+            finish_inspection(input, context);
+            return std::unexpected(
+                map_runtime_error(operation, runtime_data.error()));
+        }
+        context.runtime = *runtime_data;
+
+        const ScopedContentConcurrency concurrency_scope{
+            resolve_content_concurrency(input.request.transfer_concurrency,
+                                        context.runtime.transfer_concurrency)};
+
+        auto key = resolve_key(
+            input.credentials, context.runtime, context.key, operation);
+        if (!key) {
+            finish_inspection(input, context);
+            return std::unexpected(key.error());
+        }
+        context.layout = history_storage::derive_remote_layout(context.key);
+        context.hints =
+            make_observation_hints(context.runtime, operation, context.layout);
+
+        if (input.transport_cache && transport::valid(*input.transport_cache)) {
+            context.storage = transport::borrow_transport(*input.transport_cache);
+        } else {
+            auto opened = transport::open_transport(
+                context.runtime.storage_location,
+                transport::TransportOptions{
+                    .forbidden_executable_root = context.runtime.local_dir,
+                    .rclone_config = context.runtime.rclone_config,
+                    .bandwidth_limit = input.request.bandwidth_limit
+                                           ? input.request.bandwidth_limit
+                                           : context.runtime.bandwidth_limit,
+                });
+            if (!opened) {
+                finish_inspection(input, context);
+                return fail(operation,
+                            InspectionErrorCode::RuntimeFailure,
+                            "failed to open remote storage");
+            }
+            if (input.transport_cache) {
+                *input.transport_cache = std::move(*opened);
+                context.storage =
+                    transport::borrow_transport(*input.transport_cache);
+            } else {
+                context.storage = std::move(*opened);
+            }
+        }
+
+        auto workspace = platform::create_workspace("remote-thumb");
+        if (!workspace) {
+            finish_inspection(input, context);
+            return obs_fail(operation, "failed to prepare remote thumbnail");
+        }
+        context.workspace = std::move(*workspace);
+
+        const auto active_commit_cache = resolve_active_commit_cache(
+            input.commit_cache, input.environment.app_data_dir);
+        std::optional<history::LoadedCommit> target_commit;
+        if (active_commit_cache.ptr != nullptr) {
+            target_commit = history_storage::lookup_cached_commit_by_id(
+                *active_commit_cache.ptr,
+                context.layout.commits_prefix,
+                req.commit_id);
+        }
+        if (!target_commit) {
+            auto observed = observation::history::observe(
+                context.storage,
+                context.key,
+                context.workspace->root,
+                false,
+                nullptr,
+                context.hints.trusted_marker_identifiers,
+                true,
+                false,
+                active_commit_cache.ptr);
+            if (!observed) {
+                finish_inspection(input, context);
+                return obs_fail(operation, "failed to observe remote history");
+            }
+            const auto found = std::ranges::find(observed->reachable_commits,
+                                                 req.commit_id,
+                                                 &history::LoadedCommit::id);
+            if (found != observed->reachable_commits.end()) {
+                target_commit = *found;
+            }
+        }
+
+        if (!target_commit || !valid_commit_snapshot(*target_commit)) {
+            finish_inspection(input, context);
+            return std::optional<RemoteThumbnailSource>{std::nullopt};
+        }
+
+        const auto* row =
+            find_row(target_commit->commit.tree, req.logical_path);
+        if (row == nullptr || row->is_directory || row->size == 0 ||
+            row->size > req.max_bytes ||
+            hash_hex(row->hash) != req.expected_logical_hash) {
+            finish_inspection(input, context);
+            return std::optional<RemoteThumbnailSource>{std::nullopt};
+        }
+
+        auto dl_target = make_download_target(
+            *row, target_commit->commit.storage, context.key, req.commit_id);
+        const auto dest = context.workspace->root / "thumb-source";
+        auto fetched = download_target_to_destination(
+            context.storage,
+            context.key,
+            context.workspace->root,
+            nullptr,
+            operation,
+            dl_target,
+            dest,
+            std::nullopt);
+        if (!fetched) {
+            finish_inspection(input, context);
+            return std::unexpected(fetched.error());
+        }
+
+        auto file = platform::private_storage::open_regular_file(dest);
+        if (!file || file->size != row->size) {
+            finish_inspection(input, context);
+            return fail(operation,
+                        InspectionErrorCode::RuntimeFailure,
+                        "downloaded thumbnail source size mismatch");
+        }
+        RemoteThumbnailSource source{
+            .bytes = std::vector<std::uint8_t>(
+                static_cast<std::size_t>(file->size)),
+            .logical_hash = hash_hex(row->hash),
+            .size = file->size,
+        };
+        if (!platform::private_storage::read_regular_file_exact(
+                *file, source.bytes)) {
+            finish_inspection(input, context);
+            return fail(operation,
+                        InspectionErrorCode::RuntimeFailure,
+                        "failed to read downloaded thumbnail source");
+        }
+        result = std::move(source);
+    } catch (...) {
+        result = fail(operation,
+                      InspectionErrorCode::RuntimeFailure,
+                      "exception while fetching remote thumbnail");
+    }
+
+    finish_inspection(input, context);
+    return result;
+}
+
 } // namespace kasumi::application
