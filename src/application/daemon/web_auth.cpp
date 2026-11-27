@@ -19,6 +19,11 @@ using json = nlohmann::json;
 using crypto::secure_memory::WipeGuard;
 
 constexpr std::size_t max_web_password_size = 1024;
+constexpr auto kSessionIdleTtl = std::chrono::hours{24 * 7};
+constexpr auto kSessionMaxTtl = std::chrono::hours{24 * 30};
+constexpr std::int64_t kCookieMaxAgeSeconds = 30LL * 24LL * 60LL * 60LL;
+constexpr auto kSessionPersistInterval = 1h;
+constexpr std::size_t kMaxSessions = 256;
 
 bool valid_web_username(std::string_view username) noexcept {
     return username.size() <= 256 &&
@@ -30,9 +35,162 @@ bool valid_web_username(std::string_view username) noexcept {
 
 bool valid_new_web_password(std::string_view password) noexcept {
     return password.size() <= max_web_password_size &&
-           static_cast<std::size_t>(std::ranges::count_if(
-               password, [](unsigned char ch) { return (ch & 0xc0U) != 0x80U; }))
-               >= runtime::vault::MINIMUM_WEB_PASSWORD_SIZE;
+           static_cast<std::size_t>(
+               std::ranges::count_if(password, [](unsigned char ch) {
+                   return (ch & 0xc0U) != 0x80U;
+               })) >= runtime::vault::MINIMUM_WEB_PASSWORD_SIZE;
+}
+
+bool is_loopback_bind(std::string_view bind) noexcept {
+    return bind == "127.0.0.1" || bind == "::1";
+}
+
+bool is_wildcard_bind(std::string_view bind) noexcept {
+    return bind == "0.0.0.0" || bind == "::";
+}
+
+bool is_ipv4_literal(std::string_view value) noexcept {
+    if (value.empty() || value.size() > 15)
+        return false;
+    int parts = 0;
+    std::size_t pos = 0;
+    while (pos <= value.size()) {
+        const std::size_t dot = value.find('.', pos);
+        const auto part = dot == std::string_view::npos
+                              ? value.substr(pos)
+                              : value.substr(pos, dot - pos);
+        if (part.empty() || part.size() > 3)
+            return false;
+        if (part.size() > 1 && part.front() == '0')
+            return false;
+        int octet = -1;
+        const auto [end, ec] =
+            std::from_chars(part.data(), part.data() + part.size(), octet);
+        if (ec != std::errc{} || end != part.data() + part.size() ||
+            octet < 0 || octet > 255)
+            return false;
+        ++parts;
+        if (dot == std::string_view::npos)
+            break;
+        pos = dot + 1;
+        if (pos == value.size())
+            return false;
+    }
+    return parts == 4;
+}
+
+bool is_ipv6_literal(std::string_view value) noexcept {
+    if (value.size() < 2 || value.size() > 45 ||
+        value.find(':') == std::string_view::npos)
+        return false;
+    if (value.find("::") != value.rfind("::"))
+        return false;
+    for (const char ch : value) {
+        const auto uc = static_cast<unsigned char>(ch);
+        const bool is_hex = (uc >= '0' && uc <= '9') ||
+                            (uc >= 'a' && uc <= 'f') ||
+                            (uc >= 'A' && uc <= 'F');
+        if (!is_hex && ch != ':' && ch != '.')
+            return false;
+    }
+    return true;
+}
+
+bool is_valid_bind_address(std::string_view bind) noexcept {
+    return is_ipv4_literal(bind) || is_ipv6_literal(bind);
+}
+
+bool is_valid_allowed_host(std::string_view entry) noexcept {
+    if (entry.empty() || entry.size() > 256)
+        return false;
+    return std::ranges::none_of(entry, [](unsigned char ch) {
+        return ch <= 0x20 || ch == 0x7f || ch == '/' || ch == '\\';
+    });
+}
+
+bool is_ip_literal_host(std::string_view host_part) noexcept {
+    if (is_ipv4_literal(host_part))
+        return true;
+    return host_part.size() >= 4 && host_part.front() == '[' &&
+           host_part.back() == ']' &&
+           is_ipv6_literal(host_part.substr(1, host_part.size() - 2));
+}
+
+std::pair<std::string_view, std::string_view>
+split_host_header(std::string_view host) noexcept {
+    if (host.starts_with('[')) {
+        const auto close = host.find(']');
+        if (close == std::string_view::npos)
+            return {{}, {}};
+        const auto base = host.substr(0, close + 1);
+        const auto rest = host.substr(close + 1);
+        if (rest.empty())
+            return {base, {}};
+        if (rest.starts_with(':') && rest.size() > 1)
+            return {base, rest.substr(1)};
+        return {{}, {}};
+    }
+    const auto first = host.find(':');
+    if (first == std::string_view::npos)
+        return {host, {}};
+    if (host.find(':', first + 1) != std::string_view::npos || first == 0 ||
+        first + 1 == host.size())
+        return {{}, {}};
+    return {host.substr(0, first), host.substr(first + 1)};
+}
+
+std::string_view unbracket(std::string_view host_base) noexcept {
+    if (host_base.size() >= 2 && host_base.front() == '[' &&
+        host_base.back() == ']')
+        return host_base.substr(1, host_base.size() - 2);
+    return host_base;
+}
+
+bool host_allowed(const WebListener& listener,
+                  std::string_view host,
+                  int port) {
+    if (host.empty() || host.size() > 320 ||
+        std::ranges::any_of(host, [](unsigned char ch) {
+            return ch <= 0x20 || ch == 0x7f;
+        }))
+        return false;
+    if (listener.skip_host_check)
+        return true;
+    const std::string port_text = std::to_string(port);
+    if (host == "127.0.0.1:" + port_text || host == "localhost:" + port_text ||
+        host == "[::1]:" + port_text)
+        return true;
+    const auto [host_base, host_port] = split_host_header(host);
+    for (const auto& entry : listener.allowed_hosts) {
+        if (entry == host || entry + ":" + port_text == host)
+            return true;
+        if (entry.starts_with("*.") && entry.size() > 2 && !host_base.empty()) {
+            const std::string_view suffix = std::string_view{entry}.substr(1);
+            if (host_base.size() > suffix.size() &&
+                host_base.ends_with(suffix) &&
+                (host_port.empty() || host_port == port_text))
+                return true;
+        }
+    }
+    const bool valid_port =
+        host_port == port_text || (port == 80 && host_port.empty());
+    if (valid_port && !host_base.empty() && is_ip_literal_host(host_base)) {
+        if (is_wildcard_bind(listener.bind) ||
+            unbracket(host_base) == listener.bind)
+            return true;
+    }
+    return false;
+}
+
+std::string session_token_hash(std::string_view token) {
+    std::array<std::uint8_t, kTokenSize> digest{};
+    crypto_blake2b(digest.data(),
+                   digest.size(),
+                   reinterpret_cast<const std::uint8_t*>(token.data()),
+                   token.size());
+    auto encoded = encode_hex(digest);
+    crypto::secure_memory::wipe(digest.data(), digest.size());
+    return encoded;
 }
 
 void reply(httplib::Response& res, int status, const json& value) {
@@ -75,6 +233,121 @@ read_optional(const std::filesystem::path& path) {
     return parsed;
 }
 
+std::expected<WebListener, std::string> parse_web_listener(const json& config) {
+    WebListener listener;
+    if (config.is_null())
+        return listener;
+    try {
+        listener.bind = config.value("bind", listener.bind);
+        const auto port =
+            config.value("port", static_cast<std::int64_t>(listener.port));
+        if (port < 0 || port > 65535 || !is_valid_bind_address(listener.bind))
+            return std::unexpected("invalid web listener");
+        listener.port = static_cast<int>(port);
+        listener.allowed_hosts =
+            config.value("allowed_hosts", listener.allowed_hosts);
+        for (const auto& host : listener.allowed_hosts) {
+            if (!is_valid_allowed_host(host))
+                return std::unexpected("invalid allowed host entry");
+        }
+        listener.skip_host_check =
+            config.value("skip_host_check", listener.skip_host_check);
+    } catch (const json::exception&) {
+        return std::unexpected("invalid web configuration");
+    }
+    return listener;
+}
+
+void persist_sessions(WebAuth& auth) {
+    if (auth.dir.empty() || auth.salt.empty())
+        return;
+    const auto mono_now = WebClock::now();
+    std::erase_if(auth.sessions, [&](const auto& entry) {
+        return mono_now >= entry.second.expires ||
+               mono_now >= entry.second.idle;
+    });
+    const auto wall_now_s =
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    json items = json::array();
+    for (const auto& [hash, session] : auth.sessions) {
+        if (hash.size() != kTokenSize * 2)
+            continue;
+        const auto exp_s = std::chrono::duration_cast<std::chrono::seconds>(
+                               session.expires - mono_now)
+                               .count();
+        const auto idle_s = std::chrono::duration_cast<std::chrono::seconds>(
+                                session.idle - mono_now)
+                                .count();
+        if (exp_s <= 0 || idle_s <= 0)
+            continue;
+        items.push_back(json{{"hash", hash},
+                             {"csrf", encode_hex(session.csrf)},
+                             {"expires_unix", wall_now_s + exp_s},
+                             {"idle_unix", wall_now_s + idle_s}});
+    }
+    const auto serialized = json{
+        {"version", 1},
+        {"salt", auth.salt},
+        {"sessions",
+         std::move(items)}}.dump();
+    static_cast<void>(platform::private_storage::write_atomically(
+        auth.dir / "web-sessions.json", serialized));
+}
+
+void load_persisted_sessions(WebAuth& auth) {
+    if (auth.dir.empty() || auth.salt.empty())
+        return;
+    auto persisted = read_optional(auth.dir / "web-sessions.json");
+    if (!persisted || persisted->is_null())
+        return;
+    try {
+        if (persisted->value("version", 0) != 1 ||
+            persisted->value("salt", std::string{}) != auth.salt ||
+            !persisted->contains("sessions") ||
+            !(*persisted)["sessions"].is_array())
+            return;
+        const auto wall_now_s =
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        const auto mono_now = WebClock::now();
+        for (const auto& item : (*persisted)["sessions"]) {
+            if (!item.is_object() || auth.sessions.size() >= kMaxSessions)
+                break;
+            const auto hash = item.value("hash", std::string{});
+            const auto csrf_hex = item.value("csrf", std::string{});
+            const auto exp_unix = item.value("expires_unix", std::int64_t{0});
+            const auto idle_unix = item.value("idle_unix", std::int64_t{0});
+            auto hash_bytes = decode_hex(hash, kTokenSize);
+            auto csrf_bytes = decode_hex(csrf_hex, kTokenSize);
+            if (!hash_bytes || !csrf_bytes ||
+                csrf_bytes->size() != kTokenSize || exp_unix <= wall_now_s ||
+                idle_unix <= wall_now_s)
+                continue;
+            std::array<std::uint8_t, kTokenSize> csrf{};
+            std::copy_n(csrf_bytes->begin(), kTokenSize, csrf.begin());
+            crypto::secure_memory::wipe(csrf_bytes->data(), csrf_bytes->size());
+            const auto exp_rem =
+                (std::min)(std::chrono::seconds{exp_unix - wall_now_s},
+                           std::chrono::duration_cast<std::chrono::seconds>(
+                               kSessionMaxTtl));
+            const auto idle_rem =
+                (std::min)(std::chrono::seconds{idle_unix - wall_now_s},
+                           std::chrono::duration_cast<std::chrono::seconds>(
+                               kSessionIdleTtl));
+            auth.sessions.emplace(hash,
+                                  WebSession{.csrf = csrf,
+                                             .expires = mono_now + exp_rem,
+                                             .idle = mono_now + idle_rem,
+                                             .last_persisted = mono_now});
+        }
+    } catch (const json::exception&) {
+        return;
+    }
+}
+
 } // namespace
 
 std::string session_cookie(const httplib::Request& req) {
@@ -104,22 +377,14 @@ std::string session_cookie(const httplib::Request& req) {
 std::expected<WebListener, std::string>
 initialize_web_auth(WebAuth& auth, const std::filesystem::path& dir) {
     auth.dir = dir;
-    WebListener listener;
     auto config = read_optional(dir / "web.json");
     auto verifier = read_optional(dir / "web-password.json");
     if (!config || !verifier)
         return std::unexpected("invalid web configuration or password file");
+    auto listener = parse_web_listener(*config);
+    if (!listener)
+        return std::unexpected(listener.error());
     try {
-        if (!config->is_null()) {
-            listener.bind = config->value("bind", listener.bind);
-            const auto port =
-                config->value("port", static_cast<std::int64_t>(listener.port));
-            if (port < 0 || port > 65535 || listener.bind.empty())
-                return std::unexpected("invalid web listener");
-            listener.port = static_cast<int>(port);
-            listener.allowed_hosts =
-                config->value("allowed_hosts", listener.allowed_hosts);
-        }
         if (!verifier->is_null()) {
             auth.username = verifier->value("username", std::string{"admin"});
             auth.salt = verifier->at("salt").get<std::string>();
@@ -135,7 +400,7 @@ initialize_web_auth(WebAuth& auth, const std::filesystem::path& dir) {
         return std::unexpected("invalid web configuration or password file");
     }
     if (auth.salt.empty()) {
-        if (listener.bind != "127.0.0.1" && listener.bind != "::1")
+        if (!is_loopback_bind(listener->bind))
             return std::unexpected(
                 "configure a web password before binding outside loopback");
         if (!platform::random::fill_bytes(auth.bootstrap))
@@ -145,12 +410,19 @@ initialize_web_auth(WebAuth& auth, const std::filesystem::path& dir) {
         if (!platform::private_storage::write_atomically(
                 dir / "web-bootstrap.token", token))
             return std::unexpected("cannot write web bootstrap token");
+    } else {
+        load_persisted_sessions(auth);
     }
-    return listener;
+    auth.listener = *listener;
+    return *listener;
 }
 
 static WebSession* lookup(WebAuth& auth, std::string_view cookie) {
+    if (cookie.empty())
+        return nullptr;
     auto it = auth.sessions.find(cookie);
+    if (it == auth.sessions.end() && cookie.size() == kTokenSize * 2)
+        it = auth.sessions.find(session_token_hash(cookie));
     if (it == auth.sessions.end())
         return nullptr;
     const auto now = WebClock::now();
@@ -179,7 +451,8 @@ bool password_matches(std::string_view password,
                       std::span<const std::uint8_t, kTokenSize> hash) {
     if (salt.empty())
         return false;
-    auto calculated = runtime::vault::derive_web_password_verifier(password, salt);
+    auto calculated =
+        runtime::vault::derive_web_password_verifier(password, salt);
     if (!calculated)
         return false;
     WipeGuard wipe(*calculated);
@@ -253,7 +526,10 @@ void change_password(WebAuth& auth,
                         : std::string{auth_field(body, "username")};
     const auto password = auth_field(body, "password");
     if (!valid_new_web_password(password)) {
-        reply(res, 400, {{"error", "web password requires 8 characters and at most 1024 bytes"}});
+        reply(res,
+              400,
+              {{"error",
+                "web password requires 8 characters and at most 1024 bytes"}});
         return;
     }
     const auto previous_salt = auth.salt;
@@ -275,15 +551,14 @@ void change_password(WebAuth& auth,
     }
     auto key = runtime::vault::derive_web_password_verifier(password, *salt);
     if (!key) {
-        reply(res,
-              503,
-              {{"error", "cannot derive password verifier"}});
+        reply(res, 503, {{"error", "cannot derive password verifier"}});
         return;
     }
     WipeGuard wipe(*key);
     auto encoded = encode_hex(*key);
     WipeGuard wipe_encoded(encoded);
-    auto verifier = json{{"username", username}, {"salt", *salt}, {"hash", encoded}};
+    auto verifier =
+        json{{"username", username}, {"salt", *salt}, {"hash", encoded}};
     auto serialized = verifier.dump();
     WipeGuard wipe_serialized(serialized);
     scrub_json(&verifier);
@@ -307,8 +582,67 @@ void change_password(WebAuth& auth,
     crypto::secure_memory::wipe(auth.bootstrap.data(), auth.bootstrap.size());
     std::error_code ec;
     std::filesystem::remove(auth.dir / "web-bootstrap.token", ec);
+    std::filesystem::remove(auth.dir / "web-sessions.json", ec);
     res.set_header("Set-Cookie", "kasumi_session=; Max-Age=0" + cookie_flags);
     reply(res, 200, {{"configured", true}});
+}
+
+void change_username(WebAuth& auth,
+                     std::unique_lock<std::mutex>& lock,
+                     const httplib::Request& req,
+                     httplib::Response& res,
+                     const json& body,
+                     std::string_view cookie) {
+    const auto* session = lookup(auth, cookie);
+    if (!session || !verify_csrf(req, *session) || auth.salt.empty()) {
+        reply(res, 403, {{"error", "forbidden"}});
+        return;
+    }
+    if (auth.active_derivations >= max_active_derivations) {
+        authentication_busy(res);
+        return;
+    }
+    const auto username_field = body.find("username");
+    const auto username_view = auth_field(body, "username");
+    if (username_field == body.end() || !valid_web_username(username_view)) {
+        reply(res, 400, {{"error", "invalid Web UI username"}});
+        return;
+    }
+    std::string username{username_view};
+    const auto previous_salt = auth.salt;
+    auto previous_hash = auth.hash;
+    WipeGuard wipe_previous(previous_hash);
+    auto reservation = reserve_derivation(auth, lock);
+    lock.unlock();
+    if (!password_matches(auth_field(body, "current_password"),
+                          previous_salt,
+                          previous_hash)) {
+        reply(res, 403, {{"error", "forbidden"}});
+        return;
+    }
+    auto encoded = encode_hex(previous_hash);
+    WipeGuard wipe_encoded(encoded);
+    auto verifier = json{
+        {"username", username}, {"salt", previous_salt}, {"hash", encoded}};
+    auto serialized = verifier.dump();
+    WipeGuard wipe_serialized(serialized);
+    scrub_json(&verifier);
+
+    lock.lock();
+    reservation.reset();
+    const auto* active_session = lookup(auth, cookie);
+    if (auth.salt != previous_salt || !active_session ||
+        !verify_csrf(req, *active_session)) {
+        reply(res, 403, {{"error", "forbidden"}});
+        return;
+    }
+    if (!platform::private_storage::write_atomically(
+            auth.dir / "web-password.json", serialized)) {
+        reply(res, 500, {{"error", "cannot store web username"}});
+        return;
+    }
+    auth.username = std::move(username);
+    reply(res, 200, {{"username", auth.username}});
 }
 
 void login(WebAuth& auth,
@@ -339,8 +673,10 @@ void login(WebAuth& auth,
     WipeGuard wipe(hash);
     auto reservation = reserve_derivation(auth, lock, &attempt);
     lock.unlock();
-    const bool password_valid = password_matches(auth_field(body, "password"), salt, hash);
-    const bool matched = password_valid && auth_field(body, "username") == username;
+    const bool password_valid =
+        password_matches(auth_field(body, "password"), salt, hash);
+    const bool matched =
+        password_valid && auth_field(body, "username") == username;
     lock.lock();
     reservation.reset();
 
@@ -355,15 +691,21 @@ void login(WebAuth& auth,
     std::erase_if(auth.sessions, [&](const auto& entry) {
         return now >= entry.second.expires || now >= entry.second.idle;
     });
-    WebSession session{.expires = now + 12h, .idle = now + 30min};
+    WebSession session{.expires = now + kSessionMaxTtl,
+                       .idle = now + kSessionIdleTtl,
+                       .last_persisted = now};
     auto id = platform::random::hex_id(kTokenSize);
     if (!id || !platform::random::fill_bytes(session.csrf) ||
-        auth.sessions.size() >= 256) {
+        auth.sessions.size() >= kMaxSessions) {
         reply(res, 503, {{"error", "cannot open session"}});
         return;
     }
-    auth.sessions.emplace(*id, session);
-    res.set_header("Set-Cookie", "kasumi_session=" + *id + cookie_flags);
+    auto session_key = session_token_hash(*id);
+    auth.sessions.emplace(session_key, session);
+    persist_sessions(auth);
+    res.set_header("Set-Cookie",
+                   "kasumi_session=" + *id + "; Max-Age=" +
+                       std::to_string(kCookieMaxAgeSeconds) + cookie_flags);
     reply(res,
           200,
           {{"authenticated", true}, {"csrf_token", encode_hex(session.csrf)}});
@@ -389,7 +731,12 @@ void authenticate(WebAuth& auth,
         std::string("; Path=/; HttpOnly; SameSite=Strict") +
         (proxy_https(req) ? "; Secure" : "");
     if (req.path == "/v1/auth/logout") {
-        auth.sessions.erase(cookie);
+        if (!cookie.empty()) {
+            auth.sessions.erase(std::string{cookie});
+            if (cookie.size() == kTokenSize * 2)
+                auth.sessions.erase(session_token_hash(cookie));
+            persist_sessions(auth);
+        }
         res.set_header("Set-Cookie", "kasumi_session=; Max-Age=0" + flags);
         reply(res, 200, {{"authenticated", false}});
         return;
@@ -399,6 +746,8 @@ void authenticate(WebAuth& auth,
     lock.lock();
     if (req.path == "/v1/auth/password")
         change_password(auth, lock, req, res, *body, cookie, flags);
+    else if (req.path == "/v1/auth/username")
+        change_username(auth, lock, req, res, *body, cookie);
     else
         login(auth, lock, req, res, *body, flags);
 }
@@ -443,7 +792,6 @@ void install_web_security(WebAuth& auth,
                           bool ipc,
                           bool browser) {
     using Result = httplib::Server::HandlerResponse;
-    using namespace std::chrono_literals;
     server.set_default_headers({{"Content-Security-Policy",
                                  "default-src 'self'; object-src 'none'; "
                                  "frame-ancestors 'none'; base-uri 'none'"},
@@ -471,10 +819,10 @@ void install_web_security(WebAuth& auth,
                         const auto raw_len =
                             req.get_header_value("Content-Length");
                         std::size_t parsed = 0;
-                        const auto [end, ec] = std::from_chars(
-                            raw_len.data(),
-                            raw_len.data() + raw_len.size(),
-                            parsed);
+                        const auto [end, ec] =
+                            std::from_chars(raw_len.data(),
+                                            raw_len.data() + raw_len.size(),
+                                            parsed);
                         if (ec == std::errc{} &&
                             end == raw_len.data() + raw_len.size()) {
                             content_len = (std::max)(content_len, parsed);
@@ -501,13 +849,8 @@ void install_web_security(WebAuth& auth,
             if (!browser)
                 return deny();
             const auto host = req.get_header_value("Host");
-            const auto port_text = ":" + std::to_string(port);
             if (req.get_header_value_count("Host") != 1 ||
-                (host != "127.0.0.1" + port_text &&
-                 host != "localhost" + port_text &&
-                 host != "[::1]" + port_text &&
-                 std::ranges::find(listener.allowed_hosts, host) ==
-                     listener.allowed_hosts.end()))
+                !host_allowed(listener, host, port))
                 return deny();
             if (write && !same_origin(req, host))
                 return deny();
@@ -523,7 +866,12 @@ void install_web_security(WebAuth& auth,
             auto* s = lookup(auth, session_cookie(req));
             if (!s || (write && !verify_csrf(req, *s)))
                 return deny();
-            s->idle = WebClock::now() + 30min;
+            const auto now = WebClock::now();
+            s->idle = now + kSessionIdleTtl;
+            if (now - s->last_persisted >= kSessionPersistInterval) {
+                s->last_persisted = now;
+                persist_sessions(auth);
+            }
             return Result::Unhandled;
         });
     server.set_post_routing_handler(
@@ -556,6 +904,7 @@ void install_web_security(WebAuth& auth,
     server.Get("/v1/auth/status", handle);
     server.Post("/v1/auth/login", handle);
     server.Post("/v1/auth/password", handle);
+    server.Post("/v1/auth/username", handle);
     server.Post("/v1/auth/logout", handle);
 }
 
@@ -574,7 +923,8 @@ set_web_password(const ExecutionEnvironment& environment,
     if (!daemon_detail::valid_new_web_password(password)) {
         return std::unexpected(DaemonError{
             .code = DaemonErrorCode::InvalidCredential,
-            .detail = "web password requires 8 characters and at most 1024 bytes",
+            .detail =
+                "web password requires 8 characters and at most 1024 bytes",
         });
     }
     std::error_code dir_ec;
@@ -590,7 +940,8 @@ set_web_password(const ExecutionEnvironment& environment,
     if (username) {
         account = *username;
     } else {
-        auto previous = daemon_detail::read_optional(environment.app_data_dir / "web-password.json");
+        auto previous = daemon_detail::read_optional(environment.app_data_dir /
+                                                     "web-password.json");
         if (!previous) {
             return std::unexpected(DaemonError{
                 .code = DaemonErrorCode::StorageFailure,
@@ -600,7 +951,8 @@ set_web_password(const ExecutionEnvironment& environment,
         if (previous->is_object())
             account = daemon_detail::auth_field(*previous, "username").empty()
                           ? "admin"
-                          : std::string{daemon_detail::auth_field(*previous, "username")};
+                          : std::string{daemon_detail::auth_field(*previous,
+                                                                  "username")};
         daemon_detail::scrub_json(&*previous);
     }
     if (!daemon_detail::valid_web_username(account)) {
@@ -627,7 +979,8 @@ set_web_password(const ExecutionEnvironment& environment,
     WipeGuard wipe(*key);
     auto encoded = encode_hex(*key);
     WipeGuard wipe_encoded(encoded);
-    auto verifier = json{{"username", account}, {"salt", *salt}, {"hash", encoded}};
+    auto verifier =
+        json{{"username", account}, {"salt", *salt}, {"hash", encoded}};
     auto serialized = verifier.dump();
     WipeGuard wipe_serialized(serialized);
     daemon_detail::scrub_json(&verifier);
@@ -642,7 +995,83 @@ set_web_password(const ExecutionEnvironment& environment,
     std::error_code ec;
     std::filesystem::remove(environment.app_data_dir / "web-bootstrap.token",
                             ec);
+    std::filesystem::remove(environment.app_data_dir / "web-sessions.json", ec);
     return {};
+}
+
+std::expected<WebListenerConfig, DaemonError>
+read_web_listener_config(const ExecutionEnvironment& environment) {
+    auto config =
+        daemon_detail::read_optional(environment.app_data_dir / "web.json");
+    if (!config) {
+        return std::unexpected(DaemonError{
+            .code = DaemonErrorCode::ConfigFailure,
+            .detail = config.error(),
+        });
+    }
+    auto parsed = daemon_detail::parse_web_listener(*config);
+    if (!parsed) {
+        return std::unexpected(DaemonError{
+            .code = DaemonErrorCode::ConfigFailure,
+            .detail = parsed.error(),
+        });
+    }
+    return *parsed;
+}
+
+std::expected<WebListenerConfig, DaemonError>
+write_web_listener_config(const ExecutionEnvironment& environment,
+                          const WebListenerConfig& config) {
+    using json = nlohmann::json;
+    if (config.port < 0 || config.port > 65535 ||
+        !daemon_detail::is_valid_bind_address(config.bind)) {
+        return std::unexpected(DaemonError{
+            .code = DaemonErrorCode::ConfigFailure,
+            .detail = "invalid web listener bind address or port",
+        });
+    }
+    for (const auto& host : config.allowed_hosts) {
+        if (!daemon_detail::is_valid_allowed_host(host)) {
+            return std::unexpected(DaemonError{
+                .code = DaemonErrorCode::ConfigFailure,
+                .detail = "invalid allowed host entry",
+            });
+        }
+    }
+    if (!daemon_detail::is_loopback_bind(config.bind)) {
+        auto verifier = daemon_detail::read_optional(environment.app_data_dir /
+                                                     "web-password.json");
+        if (!verifier || verifier->is_null()) {
+            return std::unexpected(DaemonError{
+                .code = DaemonErrorCode::InvalidCredential,
+                .detail =
+                    "configure a web password before binding outside loopback",
+            });
+        }
+    }
+    std::error_code dir_ec;
+    std::filesystem::create_directories(environment.app_data_dir, dir_ec);
+    if (dir_ec) {
+        return std::unexpected(DaemonError{
+            .code = DaemonErrorCode::StorageFailure,
+            .detail =
+                "cannot create application data directory: " + dir_ec.message(),
+        });
+    }
+    const auto serialized = json{{"bind", config.bind},
+                                 {"port", config.port},
+                                 {"allowed_hosts", config.allowed_hosts},
+                                 {"skip_host_check", config.skip_host_check}}
+                                .dump(2) +
+                            "\n";
+    if (!platform::private_storage::write_atomically(
+            environment.app_data_dir / "web.json", serialized)) {
+        return std::unexpected(DaemonError{
+            .code = DaemonErrorCode::StorageFailure,
+            .detail = "cannot store web listener configuration",
+        });
+    }
+    return config;
 }
 
 } // namespace kasumi::application

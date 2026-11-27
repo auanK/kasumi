@@ -625,6 +625,36 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
             std::string_view{argv[3]} == "--username") {
             return WebInvocation{.set_password = true, .username = argv[4]};
         }
+        if (argc >= 4 && argv[2] != nullptr && argv[3] != nullptr &&
+            std::string_view{argv[2]} == "listen") {
+            WebInvocation inv{
+                .configure_listen = true,
+                .listen_address = std::string{argv[3]},
+            };
+            if (inv.listen_address->empty() ||
+                inv.listen_address->starts_with('-')) {
+                return std::unexpected(ParseError{});
+            }
+            for (int index = 4; index < argc; ++index) {
+                if (argv[index] == nullptr) {
+                    return std::unexpected(ParseError{});
+                }
+                const std::string_view flag{argv[index]};
+                if (flag == "--allow-host") {
+                    if (index + 1 >= argc || argv[index + 1] == nullptr) {
+                        return std::unexpected(ParseError{});
+                    }
+                    inv.allow_hosts.emplace_back(argv[++index]);
+                } else if (flag == "--skip-host-check") {
+                    inv.skip_host_check = true;
+                } else if (flag == "--no-skip-host-check") {
+                    inv.skip_host_check = false;
+                } else {
+                    return std::unexpected(ParseError{});
+                }
+            }
+            return inv;
+        }
         return std::unexpected(ParseError{});
     }
     if (command == "completion") {
@@ -1072,8 +1102,9 @@ std::expected<Invocation, ParseError> parse(int argc, char* argv[]) {
         return std::unexpected(ParseError{});
     }
     if (command == "stop") {
-        return argc == 2 ? std::expected<Invocation, ParseError>{StopInvocation{}}
-                         : std::unexpected(ParseError{});
+        return argc == 2
+                   ? std::expected<Invocation, ParseError>{StopInvocation{}}
+                   : std::unexpected(ParseError{});
     }
     if (command == "pause" || command == "resume") {
         if (argc != 3) {

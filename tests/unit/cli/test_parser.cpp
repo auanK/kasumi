@@ -966,8 +966,8 @@ TEST(ParserTest, ParsesV028UnifiedCommandsAndHelpAll) {
 
     const auto help_word_all_kw = parse({"help", "all"});
     ASSERT_TRUE(help_word_all_kw.has_value());
-    ASSERT_TRUE(std::holds_alternative<kasumi::cli::HelpInvocation>(
-        *help_word_all_kw));
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::cli::HelpInvocation>(*help_word_all_kw));
     EXPECT_TRUE(std::get<kasumi::cli::HelpInvocation>(*help_word_all_kw).all);
 
     const auto help_word_sync = parse({"help", "sync"});
@@ -1023,8 +1023,7 @@ TEST(ParserTest, ParsesV028UnifiedCommandsAndHelpAll) {
     ASSERT_TRUE(start_auto.has_value());
     ASSERT_TRUE(
         std::holds_alternative<kasumi::cli::StartInvocation>(*start_auto));
-    EXPECT_TRUE(
-        std::get<kasumi::cli::StartInvocation>(*start_auto).autostart);
+    EXPECT_TRUE(std::get<kasumi::cli::StartInvocation>(*start_auto).autostart);
 
     const auto stop_cmd = parse({"stop"});
     ASSERT_TRUE(stop_cmd.has_value());
@@ -1056,7 +1055,8 @@ TEST(ParserTest, ParsesV028UnifiedCommandsAndHelpAll) {
 
     const auto web_default = parse({"web"});
     ASSERT_TRUE(web_default.has_value());
-    ASSERT_TRUE(std::holds_alternative<kasumi::cli::WebInvocation>(*web_default));
+    ASSERT_TRUE(
+        std::holds_alternative<kasumi::cli::WebInvocation>(*web_default));
     {
         const auto& w = std::get<kasumi::cli::WebInvocation>(*web_default);
         EXPECT_FALSE(w.no_open);
@@ -1070,12 +1070,33 @@ TEST(ParserTest, ParsesV028UnifiedCommandsAndHelpAll) {
     const auto web_pw = parse({"web", "set-password"});
     ASSERT_TRUE(web_pw.has_value());
     EXPECT_TRUE(std::get<kasumi::cli::WebInvocation>(*web_pw).set_password);
-    const auto named_web_pw = parse({"web", "set-password", "--username", "My account"});
+    const auto named_web_pw =
+        parse({"web", "set-password", "--username", "My account"});
     ASSERT_TRUE(named_web_pw.has_value());
-    EXPECT_EQ(std::get<kasumi::cli::WebInvocation>(*named_web_pw).username, "My account");
+    EXPECT_EQ(std::get<kasumi::cli::WebInvocation>(*named_web_pw).username,
+              "My account");
     EXPECT_FALSE(parse({"web", "--username", "another"}).has_value());
 
     EXPECT_FALSE(parse({"web", "--bogus"}).has_value());
     EXPECT_FALSE(parse({"web", "set-password", "extra"}).has_value());
+
+    const auto web_listen = parse({"web",
+                                   "listen",
+                                   "0.0.0.0:3137",
+                                   "--allow-host",
+                                   "srv.ts.net:3137",
+                                   "--skip-host-check"});
+    ASSERT_TRUE(web_listen.has_value());
+    {
+        const auto& w = std::get<kasumi::cli::WebInvocation>(*web_listen);
+        EXPECT_TRUE(w.configure_listen);
+        EXPECT_EQ(w.listen_address, "0.0.0.0:3137");
+        ASSERT_EQ(w.allow_hosts.size(), 1U);
+        EXPECT_EQ(w.allow_hosts.front(), "srv.ts.net:3137");
+        EXPECT_EQ(w.skip_host_check, true);
+    }
+    EXPECT_FALSE(parse({"web", "listen"}).has_value());
+    EXPECT_FALSE(
+        parse({"web", "listen", "0.0.0.0", "--allow-host"}).has_value());
 }
 } // namespace

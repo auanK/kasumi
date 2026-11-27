@@ -283,9 +283,11 @@ TEST(WebApiTest, ProfilesDiagnosticsConflictsAndIgnore) {
     post(api, "/v1/profiles/demo/ignore/init", Json::object(), 409);
     get(api, "/v1/remote/demo/summary");
     get(api, "/v1/local/demo/tree");
-    post(api, "/v1/remote/demo/restore",
+    post(api,
+         "/v1/remote/demo/restore",
          {{"dst", kasumi::platform::path::to_utf8(api.workspace->root / "out")},
-          {"dry_run", false}}, 409);
+          {"dry_run", false}},
+         409);
     kasumi::platform::release_profile_lock(*held);
     auto patch = Json{{"watch_enabled", false},
                       {"sync_interval_seconds", 600},
@@ -312,15 +314,17 @@ TEST(WebApiTest, ProfilesDiagnosticsConflictsAndIgnore) {
     EXPECT_EQ(post(api, "/v1/profiles/demo/ignore/init", {{"preset", "dev"}})
                   .at("created"),
               true);
-    const auto existing_ignore = kasumi::test::read_text(local / ".kasumiignore");
-    const auto dry_existing = post(
-        api,
-        "/v1/profiles/demo/ignore/init",
-        {{"preset", "minimal"}, {"dry_run", true}, {"force", false}});
+    const auto existing_ignore =
+        kasumi::test::read_text(local / ".kasumiignore");
+    const auto dry_existing =
+        post(api,
+             "/v1/profiles/demo/ignore/init",
+             {{"preset", "minimal"}, {"dry_run", true}, {"force", false}});
     EXPECT_EQ(dry_existing.at("dry_run"), true);
     EXPECT_EQ(dry_existing.at("created"), false);
     EXPECT_FALSE(dry_existing.at("content").get<std::string>().empty());
-    EXPECT_EQ(kasumi::test::read_text(local / ".kasumiignore"), existing_ignore);
+    EXPECT_EQ(kasumi::test::read_text(local / ".kasumiignore"),
+              existing_ignore);
     auto ignore = post(api,
                        "/v1/profiles/demo/ignore/check",
                        {{"paths", {"notes.txt", "node_modules/test.js"}}});
@@ -569,6 +573,7 @@ TEST(WebApiTest,
     ASSERT_EQ(second->status, 200);
     auto cookie = first->get_header_value("Set-Cookie");
     EXPECT_NE(cookie.find("; Secure"), std::string::npos);
+    EXPECT_NE(cookie.find("Max-Age=2592000"), std::string::npos);
     auto auth = proxy;
     auth.emplace("Cookie", cookie.substr(0, cookie.find(';')));
     auto credentials = Json{{"current_password", "first test password"},
@@ -624,17 +629,194 @@ TEST(WebApiTest,
     cookie = new_session->get_header_value("Set-Cookie");
     auth.erase("Cookie");
     auth.emplace("Cookie", cookie.substr(0, cookie.find(';')));
+    auth.erase("X-CSRF-Token");
+    auth.emplace(
+        "X-CSRF-Token",
+        Json::parse(new_session->body).at("csrf_token").get<std::string>());
     ASSERT_EQ(api.client->Get("/v1/status", auth)->status, 200);
+    // Persistent session survives a daemon restart until explicit logout.
     app::stop_daemon_session(api.daemon);
     auto again = app::start_daemon_session(api.env);
     ASSERT_TRUE(again) << again.error().detail;
     api.daemon = std::move(*again);
+    EXPECT_EQ(api.client->Get("/v1/status", auth)->status, 200);
+    EXPECT_EQ(
+        api.client->Post("/v1/auth/logout", auth, "{}", "application/json")
+            ->status,
+        200);
+    EXPECT_EQ(api.client->Get("/v1/status", auth)->status, 403);
+    app::stop_daemon_session(api.daemon);
+    auto third = app::start_daemon_session(api.env);
+    ASSERT_TRUE(third) << third.error().detail;
+    api.daemon = std::move(*third);
     EXPECT_EQ(api.client->Get("/v1/status", auth)->status, 403);
     EXPECT_FALSE(
         std::filesystem::exists(api.env.app_data_dir / "web-bootstrap.token"));
     const auto stored =
         kasumi::test::read_text(api.env.app_data_dir / "web-password.json");
     EXPECT_EQ(stored.find("second test password"), std::string::npos);
+}
+
+TEST(WebApiTest, UsernameChangeKeepsSessionAndRequiresCurrentPassword) {
+    auto api = start_api();
+    const auto bootstrap =
+        kasumi::test::read_text(api.env.app_data_dir / "web-bootstrap.token");
+    post(api,
+         "/v1/auth/password",
+         {{"bootstrap_token", bootstrap},
+          {"username", "initial-user"},
+          {"password", "kasumi-pw-123"}});
+
+    auto auth_headers = api.headers;
+    const auto login_res = api.client->Post(
+        "/v1/auth/login",
+        api.headers,
+        Json{{"username", "initial-user"}, {"password", "kasumi-pw-123"}}
+            .dump(),
+        "application/json");
+    ASSERT_TRUE(login_res);
+    ASSERT_EQ(login_res->status, 200);
+    const auto set_cookie = login_res->get_header_value("Set-Cookie");
+    auth_headers.emplace("Cookie", set_cookie.substr(0, set_cookie.find(';')));
+    auth_headers.emplace(
+        "X-CSRF-Token",
+        Json::parse(login_res->body).at("csrf_token").get<std::string>());
+
+    EXPECT_EQ(api.client
+                  ->Post("/v1/auth/username",
+                         auth_headers,
+                         Json{{"current_password", "wrong-pass"},
+                              {"username", "renamed"}}
+                             .dump(),
+                         "application/json")
+                  ->status,
+              403);
+    EXPECT_EQ(api.client
+                  ->Post("/v1/auth/username",
+                         auth_headers,
+                         Json{{"current_password", "kasumi-pw-123"},
+                              {"username", "   "}}
+                             .dump(),
+                         "application/json")
+                  ->status,
+              400);
+
+    const auto changed =
+        response(api.client->Post("/v1/auth/username",
+                                  auth_headers,
+                                  Json{{"current_password", "kasumi-pw-123"},
+                                       {"username", "kauan-pc"}}
+                                      .dump(),
+                                  "application/json"),
+                 200);
+    EXPECT_EQ(changed.at("username"), "kauan-pc");
+
+    // Current session stays authenticated without re-login.
+    const auto status =
+        response(api.client->Get("/v1/auth/status", auth_headers), 200);
+    EXPECT_TRUE(status.at("authenticated").get<bool>());
+    EXPECT_EQ(status.at("username"), "kauan-pc");
+
+    // Fresh login works with new username and old password.
+    EXPECT_EQ(
+        api.client
+            ->Post("/v1/auth/login",
+                   api.headers,
+                   Json{{"username", "kauan-pc"}, {"password", "kasumi-pw-123"}}
+                       .dump(),
+                   "application/json")
+            ->status,
+        200);
+}
+
+TEST(WebApiTest, WebListenerConfigAndTailscaleIpHostHandling) {
+    auto workspace = kasumi::test::make_temp_workspace("kasumi-webui-listen-");
+    app::ExecutionEnvironment env{.app_data_dir = workspace->root / "app"};
+
+    // Fail-closed: refuse non-loopback bind before setting a Web UI password.
+    app::WebListenerConfig bad{.bind = "0.0.0.0", .port = 3137};
+    EXPECT_FALSE(app::write_web_listener_config(env, bad).has_value());
+
+    ASSERT_TRUE(app::set_web_password(env, "tailscale-test-pw").has_value());
+    app::WebListenerConfig lan{
+        .bind = "0.0.0.0",
+        .port = 0,
+        .allowed_hosts = {"*.ts.net"},
+        .skip_host_check = false,
+    };
+    ASSERT_TRUE(app::write_web_listener_config(env, lan).has_value());
+
+    auto daemon = app::start_daemon_session(env);
+    ASSERT_TRUE(daemon.has_value()) << daemon.error().detail;
+    const auto st = app::query_daemon_session_status(*daemon);
+    ASSERT_TRUE(st.has_value());
+    const int port = st->web_port;
+    const std::string port_str = std::to_string(port);
+
+    httplib::Client client("127.0.0.1", port);
+    // Tailscale CGNAT / LAN IP literal Host header is accepted on 0.0.0.0.
+    EXPECT_EQ(client
+                  .Get("/v1/auth/status",
+                       httplib::Headers{{"Host", "100.64.0.12:" + port_str}})
+                  ->status,
+              200);
+    // Wildcard domain entry matches cleanly.
+    EXPECT_EQ(
+        client
+            .Get("/v1/auth/status",
+                 httplib::Headers{{"Host", "srv.tailnet.ts.net:" + port_str}})
+            ->status,
+        200);
+    // Arbitrary DNS rebinding domains remain blocked when
+    // skip_host_check=false.
+    EXPECT_EQ(client
+                  .Get("/v1/auth/status",
+                       httplib::Headers{{"Host", "evil.invalid:" + port_str}})
+                  ->status,
+              403);
+    EXPECT_EQ(client
+                  .Get("/v1/auth/status",
+                       httplib::Headers{
+                           {"Host", "evil.ts.net.attacker.com:" + port_str}})
+                  ->status,
+              403);
+
+    // Authenticated PATCH /v1/web/config updates web.json cleanly.
+    const std::string origin = "http://127.0.0.1:" + port_str;
+    const auto logged = client.Post(
+        "/v1/auth/login",
+        httplib::Headers{{"Host", "127.0.0.1:" + port_str}, {"Origin", origin}},
+        Json{{"username", "admin"}, {"password", "tailscale-test-pw"}}.dump(),
+        "application/json");
+    ASSERT_TRUE(logged);
+    ASSERT_EQ(logged->status, 200);
+    const auto cookie = logged->get_header_value("Set-Cookie");
+    httplib::Headers auth{
+        {"Host", "127.0.0.1:" + port_str},
+        {"Origin", origin},
+        {"Cookie", cookie.substr(0, cookie.find(';'))},
+        {"X-CSRF-Token",
+         Json::parse(logged->body).at("csrf_token").get<std::string>()},
+    };
+    const auto get_cfg = client.Get("/v1/web/config", auth);
+    ASSERT_TRUE(get_cfg);
+    ASSERT_EQ(get_cfg->status, 200);
+    EXPECT_EQ(Json::parse(get_cfg->body).at("bind"), "0.0.0.0");
+
+    const auto patch_cfg = client.Patch(
+        "/v1/web/config",
+        auth,
+        Json{{"bind", "0.0.0.0"}, {"port", 3137}, {"skip_host_check", true}}
+            .dump(),
+        "application/json");
+    ASSERT_TRUE(patch_cfg);
+    ASSERT_EQ(patch_cfg->status, 200);
+    EXPECT_TRUE(
+        Json::parse(patch_cfg->body).at("restart_required").get<bool>());
+    const auto persisted = app::read_web_listener_config(env);
+    ASSERT_TRUE(persisted.has_value());
+    EXPECT_EQ(persisted->port, 3137);
+    EXPECT_TRUE(persisted->skip_host_check);
 }
 
 TEST(WebApiTest, CustomUsernameAndEightDigitsCanBeSetAndRotated) {
@@ -657,11 +839,11 @@ TEST(WebApiTest, CustomUsernameAndEightDigitsCanBeSetAndRotated) {
     httplib::Headers headers{
         {"Origin", "http://127.0.0.1:" + std::to_string(port)}};
     const auto login = [&](std::string_view user, std::string_view password) {
-        return api.client->Post("/v1/auth/login",
-                                headers,
-                                Json{{"username", user}, {"password", password}}
-                                    .dump(),
-                                "application/json");
+        return api.client->Post(
+            "/v1/auth/login",
+            headers,
+            Json{{"username", user}, {"password", password}}.dump(),
+            "application/json");
     };
     const auto logged_in = login(username, "12345678");
     auto session = response(logged_in, 200);
@@ -671,22 +853,24 @@ TEST(WebApiTest, CustomUsernameAndEightDigitsCanBeSetAndRotated) {
     authenticated.emplace("Cookie", cookie.substr(0, cookie.find(';')));
     authenticated.emplace("X-CSRF-Token",
                           session.at("csrf_token").get<std::string>());
-    auto info = response(api.client->Get("/v1/auth/status", authenticated), 200);
+    auto info =
+        response(api.client->Get("/v1/auth/status", authenticated), 200);
     EXPECT_EQ(info.at("username"), username);
     const std::string renamed = "Segunda Conta";
     response(api.client->Post("/v1/auth/password",
                               authenticated,
                               Json{{"username", renamed},
                                    {"current_password", "12345678"},
-                                   {"password", "87654321"}}.dump(),
+                                   {"password", "87654321"}}
+                                  .dump(),
                               "application/json"),
              200);
     response(login(renamed, "87654321"), 200);
     response(login("admin", "87654321"), 401);
     app::stop_daemon_session(api.daemon);
     ASSERT_TRUE(app::set_web_password(api.env, "78901234"));
-    auto saved = Json::parse(kasumi::test::read_text(
-        api.env.app_data_dir / "web-password.json"));
+    auto saved = Json::parse(
+        kasumi::test::read_text(api.env.app_data_dir / "web-password.json"));
     EXPECT_EQ(saved.at("username"), renamed);
 }
 
@@ -766,13 +950,14 @@ TEST(WebApiTest, BrowserUnlocksMemoryProfileAndInspectsEncryptedHistory) {
     EXPECT_TRUE(std::ranges::any_of(local_tree, [](const auto& row) {
         return row.at("path") == "note.txt" && row.at("size") == 15;
     }));
-    const auto changed = api.client->Get("/v1/local/demo/download?path=note.txt",
-                                         api.headers);
+    const auto changed =
+        api.client->Get("/v1/local/demo/download?path=note.txt", api.headers);
     ASSERT_TRUE(changed);
     EXPECT_EQ(changed->body, "changed on disk after sync");
     auto range = api.headers;
     range.emplace("Range", "bytes=0-3");
-    auto pdf = api.client->Get("/v1/local/demo/download?path=Report.PDF", range);
+    auto pdf =
+        api.client->Get("/v1/local/demo/download?path=Report.PDF", range);
     ASSERT_TRUE(pdf);
     EXPECT_EQ(pdf->status, 206);
     EXPECT_EQ(pdf->body, "%PDF");
@@ -855,12 +1040,14 @@ TEST(WebApiTest, ServesStaticWebUiAndBlocksPathTricksOnApiRoutes) {
     app::ExecutionEnvironment env{.app_data_dir = workspace->root / "app"};
     kasumi::test::write_text(env.app_data_dir / "web.json", R"({"port":0})");
 
-    // Verify set_web_password rejects short/oversized secrets and writes verifier.
+    // Verify set_web_password rejects short/oversized secrets and writes
+    // verifier.
     const auto too_short = app::set_web_password(env, "short");
     ASSERT_FALSE(too_short.has_value());
     const std::string valid_pw = "kasumi-webui-cli-password-123";
     ASSERT_TRUE(app::set_web_password(env, valid_pw).has_value());
-    EXPECT_TRUE(std::filesystem::exists(env.app_data_dir / "web-password.json"));
+    EXPECT_TRUE(
+        std::filesystem::exists(env.app_data_dir / "web-password.json"));
     EXPECT_FALSE(
         std::filesystem::exists(env.app_data_dir / "web-bootstrap.token"));
 
@@ -879,7 +1066,8 @@ TEST(WebApiTest, ServesStaticWebUiAndBlocksPathTricksOnApiRoutes) {
     EXPECT_EQ(client.Get("/v1/../v1/status")->status, 403);
     EXPECT_EQ(client.Get("/v1/status")->status, 403);
 
-    // Public GET on '/' serves either embedded SPA HTML (200) or 503 if unbundled.
+    // Public GET on '/' serves either embedded SPA HTML (200) or 503 if
+    // unbundled.
     auto root = client.Get("/");
     ASSERT_TRUE(root);
     EXPECT_TRUE(root->status == 200 || root->status == 503);
@@ -899,11 +1087,11 @@ TEST(WebApiTest, ServesStaticWebUiAndBlocksPathTricksOnApiRoutes) {
 
     // Password configured via set_web_password must work for browser login.
     const std::string origin = "http://127.0.0.1:" + std::to_string(port);
-    auto logged = client.Post(
-        "/v1/auth/login",
-        httplib::Headers{{"Origin", origin}},
-        Json{{"username", "admin"}, {"password", valid_pw}}.dump(),
-        "application/json");
+    auto logged =
+        client.Post("/v1/auth/login",
+                    httplib::Headers{{"Origin", origin}},
+                    Json{{"username", "admin"}, {"password", valid_pw}}.dump(),
+                    "application/json");
     ASSERT_TRUE(logged);
     EXPECT_EQ(logged->status, 200);
 }
@@ -922,8 +1110,8 @@ TEST(WebApiTest, ProfilesListReportsCoherentStateAndActivityAcrossLock) {
     EXPECT_TRUE(prof.at("activity").at("database_present").get<bool>());
     EXPECT_FALSE(prof.at("activity").at("accepted_commit").is_null());
 
-    auto held = kasumi::platform::acquire_profile_lock(
-        api.env.app_data_dir / "profile-demo.lock");
+    auto held = kasumi::platform::acquire_profile_lock(api.env.app_data_dir /
+                                                       "profile-demo.lock");
     ASSERT_TRUE(held);
     const auto locked_list = get(api, "/v1/profiles");
     EXPECT_EQ(locked_list.at("profiles").at(0).at("state"), "running");
@@ -956,26 +1144,28 @@ TEST(WebApiTest,
                         .at("commit_id")
                         .get<std::string>();
 
-    const auto file_diff = get(
-        api, "/v1/remote/demo/diff?from=" + c1 + "&to=" + c2 + "&path=note.txt");
+    const auto file_diff =
+        get(api,
+            "/v1/remote/demo/diff?from=" + c1 + "&to=" + c2 + "&path=note.txt");
     EXPECT_EQ(file_diff.at("from").at("text"), "line-one\nline-two\n");
     EXPECT_EQ(file_diff.at("to").at("text"), "line-one\nline-updated\n");
 
-    const auto missing_in_both = get(
-        api, "/v1/remote/demo/diff?from=" + c1 + "&to=" + c2 + "&path=absent.txt");
+    const auto missing_in_both = get(api,
+                                     "/v1/remote/demo/diff?from=" + c1 +
+                                         "&to=" + c2 + "&path=absent.txt");
     EXPECT_TRUE(missing_in_both.at("from").is_null());
     EXPECT_TRUE(missing_in_both.at("to").is_null());
 
-    auto bad_commit = api.client->Get(
-        ("/v1/remote/demo/diff?from=" + std::string(64, '0') + "&to=" + c2 +
-         "&path=note.txt")
-            .c_str(),
-        api.headers);
+    auto bad_commit =
+        api.client->Get(("/v1/remote/demo/diff?from=" + std::string(64, '0') +
+                         "&to=" + c2 + "&path=note.txt")
+                            .c_str(),
+                        api.headers);
     ASSERT_TRUE(bad_commit);
     EXPECT_EQ(bad_commit->status, 404);
 
-    auto streamed = api.client->Get("/v1/remote/demo/download?path=blob.bin",
-                                    api.headers);
+    auto streamed =
+        api.client->Get("/v1/remote/demo/download?path=blob.bin", api.headers);
     ASSERT_TRUE(streamed);
     EXPECT_EQ(streamed->status, 200);
     EXPECT_EQ(streamed->body, large_body);
@@ -994,19 +1184,18 @@ TEST(WebApiTest, StatusReportsExternalBusyAndSseStaysQuietWhenIdle) {
     EXPECT_FALSE(baseline.at("profiles").at(0).at("busy").get<bool>());
     EXPECT_EQ(baseline.at("profiles").at(0).at("active_operation"), "");
 
-    auto patched =
-        api.client->Patch("/v1/profiles/demo",
-                          api.headers,
-                          Json{{"icon", "preset:docs"}}.dump(),
-                          "application/json");
+    auto patched = api.client->Patch("/v1/profiles/demo",
+                                     api.headers,
+                                     Json{{"icon", "preset:docs"}}.dump(),
+                                     "application/json");
     ASSERT_TRUE(patched);
     EXPECT_EQ(patched->status, 200);
     const auto after_patch = get(api, "/v1/status");
     EXPECT_FALSE(after_patch.at("profiles").at(0).at("busy").get<bool>());
     EXPECT_EQ(after_patch.at("profiles").at(0).at("active_operation"), "");
 
-    auto held = kasumi::platform::acquire_profile_lock(
-        api.env.app_data_dir / "profile-demo.lock");
+    auto held = kasumi::platform::acquire_profile_lock(api.env.app_data_dir /
+                                                       "profile-demo.lock");
     ASSERT_TRUE(held);
 
     const auto busy_status = get(api, "/v1/status");
@@ -1062,11 +1251,11 @@ TEST(WebApiTest, SseTracksExternalCliLockAcquireAndReleaseLive) {
                     if (data_pos == std::string::npos)
                         continue;
                     const auto line_end = block.find('\n', data_pos);
-                    const auto json_str = block.substr(
-                        data_pos + 6,
-                        line_end == std::string::npos
-                            ? std::string::npos
-                            : line_end - (data_pos + 6));
+                    const auto json_str =
+                        block.substr(data_pos + 6,
+                                     line_end == std::string::npos
+                                         ? std::string::npos
+                                         : line_end - (data_pos + 6));
                     auto parsed = Json::parse(json_str, nullptr, false);
                     if (!parsed.is_discarded()) {
                         std::lock_guard lock(mu);
@@ -1078,32 +1267,32 @@ TEST(WebApiTest, SseTracksExternalCliLockAcquireAndReleaseLive) {
             });
     });
 
-    const auto wait_for_profile_state =
-        [&](bool expected_busy, std::string_view expected_op) {
-            std::unique_lock lock(mu);
-            return cv.wait_for(lock, 5s, [&] {
-                while (!status_frames.empty()) {
-                    const auto frame = std::move(status_frames.front());
-                    status_frames.pop_front();
-                    if (!frame.contains("profiles"))
-                        continue;
-                    for (const auto& p : frame.at("profiles")) {
-                        if (p.at("name") == "demo" &&
-                            p.at("busy").get<bool>() == expected_busy &&
-                            p.at("active_operation").get<std::string>() ==
-                                expected_op) {
-                            return true;
-                        }
+    const auto wait_for_profile_state = [&](bool expected_busy,
+                                            std::string_view expected_op) {
+        std::unique_lock lock(mu);
+        return cv.wait_for(lock, 5s, [&] {
+            while (!status_frames.empty()) {
+                const auto frame = std::move(status_frames.front());
+                status_frames.pop_front();
+                if (!frame.contains("profiles"))
+                    continue;
+                for (const auto& p : frame.at("profiles")) {
+                    if (p.at("name") == "demo" &&
+                        p.at("busy").get<bool>() == expected_busy &&
+                        p.at("active_operation").get<std::string>() ==
+                            expected_op) {
+                        return true;
                     }
                 }
-                return false;
-            });
-        };
+            }
+            return false;
+        });
+    };
 
     ASSERT_TRUE(wait_for_profile_state(false, ""));
 
-    auto held = kasumi::platform::acquire_profile_lock(
-        api.env.app_data_dir / "profile-demo.lock");
+    auto held = kasumi::platform::acquire_profile_lock(api.env.app_data_dir /
+                                                       "profile-demo.lock");
     ASSERT_TRUE(held);
     ASSERT_TRUE(wait_for_profile_state(true, "external"));
 
@@ -1181,10 +1370,10 @@ TEST(WebApiTest, ProfileIconValidationAndSafeFolderIconDetection) {
     ASSERT_TRUE(unc);
     EXPECT_EQ(unc->status, 204);
 
-    kasumi::test::write_text(local / "fake.png", "<html><script>alert(1)</script></html>");
-    kasumi::test::write_text(
-        local / "desktop.ini",
-        "[.ShellClassInfo]\nIconResource=fake.png,0\n");
+    kasumi::test::write_text(local / "fake.png",
+                             "<html><script>alert(1)</script></html>");
+    kasumi::test::write_text(local / "desktop.ini",
+                             "[.ShellClassInfo]\nIconResource=fake.png,0\n");
     auto spoofed = api.client->Get("/v1/profiles/demo/icon", api.headers);
     ASSERT_TRUE(spoofed);
     EXPECT_EQ(spoofed->status, 204);
@@ -1201,14 +1390,16 @@ TEST(WebApiTest, ProfileIconValidationAndSafeFolderIconDetection) {
 
     kasumi::test::write_text(local / "bad.svg", "<svg></svg>");
     std::filesystem::remove(local / "desktop.ini");
-    kasumi::test::write_text(local / ".directory", "[Desktop Entry]\nIcon=bad.svg\n");
+    kasumi::test::write_text(local / ".directory",
+                             "[Desktop Entry]\nIcon=bad.svg\n");
     auto svg = api.client->Get("/v1/profiles/demo/icon", api.headers);
     ASSERT_TRUE(svg);
     EXPECT_EQ(svg->status, 204);
 
     kasumi::test::write_text(local / "badge.ico",
                              std::string("\x00\x00\x01\x00ICO-BYTES", 13));
-    kasumi::test::write_text(local / ".directory", "[Desktop Entry]\nIcon=./badge.ico\n");
+    kasumi::test::write_text(local / ".directory",
+                             "[Desktop Entry]\nIcon=./badge.ico\n");
     auto ico = api.client->Get("/v1/profiles/demo/icon", api.headers);
     ASSERT_TRUE(ico);
     EXPECT_EQ(ico->status, 200);
@@ -1218,9 +1409,9 @@ TEST(WebApiTest, ProfileIconValidationAndSafeFolderIconDetection) {
 #ifdef _WIN32
     // Windows %SystemRoot%\system32\imageres.dll resource extraction -> PNG.
     std::filesystem::remove(local / ".directory");
-    kasumi::test::write_text(
-        local / "desktop.ini",
-        "[.ShellClassInfo]\r\nIconResource=%SystemRoot%\\system32\\imageres.dll,-112\r\n");
+    kasumi::test::write_text(local / "desktop.ini",
+                             "[.ShellClassInfo]\r\nIconResource=%SystemRoot%"
+                             "\\system32\\imageres.dll,-112\r\n");
     auto win_ico = api.client->Get("/v1/profiles/demo/icon", api.headers);
     ASSERT_TRUE(win_ico);
     EXPECT_EQ(win_ico->status, 200);
@@ -1229,22 +1420,22 @@ TEST(WebApiTest, ProfileIconValidationAndSafeFolderIconDetection) {
 #endif
 
     // Upload custom icon via Base64 PNG, verify storage & DELETE reset.
-    auto bad_upload = api.client->Post(
-        "/v1/profiles/demo/icon",
-        api.headers,
-        Json{{"data_base64", "PHN2Zz48L3N2Zz4="}}.dump(),
-        "application/json");
+    auto bad_upload =
+        api.client->Post("/v1/profiles/demo/icon",
+                         api.headers,
+                         Json{{"data_base64", "PHN2Zz48L3N2Zz4="}}.dump(),
+                         "application/json");
     ASSERT_TRUE(bad_upload);
     EXPECT_EQ(bad_upload->status, 400);
 
     // Standard 1x1 valid PNG bytes Base64:
     const std::string png_b64 =
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
-    auto good_upload = api.client->Post(
-        "/v1/profiles/demo/icon",
-        api.headers,
-        Json{{"data_base64", png_b64}}.dump(),
-        "application/json");
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+"
+        "M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    auto good_upload = api.client->Post("/v1/profiles/demo/icon",
+                                        api.headers,
+                                        Json{{"data_base64", png_b64}}.dump(),
+                                        "application/json");
     ASSERT_TRUE(good_upload);
     EXPECT_EQ(good_upload->status, 200);
     const auto uploaded_icon =
@@ -1296,7 +1487,8 @@ TEST(WebApiTest, LocalThumbnailScalesRasterImagesAndRejectsUnsafePaths) {
     kasumi::test::write_text(local / "note.txt", "plain text");
     sync(api);
 
-    // Traversal rejected with 400; unmapped file rejected with 404; non-image -> 204.
+    // Traversal rejected with 400; unmapped file rejected with 404; non-image
+    // -> 204.
     auto bad = api.client->Get("/v1/local/demo/thumbnail?path=../secret.bmp",
                                api.headers);
     ASSERT_TRUE(bad);
@@ -1307,8 +1499,8 @@ TEST(WebApiTest, LocalThumbnailScalesRasterImagesAndRejectsUnsafePaths) {
     ASSERT_TRUE(missing);
     EXPECT_EQ(missing->status, 404);
 
-    auto txt = api.client->Get("/v1/local/demo/thumbnail?path=note.txt",
-                               api.headers);
+    auto txt =
+        api.client->Get("/v1/local/demo/thumbnail?path=note.txt", api.headers);
     ASSERT_TRUE(txt);
     EXPECT_EQ(txt->status, 204);
 
@@ -1363,10 +1555,10 @@ TEST(WebApiTest, LocalThumbnailScalesRasterImagesAndRejectsUnsafePaths) {
     EXPECT_EQ(remote_thumb->status, 200);
     EXPECT_EQ(remote_thumb->get_header_value("Content-Type"), "image/png");
 
-    auto stale_hash = api.client->Get(
-        "/v1/remote/demo/thumbnail?path=photo.bmp&hash=" + std::string(64, '0') +
-            "&size=160",
-        api.headers);
+    auto stale_hash =
+        api.client->Get("/v1/remote/demo/thumbnail?path=photo.bmp&hash=" +
+                            std::string(64, '0') + "&size=160",
+                        api.headers);
     ASSERT_TRUE(stale_hash);
     EXPECT_EQ(stale_hash->status, 204);
 #endif

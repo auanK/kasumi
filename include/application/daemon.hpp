@@ -271,12 +271,26 @@ std::expected<DaemonAutostartStatus, DaemonError> install_daemon_autostart();
 std::expected<DaemonAutostartStatus, DaemonError> uninstall_daemon_autostart();
 std::expected<DaemonAutostartStatus, DaemonError> query_daemon_autostart();
 
-// Writes a salted Argon2id verifier to web-password.json (minimum 8 characters).
-// and removes any pending web-bootstrap.token.
+// Writes a salted Argon2id verifier to web-password.json (minimum 8
+// characters). and removes any pending web-bootstrap.token.
 std::expected<void, DaemonError>
 set_web_password(const ExecutionEnvironment& environment,
                  std::string_view password,
                  std::optional<std::string_view> username = std::nullopt);
+
+struct WebListenerConfig {
+    std::string bind = "127.0.0.1";
+    int port = 3137;
+    std::vector<std::string> allowed_hosts;
+    bool skip_host_check = false;
+};
+
+std::expected<WebListenerConfig, DaemonError>
+read_web_listener_config(const ExecutionEnvironment& environment);
+
+std::expected<WebListenerConfig, DaemonError>
+write_web_listener_config(const ExecutionEnvironment& environment,
+                          const WebListenerConfig& config);
 
 } // namespace kasumi::application
 
