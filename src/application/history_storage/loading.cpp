@@ -737,9 +737,13 @@ LoadResult load_impl(transport::Transport& storage,
                                              key,
                                              workspace_root,
                                              *identifiers,
-                                             accepted_epoch)
-                        : epoch::load_latest(
-                              storage, key, workspace_root, accepted_epoch);
+                                             accepted_epoch,
+                                             commit_cache)
+                        : epoch::load_latest(storage,
+                                             key,
+                                             workspace_root,
+                                             accepted_epoch,
+                                             commit_cache);
         if (auto cancel = cancelled(check_cancellation)) {
             return std::unexpected(*cancel);
         }
@@ -802,9 +806,13 @@ LoadResult load_impl(transport::Transport& storage,
             std::vector<HeadReference> valid;
             for (const auto& reference : references) {
                 const auto marker_id = marker_object(layout, reference);
-                auto state =
+                const bool trusted_or_cached =
                     std::ranges::find(trusted_marker_identifiers, marker_id) !=
-                            trusted_marker_identifiers.end()
+                        trusted_marker_identifiers.end() ||
+                    (commit_cache != nullptr &&
+                     has_validated_marker(*commit_cache, marker_id));
+                auto state =
+                    trusted_or_cached
                         ? std::expected<MarkerState, Error>{MarkerState::Valid}
                         : inspect_marker(storage,
                                          layout,
@@ -815,6 +823,9 @@ LoadResult load_impl(transport::Transport& storage,
                     return std::unexpected(state.error());
                 }
                 if (*state == MarkerState::Valid) {
+                    if (!trusted_or_cached && commit_cache != nullptr) {
+                        record_validated_marker(*commit_cache, marker_id);
+                    }
                     valid.push_back(reference);
                 }
             }
@@ -1306,6 +1317,10 @@ LoadResult load_impl(transport::Transport& storage,
     }
     if (discovered_epoch) {
         result.epoch = *discovered_epoch;
+    }
+    if (commit_cache != nullptr && inventory->all_commits_listed) {
+        prune_unlisted_memory_commits(
+            *commit_cache, layout.commits_prefix, inventory->commit_variants);
     }
     return result;
 }

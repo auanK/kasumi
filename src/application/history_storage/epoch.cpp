@@ -1,5 +1,6 @@
 #include "application/history_storage/epoch.hpp"
 
+#include "application/history_storage/commit_cache.hpp"
 #include "application/history_storage/detail.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "core/hasher.hpp"
@@ -223,7 +224,24 @@ load_exact_reference(transport::Transport& storage,
                      std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
                      const detail::TemporaryWorkspace& temporary,
                      const Reference& reference,
-                     std::size_t request_index) {
+                     std::size_t request_index,
+                     CommitCache* commit_cache = nullptr) {
+    if (commit_cache != nullptr) {
+        if (auto cached = lookup_cached_epoch(
+                *commit_cache, layout.epochs_prefix, reference)) {
+            return *cached;
+        }
+        if (auto sealed = read_cached_sealed_epoch(
+                *commit_cache, layout.epochs_prefix, reference)) {
+            auto opened = open(*sealed, reference, master_key);
+            if (opened) {
+                store_cached_epoch(
+                    *commit_cache, layout.epochs_prefix, *opened, nullptr);
+                return *opened;
+            }
+            evict_cached_epoch(*commit_cache, layout.epochs_prefix, reference);
+        }
+    }
     auto identifier = object_identifier(layout, reference);
     if (!identifier) {
         return std::unexpected(identifier.error());
@@ -241,7 +259,12 @@ load_exact_reference(transport::Transport& storage,
         return std::unexpected(
             error(ErrorCode::WorkspaceFailure, bytes.error().detail));
     }
-    return open(*bytes, reference, master_key);
+    auto opened = open(*bytes, reference, master_key);
+    if (opened && commit_cache != nullptr) {
+        store_cached_epoch(
+            *commit_cache, layout.epochs_prefix, *opened, &copy);
+    }
+    return opened;
 }
 
 LatestResult
@@ -249,7 +272,8 @@ load_latest_impl(transport::Transport& storage,
                  std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
                  const std::filesystem::path& workspace_root,
                  std::optional<std::span<const std::string>> known_identifiers,
-                 std::optional<Reference> trusted_ancestor) {
+                 std::optional<Reference> trusted_ancestor,
+                 CommitCache* commit_cache) {
     return guard_alloc([&]() -> LatestResult {
         const auto layout = derive_remote_layout(master_key);
         auto inventory =
@@ -281,7 +305,8 @@ load_latest_impl(transport::Transport& storage,
                                            master_key,
                                            *temporary,
                                            latest_reference,
-                                           request_index++);
+                                           request_index++,
+                                           commit_cache);
         if (!latest) {
             return std::unexpected(latest.error());
         }
@@ -303,7 +328,8 @@ load_latest_impl(transport::Transport& storage,
                                                  master_key,
                                                  *temporary,
                                                  inventory->references[index],
-                                                 request_index++);
+                                                 request_index++,
+                                                 commit_cache);
             if (!previous) {
                 return std::unexpected(previous.error());
             }
@@ -729,12 +755,14 @@ LatestResult
 load_latest(transport::Transport& storage,
             std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
             const std::filesystem::path& workspace_root,
-            std::optional<Reference> trusted_ancestor) {
+            std::optional<Reference> trusted_ancestor,
+            CommitCache* commit_cache) {
     return load_latest_impl(storage,
                             master_key,
                             workspace_root,
                             std::nullopt,
-                            std::move(trusted_ancestor));
+                            std::move(trusted_ancestor),
+                            commit_cache);
 }
 
 LatestResult
@@ -742,12 +770,14 @@ load_latest(transport::Transport& storage,
             std::span<const std::uint8_t, crypto::KEY_SIZE> master_key,
             const std::filesystem::path& workspace_root,
             std::span<const std::string> identifiers,
-            std::optional<Reference> trusted_ancestor) {
+            std::optional<Reference> trusted_ancestor,
+            CommitCache* commit_cache) {
     return load_latest_impl(storage,
                             master_key,
                             workspace_root,
                             identifiers,
-                            std::move(trusted_ancestor));
+                            std::move(trusted_ancestor),
+                            commit_cache);
 }
 
 ChainResult

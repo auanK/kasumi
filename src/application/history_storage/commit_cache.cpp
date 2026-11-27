@@ -78,12 +78,51 @@ derive_disk_cache_path(const CommitCache& cache,
     return *ns_root / (reference.commit_id + "_" + reference.ciphertext_id);
 }
 
+inline constexpr std::size_t maximum_epoch_envelope_bytes =
+    5U + 16U + epoch::maximum_encoded_size;
+
+std::string format_epoch_filename(const epoch::Reference& reference) {
+    std::string seq = std::to_string(reference.sequence);
+    if (seq.size() < 20U) {
+        seq.insert(seq.begin(), 20U - seq.size(), '0');
+    }
+    return seq + "_" + reference.epoch_id;
+}
+
+std::optional<std::filesystem::path>
+derive_epoch_disk_cache_path(const CommitCache& cache,
+                             std::string_view epochs_prefix,
+                             const epoch::Reference& reference) {
+    if (!detail::valid_hex_id(reference.epoch_id)) {
+        return std::nullopt;
+    }
+    auto ns_root = derive_namespace_root(cache, epochs_prefix);
+    if (!ns_root) {
+        return std::nullopt;
+    }
+    return *ns_root / format_epoch_filename(reference);
+}
+
 bool is_cached_ciphertext_filename(std::string_view name) noexcept {
     if (name.size() != 129U || name[64] != '_') {
         return false;
     }
     return detail::valid_hex_id(name.substr(0, 64)) &&
            detail::valid_hex_id(name.substr(65));
+}
+
+bool is_cached_epoch_filename(std::string_view name) noexcept {
+    if (name.size() < 85U || name[name.size() - 65U] != '_') {
+        return false;
+    }
+    const auto seq_part = name.substr(0, name.size() - 65U);
+    if (seq_part.size() < 20U ||
+        !std::ranges::all_of(seq_part, [](char ch) {
+            return ch >= '0' && ch <= '9';
+        })) {
+        return false;
+    }
+    return detail::valid_hex_id(name.substr(name.size() - 64U));
 }
 
 bool is_valid_existing_directory(const std::filesystem::path& path) noexcept {
@@ -96,7 +135,8 @@ bool is_valid_existing_directory(const std::filesystem::path& path) noexcept {
            std::filesystem::is_directory(status);
 }
 
-bool is_valid_cached_file(const std::filesystem::path& path) noexcept {
+bool is_valid_cached_file(const std::filesystem::path& path,
+                          std::size_t max_bytes) noexcept {
     std::error_code ec;
     const auto status = std::filesystem::symlink_status(path, ec);
     if (ec || status.type() == std::filesystem::file_type::not_found ||
@@ -105,7 +145,7 @@ bool is_valid_cached_file(const std::filesystem::path& path) noexcept {
         return false;
     }
     const auto size = std::filesystem::file_size(path, ec);
-    return !ec && size > 0 && size <= detail::maximum_commit_ciphertext_size;
+    return !ec && size > 0 && size <= max_bytes;
 }
 
 std::size_t estimate_commit_bytes(const history::LoadedCommit& loaded) noexcept {
@@ -152,6 +192,7 @@ bool ensure_private_cache_directory(const std::filesystem::path& path) noexcept 
 }
 
 void prune_disk_cache_locked(const std::filesystem::path& ns_root,
+                             bool (*is_cache_file)(std::string_view),
                              std::size_t max_files,
                              std::size_t max_bytes) noexcept {
     try {
@@ -168,7 +209,7 @@ void prune_disk_cache_locked(const std::filesystem::path& ns_root,
              it.increment(ec)) {
             const auto& entry = *it;
             const auto filename = entry.path().filename().string();
-            if (!is_cached_ciphertext_filename(filename)) {
+            if (!is_cache_file(filename)) {
                 continue;
             }
             if (platform::private_storage::is_reparse_or_symlink(entry.path())) {
@@ -213,12 +254,16 @@ void prune_disk_cache_locked(const std::filesystem::path& ns_root,
     }
 }
 
-void write_ciphertext_to_disk(const CommitCache& cache,
-                              const std::filesystem::path& ns_root,
-                              const std::filesystem::path& target,
-                              const std::filesystem::path& source) noexcept {
+void write_protected_file_to_disk(const CommitCache& cache,
+                                  const std::filesystem::path& ns_root,
+                                  const std::filesystem::path& target,
+                                  const std::filesystem::path& source,
+                                  bool (*is_cache_file)(std::string_view),
+                                  std::size_t max_file_bytes,
+                                  std::size_t max_files,
+                                  std::size_t max_bytes) noexcept {
     try {
-        if (is_valid_cached_file(target)) {
+        if (is_valid_cached_file(target, max_file_bytes)) {
             return;
         }
         if (!ensure_private_cache_directory(cache.disk_cache_root) ||
@@ -259,8 +304,7 @@ void write_ciphertext_to_disk(const CommitCache& cache,
             detail::remove_file(tmp);
             return;
         }
-        prune_disk_cache_locked(
-            ns_root, cache.max_disk_files, cache.max_disk_bytes);
+        prune_disk_cache_locked(ns_root, is_cache_file, max_files, max_bytes);
     } catch (...) {
     }
 }
@@ -273,6 +317,14 @@ CommitCacheKeyHash::operator()(const CommitCacheKey& key) const noexcept {
     seed = combine_hash(seed, std::hash<std::string>{}(key.reference.commit_id));
     seed = combine_hash(seed,
                         std::hash<std::string>{}(key.reference.ciphertext_id));
+    return seed;
+}
+
+std::size_t
+EpochCacheKeyHash::operator()(const EpochCacheKey& key) const noexcept {
+    std::size_t seed = std::hash<std::string>{}(key.epochs_prefix);
+    seed = combine_hash(seed, std::hash<std::uint64_t>{}(key.reference.sequence));
+    seed = combine_hash(seed, std::hash<std::string>{}(key.reference.epoch_id));
     return seed;
 }
 
@@ -347,7 +399,7 @@ lookup_cached_ciphertext_path(CommitCache& cache,
     }
     if (!is_valid_existing_directory(cache.disk_cache_root) ||
         !is_valid_existing_directory(*ns_root) ||
-        !is_valid_cached_file(*target)) {
+        !is_valid_cached_file(*target, detail::maximum_commit_ciphertext_size)) {
         return std::nullopt;
     }
     return target;
@@ -409,8 +461,14 @@ void store_cached_commit(CommitCache& cache,
         const auto target =
             derive_disk_cache_path(cache, commits_prefix, reference);
         if (ns_root && target) {
-            write_ciphertext_to_disk(
-                cache, *ns_root, *target, *validated_ciphertext_path);
+            write_protected_file_to_disk(cache,
+                                         *ns_root,
+                                         *target,
+                                         *validated_ciphertext_path,
+                                         is_cached_ciphertext_filename,
+                                         detail::maximum_commit_ciphertext_size,
+                                         cache.max_disk_files,
+                                         cache.max_disk_bytes);
         }
     }
 }
@@ -440,11 +498,194 @@ void evict_cached_ciphertext(CommitCache& cache,
     }
 }
 
+std::optional<epoch::VerifiedEpoch>
+lookup_cached_epoch(CommitCache& cache,
+                    std::string_view epochs_prefix,
+                    const epoch::Reference& reference) {
+    if (epochs_prefix.empty() || !detail::valid_hex_id(reference.epoch_id)) {
+        return std::nullopt;
+    }
+    std::lock_guard lock(cache.mutex);
+    const EpochCacheKey key{
+        .epochs_prefix = std::string{epochs_prefix},
+        .reference = reference,
+    };
+    const auto it = cache.epoch_entries.find(key);
+    if (it == cache.epoch_entries.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+std::optional<std::vector<std::uint8_t>>
+read_cached_sealed_epoch(CommitCache& cache,
+                         std::string_view epochs_prefix,
+                         const epoch::Reference& reference) {
+    if (epochs_prefix.empty() || !detail::valid_hex_id(reference.epoch_id)) {
+        return std::nullopt;
+    }
+    const auto ns_root = derive_namespace_root(cache, epochs_prefix);
+    const auto target =
+        derive_epoch_disk_cache_path(cache, epochs_prefix, reference);
+    if (!ns_root || !target) {
+        return std::nullopt;
+    }
+    if (!is_valid_existing_directory(cache.disk_cache_root) ||
+        !is_valid_existing_directory(*ns_root) ||
+        !is_valid_cached_file(*target, maximum_epoch_envelope_bytes)) {
+        return std::nullopt;
+    }
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(*target, ec);
+    if (ec || size == 0 || size > maximum_epoch_envelope_bytes) {
+        return std::nullopt;
+    }
+    std::ifstream input(*target, std::ios::binary);
+    if (!input) {
+        return std::nullopt;
+    }
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
+    if (!input.read(reinterpret_cast<char*>(bytes.data()),
+                    static_cast<std::streamsize>(bytes.size())) ||
+        input.gcount() != static_cast<std::streamsize>(bytes.size())) {
+        return std::nullopt;
+    }
+    return bytes;
+}
+
+void store_cached_epoch(CommitCache& cache,
+                        std::string_view epochs_prefix,
+                        const epoch::VerifiedEpoch& verified,
+                        const std::filesystem::path* sealed_epoch_path) {
+    if (epochs_prefix.empty() ||
+        !detail::valid_hex_id(verified.reference.epoch_id)) {
+        return;
+    }
+    try {
+        if (cache.max_epoch_entries > 0) {
+            std::lock_guard lock(cache.mutex);
+            const EpochCacheKey key{
+                .epochs_prefix = std::string{epochs_prefix},
+                .reference = verified.reference,
+            };
+            if (!cache.epoch_entries.contains(key)) {
+                while (cache.epoch_entries.size() >= cache.max_epoch_entries &&
+                       !cache.epoch_entries.empty()) {
+                    cache.epoch_entries.erase(cache.epoch_entries.begin());
+                }
+            }
+            cache.epoch_entries.insert_or_assign(key, verified);
+        }
+    } catch (const std::exception&) {
+    }
+
+    if (sealed_epoch_path != nullptr && cache.max_disk_files > 0 &&
+        cache.max_disk_bytes > 0 && cache.max_epoch_entries > 0) {
+        const auto ns_root = derive_namespace_root(cache, epochs_prefix);
+        const auto target = derive_epoch_disk_cache_path(
+            cache, epochs_prefix, verified.reference);
+        if (ns_root && target) {
+            write_protected_file_to_disk(
+                cache,
+                *ns_root,
+                *target,
+                *sealed_epoch_path,
+                is_cached_epoch_filename,
+                maximum_epoch_envelope_bytes,
+                std::min(cache.max_disk_files, cache.max_epoch_entries),
+                cache.max_disk_bytes);
+        }
+    }
+}
+
+void evict_cached_epoch(CommitCache& cache,
+                        std::string_view epochs_prefix,
+                        const epoch::Reference& reference) noexcept {
+    try {
+        {
+            std::lock_guard lock(cache.mutex);
+            const EpochCacheKey key{
+                .epochs_prefix = std::string{epochs_prefix},
+                .reference = reference,
+            };
+            cache.epoch_entries.erase(key);
+        }
+        if (const auto target = derive_epoch_disk_cache_path(
+                cache, epochs_prefix, reference)) {
+            detail::remove_file(*target);
+        }
+    } catch (...) {
+    }
+}
+
+bool has_validated_marker(CommitCache& cache, std::string_view marker_id) {
+    if (marker_id.empty()) {
+        return false;
+    }
+    std::lock_guard lock(cache.mutex);
+    return cache.validated_markers.contains(std::string{marker_id});
+}
+
+void record_validated_marker(CommitCache& cache, std::string_view marker_id) {
+    if (marker_id.empty() || cache.max_validated_markers == 0) {
+        return;
+    }
+    try {
+        std::lock_guard lock(cache.mutex);
+        std::string key{marker_id};
+        if (cache.validated_markers.contains(key)) {
+            return;
+        }
+        while (cache.validated_markers.size() >= cache.max_validated_markers &&
+               !cache.validated_markers.empty()) {
+            cache.validated_markers.erase(cache.validated_markers.begin());
+        }
+        cache.validated_markers.emplace(std::move(key));
+    } catch (const std::exception&) {
+    }
+}
+
+void prune_unlisted_memory_commits(
+    CommitCache& cache,
+    std::string_view commits_prefix,
+    const std::map<std::string, std::vector<HeadReference>>&
+        live_commit_variants) noexcept {
+    if (commits_prefix.empty()) {
+        return;
+    }
+    try {
+        std::lock_guard lock(cache.mutex);
+        for (auto it = cache.memory_entries.begin();
+             it != cache.memory_entries.end();) {
+            if (it->first.commits_prefix != commits_prefix) {
+                ++it;
+                continue;
+            }
+            const auto found =
+                live_commit_variants.find(it->first.reference.commit_id);
+            const bool still_live =
+                found != live_commit_variants.end() &&
+                std::ranges::find(found->second, it->first.reference) !=
+                    found->second.end();
+            if (!still_live) {
+                cache.current_memory_bytes -= it->second.estimated_bytes;
+                cache.lru_order.erase(it->second.lru_it);
+                it = cache.memory_entries.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    } catch (...) {
+    }
+}
+
 void clear_memory_cache(CommitCache& cache) noexcept {
     std::lock_guard lock(cache.mutex);
     cache.memory_entries.clear();
     cache.lru_order.clear();
     cache.current_memory_bytes = 0;
+    cache.epoch_entries.clear();
+    cache.validated_markers.clear();
 }
 
 } // namespace kasumi::application::history_storage
