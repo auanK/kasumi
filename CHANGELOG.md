@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.30.4]
+
+### Added
+
+- **Remote Vault Thumbnails & Preview-Saved Cache (`src/application/daemon/web_thumbnails.hpp`, `src/application/daemon/web_thumbnails.cpp`, `src/application/daemon/web_local.cpp`, `src/application/daemon/web_remote.cpp`, `src/application/daemon/server.cpp`, `src/application/inspection/inspect.cpp`, `web/src/workspace/files/*`)**:
+  - Added remote raster image thumbnail fallback (up to `5 MiB` in icon grids and `32 MiB` when clicked to preview) backed by a bounded in-memory LRU `RemoteThumbnailCache` (`24 MiB` / `512` thumbnails, cleared on profile lock or key/remote change) and throttled remote fetches (max `2` concurrent overall, `1` per profile, plus max `2` concurrent unseen thumbnails in the explorer grid).
+  - Clicking to preview a remote image or video saves its `160px` thumbnail in the cache (server-side for raster images, client canvas frame upload via `POST /v1/remote/{profile}/thumbnail` for videos) so the grid icon upgrades immediately and stays cached during browsing.
+
+### Changed
+
+- **Epoch & Head Marker Caching in `CommitCache` (`src/application/history_storage/commit_cache.hpp`, `src/application/history_storage/commit_cache.cpp`, `src/application/history_storage/epoch.hpp`, `src/application/history_storage/epoch.cpp`, `src/application/history_storage/loading.cpp`)**:
+  - Cached verified epochs in memory (`max_epoch_entries = 128`) and as sealed `KEPA\x01` envelopes on disk (always re-authenticated via `epoch::open` with automatic corruption self-healing), cached validated head marker IDs in RAM (`max_validated_markers = 512`), and pruned deleted commits from daemon RAM whenever a complete `commits/` listing runs.
+- **Instant Historical Snapshot Trees & Diffs from Daemon RAM (`include/application/inspection/request.hpp`, `src/application/inspection/inspect.cpp`, `src/application/daemon/web_remote.cpp`, `src/application/daemon/server.cpp`, `web/src/api/remote.js`)**:
+  - Served historical `/v1/remote/{profile}/tree?commit=...` and `/v1/remote/{profile}/diff?from=...&to=...` directly from already authenticated commits in daemon RAM `CommitCache` with zero remote calls, while supporting `?refresh=1` (`bypass_commit_cache`) for explicit live revalidation.
+
 ## [0.30.3]
 
 ### Changed
