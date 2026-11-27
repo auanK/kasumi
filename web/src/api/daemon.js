@@ -51,3 +51,11 @@ export function stopDaemon() {
 export function setAutostart(enabled) {
   return apiRequest('/v1/autostart', { method: 'POST', body: { enabled: Boolean(enabled) } })
 }
+
+export function fetchWebConfig() {
+  return apiRequest('/v1/web/config')
+}
+
+export function updateWebConfig(payload) {
+  return apiRequest('/v1/web/config', { method: 'PATCH', body: payload })
+}

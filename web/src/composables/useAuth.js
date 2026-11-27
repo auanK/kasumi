@@ -1,6 +1,7 @@
 import { reactive } from 'vue'
 import {
   changePassword as apiChangePassword,
+  changeUsername as apiChangeUsername,
   fetchAuthStatus,
   login as apiLogin,
   logout as apiLogout,
@@ -66,6 +67,12 @@ export async function setupInitialPassword(bootstrapToken, password, username) {
   return res
 }
 
+export async function changeUsername(currentPassword, username) {
+  const res = await apiChangeUsername(currentPassword, username)
+  state.username = res?.username || username
+  return res
+}
+
 export async function changePassword(currentPassword, password, username) {
   const res = await apiChangePassword(currentPassword, password, username)
   state.authenticated = false
@@ -82,6 +89,7 @@ export function useAuth() {
     login,
     logout,
     setupInitialPassword,
+    changeUsername,
     changePassword,
   }
 }

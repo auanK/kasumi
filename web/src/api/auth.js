@@ -34,14 +34,25 @@ export async function setupInitialPassword(bootstrapToken, password, username) {
   })
 }
 
-export async function changePassword(currentPassword, password, username) {
-  const data = await apiRequest('/v1/auth/password', {
+export async function changeUsername(currentPassword, username) {
+  return apiRequest('/v1/auth/username', {
     method: 'POST',
     body: {
       current_password: currentPassword,
-      password,
       username,
     },
+  })
+}
+
+export async function changePassword(currentPassword, password, username) {
+  const body = {
+    current_password: currentPassword,
+    password,
+  }
+  if (username) body.username = username
+  const data = await apiRequest('/v1/auth/password', {
+    method: 'POST',
+    body,
   })
   setCsrfToken('')
   return data

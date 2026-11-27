@@ -4,11 +4,24 @@ import { reactive } from 'vue'
 
 const mocks = vi.hoisted(() => ({
   fetchDiagnostics: vi.fn(),
+  fetchWebConfig: vi.fn(),
+  updateWebConfig: vi.fn(),
+  reloadDaemonConfig: vi.fn(),
+  setAutostart: vi.fn(),
+  stopDaemon: vi.fn(),
   daemonState: null,
 }))
 
 vi.mock('../api/profiles.js', () => ({
   fetchDiagnostics: mocks.fetchDiagnostics,
+}))
+
+vi.mock('../api/daemon.js', () => ({
+  fetchWebConfig: mocks.fetchWebConfig,
+  updateWebConfig: mocks.updateWebConfig,
+  reloadDaemonConfig: mocks.reloadDaemonConfig,
+  setAutostart: mocks.setAutostart,
+  stopDaemon: mocks.stopDaemon,
 }))
 
 vi.mock('../composables/useDaemonStream.js', async () => {
@@ -34,6 +47,7 @@ vi.mock('../composables/useDaemonStream.js', async () => {
 })
 
 import ServicePanel from '../hub/ServicePanel.vue'
+import SystemDaemonTab from '../system/SystemDaemonTab.vue'
 import SystemDiagnosticsTab from '../system/SystemDiagnosticsTab.vue'
 
 describe('Diagnostics report mapping and ServicePanel device info', () => {
@@ -91,6 +105,47 @@ describe('Diagnostics report mapping and ServicePanel device info', () => {
     expect(text).toContain('Workstation-BR')
     expect(text).toContain('v0.30.0')
     expect(text).toContain('1m 08s')
+    wrapper.unmount()
+  })
+
+  it('loads and saves Syncthing-style Web UI listener settings in SystemDaemonTab', async () => {
+    mocks.fetchWebConfig.mockResolvedValue({
+      bind: '127.0.0.1',
+      port: 3137,
+      active_port: 3137,
+      allowed_hosts: [],
+      skip_host_check: false,
+    })
+    mocks.updateWebConfig.mockResolvedValue({
+      bind: '0.0.0.0',
+      port: 3137,
+      allowed_hosts: ['*.ts.net'],
+      skip_host_check: false,
+      restart_required: true,
+    })
+
+    const wrapper = mount(SystemDaemonTab, {
+      global: { stubs: { Teleport: true } },
+    })
+    await flushPromises()
+
+    expect(mocks.fetchWebConfig).toHaveBeenCalledTimes(1)
+    const buttons = wrapper.findAll('button.k-seg-btn')
+    await buttons[1].trigger('click')
+
+    const textInputs = wrapper.findAll('input.k-input')
+    await textInputs[1].setValue('*.ts.net')
+
+    await wrapper.get('form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(mocks.updateWebConfig).toHaveBeenCalledWith({
+      bind: '0.0.0.0',
+      port: 3137,
+      allowed_hosts: ['*.ts.net'],
+      skip_host_check: false,
+    })
+    expect(wrapper.find('[role="status"]').exists()).toBe(true)
     wrapper.unmount()
   })
 })
