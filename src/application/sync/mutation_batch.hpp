@@ -26,7 +26,7 @@ struct StagedUploadObject {
     std::string identifier;
     std::string plaintext_hash;
     std::uint64_t plaintext_size = 0;
-    std::string ciphertext_sha256;
+    crypto::physical::Digest ciphertext_digest;
     std::vector<std::size_t> operation_indices;
     bool is_pack = false;
 };

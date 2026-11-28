@@ -546,7 +546,7 @@ execute(const runtime::RuntimeData& runtime_data,
                     .identifier = pack_id,
                     .plaintext_hash = hash_hex(res->pack_hash),
                     .plaintext_size = res->pack_plaintext_size,
-                    .ciphertext_sha256 = std::move(res->ciphertext_sha256),
+                    .ciphertext_digest = std::move(res->ciphertext_digest),
                     .operation_indices = {idx},
                     .is_pack = true,
                 };

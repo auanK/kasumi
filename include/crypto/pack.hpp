@@ -94,7 +94,7 @@ struct PackMemberSource {
 struct PackEncryptionResult {
     Hash pack_hash{};
     std::uint64_t pack_plaintext_size = 0;
-    std::string ciphertext_sha256;
+    physical::Digest ciphertext_digest;
 };
 
 // Content-defined slice produced by FastCDC chunking.

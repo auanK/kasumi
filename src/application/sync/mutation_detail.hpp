@@ -145,6 +145,10 @@ resolve_local_path(const std::filesystem::path& local_root,
                    std::size_t operation_index,
                    std::span<const Operation> plan_operations = {});
 
+MutationResult validate_staged_digest(const std::filesystem::path& path,
+                                      const crypto::physical::Digest& digest,
+                                      std::size_t operation_index);
+
 // Verifies the integrity of a newly uploaded object via physical hash or
 // get/decrypt.
 std::expected<void, MutationError> verify_uploaded_content_object(
@@ -155,13 +159,13 @@ std::expected<void, MutationError> verify_uploaded_content_object(
     std::uint64_t expected_size,
     const platform::Workspace& workspace,
     std::size_t operation_index,
-    std::string_view local_physical_hash,
+    const crypto::physical::Digest& ciphertext_digest,
     bool is_pack = false,
     std::optional<std::size_t> scratch_slot = std::nullopt);
 
 struct PreparedUploadCiphertext {
     std::uint64_t plaintext_size = 0;
-    std::string ciphertext_sha256;
+    crypto::physical::Digest ciphertext_digest;
 };
 
 std::expected<PreparedUploadCiphertext, MutationError>

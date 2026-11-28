@@ -486,9 +486,9 @@ prepare_upload_ciphertext(const transaction::Operation& operation,
         return std::unexpected(ok.error());
     }
 
-    return PreparedUploadCiphertext{.plaintext_size = operation.size,
-                                    .ciphertext_sha256 =
-                                        encrypted_file->ciphertext_sha256};
+    return PreparedUploadCiphertext{
+        .plaintext_size = operation.size,
+        .ciphertext_digest = std::move(encrypted_file->ciphertext_digest)};
 }
 
 namespace {

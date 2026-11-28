@@ -270,20 +270,32 @@ TEST(CryptoContentTest, EncryptionReportsHashesOfTheBytesItProcessed) {
         kasumi::test::workspace_path(workspace, "plaintext.bin");
     const auto ciphertext =
         kasumi::test::workspace_path(workspace, "ciphertext.bin");
-    kasumi::test::write_text(plaintext, "exact bytes");
-    const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    for (const std::string& contents :
+         {std::string("exact bytes"), std::string{}, std::string(8192, 'a')}) {
+        SCOPED_TRACE(contents.size());
+        kasumi::test::write_text(plaintext, contents);
+        const std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
 
-    const auto encrypted =
-        kasumi::crypto::encrypt_file_with_hashes(plaintext, ciphertext, key);
+        const auto encrypted = kasumi::crypto::encrypt_file_with_hashes(
+            plaintext, ciphertext, key);
 
-    ASSERT_TRUE(encrypted.has_value());
-    EXPECT_EQ(encrypted->plaintext_hash,
-              kasumi::hasher::hash_string("exact bytes"));
-    EXPECT_EQ(encrypted->plaintext_size, 11U);
-    const auto ciphertext_hash =
-        kasumi::crypto::physical::hash_file(ciphertext, "sha256");
-    ASSERT_TRUE(ciphertext_hash.has_value());
-    EXPECT_EQ(encrypted->ciphertext_sha256, *ciphertext_hash);
+        ASSERT_TRUE(encrypted.has_value());
+        EXPECT_EQ(encrypted->plaintext_hash,
+                  kasumi::hasher::hash_string(contents));
+        EXPECT_EQ(encrypted->plaintext_size, contents.size());
+        const auto ciphertext_hash =
+            kasumi::crypto::physical::hash_file(ciphertext, "sha256");
+        ASSERT_TRUE(ciphertext_hash.has_value());
+        EXPECT_EQ(encrypted->ciphertext_digest.algorithm,
+                  kasumi::crypto::physical::Algorithm::Sha256);
+        EXPECT_EQ(encrypted->ciphertext_digest.hex, *ciphertext_hash);
+        EXPECT_EQ(encrypted->ciphertext_digest.size,
+                  std::filesystem::file_size(ciphertext));
+        if (contents.empty()) {
+            EXPECT_EQ(encrypted->ciphertext_digest.size,
+                      kasumi::crypto::FILE_HEADER_SIZE);
+        }
+    }
 }
 
 TEST(CryptoFileTest, SmallEncryptionUsesPayloadSizedScratchAndRoundTrips) {
@@ -1538,6 +1550,13 @@ TEST(CryptoPackTest, MicroPackRoundTripExtractsAndRejectsTamper) {
     const auto encrypted =
         kasumi::crypto::pack::write_encrypted_pack(sources, pack_path, key);
     ASSERT_TRUE(encrypted.has_value()) << encrypted.error();
+
+    const auto digest =
+        kasumi::crypto::physical::hash_file(pack_path, "sha256");
+    ASSERT_TRUE(digest) << digest.error();
+    EXPECT_EQ(encrypted->ciphertext_digest.hex, *digest);
+    EXPECT_EQ(encrypted->ciphertext_digest.size,
+              std::filesystem::file_size(pack_path));
 
     const auto extract_dir =
         kasumi::test::workspace_path(workspace, "extracted");

@@ -78,7 +78,8 @@ stage_upload_to_path(const kasumi::Operation& operation,
     return StagedUploadObject{.identifier = std::move(identifier),
                               .plaintext_hash = operation.hash,
                               .plaintext_size = prepared->plaintext_size,
-                              .ciphertext_sha256 = prepared->ciphertext_sha256,
+                              .ciphertext_digest =
+                                  std::move(prepared->ciphertext_digest),
                               .operation_indices = {operation_index}};
 }
 
@@ -303,7 +304,7 @@ MutationResult verify_upload_batch_individually(
                 object.plaintext_size,
                 workspace,
                 object.operation_indices.front(),
-                object.ciphertext_sha256,
+                object.ciphertext_digest,
                 object.is_pack,
                 index);
             if (!result) {
@@ -403,6 +404,22 @@ verify_upload_batch(const StagedUploadBatch& batch,
         return {};
     }
 
+    std::optional<MutationError> invalid_reference;
+    for (const auto& object : batch.objects) {
+        if (auto ok = detail::validate_staged_digest(
+                batch.root / object.identifier,
+                object.ciphertext_digest,
+                object.operation_indices.front());
+            !ok &&
+            (!invalid_reference ||
+             ok.error().operation_index < invalid_reference->operation_index)) {
+            invalid_reference = std::move(ok.error());
+        }
+    }
+    if (invalid_reference) {
+        return std::unexpected(std::move(*invalid_reference));
+    }
+
     if (!transport::prefers_physical_hash_batch(storage,
                                                 batch.objects.size())) {
         return verify_upload_batch_individually(
@@ -411,12 +428,13 @@ verify_upload_batch(const StagedUploadBatch& batch,
 
     transport::PhysicalHashBatchRequest request;
     request.scratch_root = batch.root;
-    request.algorithm = "sha256";
+    request.algorithm = crypto::physical::algorithm_name(
+        batch.objects.front().ciphertext_digest.algorithm);
     request.objects.reserve(batch.objects.size());
     for (const auto& object : batch.objects) {
         request.objects.push_back(transport::PhysicalHashExpectation{
             .identifier = object.identifier,
-            .expected_hash = object.ciphertext_sha256,
+            .expected_hash = object.ciphertext_digest.hex,
         });
     }
 

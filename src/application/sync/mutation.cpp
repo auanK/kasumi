@@ -185,6 +185,25 @@ verify_local_file(const std::filesystem::path& path,
         path, operation.hash, operation.size, operation_index);
 }
 
+MutationResult check_ciphertext_size(const std::filesystem::path& path,
+                                     std::uint64_t expected,
+                                     std::size_t operation_index) {
+    std::error_code ec;
+    const auto actual = std::filesystem::file_size(path, ec);
+    if (ec) {
+        return std::unexpected(make_error(
+            MutationErrorCode::LocalIo, ec.message(), path, operation_index));
+    }
+    if (actual != expected) {
+        return std::unexpected(
+            make_error(MutationErrorCode::IntegrityMismatch,
+                       "ciphertext size does not match staged envelope",
+                       path,
+                       operation_index));
+    }
+    return {};
+}
+
 std::expected<void, MutationError>
 fetch_decrypt_and_verify(transport::Transport& storage,
                          std::span<const std::uint8_t, crypto::KEY_SIZE> key,
@@ -228,17 +247,10 @@ fetch_decrypt_and_verify(transport::Transport& storage,
     }
 
     if (expected_ciphertext_size) {
-        std::error_code size_error;
-        const auto actual_size =
-            std::filesystem::file_size(encrypted, size_error);
-        const std::uint64_t minimum_size = crypto::FILE_HEADER_SIZE;
-        if (size_error || actual_size < minimum_size ||
-            actual_size > *expected_ciphertext_size) {
-            return std::unexpected(
-                make_error(MutationErrorCode::IntegrityMismatch,
-                           "ciphertext size does not match expected plaintext",
-                           encrypted,
-                           operation_index));
+        if (auto ok = check_ciphertext_size(
+                encrypted, *expected_ciphertext_size, operation_index);
+            !ok) {
+            return ok;
         }
     }
 
@@ -268,6 +280,19 @@ fetch_decrypt_and_verify(transport::Transport& storage,
 
 namespace detail {
 
+MutationResult validate_staged_digest(const std::filesystem::path& path,
+                                      const crypto::physical::Digest& digest,
+                                      std::size_t operation_index) {
+    if (digest.algorithm != crypto::physical::Algorithm::Sha256 ||
+        digest.hex.size() != 64 || !is_lowercase_hex(digest.hex)) {
+        return std::unexpected(make_error(MutationErrorCode::IntegrityMismatch,
+                                          "invalid staged ciphertext digest",
+                                          path,
+                                          operation_index));
+    }
+    return check_ciphertext_size(path, digest.size, operation_index);
+}
+
 std::expected<void, MutationError> verify_uploaded_content_object(
     transport::Transport& storage,
     std::span<const std::uint8_t, crypto::KEY_SIZE> key,
@@ -276,15 +301,15 @@ std::expected<void, MutationError> verify_uploaded_content_object(
     std::uint64_t expected_size,
     const platform::Workspace& workspace,
     std::size_t operation_index,
-    std::string_view local_physical_hash,
+    const crypto::physical::Digest& ciphertext_digest,
     bool is_pack,
     std::optional<std::size_t> scratch_slot) {
-    constexpr std::string_view physical_hash_algorithm = "sha256";
-
-    auto remote_hash =
-        transport::physical_hash(storage, identifier, physical_hash_algorithm);
+    auto remote_hash = transport::physical_hash(
+        storage,
+        identifier,
+        crypto::physical::algorithm_name(ciphertext_digest.algorithm));
     if (remote_hash) {
-        if (*remote_hash == local_physical_hash) {
+        if (*remote_hash == ciphertext_digest.hex) {
             return {};
         }
         return std::unexpected(make_error(
@@ -357,6 +382,12 @@ std::expected<void, MutationError> verify_uploaded_content_object(
                 encrypted,
                 operation_index));
         }
+        if (auto ok = check_ciphertext_size(
+                encrypted, ciphertext_digest.size, operation_index);
+            !ok) {
+            cleanup();
+            return ok;
+        }
         auto verified_pack = crypto::pack::decrypt_and_verify_pack(
             encrypted, key, *expected_hash, nullptr);
         cleanup();
@@ -370,16 +401,6 @@ std::expected<void, MutationError> verify_uploaded_content_object(
         return {};
     }
 
-    const auto expected_ciphertext_size =
-        crypto::encoded_file_size(expected_size);
-    if (!expected_ciphertext_size) {
-        return std::unexpected(
-            make_error(MutationErrorCode::IntegrityMismatch,
-                       "ciphertext size does not match expected plaintext",
-                       encrypted,
-                       operation_index));
-    }
-
     auto verified =
         fetch_decrypt_and_verify(storage,
                                  key,
@@ -390,7 +411,7 @@ std::expected<void, MutationError> verify_uploaded_content_object(
                                  expected_size,
                                  operation_index,
                                  false,
-                                 expected_ciphertext_size,
+                                 ciphertext_digest.size,
                                  encrypted,
                                  MutationErrorCode::IntegrityMismatch,
                                  "remote object missing after upload",
@@ -448,6 +469,13 @@ apply_upload(const Operation& operation,
         return std::unexpected(prepared.error());
     }
 
+    if (auto ok = detail::validate_staged_digest(
+            encrypted, prepared->ciphertext_digest, operation_index);
+        !ok) {
+        remove_temporary_file(encrypted);
+        return ok;
+    }
+
     auto uploaded = transport::put(storage, encrypted, remote_identifier);
     if (!uploaded &&
         !transport::mutation_result_is_ambiguous(uploaded.error())) {
@@ -466,7 +494,7 @@ apply_upload(const Operation& operation,
                                                operation.size,
                                                workspace,
                                                operation_index,
-                                               prepared->ciphertext_sha256);
+                                               prepared->ciphertext_digest);
     std::error_code encrypted_remove_error;
     std::filesystem::remove(encrypted, encrypted_remove_error);
     if (!uploaded_verification) {

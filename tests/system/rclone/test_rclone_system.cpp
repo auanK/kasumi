@@ -1603,8 +1603,8 @@ bool advertises_command(kasumi::transport::Transport& storage,
         throw std::runtime_error(reply.error().message);
     }
     const auto commands = nlohmann::json::parse(*reply).at("commands");
-    return std::ranges::any_of(commands, [&](const auto& entry) {
-        return entry.at("Path") == command;
+    return std::ranges::any_of(commands, [&](const nlohmann::json& entry) {
+        return entry.at("Path").get_ref<const std::string&>() == command;
     });
 }
 
@@ -1640,7 +1640,7 @@ TEST(RcloneSystemTest, SinglePhysicalHashUsesHashsumfile) {
         return;
     }
     ASSERT_TRUE(verified.has_value()) << verified.error().message;
-    EXPECT_EQ(*verified, prepared->ciphertext_sha256);
+    EXPECT_EQ(*verified, prepared->ciphertext_digest.hex);
 }
 
 TEST(RcloneSystemTest, BulkPhysicalHashUsesOneCheckManifest) {
@@ -1670,7 +1670,8 @@ TEST(RcloneSystemTest, BulkPhysicalHashUsesOneCheckManifest) {
             plain, encrypted, test_key());
         ASSERT_TRUE(prepared.has_value());
         batch.identifiers.push_back(identifier);
-        request.objects.push_back({identifier, prepared->ciphertext_sha256});
+        request.objects.push_back(
+            {identifier, prepared->ciphertext_digest.hex});
     }
 
     ASSERT_TRUE(kasumi::transport::put_batch(*storage, batch));

@@ -56,7 +56,7 @@ Hash hash_span(std::span<const std::uint8_t> bytes) noexcept {
     return digest;
 }
 
-std::expected<std::string, std::string>
+std::expected<physical::Digest, std::string>
 write_ciphertext_atomically(const std::filesystem::path& output_path,
                             std::span<const std::uint8_t> ciphertext) {
     if (output_path.empty()) {
@@ -80,7 +80,7 @@ write_ciphertext_atomically(const std::filesystem::path& output_path,
 
     auto sha = physical::sha256_init();
     physical::sha256_update(sha, ciphertext);
-    auto digest = physical::sha256_finish(sha);
+    auto digest = physical::ciphertext_digest(sha);
 
     platform::private_storage::PrivateOutputFile temp_file;
     bool reserved = false;
@@ -309,15 +309,15 @@ write_encrypted_pack(std::span<const PackMemberSource> members,
     if (!cipher) {
         return std::unexpected("failed to encrypt Micro-Pack");
     }
-    auto sha256 = write_ciphertext_atomically(output_path, *cipher);
-    if (!sha256) {
-        return std::unexpected(sha256.error());
+    auto digest = write_ciphertext_atomically(output_path, *cipher);
+    if (!digest) {
+        return std::unexpected(digest.error());
     }
 
     return PackEncryptionResult{
         .pack_hash = *pack_hash,
         .pack_plaintext_size = total_size,
-        .ciphertext_sha256 = std::move(*sha256),
+        .ciphertext_digest = std::move(*digest),
     };
 }
 

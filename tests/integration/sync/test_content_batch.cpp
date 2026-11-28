@@ -1988,6 +1988,61 @@ TEST(SyncContentBatchTest, CleanupRemovesStagingWithAnUnfilledFirstSlot) {
     EXPECT_FALSE(std::filesystem::exists(batch.root));
 }
 
+TEST(UploadVerificationTest, RejectsInvalidStagedDigestBeforeRemoteProof) {
+    auto fixture = make_fixture("invalid-staged-digest");
+    add_content_files(*fixture, 1);
+    const auto result =
+        kasumi::reconciliation::reconcile(publication_input(*fixture));
+    ASSERT_TRUE(result) << result.error().detail;
+    const auto record =
+        sync::journal::create_record(0, 0, result->plan, true, {});
+    ASSERT_TRUE(record) << record.error();
+    ASSERT_EQ(record->plan.operations.size(), 1U);
+    const auto workspace =
+        sync::coordinator::detail::create_transaction_workspace(
+            fixture->profile, record->operation_id, fixture->key);
+    ASSERT_TRUE(workspace) << workspace.error().detail;
+    const std::array<std::size_t, 1> indices{0};
+    auto batch = sync::mutation::stage_upload_batch(
+        indices, *record, fixture->local, fixture->key, *workspace);
+    ASSERT_TRUE(batch) << batch.error().detail;
+    ASSERT_EQ(batch->objects.size(), 1U);
+    ASSERT_TRUE(
+        sync::mutation::transfer_upload_batch(*batch, fixture->storage, 1));
+
+    ContentWindowProbe probe;
+    attach_probe(*fixture, probe);
+    auto& digest = batch->objects.front().ciphertext_digest;
+    const auto original = digest;
+    const auto verify = [&] {
+        return sync::mutation::verify_upload_batch(
+            *batch, fixture->storage, fixture->key, *workspace, 1);
+    };
+    const auto expect_rejected = [&] {
+        const auto checked = verify();
+        ASSERT_FALSE(checked);
+        EXPECT_EQ(checked.error().code,
+                  sync::mutation::MutationErrorCode::IntegrityMismatch);
+        EXPECT_EQ(checked.error().operation_index, 0U);
+        digest = original;
+    };
+    for (const std::size_t threshold : {1U, 2U}) {
+        SCOPED_TRACE(threshold);
+        fixture->storage.storage.physical_hash_batch_min_objects = threshold;
+        ++digest.size;
+        ASSERT_NO_FATAL_FAILURE(expect_rejected());
+        digest.algorithm =
+            static_cast<kasumi::crypto::physical::Algorithm>(255);
+        ASSERT_NO_FATAL_FAILURE(expect_rejected());
+        digest.hex.front() = 'z';
+        ASSERT_NO_FATAL_FAILURE(expect_rejected());
+    }
+    EXPECT_EQ(probe.physical_hash_batch_calls, 0U);
+    EXPECT_EQ(probe.content_physical_hash_calls, 0U);
+    EXPECT_EQ(probe.content_get_count, 0U);
+    ASSERT_TRUE(verify());
+}
+
 TEST(SyncContentBatchTest, ResumedPublicationVerifiesChangedLayoutAndBlocksGc) {
     auto fixture = make_fixture("resume-layout");
     add_content_files(*fixture, 3);

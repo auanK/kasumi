@@ -3,6 +3,7 @@
 
 #include "core/hasher.hpp"
 #include "crypto/key_derivation.hpp"
+#include "crypto/physical_hash.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -39,8 +40,7 @@ struct EncryptionResult {
     Hash plaintext_hash{};
     // Original plaintext size in bytes.
     std::uint64_t plaintext_size = 0;
-    // Hexadecimal SHA-256 of the encrypted file.
-    std::string ciphertext_sha256;
+    physical::Digest ciphertext_digest;
 };
 
 // Upper-bound encoded size (header + uncompressed chunk framing and MACs);

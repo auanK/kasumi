@@ -568,7 +568,7 @@ detail::execute_packed_upload_batch(
                 .identifier = pack.pack_identifier,
                 .plaintext_hash = hash_hex(res->pack_hash),
                 .plaintext_size = res->pack_plaintext_size,
-                .ciphertext_sha256 = std::move(res->ciphertext_sha256),
+                .ciphertext_digest = std::move(res->ciphertext_digest),
                 .operation_indices = pack.operation_indices,
                 .is_pack = true,
             };
@@ -840,7 +840,7 @@ detail::execute_chunked_upload_batch(
                     .identifier = chunk.chunk_id,
                     .plaintext_hash = chunk.chunk_hex,
                     .plaintext_size = chunk.size,
-                    .ciphertext_sha256 = std::move(enc->ciphertext_sha256),
+                    .ciphertext_digest = std::move(enc->ciphertext_digest),
                     .operation_indices = {chunk.operation_index},
                     .is_pack = false,
                 };

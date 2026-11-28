@@ -11,6 +11,26 @@
 
 namespace kasumi::crypto::physical {
 
+enum class Algorithm : std::uint8_t {
+    Sha256
+};
+
+// Describes the complete encrypted envelope, including its authenticated
+// header.
+struct Digest {
+    Algorithm algorithm = Algorithm::Sha256;
+    std::string hex;
+    std::uint64_t size = 0;
+};
+
+constexpr std::string_view algorithm_name(Algorithm algorithm) noexcept {
+    switch (algorithm) {
+        case Algorithm::Sha256:
+            return "sha256";
+    }
+    return {};
+}
+
 // Incremental state for SHA-256 computation.
 struct Sha256State {
     // Internal state words of the algorithm.
@@ -32,6 +52,9 @@ void sha256_update(Sha256State& state,
 
 // Finalizes a copy of the state and returns the hexadecimal digest.
 std::string sha256_finish(Sha256State state);
+
+// Captures the algorithm, digest and byte count from the same hash stream.
+Digest ciphertext_digest(const Sha256State& state);
 
 // Accepts only "sha256".
 std::expected<std::string, std::string>

@@ -414,6 +414,12 @@ std::string sha256_finish(Sha256State state) {
     return hex_digest(state.hash);
 }
 
+Digest ciphertext_digest(const Sha256State& state) {
+    return {.algorithm = Algorithm::Sha256,
+            .hex = sha256_finish(state),
+            .size = state.size};
+}
+
 std::expected<std::string, std::string>
 hash_file(const std::filesystem::path& path, std::string_view algorithm) {
     if (algorithm != "sha256") {

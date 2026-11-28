@@ -772,8 +772,8 @@ encrypt_file_range(const std::filesystem::path& input_path,
 
                 EncryptionResult result{
                     .plaintext_size = plaintext_size,
-                    .ciphertext_sha256 =
-                        physical::sha256_finish(ciphertext_hash)};
+                    .ciphertext_digest =
+                        physical::ciphertext_digest(ciphertext_hash)};
                 blake3_hasher_finalize(&plaintext_hash,
                                        reinterpret_cast<std::uint8_t*>(
                                            result.plaintext_hash.data()),
