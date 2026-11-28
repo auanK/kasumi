@@ -798,81 +798,96 @@ void install_web_security(WebAuth& auth,
                                 {"X-Content-Type-Options", "nosniff"},
                                 {"Cache-Control", "no-store"},
                                 {"Referrer-Policy", "no-referrer"}});
-    server.set_pre_routing_handler(
+    const auto evaluate_security =
         [&auth, listener, port, ipc_token, ipc, browser](
-            const httplib::Request& req, httplib::Response& res) {
-            auto deny = [&] {
-                reply(res,
-                      403,
-                      {{"code", "invalid_credential"}, {"error", "forbidden"}});
-                return Result::Handled;
-            };
-            const bool write = req.method != "GET" && req.method != "HEAD";
-            const auto check_body = [&] {
-                const bool is_icon_upload =
-                    req.method == "POST" &&
-                    req.path.starts_with("/v1/profiles/") &&
-                    req.path.ends_with("/icon");
-                if (!is_icon_upload) {
-                    std::size_t content_len = req.body.size();
-                    if (req.has_header("Content-Length")) {
-                        const auto raw_len =
-                            req.get_header_value("Content-Length");
-                        std::size_t parsed = 0;
-                        const auto [end, ec] =
-                            std::from_chars(raw_len.data(),
-                                            raw_len.data() + raw_len.size(),
-                                            parsed);
-                        if (ec == std::errc{} &&
-                            end == raw_len.data() + raw_len.size()) {
-                            content_len = (std::max)(content_len, parsed);
-                        }
-                    }
-                    if (content_len > 65536U) {
-                        reply(res, 413, {{"error", "payload too large"}});
-                        return Result::Handled;
+            const httplib::Request& req,
+            httplib::Response& res,
+            bool touch_session) -> Result {
+        auto deny = [&] {
+            reply(res,
+                  403,
+                  {{"code", "invalid_credential"}, {"error", "forbidden"}});
+            return Result::Handled;
+        };
+        const bool write = req.method != "GET" && req.method != "HEAD";
+        const auto check_body = [&] {
+            const bool is_icon_upload = req.method == "POST" &&
+                                        req.path.starts_with("/v1/profiles/") &&
+                                        req.path.ends_with("/icon");
+            if (!is_icon_upload) {
+                std::size_t content_len = req.body.size();
+                if (req.has_header("Content-Length")) {
+                    const auto raw_len = req.get_header_value("Content-Length");
+                    std::size_t parsed = 0;
+                    const auto [end, ec] =
+                        std::from_chars(raw_len.data(),
+                                        raw_len.data() + raw_len.size(),
+                                        parsed);
+                    if (ec == std::errc{} &&
+                        end == raw_len.data() + raw_len.size()) {
+                        content_len = (std::max)(content_len, parsed);
                     }
                 }
-                if (write && !valid_mutation_content_type(req)) {
-                    reply(res, 415, {{"error", "expected application/json"}});
+                if (content_len > 65536U) {
+                    reply(res, 413, {{"error", "payload too large"}});
                     return Result::Handled;
                 }
-                return Result::Unhandled;
-            };
-            if (req.has_header("X-Kasumi-Daemon-Token")) {
-                if (ipc &&
-                    validate_ipc_request_headers(
-                        req, static_cast<std::uint16_t>(port), ipc_token))
-                    return check_body();
-                return deny();
             }
-            if (!browser)
-                return deny();
-            const auto host = req.get_header_value("Host");
-            if (req.get_header_value_count("Host") != 1 ||
-                !host_allowed(listener, host, port))
-                return deny();
-            if (write && !same_origin(req, host))
-                return deny();
-            if (check_body() == Result::Handled)
+            if (write && !valid_mutation_content_type(req)) {
+                reply(res, 415, {{"error", "expected application/json"}});
                 return Result::Handled;
-            if (!write && is_safe_static_path(req.path))
-                return Result::Unhandled;
-            if ((!write && req.path == "/v1/auth/status") ||
-                (req.method == "POST" && (req.path == "/v1/auth/login" ||
-                                          req.path == "/v1/auth/password")))
-                return Result::Unhandled;
-            std::lock_guard lock(auth.mutex);
-            auto* s = lookup(auth, session_cookie(req));
-            if (!s || (write && !verify_csrf(req, *s)))
-                return deny();
+            }
+            return Result::Unhandled;
+        };
+        if (req.has_header("X-Kasumi-Daemon-Token")) {
+            if (ipc &&
+                validate_ipc_request_headers(
+                    req, static_cast<std::uint16_t>(port), ipc_token))
+                return check_body();
+            return deny();
+        }
+        if (!browser)
+            return deny();
+        const auto host = req.get_header_value("Host");
+        if (req.get_header_value_count("Host") != 1 ||
+            !host_allowed(listener, host, port))
+            return deny();
+        if (write && !same_origin(req, host))
+            return deny();
+        if (check_body() == Result::Handled)
+            return Result::Handled;
+        if (!write && is_safe_static_path(req.path))
+            return Result::Unhandled;
+        if ((!write && req.path == "/v1/auth/status") ||
+            (req.method == "POST" && (req.path == "/v1/auth/login" ||
+                                      req.path == "/v1/auth/password")))
+            return Result::Unhandled;
+        std::lock_guard lock(auth.mutex);
+        auto* s = lookup(auth, session_cookie(req));
+        if (!s || (write && !verify_csrf(req, *s)))
+            return deny();
+        if (touch_session) {
             const auto now = WebClock::now();
             s->idle = now + kSessionIdleTtl;
             if (now - s->last_persisted >= kSessionPersistInterval) {
                 s->last_persisted = now;
                 persist_sessions(auth);
             }
-            return Result::Unhandled;
+        }
+        return Result::Unhandled;
+    };
+    server.set_expect_100_continue_handler(
+        [evaluate_security](const httplib::Request& req,
+                            httplib::Response& res) -> int {
+            if (evaluate_security(req, res, false) == Result::Handled) {
+                return res.status;
+            }
+            return httplib::StatusCode::Continue_100;
+        });
+    server.set_pre_routing_handler(
+        [evaluate_security](const httplib::Request& req,
+                            httplib::Response& res) {
+            return evaluate_security(req, res, true);
         });
     server.set_post_routing_handler(
         [](const httplib::Request& req, httplib::Response&) {

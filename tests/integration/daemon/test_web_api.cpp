@@ -626,34 +626,47 @@ TEST(WebApiTest,
                   ->status,
               403);
     {
-        // Keep-alive ensures each pre-routing-rejected POST receives its full
-        // HTTP response, while stopping between calls avoids reusing a socket
-        // whose unread request body was left unconsumed by pre_routing_handler.
-        api.client->set_keep_alive(true);
+        // Use Expect: 100-continue so pre-routing rejections (403/415) reply
+        // before the client transmits the request body; otherwise closing a
+        // socket with unread body bytes on Windows can emit a TCP RST that
+        // discards the 4xx response.
         auto invalid = auth;
         invalid.emplace("X-CSRF-Token", std::string(64, '0'));
-        response(
-            api.client->Post("/v1/reload", invalid, "{}", "application/json"),
-            403);
-        api.client->stop();
+        invalid.emplace("Expect", "100-continue");
+        {
+            SCOPED_TRACE("invalid CSRF");
+            response(api.client->Post(
+                         "/v1/reload", invalid, "{}", "application/json"),
+                     403);
+        }
         auth.emplace(
             "X-CSRF-Token",
             Json::parse(first->body).at("csrf_token").get<std::string>());
-        httplib::Request without_type;
-        without_type.method = "POST";
-        without_type.path = "/v1/reload";
-        without_type.headers = auth;
-        without_type.body = "{}";
-        response(api.client->send(without_type), 415);
-        api.client->stop();
-        response(api.client->Post("/v1/reload", auth, "{}", "text/plain"), 415);
-        api.client->stop();
-        response(
-            api.client->Post(
-                "/v1/reload", auth, "{}", "Application/JSON; charset=utf-8"),
-            200);
-        api.client->stop();
-        api.client->set_keep_alive(false);
+        auto expect_auth = auth;
+        expect_auth.emplace("Expect", "100-continue");
+        {
+            SCOPED_TRACE("missing content-type");
+            httplib::Request without_type;
+            without_type.method = "POST";
+            without_type.path = "/v1/reload";
+            without_type.headers = expect_auth;
+            without_type.body = "{}";
+            response(api.client->send(without_type), 415);
+        }
+        {
+            SCOPED_TRACE("text/plain content-type");
+            response(api.client->Post(
+                         "/v1/reload", expect_auth, "{}", "text/plain"),
+                     415);
+        }
+        {
+            SCOPED_TRACE("valid JSON content-type with Expect 100-continue");
+            response(api.client->Post("/v1/reload",
+                                      expect_auth,
+                                      "{}",
+                                      "Application/JSON; charset=utf-8"),
+                     200);
+        }
     }
     EXPECT_EQ(api.client
                   ->Post("/v1/auth/password",
