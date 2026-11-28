@@ -4,13 +4,16 @@
 #include "application/history_storage/remote_layout.hpp"
 #include "crypto/physical_hash.hpp"
 #include "platform/cancellation.hpp"
+#include "platform/durability.hpp"
 #include "platform/machine.hpp"
 #include "platform/path.hpp"
+#include "platform/private_storage.hpp"
 #include "platform/random.hpp"
 
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <mutex>
 #include <ranges>
 #include <span>
 #include <thread>
@@ -19,6 +22,40 @@
 
 namespace kasumi::application::history_storage::maintenance_protocol {
 namespace {
+
+std::mutex& active_pending_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::unordered_set<std::string>& active_pending_identifiers() {
+    static auto* identifiers = new std::unordered_set<std::string>();
+    return *identifiers;
+}
+
+bool is_pending_identifier_active(std::string_view identifier) {
+    std::scoped_lock lock(active_pending_mutex());
+    return active_pending_identifiers().contains(std::string{identifier});
+}
+
+struct ActivePendingGuard {
+    std::string identifier;
+
+    explicit ActivePendingGuard(std::string id) : identifier(std::move(id)) {
+        std::scoped_lock lock(active_pending_mutex());
+        active_pending_identifiers().insert(identifier);
+    }
+
+    ~ActivePendingGuard() {
+        std::scoped_lock lock(active_pending_mutex());
+        active_pending_identifiers().erase(identifier);
+    }
+
+    ActivePendingGuard(const ActivePendingGuard&) = delete;
+    ActivePendingGuard& operator=(const ActivePendingGuard&) = delete;
+    ActivePendingGuard(ActivePendingGuard&&) = delete;
+    ActivePendingGuard& operator=(ActivePendingGuard&&) = delete;
+};
 
 constexpr std::size_t maximum_marker_size = 512;
 constexpr std::size_t TOKEN_HEX_SIZE = 32;
@@ -29,6 +66,36 @@ bool is_canonical_hex32(std::string_view value) noexcept {
                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
            });
 }
+
+bool is_lower_hex16(std::string_view value) noexcept {
+    return value.size() == 16U &&
+           std::ranges::all_of(value, [](char c) {
+               return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+           });
+}
+
+std::optional<std::string_view>
+parse_legacy_local_staging_name(std::string_view name) noexcept {
+    constexpr std::string_view kTmpMarker = ".kasumi-tmp-";
+    constexpr std::size_t kExpectedLength = TOKEN_HEX_SIZE + 12U + 16U;
+    if (name.size() != kExpectedLength) {
+        return std::nullopt;
+    }
+    const auto token = name.substr(0, TOKEN_HEX_SIZE);
+    const auto marker = name.substr(TOKEN_HEX_SIZE, kTmpMarker.size());
+    const auto nonce = name.substr(TOKEN_HEX_SIZE + kTmpMarker.size());
+    if (!is_canonical_hex32(token) || marker != kTmpMarker ||
+        !is_lower_hex16(nonce)) {
+        return std::nullopt;
+    }
+    return token;
+}
+
+enum class ControlEntryKind {
+    PublishedMarker,
+    LegacyStagingResidue,
+    Unknown,
+};
 
 Error error(
     ErrorCode code,
@@ -232,16 +299,134 @@ list_children(transport::Transport& storage, std::string_view prefix) {
     return std::move(*listed);
 }
 
+std::expected<ControlEntryKind, Error>
+classify_control_entry(transport::Transport& storage,
+                       std::string_view prefix,
+                       std::string_view name,
+                       std::string_view expected_kind,
+                       const std::filesystem::path* workspace_root) {
+    if (is_canonical_hex32(name)) {
+        return ControlEntryKind::PublishedMarker;
+    }
+    const auto token = parse_legacy_local_staging_name(name);
+    if (!token) {
+        return ControlEntryKind::Unknown;
+    }
+
+    std::optional<platform::Workspace> owned_workspace;
+    std::filesystem::path copy;
+    detail::TemporaryWorkspace scoped_workspace{nullptr, detail::remove_workspace};
+    if (workspace_root != nullptr && !workspace_root->empty()) {
+        auto temp = detail::make_workspace(*workspace_root);
+        if (!temp) {
+            return std::unexpected(history_error(temp.error()));
+        }
+        scoped_workspace = std::move(*temp);
+        copy = scoped_workspace->workspace.root / "control.inspect";
+    } else {
+        auto temp = platform::create_workspace("control-inspect");
+        if (!temp) {
+            return std::unexpected(
+                error(ErrorCode::WorkspaceFailure, temp.error()));
+        }
+        owned_workspace = std::move(*temp);
+        copy = owned_workspace->root / "control.inspect";
+    }
+    struct OwnedWorkspaceCleanup {
+        std::optional<platform::Workspace>& workspace;
+        ~OwnedWorkspaceCleanup() noexcept {
+            if (workspace) {
+                platform::cleanup_workspace(*workspace);
+            }
+        }
+    } cleanup{owned_workspace};
+
+    const std::string identifier = std::string{prefix} + std::string{name};
+    auto downloaded = transport::get(storage, identifier, copy);
+    if (!downloaded) {
+        if (downloaded.error().code == transport::ErrorCode::ObjectNotFound) {
+            return ControlEntryKind::LegacyStagingResidue;
+        }
+        return std::unexpected(transport_error(downloaded.error()));
+    }
+    auto bytes = detail::read_file(copy, maximum_marker_size);
+    if (!bytes) {
+        return ControlEntryKind::Unknown;
+    }
+    if (parse_marker_payload_impl(
+            *bytes, expected_kind, *token, nullptr, nullptr) ==
+        MarkerParseError::Ok) {
+        return ControlEntryKind::LegacyStagingResidue;
+    }
+    return ControlEntryKind::Unknown;
+}
+
 struct ControlReadSnapshot {
     std::vector<std::string> writers;
+    std::vector<std::string> legacy_writer_staging;
+    std::vector<std::string> unknown_writers;
     std::vector<std::string> barrier_tokens;
+    std::vector<std::string> legacy_barrier_staging;
+    std::vector<std::string> unknown_barriers;
     transport::Presence legacy_barrier = transport::Presence::Absent;
 };
+
+std::expected<ControlReadSnapshot, Error> classify_control_snapshot(
+    transport::Transport& storage,
+    const RemoteLayout& layout,
+    std::vector<std::string> raw_writers,
+    std::vector<std::string> raw_barriers,
+    transport::Presence legacy_barrier,
+    bool include_writers,
+    const std::filesystem::path* workspace_root) {
+    ControlReadSnapshot snapshot;
+    snapshot.legacy_barrier = legacy_barrier;
+    if (include_writers) {
+        for (auto& name : raw_writers) {
+            auto kind = classify_control_entry(
+                storage, layout.writers_prefix, name, "writer", workspace_root);
+            if (!kind) {
+                return std::unexpected(kind.error());
+            }
+            switch (*kind) {
+                case ControlEntryKind::PublishedMarker:
+                    snapshot.writers.push_back(std::move(name));
+                    break;
+                case ControlEntryKind::LegacyStagingResidue:
+                    snapshot.legacy_writer_staging.push_back(std::move(name));
+                    break;
+                case ControlEntryKind::Unknown:
+                    snapshot.unknown_writers.push_back(std::move(name));
+                    break;
+            }
+        }
+    }
+    for (auto& name : raw_barriers) {
+        auto kind = classify_control_entry(
+            storage, layout.barriers_prefix, name, "barrier", workspace_root);
+        if (!kind) {
+            return std::unexpected(kind.error());
+        }
+        switch (*kind) {
+            case ControlEntryKind::PublishedMarker:
+                snapshot.barrier_tokens.push_back(std::move(name));
+                break;
+            case ControlEntryKind::LegacyStagingResidue:
+                snapshot.legacy_barrier_staging.push_back(std::move(name));
+                break;
+            case ControlEntryKind::Unknown:
+                snapshot.unknown_barriers.push_back(std::move(name));
+                break;
+        }
+    }
+    return snapshot;
+}
 
 std::expected<ControlReadSnapshot, Error>
 read_control_snapshot(transport::Transport& storage,
                       const RemoteLayout& layout,
-                      bool include_writers) {
+                      bool include_writers,
+                      const std::filesystem::path* workspace_root = nullptr) {
     const auto writers_dir = detail::trim_trailing_slash(layout.writers_prefix);
     const auto barriers_dir =
         detail::trim_trailing_slash(layout.barriers_prefix);
@@ -261,39 +446,66 @@ read_control_snapshot(transport::Transport& storage,
                 error(ErrorCode::InvalidControlObject,
                       "incomplete admission batch response"));
         }
-        ControlReadSnapshot snapshot;
         if (include_writers) {
-            snapshot.writers = std::move(batch->listings[0]);
-            snapshot.barrier_tokens = std::move(batch->listings[1]);
-        } else {
-            snapshot.barrier_tokens = std::move(batch->listings[0]);
+            return classify_control_snapshot(storage,
+                                             layout,
+                                             std::move(batch->listings[0]),
+                                             std::move(batch->listings[1]),
+                                             batch->presences[0],
+                                             true,
+                                             workspace_root);
         }
-        snapshot.legacy_barrier = batch->presences[0];
-        return snapshot;
+        return classify_control_snapshot(storage,
+                                         layout,
+                                         {},
+                                         std::move(batch->listings[0]),
+                                         batch->presences[0],
+                                         false,
+                                         workspace_root);
     }
     if (batch.error().code != transport::ErrorCode::Unsupported) {
         return std::unexpected(transport_error(batch.error()));
     }
 
-    ControlReadSnapshot snapshot;
+    std::vector<std::string> writers_raw;
     if (include_writers) {
         auto writers = list_children(storage, writers_dir);
         if (!writers) {
             return std::unexpected(writers.error());
         }
-        snapshot.writers = std::move(*writers);
+        writers_raw = std::move(*writers);
     }
     auto barriers = list_children(storage, barriers_dir);
     if (!barriers) {
         return std::unexpected(barriers.error());
     }
-    snapshot.barrier_tokens = std::move(*barriers);
     auto legacy = transport::presence(storage, layout.barrier_identifier);
     if (!legacy) {
         return std::unexpected(transport_error(legacy.error()));
     }
-    snapshot.legacy_barrier = *legacy;
-    return snapshot;
+    return classify_control_snapshot(storage,
+                                     layout,
+                                     std::move(writers_raw),
+                                     std::move(*barriers),
+                                     *legacy,
+                                     include_writers,
+                                     workspace_root);
+}
+
+std::expected<void, Error>
+validate_known_controls(const ControlReadSnapshot& snapshot,
+                        bool check_writers) {
+    if (!snapshot.unknown_barriers.empty()) {
+        return std::unexpected(
+            error(ErrorCode::InvalidControlObject,
+                  "invalid barrier marker: " + snapshot.unknown_barriers.front()));
+    }
+    if (check_writers && !snapshot.unknown_writers.empty()) {
+        return std::unexpected(
+            error(ErrorCode::InvalidControlObject,
+                  "invalid writer marker: " + snapshot.unknown_writers.front()));
+    }
+    return {};
 }
 
 bool any_barrier_present(const ControlReadSnapshot& snapshot) noexcept {
@@ -336,6 +548,238 @@ verify_remote_payload(transport::Transport& storage,
         return std::unexpected(history_error(observed.error()));
     }
     return std::ranges::equal(*observed, expected);
+}
+
+std::string hex_encode_bytes(std::span<const std::uint8_t> bytes) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2U);
+    for (const auto byte : bytes) {
+        out.push_back(kHex[(byte >> 4U) & 0x0FU]);
+        out.push_back(kHex[byte & 0x0FU]);
+    }
+    return out;
+}
+
+std::optional<std::vector<std::uint8_t>>
+hex_decode_bytes(std::string_view hex) {
+    if ((hex.size() % 2U) != 0U) {
+        return std::nullopt;
+    }
+    const auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') {
+            return c - '0';
+        }
+        if (c >= 'a' && c <= 'f') {
+            return 10 + (c - 'a');
+        }
+        return -1;
+    };
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(hex.size() / 2U);
+    for (std::size_t i = 0; i < hex.size(); i += 2U) {
+        const int hi = nibble(hex[i]);
+        const int lo = nibble(hex[i + 1U]);
+        if (hi < 0 || lo < 0) {
+            return std::nullopt;
+        }
+        bytes.push_back(static_cast<std::uint8_t>((hi << 4U) | lo));
+    }
+    return bytes;
+}
+
+std::filesystem::path
+pending_markers_directory(const std::filesystem::path& workspace_root) {
+    return workspace_root / ".pending-control-markers";
+}
+
+std::filesystem::path
+pending_marker_path(const std::filesystem::path& workspace_root,
+                    std::string_view kind,
+                    std::string_view token) {
+    return pending_markers_directory(workspace_root) /
+           (std::string{kind} + "-" + std::string{token});
+}
+
+struct PendingMarkerRecord {
+    std::string kind;
+    std::string identifier;
+    std::string token;
+    std::string expected_physical_sha256;
+    std::vector<std::uint8_t> payload;
+};
+
+std::string serialize_pending_record(std::string_view kind,
+                                     const RegistrationState& registration) {
+    std::string serialized;
+    serialized.reserve(256 + registration.identifier.size() +
+                       registration.payload.size() * 2U);
+    serialized.append("kasumi-pending-marker-v1\nkind=");
+    serialized.append(kind);
+    serialized.append("\nidentifier=");
+    serialized.append(registration.identifier);
+    serialized.append("\ntoken=");
+    serialized.append(registration.token);
+    serialized.append("\nsha256=");
+    serialized.append(registration.expected_physical_sha256);
+    serialized.append("\npayload_hex=");
+    serialized.append(hex_encode_bytes(registration.payload));
+    serialized.push_back('\n');
+    return serialized;
+}
+
+std::optional<PendingMarkerRecord>
+parse_pending_record(std::span<const std::uint8_t> bytes) {
+    const std::string_view text{reinterpret_cast<const char*>(bytes.data()),
+                                bytes.size()};
+    if (text.find('\r') != std::string_view::npos) {
+        return std::nullopt;
+    }
+    constexpr std::string_view kHeader = "kasumi-pending-marker-v1\n";
+    if (!text.starts_with(kHeader)) {
+        return std::nullopt;
+    }
+    PendingMarkerRecord record;
+    bool seen_kind = false;
+    bool seen_id = false;
+    bool seen_token = false;
+    bool seen_sha = false;
+    bool seen_payload = false;
+    std::string_view rest = text.substr(kHeader.size());
+    while (!rest.empty()) {
+        const auto nl = rest.find('\n');
+        const auto line =
+            nl == std::string_view::npos ? rest : rest.substr(0, nl);
+        if (line.empty()) {
+            return std::nullopt;
+        }
+        if (line.starts_with("kind=")) {
+            if (seen_kind) {
+                return std::nullopt;
+            }
+            record.kind = std::string{line.substr(5)};
+            seen_kind = true;
+        } else if (line.starts_with("identifier=")) {
+            if (seen_id) {
+                return std::nullopt;
+            }
+            record.identifier = std::string{line.substr(11)};
+            seen_id = true;
+        } else if (line.starts_with("token=")) {
+            if (seen_token) {
+                return std::nullopt;
+            }
+            record.token = std::string{line.substr(6)};
+            seen_token = true;
+        } else if (line.starts_with("sha256=")) {
+            if (seen_sha) {
+                return std::nullopt;
+            }
+            record.expected_physical_sha256 = std::string{line.substr(7)};
+            seen_sha = true;
+        } else if (line.starts_with("payload_hex=")) {
+            if (seen_payload) {
+                return std::nullopt;
+            }
+            auto decoded = hex_decode_bytes(line.substr(12));
+            if (!decoded || decoded->empty() ||
+                decoded->size() > maximum_marker_size) {
+                return std::nullopt;
+            }
+            record.payload = std::move(*decoded);
+            seen_payload = true;
+        } else {
+            return std::nullopt;
+        }
+        if (nl == std::string_view::npos) {
+            break;
+        }
+        rest = rest.substr(nl + 1);
+    }
+    if (!seen_kind || !seen_id || !seen_token || !seen_sha || !seen_payload ||
+        (record.kind != "writer" && record.kind != "barrier") ||
+        !is_canonical_hex32(record.token) ||
+        !history::valid_commit_id(record.expected_physical_sha256) ||
+        record.identifier.empty()) {
+        return std::nullopt;
+    }
+    return record;
+}
+
+std::expected<void, Error>
+persist_pending_record(const std::filesystem::path& pending_file,
+                       std::string_view kind,
+                       const RegistrationState& registration) {
+    if (auto ensured = platform::private_storage::ensure_directory(
+            pending_file.parent_path());
+        !ensured) {
+        return std::unexpected(
+            error(ErrorCode::WorkspaceFailure, ensured.error()));
+    }
+    const auto serialized = serialize_pending_record(kind, registration);
+    if (auto written =
+            platform::private_storage::write_atomically(pending_file, serialized);
+        !written) {
+        return std::unexpected(
+            error(ErrorCode::WorkspaceFailure, written.error()));
+    }
+    return {};
+}
+
+void remove_pending_record(const std::filesystem::path& pending_file) noexcept {
+    if (pending_file.empty()) {
+        return;
+    }
+    std::error_code ec;
+    std::filesystem::remove(pending_file, ec);
+    const auto dir = pending_file.parent_path();
+    if (!dir.empty()) {
+        std::error_code dir_ec;
+        std::filesystem::remove(dir, dir_ec);
+    }
+}
+
+std::expected<bool, Error>
+registration_matches(transport::Transport& storage,
+                     const RegistrationState& registration);
+
+// Reconciles ownership before any deletion so an indeterminate control marker
+// cleans up only our exact payload+hash and keeps local evidence on outage.
+bool reconcile_and_cleanup_registration(
+    transport::Transport& storage,
+    RegistrationState& registration,
+    const std::filesystem::path& pending_file) noexcept {
+    try {
+        const platform::cancellation::ScopedIgnoreCancellation ignore_cancel;
+        auto matches = registration_matches(storage, registration);
+        if (!matches) {
+            return false;
+        }
+        if (*matches) {
+            auto removed = transport::remove(storage, registration.identifier);
+            if (!removed) {
+                return false;
+            }
+        }
+        remove_pending_record(pending_file);
+        registration.storage = nullptr;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool kind_matches_filter(std::string_view record_kind,
+                         PendingRegistrationKind filter) noexcept {
+    switch (filter) {
+        case PendingRegistrationKind::All:
+            return true;
+        case PendingRegistrationKind::Writer:
+            return record_kind == "writer";
+        case PendingRegistrationKind::Barrier:
+            return record_kind == "barrier";
+    }
+    return false;
 }
 
 std::expected<std::string, Error>
@@ -420,9 +864,13 @@ verify_barrier_exclusivity_impl(const RegistrationState& registration,
         return std::unexpected(
             error(ErrorCode::InvalidInput, "invalid barrier registration"));
     }
-    auto snapshot = read_control_snapshot(*registration.storage, layout, true);
+    auto snapshot = read_control_snapshot(
+        *registration.storage, layout, true, &registration.workspace_root);
     if (!snapshot) {
         return std::unexpected(snapshot.error());
+    }
+    if (auto known = validate_known_controls(*snapshot, true); !known) {
+        return std::unexpected(known.error());
     }
     if (snapshot->legacy_barrier == transport::Presence::Present) {
         return std::unexpected(
@@ -480,7 +928,8 @@ verify_registration(const RegistrationState& registration) {
 
 std::expected<void, Error>
 verify_writer_admission(const RegistrationState& registration,
-                        const RemoteLayout& layout) {
+                        const RemoteLayout& layout,
+                        std::optional<GenesisAdmission> genesis) {
     if (!registration_active(registration) ||
         !valid_writer_identifier(layout, registration.identifier)) {
         return std::unexpected(
@@ -490,13 +939,52 @@ verify_writer_admission(const RegistrationState& registration,
     if (!owned) {
         return std::unexpected(owned.error());
     }
-    auto snapshot = read_control_snapshot(*registration.storage, layout, false);
+    auto snapshot = read_control_snapshot(*registration.storage,
+                                          layout,
+                                          genesis.has_value(),
+                                          &registration.workspace_root);
     if (!snapshot) {
         return std::unexpected(snapshot.error());
+    }
+    if (auto known = validate_known_controls(*snapshot, genesis.has_value());
+        !known) {
+        return std::unexpected(known.error());
     }
     if (any_barrier_present(*snapshot)) {
         return std::unexpected(
             error(ErrorCode::Blocked, "GC active on destination"));
+    }
+    if (genesis) {
+        if (snapshot->writers.size() != 1 ||
+            snapshot->writers.front() != registration.token) {
+            return std::unexpected(
+                error(ErrorCode::Blocked,
+                      "vault initialization requires a single visible writer; "
+                      "retry after peers finish"));
+        }
+        // Read publication evidence AFTER establishing that our marker was
+        // alone. A peer could have finished since the original observation.
+        for (const auto& [prefix, expected] :
+             {std::pair{layout.heads_prefix, genesis->expected_head},
+              std::pair{layout.epochs_prefix, genesis->expected_epoch}}) {
+            auto entries = list_children(*registration.storage, prefix);
+            if (!entries)
+                return std::unexpected(entries.error());
+            if (entries->empty()) {
+                if (prefix == layout.heads_prefix && !expected.empty()) {
+                    return std::unexpected(error(
+                        ErrorCode::Blocked,
+                        "journaled genesis HEAD disappeared during recovery"));
+                }
+                continue;
+            }
+            if (entries->size() != 1 || prefix + entries->front() != expected) {
+                return std::unexpected(
+                    error(ErrorCode::Blocked,
+                          "remote history changed during vault initialization; "
+                          "reobserve before publication"));
+            }
+        }
     }
     return {};
 }
@@ -530,6 +1018,248 @@ release_registration(RegistrationState& registration) {
     return {};
 }
 
+std::expected<void, Error> reconcile_pending_registrations(
+    transport::Transport& storage,
+    const RemoteLayout& layout,
+    const std::filesystem::path& workspace_root,
+    PendingRegistrationKind kind) {
+    if (!transport::valid(storage) || workspace_root.empty()) {
+        return std::unexpected(
+            error(ErrorCode::InvalidInput, "invalid reconciliation context"));
+    }
+    const auto dir = pending_markers_directory(workspace_root);
+    std::error_code ec;
+    const auto dir_status = std::filesystem::symlink_status(dir, ec);
+    if (ec == std::errc::no_such_file_or_directory ||
+        !std::filesystem::exists(dir_status)) {
+        return {};
+    }
+    if (ec) {
+        return std::unexpected(error(
+            ErrorCode::WorkspaceFailure,
+            "failed to inspect pending control markers: " + ec.message()));
+    }
+    if (!std::filesystem::is_directory(dir_status)) {
+        return std::unexpected(error(
+            ErrorCode::WorkspaceFailure,
+            "pending control markers path is not a directory"));
+    }
+
+    std::vector<std::filesystem::path> files;
+    for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        std::error_code entry_ec;
+        if (it->is_regular_file(entry_ec)) {
+            files.push_back(it->path());
+        }
+    }
+    if (ec) {
+        return std::unexpected(error(
+            ErrorCode::WorkspaceFailure,
+            "failed to enumerate pending control markers: " + ec.message()));
+    }
+    std::ranges::sort(files);
+
+    for (const auto& file : files) {
+        auto raw = detail::read_file(file, 4096U);
+        if (!raw) {
+            return std::unexpected(history_error(raw.error()));
+        }
+        auto parsed = parse_pending_record(*raw);
+        if (!parsed) {
+            return std::unexpected(
+                error(ErrorCode::WorkspaceFailure,
+                      "invalid pending control marker record: " +
+                          platform::path::to_utf8(file.filename())));
+        }
+        if (!kind_matches_filter(parsed->kind, kind)) {
+            continue;
+        }
+        const bool belongs_to_layout =
+            parsed->kind == "writer"
+                ? valid_writer_identifier(layout, parsed->identifier)
+                : valid_barrier_identifier(layout, parsed->identifier);
+        if (!belongs_to_layout) {
+            continue;
+        }
+        if (is_pending_identifier_active(parsed->identifier)) {
+            continue;
+        }
+        RegistrationState reg{
+            .storage = &storage,
+            .workspace_root = workspace_root,
+            .identifier = parsed->identifier,
+            .token = parsed->token,
+            .payload = std::move(parsed->payload),
+            .expected_physical_sha256 =
+                std::move(parsed->expected_physical_sha256),
+            .verify_owner = true,
+        };
+        auto matches = registration_matches(storage, reg);
+        if (!matches) {
+            auto err = matches.error();
+            err.identifier = reg.identifier;
+            return std::unexpected(std::move(err));
+        }
+        if (*matches) {
+            const platform::cancellation::ScopedIgnoreCancellation
+                ignore_cancel;
+            auto removed = transport::remove(storage, reg.identifier);
+            if (!removed) {
+                auto err = transport_error(removed.error());
+                err.identifier = reg.identifier;
+                return std::unexpected(std::move(err));
+            }
+            auto present = transport::presence(storage, reg.identifier);
+            if (!present) {
+                auto err = transport_error(present.error());
+                err.identifier = reg.identifier;
+                return std::unexpected(std::move(err));
+            }
+            if (*present != transport::Presence::Absent) {
+                return std::unexpected(error(
+                    ErrorCode::VerificationFailure,
+                    "abandoned control marker remains present after cleanup",
+                    reg.identifier));
+            }
+        }
+        remove_pending_record(file);
+    }
+    return {};
+}
+
+namespace {
+
+struct PreparedPublication {
+    RegistrationState registration;
+    std::filesystem::path pending_file;
+    bool put_succeeded = false;
+};
+
+enum class VerifyPublishOutcome {
+    Verified,
+    HashMismatch,
+    TransportFailed,
+    Cancelled,
+};
+
+std::expected<void, Error> publish_registered_marker(
+    transport::Transport& storage,
+    const std::filesystem::path& workspace_root,
+    std::string_view kind,
+    std::string_view name,
+    std::string_view identifier,
+    std::vector<std::uint8_t> bytes,
+    bool verify_owner,
+    RegistrationState& registration_out,
+    std::filesystem::path& pending_file_out) {
+    auto temporary = detail::make_workspace(workspace_root);
+    if (!temporary) {
+        return std::unexpected(history_error(temporary.error()));
+    }
+    const auto source = (*temporary)->workspace.root / "marker.source";
+    const auto copy = (*temporary)->workspace.root / "marker.copy";
+    if (auto written = detail::write_file(source, bytes); !written) {
+        return std::unexpected(history_error(written.error()));
+    }
+    auto local_hash = crypto::physical::hash_file(source, "sha256");
+    if (!local_hash) {
+        return std::unexpected(
+            error(ErrorCode::WorkspaceFailure, local_hash.error()));
+    }
+
+    registration_out = RegistrationState{
+        .storage = &storage,
+        .workspace_root = workspace_root,
+        .identifier = std::string{identifier},
+        .token = std::string{name},
+        .payload = bytes,
+        .expected_physical_sha256 = *local_hash,
+        .verify_owner = verify_owner,
+    };
+    pending_file_out = pending_marker_path(workspace_root, kind, name);
+    if (auto persisted =
+            persist_pending_record(pending_file_out, kind, registration_out);
+        !persisted) {
+        return std::unexpected(persisted.error());
+    }
+
+    auto sent = transport::put(storage, source, identifier);
+    if (!sent) {
+        auto err = transport_error(sent.error());
+        err.identifier = registration_out.identifier;
+        if (sent.error().code == transport::ErrorCode::Cancelled ||
+            platform::cancellation::requested()) {
+            reconcile_and_cleanup_registration(
+                storage, registration_out, pending_file_out);
+        }
+        return std::unexpected(std::move(err));
+    }
+
+    auto handle_cancelled = [&](Error base_err) {
+        base_err.identifier = registration_out.identifier;
+        reconcile_and_cleanup_registration(
+            storage, registration_out, pending_file_out);
+        return std::unexpected(std::move(base_err));
+    };
+
+    auto remote_hash = transport::physical_hash(storage, identifier, "sha256");
+    if (remote_hash) {
+        if (platform::cancellation::requested()) {
+            return handle_cancelled(error(ErrorCode::TransportFailure,
+                                          "operation cancelled by user"));
+        }
+        if (*remote_hash != *local_hash) {
+            remove_pending_record(pending_file_out);
+            auto err =
+                error(ErrorCode::VerificationFailure,
+                      "remote physical hash does not match published marker",
+                      registration_out.identifier);
+            return std::unexpected(std::move(err));
+        }
+        return {};
+    }
+    if (remote_hash.error().code != transport::ErrorCode::Unsupported) {
+        auto err = transport_error(remote_hash.error());
+        err.identifier = registration_out.identifier;
+        if (remote_hash.error().code == transport::ErrorCode::Cancelled ||
+            platform::cancellation::requested()) {
+            return handle_cancelled(std::move(err));
+        }
+        return std::unexpected(std::move(err));
+    }
+
+    if (auto downloaded = detail::download(storage, identifier, copy);
+        !downloaded) {
+        auto err = history_error(downloaded.error());
+        err.identifier = registration_out.identifier;
+        if (platform::cancellation::requested()) {
+            return handle_cancelled(std::move(err));
+        }
+        return std::unexpected(std::move(err));
+    }
+    if (platform::cancellation::requested()) {
+        return handle_cancelled(
+            error(ErrorCode::TransportFailure, "operation cancelled by user"));
+    }
+    auto observed = detail::read_file(copy, maximum_marker_size);
+    if (!observed) {
+        auto err = history_error(observed.error());
+        err.identifier = registration_out.identifier;
+        return std::unexpected(std::move(err));
+    }
+    if (!std::ranges::equal(*observed, bytes)) {
+        remove_pending_record(pending_file_out);
+        return std::unexpected(
+            error(ErrorCode::VerificationFailure,
+                  "remote marker does not match published marker",
+                  registration_out.identifier));
+    }
+    return {};
+}
+
+} // namespace
+
 RegistrationResult
 register_writer(transport::Transport& storage,
                 const RemoteLayout& layout,
@@ -545,6 +1275,11 @@ RegistrationResult register_writer(transport::Transport& storage,
         return std::unexpected(
             error(ErrorCode::InvalidInput, "invalid writer context"));
     }
+    if (auto reconciled = reconcile_pending_registrations(
+            storage, layout, workspace_root, PendingRegistrationKind::Writer);
+        !reconciled) {
+        return std::unexpected(reconciled.error());
+    }
     auto token = platform::random::hex_id();
     if (!token) {
         return std::unexpected(
@@ -552,26 +1287,35 @@ RegistrationResult register_writer(transport::Transport& storage,
     }
     const auto name = *token;
     const auto identifier = layout.writers_prefix + name;
+    const ActivePendingGuard active_pending(identifier);
     auto bytes = payload("writer", *token, metadata);
-    auto published = put_verified(storage, identifier, bytes, workspace_root);
-    if (!published) {
+
+    RegistrationState registration;
+    std::filesystem::path pending_file;
+    if (auto published = publish_registered_marker(storage,
+                                                   workspace_root,
+                                                   "writer",
+                                                   name,
+                                                   identifier,
+                                                   std::move(bytes),
+                                                   false,
+                                                   registration,
+                                                   pending_file);
+        !published) {
         return std::unexpected(published.error());
     }
-    RegistrationState registration{.storage = &storage,
-                                   .workspace_root = workspace_root,
-                                   .identifier = identifier,
-                                   .token = name,
-                                   .payload = std::move(bytes),
-                                   .expected_physical_sha256 =
-                                       std::move(*published),
-                                   .verify_owner = false};
     const auto fail_releasing = [&](Error failure) {
-        static_cast<void>(release_registration(registration));
+        failure.identifier = registration.identifier;
+        reconcile_and_cleanup_registration(storage, registration, pending_file);
         return std::unexpected(std::move(failure));
     };
-    auto snapshot = read_control_snapshot(storage, layout, true);
+    auto snapshot =
+        read_control_snapshot(storage, layout, true, &workspace_root);
     if (!snapshot) {
         return fail_releasing(snapshot.error());
+    }
+    if (auto known = validate_known_controls(*snapshot, true); !known) {
+        return fail_releasing(known.error());
     }
     if (!contains_name(snapshot->writers, name)) {
         return fail_releasing(
@@ -582,6 +1326,7 @@ RegistrationResult register_writer(transport::Transport& storage,
         return fail_releasing(
             error(ErrorCode::Blocked, "GC active on destination"));
     }
+    remove_pending_record(pending_file);
     return registration;
 }
 
@@ -601,9 +1346,18 @@ establish_barrier(transport::Transport& storage,
         return std::unexpected(
             error(ErrorCode::InvalidInput, "invalid barrier context"));
     }
-    auto pre_check = read_control_snapshot(storage, layout, true);
+    if (auto reconciled = reconcile_pending_registrations(
+            storage, layout, workspace_root, PendingRegistrationKind::All);
+        !reconciled) {
+        return std::unexpected(reconciled.error());
+    }
+    auto pre_check =
+        read_control_snapshot(storage, layout, true, &workspace_root);
     if (!pre_check) {
         return std::unexpected(pre_check.error());
+    }
+    if (auto known = validate_known_controls(*pre_check, true); !known) {
+        return std::unexpected(known.error());
     }
     if (any_barrier_present(*pre_check)) {
         return std::unexpected(
@@ -623,29 +1377,44 @@ establish_barrier(transport::Transport& storage,
     }
     const auto name = *token;
     const auto identifier = layout.barriers_prefix + name;
+    const ActivePendingGuard active_pending(identifier);
     const auto meta = options.metadata.value_or(default_metadata());
     auto bytes = payload("barrier", name, meta);
-    auto published = put_verified(storage, identifier, bytes, workspace_root);
-    if (!published) {
+
+    RegistrationState registration;
+    std::filesystem::path pending_file;
+    if (auto published = publish_registered_marker(storage,
+                                                   workspace_root,
+                                                   "barrier",
+                                                   name,
+                                                   identifier,
+                                                   std::move(bytes),
+                                                   true,
+                                                   registration,
+                                                   pending_file);
+        !published) {
         return std::unexpected(published.error());
     }
-    RegistrationState registration{.storage = &storage,
-                                   .workspace_root = workspace_root,
-                                   .identifier = identifier,
-                                   .token = name,
-                                   .payload = std::move(bytes),
-                                   .expected_physical_sha256 =
-                                       std::move(*published),
-                                   .verify_owner = true};
     if (options.settle_delay > std::chrono::milliseconds::zero()) {
         std::this_thread::sleep_for(options.settle_delay);
+        if (platform::cancellation::requested()) {
+            reconcile_and_cleanup_registration(
+                storage, registration, pending_file);
+            return std::unexpected(
+                error(ErrorCode::TransportFailure,
+                      "operation cancelled by user",
+                      registration.identifier));
+        }
     }
     auto exclusive =
         verify_barrier_exclusivity_impl(registration, layout, true);
     if (!exclusive) {
-        static_cast<void>(release_registration(registration));
-        return std::unexpected(exclusive.error());
+        auto err = exclusive.error();
+        err.identifier = registration.identifier;
+        reconcile_and_cleanup_registration(storage, registration, pending_file);
+        return std::unexpected(std::move(err));
     }
+    remove_pending_record(pending_file);
     return registration;
 }
 
@@ -658,7 +1427,15 @@ active_writers(transport::Transport& storage, const RemoteLayout& layout) {
     }
     std::vector<std::string> result;
     for (const auto& name : *listed) {
-        if (!is_canonical_hex32(name)) {
+        auto kind = classify_control_entry(
+            storage, layout.writers_prefix, name, "writer", nullptr);
+        if (!kind) {
+            return std::unexpected(kind.error());
+        }
+        if (*kind == ControlEntryKind::LegacyStagingResidue) {
+            continue;
+        }
+        if (*kind == ControlEntryKind::Unknown) {
             return std::unexpected(error(ErrorCode::InvalidControlObject,
                                          "invalid writer marker: " + name));
         }
@@ -673,6 +1450,9 @@ active_barriers(transport::Transport& storage, const RemoteLayout& layout) {
     if (!snapshot) {
         return std::unexpected(snapshot.error());
     }
+    if (auto known = validate_known_controls(*snapshot, false); !known) {
+        return std::unexpected(known.error());
+    }
     std::vector<std::string> result;
     if (snapshot->legacy_barrier == transport::Presence::Present) {
         result.push_back(layout.barrier_identifier);
@@ -685,6 +1465,38 @@ active_barriers(transport::Transport& storage, const RemoteLayout& layout) {
         result.push_back(layout.barriers_prefix + name);
     }
     return result;
+}
+
+std::expected<void, Error> check_pre_barrier_controls(
+    transport::Transport& storage,
+    const RemoteLayout& layout,
+    const std::filesystem::path& workspace_root) {
+    const auto* root_ptr =
+        workspace_root.empty() ? nullptr : &workspace_root;
+    auto snapshot = read_control_snapshot(storage, layout, true, root_ptr);
+    if (!snapshot) {
+        return std::unexpected(snapshot.error());
+    }
+    if (auto known = validate_known_controls(*snapshot, true); !known) {
+        return std::unexpected(known.error());
+    }
+    if (any_barrier_present(*snapshot)) {
+        return std::unexpected(
+            error(ErrorCode::Blocked,
+                  "another maintenance barrier is already present"));
+    }
+    if (!snapshot->writers.empty()) {
+        std::string listing;
+        for (std::size_t i = 0; i < snapshot->writers.size(); ++i) {
+            if (i > 0) {
+                listing.append(", ");
+            }
+            listing.append(layout.writers_prefix + snapshot->writers[i]);
+        }
+        return std::unexpected(error(
+            ErrorCode::Blocked, "active writers block garbage collection: " + listing));
+    }
+    return {};
 }
 
 std::optional<MarkerMetadata>
@@ -953,21 +1765,38 @@ remove_barrier(transport::Transport& storage,
                             multi_barriers.error());
     }
     std::vector<std::string> present_barriers;
+    std::vector<std::string> legacy_staging_barriers;
     if (*legacy_present == transport::Presence::Present) {
         present_barriers.push_back(layout.barrier_identifier);
     }
     for (const auto& name : *multi_barriers) {
-        if (!is_canonical_hex32(name)) {
+        auto kind = classify_control_entry(
+            storage, layout.barriers_prefix, name, "barrier", &workspace_root);
+        if (!kind) {
+            return with_context(BarrierRemovalStage::CheckingPresence,
+                                kind.error());
+        }
+        if (*kind == ControlEntryKind::PublishedMarker) {
+            present_barriers.push_back(layout.barriers_prefix + name);
+        } else if (*kind == ControlEntryKind::LegacyStagingResidue) {
+            legacy_staging_barriers.push_back(layout.barriers_prefix + name);
+        } else {
             return fail(BarrierRemovalStage::CheckingPresence,
                         ErrorCode::InvalidControlObject,
                         "invalid barrier marker: " + name);
         }
-        present_barriers.push_back(layout.barriers_prefix + name);
     }
 
     std::size_t remaining_barriers = 0;
     if (target_barrier.has_value()) {
         std::string canonical;
+        const auto legacy_staging_match = std::ranges::find_if(
+            legacy_staging_barriers, [&](const std::string& id) {
+                return *target_barrier == id ||
+                       *target_barrier ==
+                           std::string_view{id}.substr(
+                               layout.barriers_prefix.size());
+            });
         if (*target_barrier == layout.barrier_identifier ||
             *target_barrier == "barrier") {
             canonical = layout.barrier_identifier;
@@ -975,6 +1804,8 @@ remove_barrier(transport::Transport& storage,
             canonical = std::string{*target_barrier};
         } else if (is_canonical_hex32(*target_barrier)) {
             canonical = layout.barriers_prefix + std::string{*target_barrier};
+        } else if (legacy_staging_match != legacy_staging_barriers.end()) {
+            canonical = *legacy_staging_match;
         } else {
             active_identifier = std::string{*target_barrier};
             return fail(BarrierRemovalStage::CheckingPresence,
@@ -982,7 +1813,7 @@ remove_barrier(transport::Transport& storage,
                         "invalid maintenance barrier identifier or token");
         }
         active_identifier = canonical;
-        if (present_barriers.empty()) {
+        if (present_barriers.empty() && legacy_staging_barriers.empty()) {
             auto writers = active_writers(storage, layout);
             if (!writers) {
                 return with_context(BarrierRemovalStage::CheckingWriters,
@@ -994,15 +1825,22 @@ remove_barrier(transport::Transport& storage,
                 .remaining_barriers_count = 0,
             };
         }
-        if (std::ranges::find(present_barriers, canonical) ==
+        if (std::ranges::find(present_barriers, canonical) !=
             present_barriers.end()) {
+            remaining_barriers = present_barriers.size() - 1;
+        } else if (std::ranges::find(legacy_staging_barriers, canonical) !=
+                   legacy_staging_barriers.end()) {
+            remaining_barriers = present_barriers.size();
+        } else {
             return fail(BarrierRemovalStage::CheckingPresence,
                         ErrorCode::InvalidInput,
                         "specified maintenance barrier is not active");
         }
-        remaining_barriers = present_barriers.size() - 1;
     } else {
-        if (present_barriers.empty()) {
+        const auto& auto_pool = !present_barriers.empty()
+                                    ? present_barriers
+                                    : legacy_staging_barriers;
+        if (auto_pool.empty()) {
             auto writers = active_writers(storage, layout);
             if (!writers) {
                 return with_context(BarrierRemovalStage::CheckingWriters,
@@ -1014,13 +1852,13 @@ remove_barrier(transport::Transport& storage,
                 .remaining_barriers_count = 0,
             };
         }
-        if (present_barriers.size() > 1) {
+        if (auto_pool.size() > 1) {
             std::string listing;
-            for (std::size_t i = 0; i < present_barriers.size(); ++i) {
+            for (std::size_t i = 0; i < auto_pool.size(); ++i) {
                 if (i > 0) {
                     listing.append(", ");
                 }
-                listing.append(present_barriers[i]);
+                listing.append(auto_pool[i]);
             }
             active_identifier.clear();
             return std::unexpected(
@@ -1032,7 +1870,7 @@ remove_barrier(transport::Transport& storage,
                       BarrierRemovalStage::CheckingPresence,
                       BarrierRemovalMutationState::NotAttempted));
         }
-        active_identifier = present_barriers.front();
+        active_identifier = auto_pool.front();
         remaining_barriers = 0;
     }
 
@@ -1061,8 +1899,13 @@ remove_barrier(transport::Transport& storage,
 
     std::optional<std::string_view> expected_token;
     if (active_identifier.starts_with(layout.barriers_prefix)) {
-        expected_token = std::string_view{active_identifier}.substr(
+        const auto suffix = std::string_view{active_identifier}.substr(
             layout.barriers_prefix.size());
+        if (const auto legacy_token = parse_legacy_local_staging_name(suffix)) {
+            expected_token = *legacy_token;
+        } else {
+            expected_token = suffix;
+        }
     }
     const auto parse_status = parse_marker_payload_impl(
         *observed, "barrier", expected_token, nullptr, nullptr);
@@ -1168,6 +2011,12 @@ supports_online_collection(transport::Transport& storage,
     if (auto published =
             put_verified(storage, identifier, bytes, workspace_root);
         !published) {
+        const platform::cancellation::ScopedIgnoreCancellation ignore_cancel;
+        auto probe_matches =
+            verify_remote_payload(storage, identifier, bytes, workspace_root, "");
+        if (probe_matches && *probe_matches) {
+            static_cast<void>(transport::remove(storage, identifier));
+        }
         return std::unexpected(published.error());
     }
     const auto cleanup = [&]() -> std::expected<void, Error> {

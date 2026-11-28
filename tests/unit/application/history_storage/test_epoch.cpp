@@ -105,6 +105,10 @@ TEST(EpochCodecTest, RoundTripsCanonicalAndAuthenticatedFormats) {
     const auto second = epoch::seal(original, key);
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(second.has_value());
+    // Fixed v1 interoperability vector for the canonical payload and keyed ID.
+    EXPECT_EQ(
+        first->reference.epoch_id,
+        "b07e214ab8b1bece7e6af3c26f9dc1f0c71e43668cb1e88cde40ad25b4b55e01");
     EXPECT_EQ(first->reference, second->reference);
     EXPECT_EQ(first->bytes, second->bytes);
 
@@ -568,6 +572,65 @@ TEST(EpochLoadByIdTest, RejectsMultipleReferencesForSameId) {
     EXPECT_EQ(loaded.error().code, ErrorCode::Conflict);
 }
 
+TEST(EpochLoadByIdTest,
+     LoadsIndividualBifurcatedEpochsByExactIdWhileChainFailsClosed) {
+    auto workspace = kasumi::test::make_temp_workspace("epoch-bifurcated-id");
+    const auto storage_path =
+        kasumi::test::workspace_path(workspace, "storage");
+    auto storage = kasumi::transport::open_transport(storage_path.string());
+    ASSERT_TRUE(storage.has_value());
+    ASSERT_TRUE(kasumi::transport::initialize(*storage));
+
+    const auto key = epoch_test_key();
+    const auto root = kasumi::test::workspace_root(workspace);
+    auto e0_val = representative_epoch();
+    e0_val.sequence = 0;
+    e0_val.issued_at = 1000;
+    e0_val.previous_epoch_id.clear();
+    const auto e0 = epoch::seal(e0_val, key);
+    ASSERT_TRUE(e0.has_value());
+    ASSERT_TRUE(epoch::publish(*storage, key, *e0, root));
+
+    auto e1a_val = e0_val;
+    e1a_val.sequence = 1;
+    e1a_val.issued_at = 2000;
+    e1a_val.anchors = {{.commit_id = id('a'), .height = 1}};
+    e1a_val.previous_epoch_id = e0->reference.epoch_id;
+    const auto e1a = epoch::seal(e1a_val, key);
+    ASSERT_TRUE(e1a.has_value());
+
+    auto e1b_val = e0_val;
+    e1b_val.sequence = 1;
+    e1b_val.issued_at = 2005;
+    e1b_val.anchors = {{.commit_id = id('b'), .height = 2}};
+    e1b_val.previous_epoch_id = e0->reference.epoch_id;
+    const auto e1b = epoch::seal(e1b_val, key);
+    ASSERT_TRUE(e1b.has_value());
+    ASSERT_NE(e1a->reference.epoch_id, e1b->reference.epoch_id);
+
+    ASSERT_TRUE(epoch::publish(*storage, key, *e1a, root));
+    ASSERT_TRUE(epoch::publish(*storage, key, *e1b, root));
+
+    const auto latest = epoch::load_latest(*storage, key, root);
+    ASSERT_FALSE(latest.has_value());
+    EXPECT_EQ(latest.error().code, ErrorCode::Conflict);
+    EXPECT_NE(latest.error().detail.find("sequence 1"), std::string::npos);
+
+    const auto chain = epoch::load_chain(*storage, key, root);
+    ASSERT_FALSE(chain.has_value());
+    EXPECT_EQ(chain.error().code, ErrorCode::Conflict);
+
+    const auto got_a =
+        epoch::load_by_id(*storage, key, root, e1a->reference.epoch_id);
+    ASSERT_TRUE(got_a.has_value() && *got_a);
+    EXPECT_EQ((*got_a)->value, e1a_val);
+
+    const auto got_b =
+        epoch::load_by_id(*storage, key, root, e1b->reference.epoch_id);
+    ASSERT_TRUE(got_b.has_value() && *got_b);
+    EXPECT_EQ((*got_b)->value, e1b_val);
+}
+
 TEST(EpochLoadLatestTest,
      RejectsMissingHistoricalEpochInsteadOfReturningNewer) {
     auto workspace = kasumi::test::make_temp_workspace("epoch-load-chain-gap");
@@ -620,6 +683,23 @@ TEST(EpochLoadLatestTest, RejectsBrokenHistoricalPointer) {
         *storage, epoch_test_key(), kasumi::test::workspace_root(workspace));
     ASSERT_FALSE(latest.has_value());
     EXPECT_EQ(latest.error().code, ErrorCode::Conflict);
+}
+
+TEST(EpochLoadLatestTest, EmptyInventoryCannotEraseAnAcceptedCheckpoint) {
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    auto workspace = kasumi::test::make_temp_workspace("missing-checkpoint");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto chain = valid_chain(2);
+    const auto fresh = epoch::load_latest(storage, epoch_test_key(), root);
+    ASSERT_TRUE(fresh);
+    EXPECT_FALSE(*fresh);
+    for (const auto& entry : chain) {
+        const auto result = epoch::load_latest(
+            storage, epoch_test_key(), root, entry.reference);
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().code, ErrorCode::Conflict);
+    }
 }
 
 TEST(EpochLoadLatestTest, SupportsMoreThan1024HistoricalEpochs) {

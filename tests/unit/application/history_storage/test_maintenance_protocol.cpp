@@ -1,6 +1,7 @@
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "kasumi/test/history_storage.hpp"
+#include "platform/cancellation.hpp"
 
 namespace {
 
@@ -23,6 +24,40 @@ TEST(ManualWriterRemovalTest, RemovesOnlyTheSelectedListedWriter) {
 
     ASSERT_TRUE(removed.has_value()) << (removed ? "" : removed.error().detail);
     EXPECT_EQ(state->objects, expected);
+}
+
+TEST(GenesisAdmissionTest, RejectsOverlappingAndStaleInitializers) {
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    const auto layout = history::derive_remote_layout(test_key());
+    auto workspace = kasumi::test::make_temp_workspace("bootstrap-admission");
+    const auto root = kasumi::test::workspace_root(workspace);
+    auto first = protocol::register_writer(storage, layout, root);
+    ASSERT_TRUE(first);
+    auto check = [&](const auto& writer,
+                     protocol::GenesisAdmission evidence = {}) {
+        return protocol::verify_writer_admission(writer, layout, evidence);
+    };
+    ASSERT_TRUE(check(*first));
+    auto second = protocol::register_writer(storage, layout, root);
+    ASSERT_TRUE(second);
+    EXPECT_FALSE(check(*second));
+    EXPECT_FALSE(check(*first));
+    const auto head = layout.heads_prefix + "first-head";
+    const auto epoch = layout.epochs_prefix + "first-epoch";
+    state->objects[head] = {};
+    ASSERT_TRUE(protocol::release_registration(*first));
+    EXPECT_FALSE(check(*second));
+    EXPECT_TRUE(check(*second, {.expected_head = head}));
+    state->objects[epoch] = {};
+    EXPECT_FALSE(check(*second, {.expected_head = head}));
+    EXPECT_TRUE(
+        check(*second, {.expected_head = head, .expected_epoch = epoch}));
+    state->objects.erase(head);
+    EXPECT_FALSE(check(*second));
+    EXPECT_TRUE(protocol::verify_writer_admission(*second, layout));
+    EXPECT_TRUE(protocol::release_registration(*second));
 }
 
 TEST(ManualWriterRemovalTest, MissingAndStorageFailuresAreNotSuccess) {
@@ -918,6 +953,326 @@ TEST(ManualWriterRemovalTest,
     EXPECT_TRUE(state->objects.contains(kept));
     ASSERT_FALSE(steps.empty());
     EXPECT_EQ(steps.back(), (std::pair<std::size_t, std::size_t>{3U, 3U}));
+}
+
+TEST(MaintenanceProtocolRecoveryTest,
+     WriterAndBarrierRetainRecoverableEvidenceOnPostPutVerificationFailureAndRecover) {
+    const auto layout = history::derive_remote_layout(test_key());
+
+    // 1. Writer registration: PUT succeeds, post-PUT GET fallback verification
+    // fails, leaving a durable pending record; after recovery, subsequent
+    // reconciliation / register_writer removes the orphaned writer marker.
+    {
+        FakeState* state = nullptr;
+        auto storage = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(storage));
+        auto workspace = kasumi::test::make_temp_workspace("writer-post-put-fail");
+        const auto root = kasumi::test::workspace_root(workspace);
+        state->physical_hash_supported = false;
+
+        const auto orig_get = storage.storage.get;
+        struct Hook {
+            FakeState* state = nullptr;
+            kasumi::transport::GetFunction orig = nullptr;
+            bool fail = true;
+            std::string writer_id;
+        };
+        static Hook hook;
+        hook = Hook{.state = state, .orig = orig_get, .fail = true, .writer_id = {}};
+        storage.storage.get = +[](void* ctx,
+                                  std::string_view id,
+                                  const std::filesystem::path& dst)
+            -> kasumi::transport::Result {
+            const auto res_layout =
+                history::derive_remote_layout(test_key());
+            if (hook.fail && id.starts_with(res_layout.writers_prefix)) {
+                hook.writer_id = std::string{id};
+                return std::unexpected(kasumi::transport::Error{
+                    .code = kasumi::transport::ErrorCode::Io,
+                    .message = "injected post-put get failure"});
+            }
+            return hook.orig(ctx, id, dst);
+        };
+
+        const auto failed = protocol::register_writer(storage, layout, root);
+        ASSERT_FALSE(failed.has_value());
+        ASSERT_FALSE(hook.writer_id.empty());
+        EXPECT_EQ(failed.error().identifier, hook.writer_id);
+        EXPECT_TRUE(state->objects.contains(hook.writer_id));
+        EXPECT_TRUE(std::filesystem::exists(root / ".pending-control-markers"));
+
+        // Backend recovers; next register_writer reconciles the orphaned writer
+        // before publishing a fresh one, and establishes_barrier afterwards is
+        // unblocked once released.
+        hook.fail = false;
+        auto second = protocol::register_writer(storage, layout, root);
+        ASSERT_TRUE(second.has_value()) << second.error().detail;
+        EXPECT_FALSE(state->objects.contains(hook.writer_id));
+        EXPECT_TRUE(state->objects.contains(second->identifier));
+        EXPECT_FALSE(
+            std::filesystem::exists(root / ".pending-control-markers"));
+        ASSERT_TRUE(protocol::release_registration(*second));
+        auto barrier = protocol::establish_barrier(storage, layout, root);
+        ASSERT_TRUE(barrier.has_value()) << barrier.error().detail;
+        ASSERT_TRUE(protocol::release_registration(*barrier));
+    }
+
+    // 2. Barrier registration: PUT succeeds, post-PUT physical_hash fails ->
+    // pending record retained; once backend recovers, reconcile + writer
+    // and barrier operations succeed without manual intervention.
+    {
+        FakeState* state = nullptr;
+        auto storage = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(storage));
+        auto workspace = kasumi::test::make_temp_workspace("barrier-post-put-fail");
+        const auto root = kasumi::test::workspace_root(workspace);
+        state->physical_hash_supported = true;
+        state->physical_hash_failure = kasumi::transport::ErrorCode::Timeout;
+
+        const auto failed = protocol::establish_barrier(storage, layout, root);
+        ASSERT_FALSE(failed.has_value());
+        ASSERT_TRUE(failed.error().identifier.has_value());
+        const auto abandoned_barrier_id = *failed.error().identifier;
+        EXPECT_TRUE(state->objects.contains(abandoned_barrier_id));
+        EXPECT_TRUE(std::filesystem::exists(root / ".pending-control-markers"));
+
+        state->physical_hash_failure.reset();
+        auto recovered_barrier =
+            protocol::establish_barrier(storage, layout, root);
+        ASSERT_TRUE(recovered_barrier.has_value())
+            << recovered_barrier.error().detail;
+        EXPECT_FALSE(state->objects.contains(abandoned_barrier_id));
+        EXPECT_TRUE(state->objects.contains(recovered_barrier->identifier));
+        EXPECT_FALSE(
+            std::filesystem::exists(root / ".pending-control-markers"));
+        ASSERT_TRUE(protocol::release_registration(*recovered_barrier));
+
+        auto writer = protocol::register_writer(storage, layout, root);
+        ASSERT_TRUE(writer.has_value()) << writer.error().detail;
+        ASSERT_TRUE(protocol::release_registration(*writer));
+    }
+}
+
+TEST(MaintenanceProtocolRecoveryTest,
+     WriterAndBarrierCleanupRunsUnderCancellationDuringVerificationWindow) {
+    const auto layout = history::derive_remote_layout(test_key());
+    for (const bool test_barrier : {false, true}) {
+        SCOPED_TRACE(test_barrier);
+        kasumi::platform::cancellation::reset();
+        FakeState* state = nullptr;
+        auto storage = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(storage));
+        auto workspace = kasumi::test::make_temp_workspace("marker-cancel-verify");
+        const auto root = kasumi::test::workspace_root(workspace);
+        state->physical_hash_supported = false;
+
+        std::string observed_id;
+        state->on_operation =
+            [&](FakeState&, std::string_view op, std::string_view id) {
+                if (op == "get" &&
+                    (id.starts_with(layout.writers_prefix) ||
+                     id.starts_with(layout.barriers_prefix))) {
+                    observed_id = std::string{id};
+                    kasumi::platform::cancellation::request();
+                }
+            };
+
+        const auto res =
+            test_barrier ? protocol::establish_barrier(storage, layout, root)
+                         : protocol::register_writer(storage, layout, root);
+        kasumi::platform::cancellation::reset();
+
+        ASSERT_FALSE(res.has_value());
+        ASSERT_FALSE(observed_id.empty());
+        EXPECT_FALSE(state->objects.contains(observed_id));
+        EXPECT_FALSE(
+            std::filesystem::exists(root / ".pending-control-markers"));
+    }
+}
+
+TEST(MaintenanceProtocolRecoveryTest,
+     PendingRegistrationReconciliationPreservesReplacedThirdPartyMarker) {
+    const auto layout = history::derive_remote_layout(test_key());
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    auto workspace =
+        kasumi::test::make_temp_workspace("pending-preserve-third-party");
+    const auto root = kasumi::test::workspace_root(workspace);
+    state->physical_hash_supported = true;
+    state->physical_hash_failure = kasumi::transport::ErrorCode::Timeout;
+
+    const auto failed = protocol::establish_barrier(storage, layout, root);
+    ASSERT_FALSE(failed.has_value());
+    ASSERT_TRUE(failed.error().identifier.has_value());
+    const auto identifier = *failed.error().identifier;
+    ASSERT_TRUE(state->objects.contains(identifier));
+
+    // Another client replaces the object at that identifier with its own
+    // valid barrier payload before backend connectivity returns.
+    const std::string other_token = "ffffffffffffffffffffffffffffffff";
+    const auto third_party_bytes =
+        protocol::testing::format_payload("barrier", other_token);
+    state->objects[identifier] = third_party_bytes;
+    state->physical_hashes[identifier] = std::string(64, '9');
+    state->physical_hash_failure.reset();
+
+    const auto reconciled = protocol::reconcile_pending_registrations(
+        storage, layout, root, protocol::PendingRegistrationKind::All);
+    ASSERT_TRUE(reconciled.has_value()) << reconciled.error().detail;
+    EXPECT_TRUE(state->objects.contains(identifier));
+    EXPECT_EQ(state->objects[identifier], third_party_bytes);
+    EXPECT_FALSE(std::filesystem::exists(root / ".pending-control-markers"));
+}
+
+TEST(MaintenanceProtocolV024Test,
+     Legacy0312BarrierStagingResidueDoesNotBlockSyncOrGcAndCanBeCleaned) {
+    FakeState* state = nullptr;
+    auto storage = make_fake_transport(state);
+    ASSERT_TRUE(kasumi::transport::initialize(storage));
+    const auto layout = history::derive_remote_layout(test_key());
+    auto workspace = kasumi::test::make_temp_workspace("legacy-0312-staging");
+    const auto root = kasumi::test::workspace_root(workspace);
+
+    const std::string token = "0123456789abcdef0123456789abcdef";
+    const std::string tmp_name = token + ".kasumi-tmp-abcdef0123456789";
+    const std::string tmp_id = layout.barriers_prefix + tmp_name;
+    state->objects[tmp_id] =
+        protocol::testing::format_payload("barrier", token);
+
+    const auto barriers = protocol::active_barriers(storage, layout);
+    ASSERT_TRUE(barriers.has_value()) << barriers.error().detail;
+    EXPECT_TRUE(barriers->empty());
+
+    auto writer = protocol::register_writer(storage, layout, root);
+    ASSERT_TRUE(writer.has_value()) << writer.error().detail;
+    ASSERT_TRUE(protocol::release_registration(*writer));
+
+    auto barrier = protocol::establish_barrier(storage, layout, root);
+    ASSERT_TRUE(barrier.has_value()) << barrier.error().detail;
+    ASSERT_TRUE(protocol::release_registration(*barrier));
+
+    const auto removed = protocol::remove_barrier(storage, layout, root);
+    ASSERT_TRUE(removed.has_value()) << removed.error().detail;
+    EXPECT_EQ(removed->outcome, protocol::BarrierRemovalOutcome::Removed);
+    EXPECT_EQ(removed->barrier_identifier, tmp_id);
+    EXPECT_FALSE(state->objects.contains(tmp_id));
+}
+
+TEST(MaintenanceProtocolV024Test,
+     AmbiguousLegacyStagingAndUnknownFilesArePreservedAndReportedInDiagnostics) {
+    const auto layout = history::derive_remote_layout(test_key());
+
+    // Subcase 1: .kasumi-tmp-* files with arbitrary/empty/mismatched bytes ->
+    // InvalidControlObject and preserved untouched.
+    const std::string token = "0123456789abcdef0123456789abcdef";
+    const std::string bad_tmp_name = token + ".kasumi-tmp-0011223344556677";
+    const std::vector<std::vector<std::uint8_t>> ambiguous_payloads{
+        {},
+        {'n', 'o', 't', '-', 'k', 'a', 's', 'u', 'm', 'i'},
+        protocol::testing::format_payload("barrier",
+                                          "fedcba9876543210fedcba9876543210"),
+        protocol::testing::format_payload("writer", token),
+    };
+    for (const auto& bytes : ambiguous_payloads) {
+        FakeState* state = nullptr;
+        auto storage = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(storage));
+        auto workspace =
+            kasumi::test::make_temp_workspace("ambiguous-legacy-staging");
+        const auto root = kasumi::test::workspace_root(workspace);
+        const std::string id = layout.barriers_prefix + bad_tmp_name;
+        state->objects[id] = bytes;
+
+        const auto barriers = protocol::active_barriers(storage, layout);
+        ASSERT_FALSE(barriers.has_value());
+        EXPECT_EQ(barriers.error().code,
+                  protocol::ErrorCode::InvalidControlObject);
+        EXPECT_NE(barriers.error().detail.find(bad_tmp_name),
+                  std::string::npos);
+
+        const auto writer = protocol::register_writer(storage, layout, root);
+        ASSERT_FALSE(writer.has_value());
+        EXPECT_EQ(writer.error().code,
+                  protocol::ErrorCode::InvalidControlObject);
+        EXPECT_NE(writer.error().detail.find(bad_tmp_name),
+                  std::string::npos);
+
+        const auto gc_barrier =
+            protocol::establish_barrier(storage, layout, root);
+        ASSERT_FALSE(gc_barrier.has_value());
+        EXPECT_EQ(gc_barrier.error().code,
+                  protocol::ErrorCode::InvalidControlObject);
+
+        const auto removed = protocol::remove_barrier(storage, layout, root);
+        ASSERT_FALSE(removed.has_value());
+        EXPECT_EQ(removed.error().code,
+                  protocol::ErrorCode::InvalidControlObject);
+        EXPECT_TRUE(state->objects.contains(id));
+        EXPECT_EQ(state->objects[id], bytes);
+    }
+
+    // Subcase 2: Unknown filename stray.txt in barriers/ -> reported & kept.
+    {
+        FakeState* state = nullptr;
+        auto storage = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(storage));
+        auto workspace =
+            kasumi::test::make_temp_workspace("unknown-barrier-file");
+        const auto root = kasumi::test::workspace_root(workspace);
+        const std::string stray_id = layout.barriers_prefix + "stray.txt";
+        const std::vector<std::uint8_t> stray_bytes{'u', 's', 'e', 'r'};
+        state->objects[stray_id] = stray_bytes;
+
+        const auto barriers = protocol::active_barriers(storage, layout);
+        ASSERT_FALSE(barriers.has_value());
+        EXPECT_EQ(barriers.error().code,
+                  protocol::ErrorCode::InvalidControlObject);
+        EXPECT_NE(barriers.error().detail.find("stray.txt"), std::string::npos);
+
+        const auto removed = protocol::remove_barrier(storage, layout, root);
+        ASSERT_FALSE(removed.has_value());
+        EXPECT_EQ(removed.error().code,
+                  protocol::ErrorCode::InvalidControlObject);
+        EXPECT_TRUE(state->objects.contains(stray_id));
+        EXPECT_EQ(state->objects[stray_id], stray_bytes);
+    }
+
+    // Subcase 3: Legitimate published barrier alongside a verified legacy
+    // staging residue -> still blocks Sync/GC and remove_barrier removes the
+    // published barrier first.
+    {
+        FakeState* state = nullptr;
+        auto storage = make_fake_transport(state);
+        ASSERT_TRUE(kasumi::transport::initialize(storage));
+        auto workspace =
+            kasumi::test::make_temp_workspace("published-plus-legacy-staging");
+        const auto root = kasumi::test::workspace_root(workspace);
+        const std::string pub_token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const std::string pub_id = layout.barriers_prefix + pub_token;
+        const std::string tmp_token = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const std::string tmp_id =
+            layout.barriers_prefix + tmp_token + ".kasumi-tmp-1122334455667788";
+        state->objects[pub_id] =
+            protocol::testing::format_payload("barrier", pub_token);
+        state->objects[tmp_id] =
+            protocol::testing::format_payload("barrier", tmp_token);
+
+        const auto writer = protocol::register_writer(storage, layout, root);
+        ASSERT_FALSE(writer.has_value());
+        EXPECT_EQ(writer.error().code, protocol::ErrorCode::Blocked);
+
+        const auto gc_barrier =
+            protocol::establish_barrier(storage, layout, root);
+        ASSERT_FALSE(gc_barrier.has_value());
+        EXPECT_EQ(gc_barrier.error().code, protocol::ErrorCode::Blocked);
+
+        const auto removed = protocol::remove_barrier(storage, layout, root);
+        ASSERT_TRUE(removed.has_value()) << removed.error().detail;
+        EXPECT_EQ(removed->barrier_identifier, pub_id);
+        EXPECT_FALSE(state->objects.contains(pub_id));
+        EXPECT_TRUE(state->objects.contains(tmp_id));
+    }
 }
 
 } // namespace

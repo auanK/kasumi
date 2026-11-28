@@ -363,6 +363,7 @@ ReachabilityResult inventory_impl(
             return std::unexpected(detail::error(ErrorCode::InvalidInput,
                                                  latest_epoch.error().detail));
         }
+        result.latest_epoch = *latest_epoch;
         for (const auto& anchor : latest_epoch->value.anchors) {
             epoch_anchors.emplace(anchor.commit_id, anchor.height);
         }

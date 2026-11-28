@@ -2,6 +2,7 @@
 #define KASUMI_APPLICATION_HISTORY_STORAGE_REACHABILITY_HPP
 
 #include "application/history_storage/detail.hpp"
+#include "application/history_storage/epoch.hpp"
 
 #include <functional>
 #include <optional>
@@ -62,6 +63,7 @@ struct ReachabilityInventory {
     std::vector<ReachabilityMarker> markers;
     std::vector<std::string> valid_epochs;
     std::vector<std::string> orphan_epochs;
+    std::optional<epoch::VerifiedEpoch> latest_epoch;
 };
 
 // Result of the history reachability inventory.

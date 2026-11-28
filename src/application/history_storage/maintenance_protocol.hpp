@@ -86,14 +86,35 @@ using RegistrationResult = std::expected<RegistrationState, Error>;
 bool registration_active(const RegistrationState& registration) noexcept;
 std::expected<void, Error>
 verify_registration(const RegistrationState& registration);
+// Empty names describe a fresh bootstrap. Recovery may only complete its own
+// journaled root. Names are complete physical identifiers.
+struct GenesisAdmission {
+    std::string expected_head;
+    std::string expected_epoch;
+};
 std::expected<void, Error>
 verify_writer_admission(const RegistrationState& registration,
-                        const RemoteLayout& layout);
+                        const RemoteLayout& layout,
+                        std::optional<GenesisAdmission> genesis = std::nullopt);
 std::expected<void, Error>
 verify_barrier_exclusivity(const RegistrationState& registration,
                            const RemoteLayout& layout);
+enum class PendingRegistrationKind : std::uint8_t {
+    All,
+    Writer,
+    Barrier,
+};
+
 std::expected<void, Error>
 release_registration(RegistrationState& registration);
+
+// Reconciles and cleans up any locally persisted uncertain writer or barrier
+// registrations belonging to this vault before starting new control writes.
+std::expected<void, Error> reconcile_pending_registrations(
+    transport::Transport& storage,
+    const RemoteLayout& layout,
+    const std::filesystem::path& workspace_root,
+    PendingRegistrationKind kind = PendingRegistrationKind::All);
 
 // Registers a writer and denies entry when a barrier is present.
 RegistrationResult register_writer(transport::Transport& storage,
@@ -189,6 +210,13 @@ supports_online_collection(transport::Transport& storage,
 // Identifies objects reserved for the protocol, outside logical history.
 bool is_control_object(const RemoteLayout& layout,
                        std::string_view identifier) noexcept;
+
+// Checks pre-barrier maintenance controls (no active barriers or writers)
+// while safely classifying confirmed legacy 0.31.2 local staging residues.
+std::expected<void, Error> check_pre_barrier_controls(
+    transport::Transport& storage,
+    const RemoteLayout& layout,
+    const std::filesystem::path& workspace_root = {});
 
 namespace testing {
 std::vector<std::uint8_t> format_payload(std::string_view kind,
