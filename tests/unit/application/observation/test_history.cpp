@@ -1003,7 +1003,7 @@ TEST(HistoryObservationTest,
     ASSERT_TRUE(observed.has_value());
     ASSERT_TRUE(observed->epoch.has_value());
     EXPECT_EQ(observed->epoch->reference, epoch.reference);
-    EXPECT_EQ(storage.state->commit_get_count, 4);
+    EXPECT_EQ(storage.state->commit_get_count, 3);
     EXPECT_EQ(observed->effective_tree, remote.tree);
 }
 

@@ -626,14 +626,16 @@ TEST(WebApiTest,
                   ->status,
               403);
     {
-        // A persistent connection lets httplib drain a body rejected during
-        // routing before the next request. Closing early can reset the socket.
+        // Keep-alive ensures each pre-routing-rejected POST receives its full
+        // HTTP response, while stopping between calls avoids reusing a socket
+        // whose unread request body was left unconsumed by pre_routing_handler.
         api.client->set_keep_alive(true);
         auto invalid = auth;
         invalid.emplace("X-CSRF-Token", std::string(64, '0'));
         response(
             api.client->Post("/v1/reload", invalid, "{}", "application/json"),
             403);
+        api.client->stop();
         auth.emplace(
             "X-CSRF-Token",
             Json::parse(first->body).at("csrf_token").get<std::string>());
@@ -643,7 +645,9 @@ TEST(WebApiTest,
         without_type.headers = auth;
         without_type.body = "{}";
         response(api.client->send(without_type), 415);
+        api.client->stop();
         response(api.client->Post("/v1/reload", auth, "{}", "text/plain"), 415);
+        api.client->stop();
         response(
             api.client->Post(
                 "/v1/reload", auth, "{}", "Application/JSON; charset=utf-8"),
