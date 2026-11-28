@@ -3,8 +3,9 @@ import { reactive } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import ProfileWorkspaceView from '../workspace/ProfileWorkspaceView.vue'
 import ConflictsTab from '../workspace/conflicts/ConflictsTab.vue'
-import { fetchConflictDiff, listConflicts } from '../api/conflicts.js'
+import { fetchConflictDiff, listConflicts, resolveConflict } from '../api/conflicts.js'
 import { clearProfiles } from '../composables/useProfiles.js'
+import { useToasts } from '../composables/useToasts.js'
 import { listProfiles } from '../api/profiles.js'
 
 const route = reactive({ params: { name: 'alpha', tab: 'overview' }, query: {} })
@@ -128,6 +129,43 @@ describe('Workspace lazy conflicts and error/stale-response isolation', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('remote')
     expect(wrapper.text()).not.toContain('stale')
+    wrapper.unmount()
+  })
+
+  it('announces retained recovery directory in toast after resolving a conflict', async () => {
+    const recovery = 'docs/.kasumi-conflict-recovery-0123456789abcdef0123456789abcdef'
+    listConflicts
+      .mockResolvedValueOnce({
+        groups: [{
+          canonical_path: 'docs/note.txt',
+          artifacts: [{ path: 'docs/note.txt.kasumiconflict_local', size: 12 }],
+        }],
+      })
+      .mockResolvedValueOnce({ groups: [] })
+    fetchConflictDiff.mockResolvedValueOnce({
+      canonical: { hex: '61' },
+      artifact: { hex: '62' },
+    })
+    resolveConflict.mockResolvedValueOnce({
+      canonical_path: 'docs/note.txt',
+      recovery_directory: recovery,
+    })
+
+    const { toasts } = useToasts()
+    toasts.value = []
+
+    const wrapper = mount(ConflictsTab, { props: { profile: 'alpha' } })
+    await flushPromises()
+    await wrapper.get('button.k-btn--primary').trigger('click')
+    await flushPromises()
+
+    expect(resolveConflict).toHaveBeenCalledWith('alpha', {
+      path: 'docs/note.txt',
+      choice: 'keep_canonical',
+      artifact: undefined,
+      dryRun: false,
+    })
+    expect(toasts.value.some((item) => item.message.includes(recovery))).toBe(true)
     wrapper.unmount()
   })
 })

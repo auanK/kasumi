@@ -20,7 +20,7 @@ std::int64_t now_unix_seconds() noexcept {
 Json compact_job_summary(const WebJob& job) {
     if (!job.result.is_object())
         return Json(nullptr);
-    static constexpr std::array<const char*, 34> kSummaryKeys{
+    static constexpr std::array<const char*, 39> kSummaryKeys{
         "error",
         "warning",
         "dry_run",
@@ -41,6 +41,11 @@ Json compact_job_summary(const WebJob& job) {
         "deferred_recent_objects",
         "removed_objects",
         "removed_bytes",
+        "epoch_advanced",
+        "epoch_advancement_planned",
+        "target_epoch_sequence",
+        "target_epoch_id",
+        "planned_pruned_commits",
         "live_small_blobs",
         "dirty_packs_detected",
         "loose_small_blobs_detected",

@@ -19,8 +19,10 @@ const nowTickMs = ref(Date.now())
 
 let handle = null
 let refCount = 0
+let streamSession = 0
 let statusRevision = 0
 let statusRequest = 0
+let logsRequest = 0
 let statusInFlight = null
 let fallbackTimer = null
 let uptimeTimer = null
@@ -170,7 +172,12 @@ export function ensureStatus() {
 }
 
 export async function refreshLogs(options = {}) {
+  const session = streamSession
+  const request = ++logsRequest
   const report = await fetchDaemonLogs(options)
+  if (session !== streamSession || request !== logsRequest) {
+    return report
+  }
   if (report && Array.isArray(report.events)) {
     const latestSeq = report.latest_seq ?? report.events.at(-1)?.seq ?? 0
     const newerEvents = logs.value.filter((entry) => entry.seq > latestSeq)
@@ -182,12 +189,18 @@ export async function refreshLogs(options = {}) {
 export function startDaemonStream() {
   refCount += 1
   if (handle) return
+  const session = ++streamSession
   ensureStatus().catch(() => {})
   refreshLogs({ lines: 120, full: true }).catch(() => {})
   handle = connectEventStream({
-    onStatus: (payload) => mergeStatusSnapshot(payload),
-    onLog: (entry) => appendLog(entry),
+    onStatus: (payload) => {
+      if (session === streamSession) mergeStatusSnapshot(payload)
+    },
+    onLog: (entry) => {
+      if (session === streamSession) appendLog(entry)
+    },
     onStateChange: (next) => {
+      if (session !== streamSession) return
       streamState.value = next
       if (next === 'connected') {
         clearFallbackPolling()
@@ -207,21 +220,29 @@ export function startDaemonStream() {
       return Boolean(info?.authenticated)
     },
     onSessionExpired: () => {
-      notifyUnauthorized()
+      if (session === streamSession) notifyUnauthorized()
     },
   })
 }
 
 export function stopDaemonStream(force = false) {
   refCount = force ? 0 : Math.max(0, refCount - 1)
-  if (refCount === 0 && handle) {
-    const active = handle
-    handle = null
-    clearFallbackPolling()
-    clearUptimeTimer()
-    active.close()
-    statusInFlight = null
+  if (refCount === 0 && (handle || force)) {
+    streamSession++
+    logsRequest++
     statusRequest++
+    statusInFlight = null
+    if (handle) {
+      const active = handle
+      handle = null
+      clearFallbackPolling()
+      clearUptimeTimer()
+      active.close()
+    } else {
+      clearFallbackPolling()
+      clearUptimeTimer()
+    }
+    streamState.value = 'disconnected'
     invalidateInspections(undefined, { discard: true })
     daemonStatus.value = null
     daemonInstance.value = ''

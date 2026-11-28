@@ -222,7 +222,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_ONLY_SERIALIZE(ResolveConflictReport,
                                                   choice,
                                                   selected_artifact,
                                                   dry_run,
-                                                  removed_artifacts)
+                                                  removed_artifacts,
+                                                  recovery_directory)
 
 NLOHMANN_JSON_SERIALIZE_ENUM(
     RemoteVaultState,

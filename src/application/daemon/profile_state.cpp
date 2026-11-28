@@ -18,8 +18,6 @@
 namespace kasumi::application::daemon_detail {
 namespace {
 
-constexpr std::size_t kMaxTrackedDirtyPaths = 4096U;
-
 observation::DatabaseMetadataStamp
 capture_ignore_stamp(const std::filesystem::path& local_dir,
                      bool& ignore_present) {
@@ -168,6 +166,17 @@ void handle_watch_event(DaemonSessionState& state,
 }
 
 } // namespace
+
+namespace testing {
+
+void handle_watch_event_for_testing(
+    DaemonSessionState& state,
+    std::string_view profile_name,
+    const platform::WatchEvent& ev) noexcept {
+    handle_watch_event(state, profile_name, ev);
+}
+
+} // namespace testing
 
 std::optional<std::size_t> find_profile_slot(const ProfileTable& table,
                                              std::string_view name) noexcept {
@@ -502,28 +511,50 @@ bool refresh_key_status_for_slot(DaemonSessionState& state,
     return has_arena;
 }
 
+std::expected<ConsistentProfilesLoad, DaemonError>
+load_consistent_profiles(const std::filesystem::path& cfg_path) {
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        const auto stamp_before = read_file_stamp(cfg_path);
+        auto loaded = runtime::load_profiles(cfg_path);
+        if (!loaded) {
+            if (loaded.error().code == runtime::ErrorCode::ConfigNotFound) {
+                loaded = std::vector<runtime::ProfileData>{};
+            } else {
+                return std::unexpected(DaemonError{
+                    .code = DaemonErrorCode::ConfigFailure,
+                    .detail = loaded.error().detail,
+                });
+            }
+        }
+        const auto stamp_after = read_file_stamp(cfg_path);
+        const bool consistent = (stamp_before == stamp_after);
+        if (consistent || attempt == 3) {
+            return ConsistentProfilesLoad{
+                .profiles = std::move(*loaded),
+                .stamp = stamp_after,
+                .stamp_consistent = consistent,
+            };
+        }
+    }
+    return ConsistentProfilesLoad{};
+}
+
 std::expected<void, DaemonError>
 sync_profiles_from_disk_locked(DaemonSessionState& state,
                                std::unique_lock<std::mutex>& lock,
                                bool force_key_recheck) {
     const auto cfg_path = state.environment.app_data_dir / "config.toml";
-    const auto cfg_stamp = read_file_stamp(cfg_path);
-    auto loaded = runtime::load_profiles(cfg_path);
-    if (!loaded) {
-        if (loaded.error().code == runtime::ErrorCode::ConfigNotFound) {
-            loaded = std::vector<runtime::ProfileData>{};
-        } else {
-            return std::unexpected(DaemonError{
-                .code = DaemonErrorCode::ConfigFailure,
-                .detail = loaded.error().detail,
-            });
-        }
+    auto consistent = load_consistent_profiles(cfg_path);
+    if (!consistent) {
+        state.has_config_stamp = false;
+        return std::unexpected(consistent.error());
     }
 
-    state.config_stamp = cfg_stamp;
-    state.has_config_stamp = true;
+    state.config_stamp = consistent->stamp;
+    state.has_config_stamp = consistent->stamp_consistent;
 
-    std::vector<runtime::ProfileData> disk_profiles = std::move(*loaded);
+    std::vector<runtime::ProfileData> disk_profiles =
+        std::move(consistent->profiles);
     std::ranges::sort(disk_profiles, {}, &runtime::ProfileData::name);
     const auto has_disk_profile = [&](std::string_view name) {
         return std::ranges::binary_search(
@@ -542,12 +573,16 @@ sync_profiles_from_disk_locked(DaemonSessionState& state,
             auto& warm = state.profiles.warm[idx];
             if (hot.in_flight) {
                 // Cancel active task first; defer erasure until next reload.
+                abort_pending_immediate_sync_locked(
+                    hot, "profile removed before sync started");
                 if (warm.task_stop_source) {
                     warm.task_stop_source->request_stop();
                 }
                 hot.paused = true;
                 continue;
             }
+            abort_pending_immediate_sync_locked(
+                hot, "profile removed before sync started");
             if (warm.watcher_ctx) {
                 ctx_to_detach.push_back(std::move(warm.watcher_ctx));
             }
@@ -557,6 +592,7 @@ sync_profiles_from_disk_locked(DaemonSessionState& state,
             if (warm.warm_transport) {
                 transports_to_close.push_back(std::move(warm.warm_transport));
                 warm.warm_transport.reset();
+                warm.warm_transport_binding.reset();
             }
             if (warm.commit_cache) {
                 history_storage::clear_memory_cache(*warm.commit_cache);
@@ -677,9 +713,14 @@ sync_profiles_from_disk_locked(DaemonSessionState& state,
                     transports_to_close.push_back(
                         std::move(warm.warm_transport));
                     warm.warm_transport.reset();
+                    warm.warm_transport_binding.reset();
                 }
                 if (hot.paused && !hot.in_flight) {
                     clear_active_telemetry(telemetry);
+                }
+                if (hot.paused) {
+                    abort_pending_immediate_sync_locked(
+                        hot, "profile paused before sync started");
                 }
                 if (transport_changed) {
                     hot.needs_attention = false;

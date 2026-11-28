@@ -3,6 +3,7 @@
 
 #include "application/environment.hpp"
 #include "application/observation/state.hpp"
+#include "application/use_cases/context.hpp"
 #include "runtime/resolver.hpp"
 #include "transport/transport.hpp"
 
@@ -24,6 +25,7 @@ struct FastPollReport {
     std::string reason;
     bool transport_error = false;
     bool profile_locked = false;
+    bool config_changed = false;
 };
 
 // Checks whether a periodic poll can safely prove zero local + remote changes
@@ -34,6 +36,7 @@ FastPollReport try_fast_remote_noop_poll(
     std::string_view profile_name,
     const runtime::RuntimeData& runtime_data,
     transport::Transport& borrowed_transport,
+    const detail::TransportBinding& borrowed_binding,
     std::span<const std::uint8_t, 32> master_key,
     observation::LocalObservationSession& warm_observation,
     bool ignore_file_present,

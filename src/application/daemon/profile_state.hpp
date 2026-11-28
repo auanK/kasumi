@@ -27,10 +27,27 @@ bool refresh_key_status_for_slot(DaemonSessionState& state,
                                  std::size_t idx,
                                  bool force_probe);
 
+struct ConsistentProfilesLoad {
+    std::vector<runtime::ProfileData> profiles;
+    observation::DatabaseMetadataStamp stamp{};
+    bool stamp_consistent = false;
+};
+
+std::expected<ConsistentProfilesLoad, DaemonError>
+load_consistent_profiles(const std::filesystem::path& cfg_path);
+
 std::expected<void, DaemonError>
 sync_profiles_from_disk_locked(DaemonSessionState& state,
                                std::unique_lock<std::mutex>& lock,
                                bool force_key_recheck = false);
+
+namespace testing {
+
+void handle_watch_event_for_testing(DaemonSessionState& state,
+                                    std::string_view profile_name,
+                                    const platform::WatchEvent& ev) noexcept;
+
+} // namespace testing
 
 } // namespace kasumi::application::daemon_detail
 

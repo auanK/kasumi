@@ -95,46 +95,67 @@ void track_internal_profile_lock(DaemonSessionState& state,
 struct WarmTransportLease {
     transport::Transport transport;
     std::optional<std::uint64_t> generation;
+    std::optional<detail::TransportBinding> binding;
 };
 
 WarmTransportLease borrow_warm_transport(DaemonSessionState& state,
                                          std::string_view name,
                                          const runtime::ProfileData& config) {
     WarmTransportLease lease;
-    std::lock_guard lock(state.mutex);
-    if (auto slot = find_profile_slot(state.profiles, name)) {
-        const auto& cfg = state.profiles.cold[*slot].config;
-        if (!state.profiles.hot[*slot].in_flight &&
-            cfg.remote_dir == config.remote_dir &&
-            cfg.local_dir == config.local_dir &&
-            cfg.rclone_config == config.rclone_config &&
-            cfg.bandwidth_limit == config.bandwidth_limit) {
-            lease.generation = state.profiles.hot[*slot].config_generation;
-            auto& cache = state.profiles.warm[*slot].warm_transport;
-            if (cache) {
-                lease.transport = std::move(*cache);
-                cache.reset();
+    const auto expected = detail::make_transport_binding(config);
+    std::optional<transport::Transport> discard_transport;
+    {
+        std::lock_guard lock(state.mutex);
+        if (auto slot = find_profile_slot(state.profiles, name)) {
+            const auto& cfg = state.profiles.cold[*slot].config;
+            if (!state.profiles.hot[*slot].in_flight &&
+                cfg.remote_dir == config.remote_dir &&
+                cfg.local_dir == config.local_dir &&
+                cfg.rclone_config == config.rclone_config &&
+                cfg.bandwidth_limit == config.bandwidth_limit) {
+                lease.generation = state.profiles.hot[*slot].config_generation;
+                lease.binding = expected;
+                auto& warm = state.profiles.warm[*slot];
+                if (warm.warm_transport) {
+                    if (warm.warm_transport_binding &&
+                        *warm.warm_transport_binding == expected) {
+                        lease.transport = std::move(*warm.warm_transport);
+                    } else {
+                        discard_transport = std::move(warm.warm_transport);
+                    }
+                    warm.warm_transport.reset();
+                    warm.warm_transport_binding.reset();
+                }
             }
         }
     }
+    discard_transport.reset();
     return lease;
 }
 
 void return_warm_transport(DaemonSessionState& state,
                            std::string_view name,
                            std::optional<std::uint64_t> generation,
+                           const std::optional<detail::TransportBinding>& binding,
                            transport::Transport returned) {
-    if (!generation || !transport::valid(returned))
+    if (!generation || !binding || !transport::valid(returned))
         return;
-    std::lock_guard lock(state.mutex);
-    auto slot = find_profile_slot(state.profiles, name);
-    if (slot && state.profiles.hot[*slot].config_generation == *generation &&
-        !state.profiles.hot[*slot].in_flight &&
-        !state.profiles.warm[*slot].warm_transport) {
-        state.profiles.warm[*slot].warm_transport = std::move(returned);
-        state.profiles.warm[*slot].warm_transport_last_used =
-            std::chrono::steady_clock::now();
+    {
+        std::lock_guard lock(state.mutex);
+        auto slot = find_profile_slot(state.profiles, name);
+        if (slot && state.profiles.hot[*slot].config_generation == *generation &&
+            !state.profiles.hot[*slot].in_flight &&
+            !state.profiles.warm[*slot].warm_transport &&
+            detail::make_transport_binding(state.profiles.cold[*slot].config) ==
+                *binding) {
+            state.profiles.warm[*slot].warm_transport = std::move(returned);
+            state.profiles.warm[*slot].warm_transport_binding = *binding;
+            state.profiles.warm[*slot].warm_transport_last_used =
+                std::chrono::steady_clock::now();
+            return;
+        }
     }
+    // Destroy rejected transport outside state.mutex.
 }
 
 std::shared_ptr<history_storage::CommitCache>
@@ -252,8 +273,11 @@ inspect_web_request(DaemonSessionState& state, InspectionRequest request) {
                                .commit_cache = commit_cache.get(),
                                .allow_cached_commit = true});
         if (result) {
-            return_warm_transport(
-                state, name, lease.generation, std::move(lease.transport));
+            return_warm_transport(state,
+                                  name,
+                                  lease.generation,
+                                  lease.binding,
+                                  std::move(lease.transport));
         }
         return result;
     };
@@ -297,8 +321,11 @@ inspect_commit_pair_web_request(DaemonSessionState& state,
         std::move(from_commit_id),
         std::move(to_commit_id));
     if (result) {
-        return_warm_transport(
-            state, name, lease.generation, std::move(lease.transport));
+        return_warm_transport(state,
+                              name,
+                              lease.generation,
+                              lease.binding,
+                              std::move(lease.transport));
     }
     return result;
 }
@@ -326,16 +353,17 @@ open_web_download(DaemonSessionState& state, InspectionRequest request) {
     if (!opened)
         return std::unexpected(opened.error());
     const auto generation = lease.generation;
+    const auto binding = lease.binding;
     return std::shared_ptr<RemoteDownloadSession>(
         new RemoteDownloadSession(std::move(*opened)),
-        [&state, name, generation](RemoteDownloadSession* ptr) {
+        [&state, name, generation, binding](RemoteDownloadSession* ptr) {
             if (!ptr)
                 return;
             if (auto returned = take_remote_download_transport(*ptr);
                 returned && transport::valid(*returned) &&
                 transport::check_health(*returned)) {
                 return_warm_transport(
-                    state, name, generation, std::move(*returned));
+                    state, name, generation, binding, std::move(*returned));
             }
             delete ptr;
         });
@@ -369,8 +397,11 @@ fetch_remote_thumbnail_source_web_request(DaemonSessionState& state,
          .commit_cache = commit_cache.get()},
         req);
     if (result) {
-        return_warm_transport(
-            state, name, lease.generation, std::move(lease.transport));
+        return_warm_transport(state,
+                              name,
+                              lease.generation,
+                              lease.binding,
+                              std::move(lease.transport));
     }
     return result;
 }
@@ -1084,6 +1115,36 @@ void register_daemon_routes(httplib::Server& server,
         });
 }
 
+// A daemon must own its listening address. httplib's default allows other
+// listeners to bind the same port on some platforms.
+int bind_listener(httplib::Server& server,
+                  const std::string& address,
+                  int port) {
+    server.set_socket_options([](socket_t socket) {
+#ifdef _WIN32
+        if (!httplib::set_socket_opt(
+                socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1)) {
+            const auto error = WSAGetLastError();
+            // httplib has not taken ownership of this socket when its options
+            // callback throws.
+            closesocket(socket);
+            throw std::system_error(error, std::system_category());
+        }
+#else
+        // Permit restart after close without SO_REUSEPORT on live listeners.
+        httplib::set_socket_opt(socket, SOL_SOCKET, SO_REUSEADDR, 1);
+#endif
+    });
+    try {
+        if (port == 0) {
+            return server.bind_to_any_port(address);
+        }
+        return server.bind_to_port(address, port) ? port : -1;
+    } catch (const std::system_error&) {
+        return -1;
+    }
+}
+
 } // namespace
 
 std::expected<void, DaemonError> start_ipc_server(DaemonSessionState& state) {
@@ -1094,7 +1155,7 @@ std::expected<void, DaemonError> start_ipc_server(DaemonSessionState& state) {
             DaemonError{DaemonErrorCode::ConfigFailure, config.error()});
     auto server = std::make_unique<httplib::Server>();
     register_daemon_routes(*server, state);
-    const int bound_port = server->bind_to_any_port("127.0.0.1");
+    const int bound_port = bind_listener(*server, "127.0.0.1", 0);
     if (bound_port <= 0 || bound_port > 65535) {
         return std::unexpected(DaemonError{
             .code = DaemonErrorCode::IpcFailure,
@@ -1124,11 +1185,7 @@ std::expected<void, DaemonError> start_ipc_server(DaemonSessionState& state) {
     if (separate) {
         auto web = std::make_unique<httplib::Server>();
         register_daemon_routes(*web, state);
-        int port = config->port;
-        if (port == 0)
-            port = web->bind_to_any_port(config->bind);
-        else if (!web->bind_to_port(config->bind, port))
-            port = -1;
+        const int port = bind_listener(*web, config->bind, config->port);
         if (port <= 0)
             return std::unexpected(
                 DaemonError{DaemonErrorCode::IpcFailure,

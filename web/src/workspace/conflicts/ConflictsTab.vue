@@ -137,7 +137,8 @@ async function handleResolve(choice, dryRun) {
     if (dryRun) {
       dryRunPreview.value = res
     } else {
-      pushToast(`Resolved conflict: ${targetPath}`, 'ok')
+      const recovery = res?.recovery_directory
+      pushToast(recovery ? `Resolved ${targetPath}. Other versions are in ${recovery}.` : `Resolved conflict: ${targetPath}`, 'ok')
       emit('updated')
       await loadConflicts()
     }
