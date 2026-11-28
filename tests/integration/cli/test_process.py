@@ -1312,7 +1312,7 @@ class CliProcessTest(unittest.TestCase):
         remote = self.root / "v026-remote"
         local.mkdir()
 
-        # profile create --verify fails closed and rolls back when remote path is a file
+        # profile create --verify verifies the candidate before creating any profile state
         blocked_remote = self.root / "not-a-directory"
         blocked_remote.write_text("file", encoding="utf-8")
         verify_fail = self.invoke_raw(
@@ -1323,6 +1323,8 @@ class CliProcessTest(unittest.TestCase):
             "--verify", "--json",
         )
         self.assertEqual(verify_fail.returncode, 1)
+        self.assertFalse((self.root / "kasumi" / "config.toml").exists())
+        self.assertFalse((self.root / "kasumi" / "profiles" / "bad").exists())
         self.assertEqual(self.invoke_raw("list").stdout.decode("utf-8").strip(), "")
 
         # profile create --verify with --bwlimit / --concurrency succeeds
@@ -1653,6 +1655,107 @@ class CliProcessTest(unittest.TestCase):
         finally:
             stop_res = self.invoke_raw("stop", "--json", environment=env)
             self.assertEqual(stop_res.returncode, 0, stop_res.stdout + stop_res.stderr)
+
+    def test_ignore_init_without_force_is_atomic_across_concurrent_processes(self) -> None:
+        import threading
+
+        local_dir = self.root / "ignore_race_local"
+        remote_dir = self.root / "ignore_race_remote"
+        local_dir.mkdir(parents=True, exist_ok=True)
+        remote_dir.mkdir(parents=True, exist_ok=True)
+
+        created = self.invoke_raw(
+            "profile",
+            "create",
+            "race",
+            "--local",
+            str(local_dir),
+            "--remote",
+            str(remote_dir),
+            "--key-storage",
+            "file",
+            "--json",
+        )
+        self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
+
+        ignore_file = local_dir / ".kasumiignore"
+        for _ in range(5):
+            if ignore_file.exists():
+                ignore_file.unlink()
+            barrier = threading.Barrier(2)
+            results: list[subprocess.CompletedProcess[bytes] | None] = [None, None]
+            presets = ["dev", "office"]
+
+            def run_init(index: int) -> None:
+                barrier.wait(timeout=10)
+                results[index] = self.invoke_raw(
+                    "ignore",
+                    "init",
+                    "race",
+                    "--preset",
+                    presets[index],
+                    "--json",
+                )
+
+            threads = [
+                threading.Thread(target=run_init, args=(0,)),
+                threading.Thread(target=run_init, args=(1,)),
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+
+            assert results[0] is not None and results[1] is not None
+            exit_codes = [results[0].returncode, results[1].returncode]
+            self.assertEqual(sorted(exit_codes), [0, 1], f"results={results}")
+            winner_idx = 0 if results[0].returncode == 0 else 1
+            loser_idx = 1 - winner_idx
+
+            winner_payload = json.loads(results[winner_idx].stdout.decode("utf-8"))
+            self.assertTrue(winner_payload["data"]["created"])
+            self.assertFalse(winner_payload["data"]["overwritten"])
+            loser_payload = json.loads(results[loser_idx].stdout.decode("utf-8"))
+            self.assertEqual(loser_payload["error"]["code"], "already_exists")
+            self.assertEqual(
+                ignore_file.read_text(encoding="utf-8"),
+                winner_payload["data"]["content"],
+            )
+
+        preserved = ignore_file.read_text(encoding="utf-8")
+        dry_res = self.invoke_raw(
+            "ignore",
+            "init",
+            "race",
+            "--preset",
+            "minimal",
+            "--dry-run",
+            "--json",
+        )
+        self.assertEqual(dry_res.returncode, 0, dry_res.stdout + dry_res.stderr)
+        dry_payload = json.loads(dry_res.stdout.decode("utf-8"))
+        self.assertFalse(dry_payload["data"]["created"])
+        self.assertFalse(dry_payload["data"]["overwritten"])
+        self.assertTrue(dry_payload["data"]["dry_run"])
+        self.assertEqual(ignore_file.read_text(encoding="utf-8"), preserved)
+
+        forced_res = self.invoke_raw(
+            "ignore",
+            "init",
+            "race",
+            "--preset",
+            "minimal",
+            "--force",
+            "--json",
+        )
+        self.assertEqual(forced_res.returncode, 0, forced_res.stdout + forced_res.stderr)
+        forced_payload = json.loads(forced_res.stdout.decode("utf-8"))
+        self.assertFalse(forced_payload["data"]["created"])
+        self.assertTrue(forced_payload["data"]["overwritten"])
+        self.assertEqual(
+            ignore_file.read_text(encoding="utf-8"),
+            forced_payload["data"]["content"],
+        )
 
 
 if __name__ == "__main__":

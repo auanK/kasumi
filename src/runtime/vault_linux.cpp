@@ -1307,11 +1307,13 @@ write_vault(const std::filesystem::path& key_path, const KeyBytes& clear_key) {
 }
 
 std::expected<void, runtime::Error>
-delete_vault(const std::filesystem::path& key_path) {
+delete_vault(const std::filesystem::path& key_path, bool require_backend) {
     const std::lock_guard<std::mutex> lock{linux_vault_mutex()};
     std::string reason;
     const auto backend = select_linux_backend(reason);
     if (backend == LinuxBackend::None) {
+        if (require_backend)
+            return fail(ErrorCode::IoFailure, std::move(reason));
         return {};
     }
     const auto target = linux_vault_target_name(key_path);

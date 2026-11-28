@@ -58,7 +58,8 @@ write_vault(const std::filesystem::path& key_path, const KeyBytes& clear_key);
 
 // Removes the key from the OS credential vault (no-op if absent).
 std::expected<void, runtime::Error>
-delete_vault(const std::filesystem::path& key_path);
+delete_vault(const std::filesystem::path& key_path,
+             bool require_backend = false);
 
 // Derives the key from password and reproducible password salt.
 std::expected<KeyBytes, runtime::Error> derive(std::string_view password,

@@ -9,6 +9,7 @@
 #include "crypto/content.hpp"
 #include "crypto/secure_memory.hpp"
 #include "platform/cancellation.hpp"
+#include "platform/durability.hpp"
 #include "platform/path.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/profile_lock.hpp"
@@ -242,6 +243,26 @@ EntryInfo query_entry(const std::filesystem::path& path) {
         info.size = size;
     }
     return info;
+}
+
+// Config writers hold config.lock while consulting or changing this
+// reservation.
+std::filesystem::path deletion_intent(const ExecutionEnvironment& environment,
+                                      std::string_view name) {
+    return environment.app_data_dir /
+           ("profile-" + runtime::fold_profile_name(name) + ".delete-pending");
+}
+
+std::expected<void, ProfileError>
+check_deletion_reservation(const ExecutionEnvironment& environment,
+                           std::string_view name) {
+    if (query_entry(deletion_intent(environment, name)).state !=
+        EntryState::Absent) {
+        return fail_profile(
+            ProfileErrorCode::StorageFailure,
+            "profile deletion is pending; retry profile delete");
+    }
+    return {};
 }
 
 enum class LockProbe {
@@ -1017,9 +1038,13 @@ create_profile(const ExecutionEnvironment& environment,
                 *master_key_res);
             if (!checked)
                 return std::unexpected(checked.error());
-            if (!checked->ready)
-                return fail_profile(ProfileErrorCode::CredentialFailure,
-                                    checked->detail);
+            if (!checked->ready) {
+                const auto code = checked->vault_state ==
+                                          RemoteVaultState::KeyMismatchOrInvalidHistory
+                                      ? ProfileErrorCode::CredentialFailure
+                                      : ProfileErrorCode::StorageFailure;
+                return fail_profile(code, checked->detail);
+            }
         }
 
         auto loaded = load_profiles_locked(environment.app_data_dir, true);
@@ -1035,6 +1060,11 @@ create_profile(const ExecutionEnvironment& environment,
                                 "profile already exists");
         }
 
+        if (auto available =
+                check_deletion_reservation(environment, profile.name);
+            !available) {
+            return available;
+        }
         auto paths_res = runtime::resolve_profile_paths(
             environment.app_data_dir, profile.name);
         if (!paths_res) {
@@ -1046,6 +1076,11 @@ create_profile(const ExecutionEnvironment& environment,
             return fail_profile(
                 ProfileErrorCode::StorageFailure,
                 "profile infrastructure already exists on disk");
+        }
+
+        if (verify && platform::cancellation::requested()) {
+            return fail_profile(ProfileErrorCode::StorageFailure,
+                                "profile verification cancelled");
         }
 
         auto ensure_res = runtime::ensure_profile_directory(*paths_res);
@@ -1215,6 +1250,10 @@ update_profile(const ExecutionEnvironment& environment,
         return fail_profile(ProfileErrorCode::NotFound, "profile not found");
     }
 
+    if (auto available = check_deletion_reservation(environment, profile.name);
+        !available) {
+        return available;
+    }
     const auto settings = [](const Profile& p) {
         return std::tie(p.name,
                         p.local_dir,
@@ -1455,42 +1494,106 @@ delete_profile(const ExecutionEnvironment& environment,
         return std::unexpected(loaded.error());
     }
 
+    auto paths =
+        runtime::resolve_profile_paths(environment.app_data_dir, profile_name);
+    if (!paths) {
+        return std::unexpected(map_runtime_error(paths.error()));
+    }
+    const auto intent = deletion_intent(environment, profile_name);
+    const auto retired =
+        paths->profile_dir.parent_path() /
+        (".retired-" + runtime::fold_profile_name(profile_name));
+    const auto pending = query_entry(intent);
     auto it = find_profile(loaded->profiles, profile_name);
-    if (it == loaded->profiles.end()) {
+    if (it == loaded->profiles.end() && pending.state == EntryState::Absent) {
         return fail_profile(ProfileErrorCode::NotFound, "profile not found");
     }
-
     auto profile_lock = acquire_target_profile_lock(environment, profile_name);
     if (!profile_lock) {
         return std::unexpected(profile_lock.error());
     }
 
-    auto original_profiles = loaded->profiles;
-    loaded->profiles.erase(it);
-
-    auto save_res =
-        runtime::save_profiles(loaded->config_path, loaded->profiles);
-    if (!save_res) {
-        return std::unexpected(map_runtime_error(save_res.error()));
+    namespace ps = platform::private_storage;
+    const auto failure = [](std::string detail) {
+        return fail_profile(ProfileErrorCode::StorageFailure,
+                            std::move(detail));
+    };
+    bool requires_vault = false;
+    if (pending.state == EntryState::Absent) {
+        if (query_entry(retired).state != EntryState::Absent) {
+            return failure("unexpected retired profile directory");
+        }
+        requires_vault = it->key_storage == runtime::KeyStorage::Vault;
+        const auto record =
+            std::string(requires_vault ? "V" : "P").append(profile_name);
+        if (auto saved = ps::write_atomically(intent, record); !saved) {
+            return failure(saved.error());
+        }
+    } else {
+        auto input = ps::open_regular_file(intent);
+        std::vector<std::uint8_t> recorded(profile_name.size() + 1);
+        if (!input || input->size != recorded.size() ||
+            !ps::read_regular_file_exact(*input, recorded) ||
+            (recorded.front() != 'V' && recorded.front() != 'P') ||
+            !std::ranges::equal(std::span(recorded).subspan(1), profile_name)) {
+            return failure("invalid deletion intent or profile name spelling");
+        }
+        requires_vault = recorded.front() == 'V';
     }
 
-    auto paths_res =
-        runtime::resolve_profile_paths(environment.app_data_dir, profile_name);
-    if (paths_res) {
-        auto remove_res = runtime::remove_profile_directory(*paths_res);
-        if (!remove_res) {
-            auto rollback_res =
-                runtime::save_profiles(loaded->config_path, original_profiles);
-            std::string detail = remove_res.error().detail;
-            if (!rollback_res) {
-                detail +=
-                    " (config rollback failed: " + rollback_res.error().detail +
-                    ")";
-            }
-            return fail_profile(ProfileErrorCode::StorageFailure, detail);
+    // Removing the configuration commits the deletion. Until then the
+    // active database and credentials are intact. Retry cleanup by name.
+    if (it != loaded->profiles.end()) {
+        loaded->profiles.erase(it);
+        if (auto saved =
+                runtime::save_profiles(loaded->config_path, loaded->profiles);
+            !saved) {
+            return std::unexpected(map_runtime_error(saved.error()));
         }
     }
-
+    // A previous save may have installed the config but failed its directory
+    // flush.
+    if (auto synced = platform::durability::sync_parent_directory(intent);
+        !synced) {
+        return failure(synced.error());
+    }
+    if (query_entry(paths->profile_dir).state != EntryState::Absent) {
+        if (auto moved = platform::durability::retire_directory(
+                paths->profile_dir, retired);
+            !moved) {
+            return failure(moved.error());
+        }
+    }
+    if (auto erased =
+            runtime::vault::delete_vault(paths->key_path, requires_vault);
+        !erased) {
+        return std::unexpected(map_runtime_error(erased.error()));
+    }
+    if (query_entry(retired).state != EntryState::Absent) {
+        if (auto secured = ps::protect_tree(retired); !secured) {
+            return failure(secured.error());
+        }
+        std::error_code ec;
+        std::filesystem::remove_all(retired, ec);
+        if (ec) {
+            return failure(ec.message());
+        }
+    }
+    if (query_entry(retired.parent_path()).state != EntryState::Absent) {
+        if (auto synced = platform::durability::sync_parent_directory(retired);
+            !synced) {
+            return failure(synced.error());
+        }
+    }
+    std::error_code ec;
+    std::filesystem::remove(intent, ec);
+    if (ec) {
+        return failure(ec.message());
+    }
+    if (auto synced = platform::durability::sync_parent_directory(intent);
+        !synced) {
+        return failure(synced.error());
+    }
     return {};
 }
 
@@ -1520,6 +1623,12 @@ rename_profile(const ExecutionEnvironment& environment,
                             "a profile with this name already exists");
     }
 
+    for (auto name : {current_name, new_name}) {
+        if (auto available = check_deletion_reservation(environment, name);
+            !available) {
+            return available;
+        }
+    }
     const bool case_only = runtime::fold_profile_name(current_name) ==
                            runtime::fold_profile_name(new_name);
     const auto first_lock_name =
@@ -1672,6 +1781,11 @@ clone_profile(const ExecutionEnvironment& environment,
                             "a profile with this name already exists");
     }
 
+    if (auto available =
+            check_deletion_reservation(environment, destination_profile_name);
+        !available) {
+        return available;
+    }
     auto source_paths_res = runtime::resolve_profile_paths(
         environment.app_data_dir, source_profile_name);
     if (!source_paths_res) {
