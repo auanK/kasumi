@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <new>
 #include <system_error>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -55,8 +56,18 @@ std::filesystem::path objects_directory(const State& state) {
 
 namespace {
 
+constexpr std::string_view local_staging_dir_name = ".kasumi-staging";
+
 bool valid_identifier(std::string_view identifier) noexcept {
     return detail::valid_relative_identifier(identifier, false);
+}
+
+bool is_reserved_staging_identifier(std::string_view identifier) noexcept {
+    const auto normalized =
+        platform::path::from_utf8(identifier).lexically_normal();
+    return !normalized.empty() &&
+           platform::path::to_utf8(*normalized.begin()) ==
+               local_staging_dir_name;
 }
 
 Result reparse_rejected_error(std::string_view context) {
@@ -95,7 +106,8 @@ std::expected<State*, Error> ready_local(void* context) {
 
 std::expected<std::filesystem::path, Error>
 resolve_object_path(const State& state, std::string_view identifier) {
-    if (!valid_identifier(identifier)) {
+    if (!valid_identifier(identifier) ||
+        is_reserved_staging_identifier(identifier)) {
         return std::unexpected(invalid_identifier_error());
     }
     const auto base = objects_directory(state);
@@ -137,9 +149,11 @@ Result ensure_parent_directory(const std::filesystem::path& path) {
     return {};
 }
 
-Result copy_file_overwrite(const std::filesystem::path& source,
-                           const std::filesystem::path& destination,
-                           const TransportProgressCallback& callback) {
+Result copy_file_overwrite(
+    const std::filesystem::path& source,
+    const std::filesystem::path& destination,
+    const TransportProgressCallback& callback,
+    const std::filesystem::path* staging_directory = nullptr) {
     std::error_code error;
     if (platform::private_storage::is_reparse_or_symlink(source)) {
         return reparse_rejected_error(
@@ -164,17 +178,34 @@ Result copy_file_overwrite(const std::filesystem::path& source,
         return std::unexpected(detail::make_error(
             ErrorCode::Io, "could not generate temporary filename", 0));
     }
-    auto staging = destination;
-    staging += ".kasumi-tmp-" + *nonce;
+    std::filesystem::path staging;
+    if (staging_directory != nullptr) {
+        if (platform::private_storage::is_reparse_or_symlink(
+                *staging_directory)) {
+            return reparse_rejected_error(
+                "local storage staging directory cannot be a symlink or "
+                "reparse point");
+        }
+        error.clear();
+        std::filesystem::create_directories(*staging_directory, error);
+        if (error) {
+            return std::unexpected(make_error(error));
+        }
+        staging = *staging_directory / ("put-" + *nonce + ".tmp");
+    } else {
+        staging = destination;
+        staging += ".kasumi-tmp-" + *nonce;
+    }
 
     struct TempGuard {
         const std::filesystem::path& path;
         bool active = true;
         ~TempGuard() noexcept {
-            if (active) {
-                std::error_code cleanup_error;
-                std::filesystem::remove(path, cleanup_error);
+            if (!active) {
+                return;
             }
+            std::error_code cleanup_error;
+            std::filesystem::remove(path, cleanup_error);
         }
     } guard{staging};
 
@@ -183,6 +214,13 @@ Result copy_file_overwrite(const std::filesystem::path& source,
         namespace ps = platform::private_storage;
         guard.active = false;
         auto output = ps::create_private_file(staging);
+        for (int attempt = 0;
+             attempt < 4 && !output && staging_directory != nullptr;
+             ++attempt) {
+            std::error_code dir_err;
+            std::filesystem::create_directories(*staging_directory, dir_err);
+            output = ps::create_private_file(staging);
+        }
         if (!output) {
             return std::unexpected(
                 detail::make_error(ErrorCode::Io, output.error().message, 0));
@@ -240,6 +278,12 @@ Result copy_file_overwrite(const std::filesystem::path& source,
                 break;
             }
             win_err = GetLastError();
+            if (win_err == ERROR_PATH_NOT_FOUND &&
+                staging_directory != nullptr && attempt < 4) {
+                std::error_code dir_err;
+                std::filesystem::create_directories(*staging_directory, dir_err);
+                continue;
+            }
             if (attempt == 5 || (win_err != ERROR_SHARING_VIOLATION &&
                                  win_err != ERROR_LOCK_VIOLATION &&
                                  win_err != ERROR_ACCESS_DENIED)) {
@@ -266,9 +310,17 @@ Result copy_file_overwrite(const std::filesystem::path& source,
                 static_cast<int>(GetLastError()), std::system_category())));
         }
 #else
-        error.clear();
-        std::filesystem::copy_file(
-            source, staging, std::filesystem::copy_options::none, error);
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            error.clear();
+            std::filesystem::copy_file(
+                source, staging, std::filesystem::copy_options::none, error);
+            if (error != std::errc::no_such_file_or_directory ||
+                staging_directory == nullptr) {
+                break;
+            }
+            std::error_code dir_err;
+            std::filesystem::create_directories(*staging_directory, dir_err);
+        }
         if (error) {
             if (error == std::errc::file_exists) {
                 guard.active = false;
@@ -281,9 +333,24 @@ Result copy_file_overwrite(const std::filesystem::path& source,
         return std::unexpected(
             detail::make_error(ErrorCode::Io, synced.error(), 0));
     }
-    if (const auto replaced =
-            platform::durability::replace_atomically(staging, destination);
-        !replaced) {
+    if (staging_directory != nullptr) {
+        if (const auto synced_staging =
+                platform::durability::sync_parent_directory(staging);
+            !synced_staging) {
+            return std::unexpected(
+                detail::make_error(ErrorCode::Io, synced_staging.error(), 0));
+        }
+        if (const auto moved = platform::durability::move_regular_file(
+                staging,
+                destination,
+                platform::durability::ExistingTarget::Replace);
+            !moved) {
+            return std::unexpected(
+                detail::make_error(ErrorCode::Io, moved.error(), 0));
+        }
+    } else if (const auto replaced = platform::durability::replace_atomically(
+                   staging, destination);
+               !replaced) {
         return std::unexpected(
             detail::make_error(ErrorCode::Io, replaced.error(), 0));
     }
@@ -301,7 +368,10 @@ Result copy_file_overwrite(const std::filesystem::path& source,
 
 template <typename Iterator, typename Fn>
 std::expected<void, Error> scan_regular_entries(
-    const std::filesystem::path& base, bool use_filename_only, Fn&& on_entry) {
+    const std::filesystem::path& base,
+    bool use_filename_only,
+    Fn&& on_entry,
+    const std::filesystem::path* excluded_top_level_dir = nullptr) {
     if (platform::private_storage::is_reparse_or_symlink(base)) {
         return std::unexpected(detail::make_error(
             ErrorCode::InvalidContext,
@@ -327,6 +397,15 @@ std::expected<void, Error> scan_regular_entries(
                 ErrorCode::InvalidContext,
                 "local storage cannot traverse a symlink or reparse point",
                 0));
+        }
+        if (excluded_top_level_dir != nullptr &&
+            iterator->path() == *excluded_top_level_dir) {
+            if constexpr (std::is_same_v<
+                              Iterator,
+                              std::filesystem::recursive_directory_iterator>) {
+                iterator.disable_recursion_pending();
+            }
+            continue;
         }
         const bool regular = iterator->is_regular_file(error);
         if (error) {
@@ -354,8 +433,10 @@ std::expected<void, Error> scan_regular_entries(
 }
 
 template <typename Iterator>
-ListingResult scan_directory(const std::filesystem::path& base,
-                             bool use_filename_only) {
+ListingResult scan_directory(
+    const std::filesystem::path& base,
+    bool use_filename_only,
+    const std::filesystem::path* excluded_top_level_dir = nullptr) {
     std::vector<std::string> identifiers;
     auto scanned = scan_regular_entries<Iterator>(
         base,
@@ -364,7 +445,8 @@ ListingResult scan_directory(const std::filesystem::path& base,
             std::string identifier) -> std::expected<void, Error> {
             identifiers.push_back(std::move(identifier));
             return {};
-        });
+        },
+        excluded_top_level_dir);
     if (!scanned) {
         return std::unexpected(scanned.error());
     }
@@ -386,7 +468,11 @@ Result local_put_progress(void* context,
                           const std::filesystem::path& source,
                           std::string_view identifier,
                           const TransportProgressCallback& callback) {
-    auto destination = resolve_ready_path(context, identifier);
+    auto state = ready_local(context);
+    if (!state) {
+        return std::unexpected(state.error());
+    }
+    auto destination = resolve_object_path(**state, identifier);
     if (!destination) {
         return std::unexpected(destination.error());
     }
@@ -404,7 +490,41 @@ Result local_put_progress(void* context,
     if (auto parent = ensure_parent_directory(*destination); !parent) {
         return parent;
     }
-    return copy_file_overwrite(source, *destination, callback);
+    const auto staging_dir = objects_directory(**state) / local_staging_dir_name;
+    struct StagingDirLease {
+        State& state;
+        const std::filesystem::path& staging_dir;
+        bool acquired = false;
+        ~StagingDirLease() noexcept {
+            if (!acquired) {
+                return;
+            }
+            std::lock_guard lock(state.staging_dir_mutex);
+            if (state.active_staging_puts > 0) {
+                --state.active_staging_puts;
+            }
+            if (state.active_staging_puts == 0) {
+                std::error_code ec;
+                std::filesystem::remove(staging_dir, ec);
+            }
+        }
+    } staging_lease{**state, staging_dir};
+    {
+        std::lock_guard lock((**state).staging_dir_mutex);
+        if (platform::private_storage::is_reparse_or_symlink(staging_dir)) {
+            return reparse_rejected_error(
+                "local storage staging directory cannot be a symlink or "
+                "reparse point");
+        }
+        error.clear();
+        std::filesystem::create_directories(staging_dir, error);
+        if (error) {
+            return std::unexpected(make_error(error));
+        }
+        ++(**state).active_staging_puts;
+        staging_lease.acquired = true;
+    }
+    return copy_file_overwrite(source, *destination, callback, &staging_dir);
 }
 
 Result local_get_progress(void* context,
@@ -456,8 +576,9 @@ ListingResult local_list(void* context) {
     if (!std::filesystem::exists(base, error)) {
         return std::unexpected(error ? make_error(error) : storage_not_found());
     }
-    return scan_directory<std::filesystem::recursive_directory_iterator>(base,
-                                                                         false);
+    const auto staging_dir = base / local_staging_dir_name;
+    return scan_directory<std::filesystem::recursive_directory_iterator>(
+        base, false, &staging_dir);
 }
 
 MetadataListingResult local_list_metadata(void* context) {
@@ -470,6 +591,7 @@ MetadataListingResult local_list_metadata(void* context) {
     if (!std::filesystem::exists(base, error)) {
         return std::unexpected(error ? make_error(error) : storage_not_found());
     }
+    const auto staging_dir = base / local_staging_dir_name;
     std::vector<ObjectMetadata> entries;
     auto scanned =
         scan_regular_entries<std::filesystem::recursive_directory_iterator>(
@@ -494,7 +616,8 @@ MetadataListingResult local_list_metadata(void* context) {
                 }
                 entries.push_back(std::move(meta));
                 return {};
-            });
+            },
+            &staging_dir);
     if (!scanned) {
         return std::unexpected(scanned.error());
     }
@@ -507,7 +630,7 @@ ListingResult local_list_prefix(void* context, std::string_view prefix) {
     if (!state) {
         return std::unexpected(state.error());
     }
-    if (!valid_identifier(prefix)) {
+    if (!valid_identifier(prefix) || is_reserved_staging_identifier(prefix)) {
         return std::unexpected(invalid_identifier_error());
     }
     const auto normalized =

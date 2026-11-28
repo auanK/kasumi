@@ -457,6 +457,41 @@ std::optional<TransferItemProgress> transfer_item(const nlohmann::json& stats,
     return std::nullopt;
 }
 
+bool stop_orphan_async_group(State& state, std::string_view group) noexcept {
+    try {
+        using namespace std::chrono_literals;
+        const nlohmann::json body{{"group", group}};
+        const auto dumped = body.dump();
+        const auto stopped =
+            post_rc(state,
+                    "job/stopgroup",
+                    dumped,
+                    maximum_response_size,
+                    1s,
+                    false);
+        bool confirmed = false;
+        if (stopped.has_value()) {
+            confirmed = true;
+        } else if (stopped.error().message.ends_with(": job not found") ||
+                   stopped.error().message.ends_with(": group not found") ||
+                   stopped.error().message == "job not found" ||
+                   stopped.error().message == "group not found") {
+            confirmed = true;
+        }
+        if (confirmed) {
+            static_cast<void>(post_rc(state,
+                                      "core/stats-delete",
+                                      dumped,
+                                      maximum_response_size,
+                                      1s,
+                                      false));
+        }
+        return confirmed;
+    } catch (...) {
+        return false;
+    }
+}
+
 Result run_copy(State& state,
                 std::string_view endpoint,
                 nlohmann::json payload,
@@ -500,6 +535,12 @@ Result run_copy(State& state,
             error.native_code == 0) {
             error.code = ErrorCode::BackendUnavailable;
         }
+        if (!stop_orphan_async_group(state, group)) {
+            error.message += "; rclone async job termination could not be confirmed";
+            if (!read_only && state.process_started) {
+                state.ready = false;
+            }
+        }
         return std::unexpected(std::move(error));
     }
     if (submitted->is_object() && !submitted->contains("jobid")) {
@@ -513,8 +554,15 @@ Result run_copy(State& state,
     }
     const auto job_id = nonnegative_integer(*submitted, "jobid");
     if (!job_id) {
-        return std::unexpected(
-            make_error(ErrorCode::BackendUnavailable, "invalid async job id"));
+        auto error = make_error(ErrorCode::BackendUnavailable,
+                                "invalid async job id");
+        if (!stop_orphan_async_group(state, group)) {
+            error.message += "; rclone async job termination could not be confirmed";
+            if (!read_only && state.process_started) {
+                state.ready = false;
+            }
+        }
+        return std::unexpected(std::move(error));
     }
 
     const nlohmann::json job{{"jobid", *job_id}};
@@ -626,6 +674,9 @@ Result run_copy(State& state,
     const auto fail = [&](Error error) -> Result {
         if (!finish_cleanup()) {
             error.message += "; rclone job termination could not be confirmed";
+            if (!read_only && state.process_started) {
+                state.ready = false;
+            }
         }
         return std::unexpected(std::move(error));
     };
