@@ -120,9 +120,15 @@ struct CreateFileError {
 std::expected<PrivateOutputFile, CreateFileError>
 create_private_file(const std::filesystem::path& path);
 
+enum class PublishMode {
+    Replace,
+    CreateOnly
+};
+
 std::expected<void, std::string>
 publish_private_file(PrivateOutputFile& file,
-                     const std::filesystem::path& target_path);
+                     const std::filesystem::path& target_path,
+                     PublishMode mode = PublishMode::Replace);
 
 std::expected<void, std::string>
 write_private_file(PrivateOutputFile& file, const void* data, std::size_t size);
@@ -155,8 +161,17 @@ std::expected<void, std::string> create_file(const std::filesystem::path& path);
 std::expected<void, std::string>
 protect_file(const std::filesystem::path& path);
 
+struct CreateAtomicError {
+    bool already_exists = false;
+    std::string message;
+};
+
 std::expected<void, std::string>
 write_atomically(const std::filesystem::path& path, std::string_view bytes);
+
+std::expected<void, CreateAtomicError>
+write_atomically_without_overwrite(const std::filesystem::path& path,
+                                   std::string_view bytes);
 
 enum class StreamErrorKind {
     NotFound,

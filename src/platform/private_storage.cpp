@@ -1001,7 +1001,8 @@ query_directory_identity(const std::filesystem::path& path) noexcept {
 
 std::expected<void, std::string>
 publish_private_file(PrivateOutputFile& file,
-                     const std::filesystem::path& target_path) {
+                     const std::filesystem::path& target_path,
+                     PublishMode mode) {
     if (!is_private_file_open(file)) {
         return std::unexpected("private file is not open");
     }
@@ -1029,8 +1030,11 @@ publish_private_file(PrivateOutputFile& file,
         return std::unexpected(windows_error("FlushFileBuffers failed", code));
     }
 
-    if (const auto code =
-            detail::rename_windows_handle(h, target_path, FileRenameInfo, TRUE);
+    if (const auto code = detail::rename_windows_handle(
+            h,
+            target_path,
+            FileRenameInfo,
+            mode == PublishMode::Replace ? TRUE : FALSE);
         code != ERROR_SUCCESS) {
         return std::unexpected(
             windows_error("SetFileInformationByHandle rename failed", code));
@@ -1065,7 +1069,14 @@ publish_private_file(PrivateOutputFile& file,
     }
 
     std::error_code rename_err;
-    std::filesystem::rename(file.path, target_path, rename_err);
+    if (mode == PublishMode::CreateOnly) {
+        auto installed =
+            durability::install_without_overwrite(file.path, target_path);
+        if (!installed)
+            return std::unexpected(installed.error().message());
+    } else {
+        std::filesystem::rename(file.path, target_path, rename_err);
+    }
     if (rename_err) {
         return std::unexpected(rename_err.message());
     }
@@ -1248,6 +1259,87 @@ write_atomically(const std::filesystem::path& path, std::string_view bytes) {
         return durability::sync_parent_directory(path);
     }
     return std::unexpected("could not reserve temporary file");
+}
+
+namespace {
+
+bool is_destination_exists_error(const std::error_code& ec) noexcept {
+    if (ec == std::errc::file_exists) {
+        return true;
+    }
+#if defined(_WIN32)
+    if (ec.category() == std::system_category() &&
+        (ec.value() == ERROR_ALREADY_EXISTS ||
+         ec.value() == ERROR_FILE_EXISTS)) {
+        return true;
+    }
+#endif
+    return false;
+}
+
+} // namespace
+
+std::expected<void, CreateAtomicError>
+write_atomically_without_overwrite(const std::filesystem::path& path,
+                                   std::string_view bytes) {
+    if (path.empty() || path.parent_path().empty()) {
+        return std::unexpected(
+            CreateAtomicError{.message = "invalid private path"});
+    }
+    if (auto parent = protect_directory(path.parent_path()); !parent) {
+        return std::unexpected(
+            CreateAtomicError{.message = std::move(parent.error())});
+    }
+
+    for (std::size_t attempt = 0; attempt < 16; ++attempt) {
+        auto id = random::hex_id();
+        if (!id) {
+            return std::unexpected(
+                CreateAtomicError{.message = std::move(id.error())});
+        }
+        const auto temporary =
+            platform::path::temporary_sibling_path(path, ".", "." + *id);
+        auto file = create_private_file(temporary);
+        if (!file) {
+            if (file.error().is_collision) {
+                continue;
+            }
+            return std::unexpected(
+                CreateAtomicError{.message = std::move(file.error().message)});
+        }
+        if (auto written =
+                write_private_file(*file, bytes.data(), bytes.size());
+            !written) {
+            static_cast<void>(remove_private_file_if_owned(*file));
+            return std::unexpected(
+                CreateAtomicError{.message = std::move(written.error())});
+        }
+        if (auto flushed = flush_and_close_private_file(*file); !flushed) {
+            static_cast<void>(remove_private_file_if_owned(*file));
+            return std::unexpected(
+                CreateAtomicError{.message = std::move(flushed.error())});
+        }
+        if (auto installed =
+                durability::install_without_overwrite(temporary, path);
+            !installed) {
+            static_cast<void>(remove_private_file_if_owned(*file));
+            if (is_destination_exists_error(installed.error())) {
+                return std::unexpected(
+                    CreateAtomicError{.already_exists = true,
+                                      .message = "destination already exists"});
+            }
+            return std::unexpected(CreateAtomicError{
+                .message = system_error("could not install destination",
+                                        installed.error())});
+        }
+        if (auto synced = durability::sync_parent_directory(path); !synced) {
+            return std::unexpected(
+                CreateAtomicError{.message = std::move(synced.error())});
+        }
+        return {};
+    }
+    return std::unexpected(
+        CreateAtomicError{.message = "could not reserve temporary file"});
 }
 
 std::expected<RegularFileInput, StreamError>

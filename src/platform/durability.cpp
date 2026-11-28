@@ -281,10 +281,6 @@ bool same_parent_dir(const std::filesystem::path& source,
 std::expected<void, std::string>
 validate_replace_paths(const std::filesystem::path& source,
                        const std::filesystem::path& target) {
-    if (!same_parent_dir(source, target)) {
-        return std::unexpected(
-            "replace_atomically: source and target must share a valid parent");
-    }
     for (const auto& [path, dir, label] :
          {std::tuple{&source, false, "regular file"},
           std::tuple{&source, true, "parent directory"},
@@ -313,6 +309,19 @@ validate_replace_paths(const std::filesystem::path& source,
             "replace_atomically: target cannot be symlink, directory, or "
             "non-regular file");
     }
+#if defined(_WIN32)
+    const DWORD target_attributes = GetFileAttributesW(target.wstring().c_str());
+    if (target_attributes == INVALID_FILE_ATTRIBUTES) {
+        return std::unexpected(
+            native_error("replace_atomically: GetFileAttributesW failed",
+                         GetLastError()));
+    }
+    if ((target_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return std::unexpected(
+            "replace_atomically: target cannot be symlink, directory, or "
+            "non-regular file");
+    }
+#endif
     return {};
 }
 
@@ -321,9 +330,27 @@ validate_replace_paths(const std::filesystem::path& source,
 std::expected<void, std::string>
 replace_atomically(const std::filesystem::path& source,
                    const std::filesystem::path& target) {
+    if (!same_parent_dir(source, target)) {
+        return std::unexpected(
+            "replace_atomically: source and target must share a valid parent");
+    }
+    return move_regular_file(source, target, ExistingTarget::Replace);
+}
+
+std::expected<void, std::string>
+move_regular_file(const std::filesystem::path& source,
+                  const std::filesystem::path& target,
+                  ExistingTarget existing) {
     auto validation = validate_replace_paths(source, target);
     if (!validation) {
         return validation;
+    }
+
+    if (existing == ExistingTarget::Reject) {
+        if (auto ec = detail::rename_no_replace(source, target); ec) {
+            return std::unexpected(ec.message());
+        }
+        return {};
     }
 
 #if defined(_WIN32)
@@ -340,7 +367,8 @@ replace_atomically(const std::filesystem::path& source,
             // MoveFileEx may reject an open target despite delete sharing.
             // A single POSIX rename keeps those readers on the old snapshot.
             HANDLE file = INVALID_HANDLE_VALUE;
-            const auto open_error = detail::retry_windows_file_operation([&] {
+            bool can_flush = true;
+            DWORD open_error = detail::retry_windows_file_operation([&] {
                 file = CreateFileW(
                     source.c_str(),
                     GENERIC_READ | GENERIC_WRITE | DELETE,
@@ -352,6 +380,21 @@ replace_atomically(const std::filesystem::path& source,
                 return file == INVALID_HANDLE_VALUE ? GetLastError()
                                                     : ERROR_SUCCESS;
             });
+            if (open_error == ERROR_SHARING_VIOLATION) {
+                can_flush = false;
+                open_error = detail::retry_windows_file_operation([&] {
+                    file = CreateFileW(
+                        source.c_str(),
+                        DELETE | FILE_READ_ATTRIBUTES,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        nullptr,
+                        OPEN_EXISTING,
+                        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
+                        nullptr);
+                    return file == INVALID_HANDLE_VALUE ? GetLastError()
+                                                        : ERROR_SUCCESS;
+                });
+            }
             if (open_error != ERROR_SUCCESS) {
                 return std::unexpected(native_error(
                     "replace_atomically: open source failed", open_error));
@@ -370,7 +413,7 @@ replace_atomically(const std::filesystem::path& source,
                     "replace_atomically: source is not a regular file");
             }
             const auto rename_error =
-                FlushFileBuffers(file)
+                (!can_flush || FlushFileBuffers(file))
                     ? detail::rename_windows_handle(
                           file,
                           target,
