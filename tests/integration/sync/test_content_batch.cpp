@@ -16,6 +16,7 @@
 #include "core/transaction/types.hpp"
 #include "crypto/file_crypto.hpp"
 #include "crypto/pack.hpp"
+#include "crypto/physical_hash.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
@@ -60,6 +61,8 @@ struct ContentWindowProbe {
     std::size_t content_put_started = 0;
     std::size_t content_put_finished = 0;
     std::size_t content_get_count = 0;
+    std::uintmax_t content_get_bytes = 0;
+    std::filesystem::path content_hash_root;
     std::vector<std::size_t> content_get_batches;
     std::vector<std::size_t> content_get_parallelism;
     std::size_t active = 0;
@@ -84,6 +87,7 @@ struct ContentWindowProbe {
     bool physical_hash_transport_failure = false;
     bool physical_hash_batch_unsupported = false;
     bool physical_hash_batch_transport_failure = false;
+    bool omit_last_batch_result = false;
     bool barrier_first_four = false;
     bool barrier_first_four_gets = false;
     bool hold_first_until_fifth = false;
@@ -360,18 +364,26 @@ std::expected<std::string, kasumi::transport::Error> recording_physical_hash(
         }
     }
 
-    auto result =
-        probe != nullptr && probe->physical_hash_transport_failure &&
-                identifier.find('/') == std::string_view::npos
-            ? std::expected<
-                  std::string,
-                  kasumi::transport::
-                      Error>{std::unexpect,
-                             kasumi::transport::Error{
-                                 .code = kasumi::transport::ErrorCode::Io,
-                                 .message = "injected physical hash failure"}}
-            : kasumi::transport::physical_hash(
-                  *state->base, identifier, algorithm);
+    const auto query =
+        [&]() -> std::expected<std::string, kasumi::transport::Error> {
+        if (content_object && probe && probe->physical_hash_transport_failure) {
+            return std::unexpected(kasumi::transport::Error{
+                .code = kasumi::transport::ErrorCode::Io,
+                .message = "injected physical hash failure"});
+        }
+        if (content_object && probe && !probe->content_hash_root.empty()) {
+            return kasumi::crypto::physical::hash_file(
+                       probe->content_hash_root / identifier, algorithm)
+                .transform_error([](const std::string& detail) {
+                    return kasumi::transport::Error{
+                        .code = kasumi::transport::ErrorCode::Io,
+                        .message = detail};
+                });
+        }
+        return kasumi::transport::physical_hash(
+            *state->base, identifier, algorithm);
+    };
+    auto result = query();
     if (probe != nullptr && !probe->corrupt_physical_hash_identifier.empty() &&
         identifier.find(probe->corrupt_physical_hash_identifier) !=
             std::string_view::npos) {
@@ -440,6 +452,9 @@ kasumi::transport::PhysicalHashBatchResult recording_physical_hash_batch(
             report.matched.push_back(object.identifier);
         }
     }
+    if (probe && probe->omit_last_batch_result && !report.matched.empty()) {
+        report.matched.pop_back();
+    }
     return report;
 }
 
@@ -473,8 +488,10 @@ recording_get(void* context,
         probe->failed_get_ordinal == ordinal
             ? kasumi::transport::Result{std::unexpect, injected_put_error()}
             : kasumi::transport::get(*state->base, identifier, destination);
+    const auto bytes = result ? std::filesystem::file_size(destination) : 0;
     {
         std::lock_guard lock(probe->mutex);
+        probe->content_get_bytes += bytes;
         --probe->active;
     }
     probe->changed.notify_all();
@@ -864,6 +881,7 @@ TEST(SyncContentBatchTest, VerificationAtThresholdUsesBulkAndSinglePutBatch) {
     EXPECT_EQ(probe.physical_hash_batch_calls, 1U);
     EXPECT_EQ(probe.physical_hash_batch_objects, 6U);
     EXPECT_EQ(probe.content_physical_hash_calls, 0U);
+    EXPECT_EQ(probe.content_get_count, 0U);
     EXPECT_EQ(content_put_events(*fixture), 0U);
     EXPECT_EQ(std::ranges::count_if(fixture->events,
                                     [](std::string_view event) {
@@ -877,6 +895,7 @@ TEST(SyncContentBatchTest, VerificationAtThresholdUsesBulkAndSinglePutBatch) {
 TEST(SyncContentBatchTest, SingleContentObjectUsesIndividualPhysicalHash) {
     auto fixture = make_fixture("single-content-physical-hash");
     ContentWindowProbe probe;
+    probe.content_hash_root = fixture->storage_path;
     attach_probe(*fixture, probe);
     add_content_files(*fixture, 1);
 
@@ -884,6 +903,8 @@ TEST(SyncContentBatchTest, SingleContentObjectUsesIndividualPhysicalHash) {
 
     EXPECT_EQ(probe.physical_hash_batch_calls, 0U);
     EXPECT_EQ(probe.content_physical_hash_calls, 1U);
+    EXPECT_EQ(probe.content_get_count, 0U);
+    EXPECT_EQ(history_put_events(*fixture, "heads"), 1U);
 }
 
 TEST(SyncContentBatchTest, VerificationBelowThresholdUsesIndividualHashes) {
@@ -901,6 +922,84 @@ TEST(SyncContentBatchTest, VerificationBelowThresholdUsesIndividualHashes) {
     EXPECT_EQ(probe.content_physical_hash_calls, 5U);
     EXPECT_EQ(probe.peak_active_content_hashes, 2U);
 }
+
+class UploadVerificationTest : public ::testing::TestWithParam<bool> {};
+
+TEST_P(UploadVerificationTest, PublishesLoosePackedAndChunkedContent) {
+    const bool supports_sha256 = GetParam();
+    auto fixture = make_fixture("upload-verification");
+    ContentWindowProbe probe;
+    probe.content_hash_root = fixture->storage_path;
+    probe.physical_hash_unsupported = !supports_sha256;
+    attach_probe(*fixture, probe);
+    // Keep pack planning enabled, but exercise individual verification for
+    // every object regardless of how many distinct FastCDC slices are cut.
+    fixture->storage.storage.physical_hash_batch_min_objects = 0;
+    add_content_files(*fixture, 2);
+    kasumi::test::write_text(fixture->local / "loose.bin",
+                             std::string(300 * 1024, 'l'));
+    kasumi::test::write_text(fixture->local / "chunked.bin",
+                             std::string(9 * 1024 * 1024, 'c'));
+
+    namespace app = kasumi::application;
+    app::detail::OperationContext context{
+        .operation = app::Operation::Sync,
+        .runtime = runtime_data(*fixture),
+        .summary = {},
+        .key = fixture->key,
+        .writer_identifier = {},
+        .storage = std::move(fixture->storage),
+    };
+    ASSERT_TRUE(
+        kasumi::state_storage::initialize(context.runtime.database_path));
+    const auto synced = app::detail::run_sync(context);
+    ASSERT_TRUE(synced) << synced.error().detail;
+    ASSERT_EQ(history_put_events(*fixture, "heads"), 1U);
+    const auto saved =
+        kasumi::state_storage::load_state(context.runtime.database_path);
+    ASSERT_TRUE(saved && *saved);
+    const auto& manifest = (*saved)->storage_manifest;
+    ASSERT_EQ(manifest.packed_blobs.size(), 2U);
+    ASSERT_EQ(manifest.chunked_files.size(), 1U);
+    ASSERT_GT(manifest.chunked_files.front().chunks.size(), 1U);
+
+    std::size_t physical_objects = 0;
+    std::uintmax_t ciphertext_bytes = 0;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(fixture->storage_path)) {
+        if (kasumi::hash_from_hex(entry.path().filename().string())) {
+            ++physical_objects;
+            ciphertext_bytes += entry.file_size();
+        }
+    }
+    ASSERT_GE(physical_objects, 3U);
+    ASSERT_GT(ciphertext_bytes, 0U);
+    EXPECT_EQ(probe.content_physical_hash_calls,
+              supports_sha256 ? physical_objects : 0U);
+    EXPECT_EQ(probe.content_get_count, supports_sha256 ? 0U : physical_objects);
+    EXPECT_EQ(probe.content_get_bytes, supports_sha256 ? 0U : ciphertext_bytes);
+    RecordProperty("stored_ciphertext_bytes", std::to_string(ciphertext_bytes));
+    RecordProperty("content_gets", std::to_string(probe.content_get_count));
+    RecordProperty("readback_bytes", std::to_string(probe.content_get_bytes));
+
+    ContentWindowProbe idle;
+    idle.content_hash_root = fixture->storage_path;
+    attach_probe(*fixture, idle);
+    const auto unchanged = app::detail::run_sync(context);
+    ASSERT_TRUE(unchanged) << unchanged.error().detail;
+    EXPECT_EQ(idle.content_physical_hash_calls, 0U);
+    EXPECT_EQ(idle.physical_hash_batch_calls, 0U);
+    EXPECT_EQ(idle.content_get_count, 0U);
+    EXPECT_EQ(history_put_events(*fixture, "heads"), 1U);
+}
+
+INSTANTIATE_TEST_SUITE_P(Provider,
+                         UploadVerificationTest,
+                         ::testing::Bool(),
+                         [](const ::testing::TestParamInfo<bool>& info) {
+                             return info.param ? "WithSha256"
+                                               : "WithoutPhysicalHash";
+                         });
 
 TEST(SyncContentBatchTest, VerificationAboveThresholdUsesBulk) {
     auto fixture = make_fixture("verification-above-threshold");
@@ -969,6 +1068,7 @@ TEST(SyncContentBatchTest,
     EXPECT_EQ(probe.content_put_batch_count, 1U);
     EXPECT_EQ(probe.physical_hash_batch_calls, 1U);
     EXPECT_EQ(probe.content_physical_hash_calls, 0U);
+    EXPECT_EQ(probe.content_get_count, 0U);
     EXPECT_EQ(history_put_events(*fixture, "commits"), 1U);
     EXPECT_EQ(history_put_events(*fixture, "heads"), 0U);
     EXPECT_FALSE(
@@ -1005,7 +1105,63 @@ TEST(SyncContentBatchTest, BulkTransportFailureDoesNotFallback) {
     ASSERT_FALSE(executed.has_value());
     EXPECT_EQ(probe.physical_hash_batch_calls, 1U);
     EXPECT_EQ(probe.content_physical_hash_calls, 0U);
+    EXPECT_EQ(probe.content_get_count, 0U);
     EXPECT_EQ(history_put_events(*fixture, "commits"), 1U);
+    EXPECT_EQ(history_put_events(*fixture, "heads"), 0U);
+}
+
+TEST(SyncContentBatchTest, IncompleteBatchReportCannotPublishHead) {
+    auto fixture = make_fixture("incomplete-batch-report");
+    ContentWindowProbe probe;
+    probe.omit_last_batch_result = true;
+    attach_probe(*fixture, probe);
+    add_content_files(*fixture, 6);
+
+    EXPECT_FALSE(reconcile_and_execute(*fixture));
+    EXPECT_EQ(probe.physical_hash_batch_calls, 1U);
+    EXPECT_EQ(probe.content_physical_hash_calls, 0U);
+    EXPECT_EQ(probe.content_get_count, 0U);
+    EXPECT_EQ(history_put_events(*fixture, "heads"), 0U);
+}
+
+TEST(SyncContentBatchTest, MissingUploadedObjectCannotPublishHead) {
+    auto fixture = make_fixture("missing-uploaded-object");
+    ContentWindowProbe probe;
+    attach_probe(*fixture, probe);
+    add_content_files(*fixture, 6);
+    probe.bulk_missing.push_back(kasumi::crypto::content_identifier(
+        fixture->key, kasumi::hasher::hash_string("payload-0")));
+
+    EXPECT_FALSE(reconcile_and_execute(*fixture));
+    EXPECT_EQ(probe.physical_hash_batch_calls, 1U);
+    EXPECT_EQ(probe.content_physical_hash_calls, 0U);
+    EXPECT_EQ(probe.content_get_count, 0U);
+    EXPECT_EQ(history_put_events(*fixture, "heads"), 0U);
+}
+
+TEST(SyncContentBatchTest, CorruptReadbackCannotPublishHead) {
+    auto fixture = make_fixture("corrupt-upload-readback");
+    ContentWindowProbe probe;
+    probe.physical_hash_unsupported = true;
+    attach_probe(*fixture, probe);
+    add_content_files(*fixture, 1);
+    fixture->storage.storage.get =
+        [](void* context,
+           std::string_view id,
+           const std::filesystem::path& destination) {
+            auto result = recording_get(context, id, destination);
+            if (result && kasumi::hash_from_hex(id)) {
+                auto bytes = kasumi::test::read_text(destination);
+                if (!bytes.empty()) {
+                    bytes.back() ^= 1;
+                    kasumi::test::write_text(destination, bytes);
+                }
+            }
+            return result;
+        };
+
+    EXPECT_FALSE(reconcile_and_execute(*fixture));
+    EXPECT_EQ(probe.content_get_count, 1U);
     EXPECT_EQ(history_put_events(*fixture, "heads"), 0U);
 }
 
