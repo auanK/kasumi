@@ -21,6 +21,14 @@ std::expected<void, std::string>
 replace_atomically(const std::filesystem::path& source,
                    const std::filesystem::path& target);
 
+enum class ExistingTarget { Reject, Replace };
+
+// Atomic rename on one filesystem. Caller flushes affected directories.
+std::expected<void, std::string>
+move_regular_file(const std::filesystem::path& source,
+                  const std::filesystem::path& target,
+                  ExistingTarget existing);
+
 // Moves a regular sibling file without replacing target; caller flushes data
 // before and its parent after. Failure never cleans up target.
 std::expected<void, std::error_code>

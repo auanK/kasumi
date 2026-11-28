@@ -184,7 +184,7 @@ When the plan is acceptable:
 kasumi sync work
 ```
 
-For an empty destination, this publishes the initial encrypted files and history.
+Initialize an empty destination from Machine A alone. The first Sync registers its writer, checks for other writers, and publishes the initial HEAD followed by Epoch zero. Wait for Machine A to accept that history locally before starting Machine B. If interrupted, recover by rerunning Sync on A with the same profile. An empty result from `profile test` is a readiness observation and reserves nothing.
 Check the result: exit code `0` means success; `2` means pending materializations
 and **partial synchronization**, not a fully populated folder. Follow
 [Exit Code 2](troubleshooting.md#exit-code-2--pending-materializations) if needed.

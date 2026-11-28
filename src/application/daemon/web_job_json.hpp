@@ -128,7 +128,12 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_ONLY_SERIALIZE(GarbageCollectCompleted,
                                                   candidate_bytes,
                                                   removed_objects,
                                                   removed_bytes,
-                                                  min_age_hours)
+                                                  min_age_hours,
+                                                  epoch_advanced,
+                                                  epoch_advancement_planned,
+                                                  target_epoch_sequence,
+                                                  target_epoch_id,
+                                                  planned_pruned_commits)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_ONLY_SERIALIZE(
     ResolveMissingCompleted, resolved_count, resolved_paths, published, dry_run)

@@ -775,7 +775,7 @@ TEST(SyncMaintenanceTest, FsckPublishesOrderedStagesAndAuthenticatedTotals) {
     const auto result = kasumi::application::execute(std::move(req));
     ASSERT_TRUE(result.has_value()) << (result ? "" : result.error().detail);
 
-    ASSERT_EQ(events.size(), 6U);
+    ASSERT_GE(events.size(), 6U);
     EXPECT_EQ(events[0].stage, kasumi::application::FsckStage::Preparing);
     EXPECT_FALSE(events[0].total_objects.has_value());
     EXPECT_EQ(events[1].stage, kasumi::application::FsckStage::Observing);
@@ -787,11 +787,21 @@ TEST(SyncMaintenanceTest, FsckPublishesOrderedStagesAndAuthenticatedTotals) {
     EXPECT_EQ(events[3].total_objects, 1U);
     EXPECT_EQ(events[3].completed_plaintext_bytes, 0U);
     EXPECT_EQ(events[3].total_plaintext_bytes, 6U);
-    EXPECT_EQ(events[4].completed_objects, 1U);
-    EXPECT_EQ(events[4].completed_plaintext_bytes, 6U);
-    EXPECT_EQ(events[5].stage, kasumi::application::FsckStage::Finalizing);
-    EXPECT_EQ(events[5].completed_objects, 1U);
-    EXPECT_EQ(events[5].completed_plaintext_bytes, 6U);
+    for (std::size_t i = 3; i + 1 < events.size(); ++i) {
+        EXPECT_EQ(events[i].stage,
+                  kasumi::application::FsckStage::AuditingContent);
+        EXPECT_EQ(events[i].total_objects, 1U);
+        EXPECT_EQ(events[i].total_plaintext_bytes, 6U);
+        EXPECT_GE(events[i].completed_objects, events[i - 1].completed_objects);
+        EXPECT_GE(events[i].completed_plaintext_bytes,
+                  events[i - 1].completed_plaintext_bytes);
+    }
+    const auto& last_audit = events[events.size() - 2U];
+    EXPECT_EQ(last_audit.completed_objects, 1U);
+    EXPECT_EQ(last_audit.completed_plaintext_bytes, 6U);
+    EXPECT_EQ(events.back().stage, kasumi::application::FsckStage::Finalizing);
+    EXPECT_EQ(events.back().completed_objects, 1U);
+    EXPECT_EQ(events.back().completed_plaintext_bytes, 6U);
     const auto& completed =
         std::get<kasumi::application::FsckCompleted>(result->data);
     EXPECT_EQ(completed.checked_plaintext_bytes,

@@ -3233,4 +3233,77 @@ TEST(RcloneRcClientTest,
     }
 }
 
+TEST(RcloneStorageTest, AsyncCopyStopsGroupWhenSubmissionResponseIsLost) {
+    for (const bool stop_succeeds : {true, false}) {
+        SCOPED_TRACE(stop_succeeds);
+        RcServerState remote;
+        std::string submitted_group;
+        std::string stopped_group;
+        std::string stats_deleted_group;
+        std::atomic_int stop_calls = 0;
+        std::atomic_int stats_delete_calls = 0;
+        remote.server.Post(
+            "/rc/operations/copyfile",
+            [&](const httplib::Request& input, httplib::Response& response) {
+                const auto body = nlohmann::json::parse(input.body);
+                EXPECT_EQ(body.at("_async"), true);
+                submitted_group = body.at("_group").get<std::string>();
+                response.status = 502;
+                response.set_content(R"({"error":"bad gateway after submit"})",
+                                     "application/json");
+            });
+        remote.server.Post(
+            "/rc/job/stopgroup",
+            [&](const httplib::Request& input, httplib::Response& response) {
+                ++stop_calls;
+                stopped_group =
+                    nlohmann::json::parse(input.body).at("group").get<std::string>();
+                if (stop_succeeds) {
+                    response.set_content("{}", "application/json");
+                } else {
+                    response.status = 500;
+                    response.set_content(R"({"error":"stopgroup failed"})",
+                                         "application/json");
+                }
+            });
+        remote.server.Post(
+            "/rc/core/stats-delete",
+            [&](const httplib::Request& input, httplib::Response& response) {
+                ++stats_delete_calls;
+                stats_deleted_group =
+                    nlohmann::json::parse(input.body).at("group").get<std::string>();
+                response.set_content("{}", "application/json");
+            });
+
+        auto& state = start_configured_state(remote);
+        auto workspace =
+            kasumi::test::make_temp_workspace("rclone-async-lost-submit");
+        const auto source = kasumi::test::workspace_path(workspace, "object");
+        kasumi::test::write_text(source, "payload");
+        auto storage = make_preflight_transport(state);
+
+        const auto res = kasumi::transport::put_with_progress(
+            storage,
+            source,
+            "object",
+            [](const kasumi::transport::TransferProgress&) {});
+        stop_rc_server(remote);
+
+        ASSERT_FALSE(res.has_value());
+        EXPECT_FALSE(submitted_group.empty());
+        EXPECT_EQ(stop_calls.load(), 1);
+        EXPECT_EQ(stopped_group, submitted_group);
+        if (stop_succeeds) {
+            EXPECT_EQ(stats_delete_calls.load(), 1);
+            EXPECT_EQ(stats_deleted_group, submitted_group);
+            EXPECT_FALSE(res.error().message.contains(
+                "rclone async job termination could not be confirmed"));
+        } else {
+            EXPECT_EQ(stats_delete_calls.load(), 0);
+            EXPECT_TRUE(res.error().message.contains(
+                "rclone async job termination could not be confirmed"));
+        }
+    }
+}
+
 } // namespace

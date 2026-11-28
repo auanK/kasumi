@@ -2,6 +2,8 @@
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/publication.hpp"
 #include "application/history_storage/remote_layout.hpp"
+#include "application/integrity/maintenance.hpp"
+#include "application/observation/history.hpp"
 #include "application/observation/scanner.hpp"
 #include "application/observation/state.hpp"
 #include "application/sync/coordinator.hpp"
@@ -1534,7 +1536,14 @@ auto execute_fixture(PruningFixture& fixture) {
                           fixture.storage,
                           fixture.key,
                           fixture.input,
-                          fixture.result);
+                          fixture.result,
+                          nullptr,
+                          nullptr,
+                          false,
+                          {},
+                          nullptr,
+                          false,
+                          coord::EpochAdvancementPolicy::ExclusivePublisher);
 }
 
 [[nodiscard]] ::testing::AssertionResult
@@ -2208,8 +2217,19 @@ TEST(SyncCoordinatorTest,
     runtime_data.min_history_age_hours = 9;
     const auto before = kasumi::platform::clock::unix_seconds();
     ASSERT_TRUE(before.has_value()) << before.error();
-    const auto executed =
-        coord::execute(runtime_data, *storage, key, input, *result);
+    const auto executed = coord::execute(
+        runtime_data,
+        *storage,
+        key,
+        input,
+        *result,
+        nullptr,
+        nullptr,
+        false,
+        {},
+        nullptr,
+        false,
+        coord::EpochAdvancementPolicy::ExclusivePublisher);
     ASSERT_TRUE(executed.has_value()) << executed.error().detail;
     const auto after = kasumi::platform::clock::unix_seconds();
     ASSERT_TRUE(after.has_value()) << after.error();
@@ -2327,8 +2347,19 @@ TEST(SyncCoordinatorTest, PruningEpochPersistsMatchingEpochSequence) {
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     ASSERT_TRUE(result->requires_publication);
-    const auto executed =
-        coord::execute(runtime_data, *storage, key, input, *result);
+    const auto executed = coord::execute(
+        runtime_data,
+        *storage,
+        key,
+        input,
+        *result,
+        nullptr,
+        nullptr,
+        false,
+        {},
+        nullptr,
+        false,
+        coord::EpochAdvancementPolicy::ExclusivePublisher);
     ASSERT_TRUE(executed) << executed.error().detail;
 
     const auto state =
@@ -3267,8 +3298,19 @@ TEST(SyncCoordinatorTest, SyncWithoutNewEpochPreservesAcceptedEpochReference) {
     const auto result = kasumi::reconciliation::reconcile(input);
     ASSERT_TRUE(result.has_value()) << result.error().detail;
     ASSERT_TRUE(result->requires_publication);
-    const auto executed =
-        coord::execute(runtime_data, *storage, key, input, *result);
+    const auto executed = coord::execute(
+        runtime_data,
+        *storage,
+        key,
+        input,
+        *result,
+        nullptr,
+        nullptr,
+        false,
+        {},
+        nullptr,
+        false,
+        coord::EpochAdvancementPolicy::ExclusivePublisher);
     ASSERT_TRUE(executed) << executed.error().detail;
 
     const auto state =
@@ -5490,8 +5532,19 @@ TEST(SyncCoordinatorTest, LocalOnlyDatabaseFailureRollsBackAppliedDownload) {
     ASSERT_FALSE(result->requires_publication);
     ASSERT_TRUE(result->requires_local_mutation);
 
-    const auto executed =
-        coord::execute(runtime_data, *storage, key, input, *result);
+    const auto executed = coord::execute(
+        runtime_data,
+        *storage,
+        key,
+        input,
+        *result,
+        nullptr,
+        nullptr,
+        false,
+        {},
+        nullptr,
+        false,
+        coord::EpochAdvancementPolicy::ExclusivePublisher);
     ASSERT_FALSE(executed.has_value());
     EXPECT_EQ(executed.error().code, CoordErrorCode::DatabaseFailure)
         << executed.error().detail;
@@ -7846,8 +7899,19 @@ TEST(SyncCoordinatorTest, PublishedCommitMatchesCandidateTreeMetadata) {
     ASSERT_TRUE(result->requires_publication);
 
     const auto runtime_data = make_runtime(profile, local, storage_path);
-    const auto executed =
-        coord::execute(runtime_data, *storage, key, input, *result);
+    const auto executed = coord::execute(
+        runtime_data,
+        *storage,
+        key,
+        input,
+        *result,
+        nullptr,
+        nullptr,
+        false,
+        {},
+        nullptr,
+        false,
+        coord::EpochAdvancementPolicy::ExclusivePublisher);
     ASSERT_TRUE(executed) << executed.error().detail;
 
     const auto stored =
@@ -12969,6 +13033,720 @@ TEST(SyncCoordinatorTest, ReadCanonicalMtimeFailsExplicitlyOnMissingPath) {
     EXPECT_FALSE(res.has_value());
     EXPECT_THROW(static_cast<void>(canonical_mtime(missing)),
                  std::runtime_error);
+}
+
+TEST(SyncCoordinatorTest,
+     MultiWriterSyncDefersPruningEpochAcrossSameAndDifferentAnchors) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("sync-defer-pruning-epoch");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto storage_path = root / "remote";
+    const auto profile_a = root / "profile-a";
+    const auto local_a = root / "local-a";
+    const auto profile_b = root / "profile-b";
+    const auto local_b = root / "local-b";
+    const auto profile_c = root / "profile-c";
+    const auto local_c = root / "local-c";
+    for (const auto& dir :
+         {storage_path, profile_a, local_a, profile_b, local_b, profile_c,
+          local_c}) {
+        ASSERT_TRUE(std::filesystem::create_directories(dir));
+    }
+
+    auto storage = open_initialized_storage(storage_path);
+    ASSERT_TRUE(storage.has_value());
+    std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    key.fill(0x55U);
+    const auto now = kasumi::platform::clock::unix_seconds();
+    ASSERT_TRUE(now.has_value()) << now.error();
+
+    // Seed old genesis commit + genesis Epoch (depth=1, age=1h) + child C1 so
+    // the next client commits immediately cross the retention boundary.
+    kasumi::Snapshot empty_tree;
+    empty_tree.rows.push_back(dir_row("", canonical_mtime(local_a)));
+    kasumi::finalize_snapshot(empty_tree);
+    auto c0 = kasumi::application::sync::publication::prepare_commit(
+        empty_tree, false, 0, {}, *now - 10000, key);
+    ASSERT_TRUE(c0.has_value()) << c0.error().detail;
+    auto c0_pub = kasumi::application::sync::publication::publish_commit(
+        *storage, key, *c0, profile_a);
+    ASSERT_TRUE(c0_pub.has_value()) << c0_pub.error().detail;
+
+    const auto vault_id = std::string(64, '7');
+    const kasumi::application::history_storage::epoch::RetentionPolicy policy{
+        .min_history_depth = 1, .min_history_age_hours = 1};
+    auto e0 = kasumi::application::history_storage::epoch::seal(
+        {.vault_id = vault_id,
+         .sequence = 0,
+         .issued_at = *now - 10000,
+         .policy = policy,
+         .anchors = {{.commit_id = c0->commit_id, .height = 0}}},
+        key);
+    ASSERT_TRUE(e0.has_value());
+    ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
+        *storage, key, *e0, profile_a));
+
+    const std::vector<std::string> c1_parents{c0->commit_id};
+    auto c1 = kasumi::application::sync::publication::prepare_commit(
+        empty_tree, true, 0, c1_parents, *now - 8000, key);
+    ASSERT_TRUE(c1.has_value()) << c1.error().detail;
+    auto c1_pub = kasumi::application::sync::publication::publish_commit(
+        *storage, key, *c1, profile_a);
+    ASSERT_TRUE(c1_pub.has_value()) << c1_pub.error().detail;
+
+    auto runtime_a = make_runtime(profile_a, local_a, storage_path);
+    auto runtime_b = make_runtime(profile_b, local_b, storage_path);
+    auto runtime_c = make_runtime(profile_c, local_c, storage_path);
+    for (auto* rt : {&runtime_a, &runtime_b, &runtime_c}) {
+        rt->min_history_depth = 1;
+        rt->min_history_age_hours = 1;
+        ASSERT_TRUE(kasumi::state_storage::initialize(rt->database_path));
+        ASSERT_TRUE(kasumi::state_storage::save_state(
+            rt->database_path,
+            {.tree = empty_tree,
+             .height = c1->commit.height,
+             .commit_id = c1->commit_id,
+             .ciphertext_id = c1_pub->head.ciphertext_id,
+             .epoch_id = e0->reference.epoch_id,
+             .epoch_sequence = e0->reference.sequence}));
+    }
+
+    // Phase 1: A and B observe the same frontier and cross retention with SAME
+    // planned anchors.
+    kasumi::test::write_text(local_a / "a-same.txt", "branch-a-same");
+    kasumi::test::write_text(local_b / "b-same.txt", "branch-b-same");
+    auto obs_a1 = kasumi::application::observation::collect_reconciliation_input(
+        runtime_a, *storage, key, false);
+    auto obs_b1 = kasumi::application::observation::collect_reconciliation_input(
+        runtime_b, *storage, key, false);
+    ASSERT_TRUE(obs_a1.has_value() && obs_b1.has_value());
+    auto rec_a1 = kasumi::reconciliation::reconcile(*obs_a1);
+    auto rec_b1 = kasumi::reconciliation::reconcile(*obs_b1);
+    ASSERT_TRUE(rec_a1.has_value() && rec_b1.has_value());
+    ASSERT_TRUE(coord::execute(runtime_a, *storage, key, *obs_a1, *rec_a1));
+    ASSERT_TRUE(coord::execute(runtime_b, *storage, key, *obs_b1, *rec_b1));
+
+    auto chain_same = kasumi::application::history_storage::epoch::load_chain(
+        *storage, key, profile_c);
+    ASSERT_TRUE(chain_same.has_value()) << chain_same.error().detail;
+    EXPECT_EQ(chain_same->size(), 1U);
+    EXPECT_EQ(chain_same->front().reference, e0->reference);
+
+    // Phase 2: A observes merged {CA, CB} + commits a deeper edit while B still
+    // observes {C1} -> DIFFERENT planned anchors, still crossing retention.
+    kasumi::test::write_text(local_a / "a-diff.txt", "branch-a-diff");
+    auto obs_a2 = kasumi::application::observation::collect_reconciliation_input(
+        runtime_a, *storage, key, false);
+    ASSERT_TRUE(obs_a2.has_value());
+    auto rec_a2 = kasumi::reconciliation::reconcile(*obs_a2);
+    ASSERT_TRUE(rec_a2.has_value());
+    // Install b-same.txt on A while publishing a-diff.txt.
+    ASSERT_TRUE(coord::execute(runtime_a, *storage, key, *obs_a2, *rec_a2));
+
+    kasumi::test::write_text(local_b / "b-diff.txt", "branch-b-diff");
+    auto obs_b2 = kasumi::application::observation::collect_reconciliation_input(
+        runtime_b, *storage, key, false);
+    ASSERT_TRUE(obs_b2.has_value());
+    auto rec_b2 = kasumi::reconciliation::reconcile(*obs_b2);
+    ASSERT_TRUE(rec_b2.has_value());
+    ASSERT_TRUE(coord::execute(runtime_b, *storage, key, *obs_b2, *rec_b2));
+
+    auto chain_diff = kasumi::application::history_storage::epoch::load_chain(
+        *storage, key, profile_c);
+    ASSERT_TRUE(chain_diff.has_value()) << chain_diff.error().detail;
+    EXPECT_EQ(chain_diff->size(), 1U);
+
+    // 3rd client opens the vault and GC preserves content from both branches.
+    auto observed_c = kasumi::application::observation::history::observe(
+        *storage, key, profile_c, true);
+    ASSERT_TRUE(observed_c.has_value()) << observed_c.error().detail;
+    EXPECT_EQ(observed_c->missing_content_count, 0U);
+    EXPECT_NE(kasumi::find_row(observed_c->effective_tree, "a-same.txt"),
+              nullptr);
+    EXPECT_NE(kasumi::find_row(observed_c->effective_tree, "a-diff.txt"),
+              nullptr);
+    EXPECT_NE(kasumi::find_row(observed_c->effective_tree, "b-same.txt"),
+              nullptr);
+    EXPECT_NE(kasumi::find_row(observed_c->effective_tree, "b-diff.txt"),
+              nullptr);
+
+    const auto gc_res = kasumi::application::integrity::garbage_collect(
+        runtime_c,
+        *storage,
+        key,
+        {.dry_run = false, .min_orphan_age = std::chrono::seconds{0}});
+    ASSERT_TRUE(gc_res.has_value()) << gc_res.error().detail;
+
+    auto observed_after_gc = kasumi::application::observation::history::observe(
+        *storage, key, profile_c, true);
+    ASSERT_TRUE(observed_after_gc.has_value())
+        << observed_after_gc.error().detail;
+    EXPECT_EQ(observed_after_gc->missing_content_count, 0U);
+    EXPECT_NE(kasumi::find_row(observed_after_gc->effective_tree, "a-diff.txt"),
+              nullptr);
+    EXPECT_NE(kasumi::find_row(observed_after_gc->effective_tree, "b-diff.txt"),
+              nullptr);
+}
+
+TEST(SyncCoordinatorTest,
+     MixedVersionExclusivePublisherAndMultiWriterClientConvergeSafely) {
+    auto workspace = kasumi::test::make_temp_workspace("sync-mixed-epoch");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto storage_path = root / "remote";
+    const auto profile_a = root / "profile-a";
+    const auto local_a = root / "local-a";
+    const auto profile_b = root / "profile-b";
+    const auto local_b = root / "local-b";
+    const auto profile_c = root / "profile-c";
+    const auto local_c = root / "local-c";
+    for (const auto& dir :
+         {storage_path, profile_a, local_a, profile_b, local_b, profile_c,
+          local_c}) {
+        ASSERT_TRUE(std::filesystem::create_directories(dir));
+    }
+
+    auto storage = open_initialized_storage(storage_path);
+    ASSERT_TRUE(storage.has_value());
+    std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    key.fill(0x55U);
+    const auto now = kasumi::platform::clock::unix_seconds();
+    ASSERT_TRUE(now.has_value()) << now.error();
+
+    kasumi::Snapshot empty_tree;
+    empty_tree.rows.push_back(dir_row("", canonical_mtime(local_a)));
+    kasumi::finalize_snapshot(empty_tree);
+    auto c0 = kasumi::application::sync::publication::prepare_commit(
+        empty_tree, false, 0, {}, *now - 10000, key);
+    ASSERT_TRUE(c0.has_value());
+    ASSERT_TRUE(kasumi::application::sync::publication::publish_commit(
+        *storage, key, *c0, profile_a));
+
+    const auto vault_id = std::string(64, '8');
+    const kasumi::application::history_storage::epoch::RetentionPolicy policy{
+        .min_history_depth = 1, .min_history_age_hours = 1};
+    auto e0 = kasumi::application::history_storage::epoch::seal(
+        {.vault_id = vault_id,
+         .sequence = 0,
+         .issued_at = *now - 10000,
+         .policy = policy,
+         .anchors = {{.commit_id = c0->commit_id, .height = 0}}},
+        key);
+    ASSERT_TRUE(e0.has_value());
+    ASSERT_TRUE(kasumi::application::history_storage::epoch::publish(
+        *storage, key, *e0, profile_a));
+
+    const std::vector<std::string> c1_parents{c0->commit_id};
+    auto c1 = kasumi::application::sync::publication::prepare_commit(
+        empty_tree, true, 0, c1_parents, *now - 8000, key);
+    ASSERT_TRUE(c1.has_value());
+    auto c1_pub = kasumi::application::sync::publication::publish_commit(
+        *storage, key, *c1, profile_a);
+    ASSERT_TRUE(c1_pub.has_value());
+
+    auto runtime_a = make_runtime(profile_a, local_a, storage_path);
+    auto runtime_b = make_runtime(profile_b, local_b, storage_path);
+    auto runtime_c = make_runtime(profile_c, local_c, storage_path);
+    for (auto* rt : {&runtime_a, &runtime_b, &runtime_c}) {
+        rt->min_history_depth = 1;
+        rt->min_history_age_hours = 1;
+        ASSERT_TRUE(kasumi::state_storage::initialize(rt->database_path));
+        ASSERT_TRUE(kasumi::state_storage::save_state(
+            rt->database_path,
+            {.tree = empty_tree,
+             .height = c1->commit.height,
+             .commit_id = c1->commit_id,
+             .ciphertext_id = c1_pub->head.ciphertext_id,
+             .epoch_id = e0->reference.epoch_id,
+             .epoch_sequence = e0->reference.sequence}));
+    }
+
+    kasumi::test::write_text(local_a / "legacy-31.txt", "from-0.31.2");
+    kasumi::test::write_text(local_b / "modern-32.txt", "from-0.32.0");
+    auto obs_a = kasumi::application::observation::collect_reconciliation_input(
+        runtime_a, *storage, key, false);
+    auto obs_b = kasumi::application::observation::collect_reconciliation_input(
+        runtime_b, *storage, key, false);
+    ASSERT_TRUE(obs_a.has_value() && obs_b.has_value());
+    auto rec_a = kasumi::reconciliation::reconcile(*obs_a);
+    auto rec_b = kasumi::reconciliation::reconcile(*obs_b);
+    ASSERT_TRUE(rec_a.has_value() && rec_b.has_value());
+
+    // Client A models legacy 0.31.2 advancing Epoch to sequence 1 while
+    // concurrent Client B (0.32.0) defers pruning Epoch advancement.
+    ASSERT_TRUE(coord::execute(
+        runtime_a,
+        *storage,
+        key,
+        *obs_a,
+        *rec_a,
+        nullptr,
+        nullptr,
+        false,
+        {},
+        nullptr,
+        false,
+        coord::EpochAdvancementPolicy::ExclusivePublisher));
+    ASSERT_TRUE(coord::execute(runtime_b, *storage, key, *obs_b, *rec_b));
+
+    auto chain = kasumi::application::history_storage::epoch::load_chain(
+        *storage, key, profile_c);
+    ASSERT_TRUE(chain.has_value()) << chain.error().detail;
+    ASSERT_EQ(chain->size(), 2U);
+    EXPECT_EQ((*chain)[0].reference.sequence, 0U);
+    EXPECT_EQ((*chain)[1].reference.sequence, 1U);
+
+    // 3rd client opens the vault cleanly at sequence 1 and GC keeps both files.
+    auto observed_c = kasumi::application::observation::history::observe(
+        *storage, key, profile_c, true);
+    ASSERT_TRUE(observed_c.has_value()) << observed_c.error().detail;
+    ASSERT_TRUE(observed_c->epoch.has_value());
+    EXPECT_EQ(observed_c->epoch->reference.sequence, 1U);
+    EXPECT_EQ(observed_c->missing_content_count, 0U);
+    EXPECT_NE(kasumi::find_row(observed_c->effective_tree, "legacy-31.txt"),
+              nullptr);
+    EXPECT_NE(kasumi::find_row(observed_c->effective_tree, "modern-32.txt"),
+              nullptr);
+
+    const auto gc_res = kasumi::application::integrity::garbage_collect(
+        runtime_c,
+        *storage,
+        key,
+        {.dry_run = false, .min_orphan_age = std::chrono::seconds{0}});
+    ASSERT_TRUE(gc_res.has_value()) << gc_res.error().detail;
+
+    auto observed_after_gc = kasumi::application::observation::history::observe(
+        *storage, key, profile_c, true);
+    ASSERT_TRUE(observed_after_gc.has_value())
+        << observed_after_gc.error().detail;
+    EXPECT_EQ(observed_after_gc->missing_content_count, 0U);
+    EXPECT_NE(
+        kasumi::find_row(observed_after_gc->effective_tree, "legacy-31.txt"),
+        nullptr);
+    EXPECT_NE(
+        kasumi::find_row(observed_after_gc->effective_tree, "modern-32.txt"),
+        nullptr);
+}
+
+TEST(SyncCoordinatorTest,
+     DatabaseCommittedRecoversWhenPeerPrunesAncestralHeadMarker) {
+    for (const bool with_pending_path : {false, true}) {
+        SCOPED_TRACE(with_pending_path);
+        auto workspace = kasumi::test::make_temp_workspace(
+            "database-committed-pruned-ancestor");
+        const auto root = kasumi::test::workspace_root(workspace);
+        const auto storage_path = root / "remote";
+        const auto profile_a = root / "profile-a";
+        const auto local_a = root / "local-a";
+        const auto profile_b = root / "profile-b";
+        const auto local_b = root / "local-b";
+        for (const auto& dir :
+             {storage_path, profile_a, local_a, profile_b, local_b}) {
+            ASSERT_TRUE(std::filesystem::create_directories(dir));
+        }
+
+        auto storage = open_initialized_storage(storage_path);
+        ASSERT_TRUE(storage.has_value());
+        std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+        key.fill(0x24U);
+        const auto layout =
+            kasumi::application::history_storage::derive_remote_layout(key);
+
+        auto runtime_a = make_runtime(profile_a, local_a, storage_path);
+        auto runtime_b = make_runtime(profile_b, local_b, storage_path);
+
+        // Device A publishes commit C (plus optional pending materialization).
+        kasumi::test::write_text(local_a / "from-a.txt", "content from A");
+        auto obs_a1 =
+            kasumi::application::observation::collect_reconciliation_input(
+                runtime_a, *storage, key, false);
+        ASSERT_TRUE(obs_a1.has_value());
+        auto rec_a1 = kasumi::reconciliation::reconcile(*obs_a1);
+        ASSERT_TRUE(rec_a1.has_value());
+        ASSERT_TRUE(coord::execute(runtime_a, *storage, key, *obs_a1, *rec_a1));
+
+        auto state_a_after_c =
+            kasumi::state_storage::load_state(runtime_a.database_path);
+        ASSERT_TRUE(state_a_after_c.has_value() && *state_a_after_c);
+        const auto commit_c_id = (*state_a_after_c)->commit_id;
+        const auto commit_c_ciphertext = (*state_a_after_c)->ciphertext_id;
+        const kasumi::application::history_storage::HeadReference commit_c_ref{
+            .commit_id = commit_c_id, .ciphertext_id = commit_c_ciphertext};
+
+        // Recreate Device A interrupted at DatabaseCommitted before
+        // CleanupCompleted.
+        auto tree_c = (*state_a_after_c)->tree;
+        std::vector<std::string> pending_paths;
+        if (with_pending_path) {
+            pending_paths = {"from-a.txt"};
+            const auto* row = kasumi::find_row(tree_c, "from-a.txt");
+            ASSERT_NE(row, nullptr);
+            auto updated_state = **state_a_after_c;
+            updated_state.pending_materializations = {*row};
+            ASSERT_TRUE(kasumi::state_storage::save_state(
+                runtime_a.database_path, updated_state));
+        }
+        const auto db_bytes_before =
+            kasumi::test::read_binary(runtime_a.database_path);
+
+        const auto tx_id = save_recovery_record(
+            profile_a,
+            kasumi::transaction::Phase::DatabaseCommitted,
+            key,
+            commit_c_id,
+            commit_c_ciphertext);
+        ASSERT_FALSE(tx_id.empty());
+        const auto paths_a = sync_journal::make_paths(profile_a);
+        ASSERT_TRUE(paths_a.has_value());
+        auto record_a = sync_journal::load(*paths_a, key);
+        ASSERT_TRUE(record_a.has_value() && *record_a);
+        auto latest_epoch_a = kasumi::application::history_storage::epoch::load_latest(
+            *storage, key, profile_a);
+        ASSERT_TRUE(latest_epoch_a.has_value() && *latest_epoch_a);
+        (*record_a)->epoch_vault_id = (*latest_epoch_a)->value.vault_id;
+        (*record_a)->epoch_id = (*state_a_after_c)->epoch_id;
+        (*record_a)->pending_paths = pending_paths;
+        ASSERT_TRUE(sync_journal::save(*paths_a, **record_a, key));
+
+        // Device B observes C, downloads it, then publishes child D which prunes
+        // C's head marker.
+        auto obs_b1 =
+            kasumi::application::observation::collect_reconciliation_input(
+                runtime_b, *storage, key, false);
+        ASSERT_TRUE(obs_b1.has_value());
+        auto rec_b1 = kasumi::reconciliation::reconcile(*obs_b1);
+        ASSERT_TRUE(rec_b1.has_value());
+        ASSERT_TRUE(coord::execute(runtime_b, *storage, key, *obs_b1, *rec_b1));
+        ASSERT_TRUE(std::filesystem::is_regular_file(local_b / "from-a.txt"));
+
+        kasumi::test::write_text(local_b / "from-b.txt", "content from B");
+        auto obs_b2 =
+            kasumi::application::observation::collect_reconciliation_input(
+                runtime_b, *storage, key, false);
+        ASSERT_TRUE(obs_b2.has_value());
+        auto rec_b2 = kasumi::reconciliation::reconcile(*obs_b2);
+        ASSERT_TRUE(rec_b2.has_value());
+        ASSERT_TRUE(coord::execute(runtime_b, *storage, key, *obs_b2, *rec_b2));
+
+        // Verify B pruned C's head marker while C remains reachable as parent
+        // of D.
+        auto marker_state =
+            kasumi::application::sync::publication::inspect_head_marker(
+                *storage, layout, commit_c_ref, profile_a);
+        ASSERT_TRUE(marker_state.has_value());
+        ASSERT_EQ(*marker_state,
+                  kasumi::application::sync::publication::HeadMarkerState::
+                      Absent);
+
+        // Device A recovers cleanly without blocking.
+        ASSERT_TRUE(recover_expect(
+            runtime_a, *storage, key, RecoveryResult::RolledForward));
+        EXPECT_FALSE(std::filesystem::exists(paths_a->final_path));
+        EXPECT_FALSE(
+            std::filesystem::exists(profile_a / ".transactions" / tx_id));
+        EXPECT_EQ(kasumi::test::read_binary(runtime_a.database_path),
+                  db_bytes_before);
+
+        // Device A syncs again and converges with B's child D.
+        auto obs_a2 =
+            kasumi::application::observation::collect_reconciliation_input(
+                runtime_a, *storage, key, false);
+        ASSERT_TRUE(obs_a2.has_value()) << obs_a2.error().detail;
+        auto rec_a2 = kasumi::reconciliation::reconcile(*obs_a2);
+        ASSERT_TRUE(rec_a2.has_value());
+        ASSERT_TRUE(coord::execute(runtime_a, *storage, key, *obs_a2, *rec_a2));
+        EXPECT_EQ(kasumi::test::read_text(local_a / "from-b.txt"),
+                  "content from B");
+    }
+}
+
+TEST(SyncCoordinatorTest,
+     DatabaseCommittedPrunedAncestorRejectsTamperedMarkerDivergentDbAndMissingDescendant) {
+    auto make_two_commit_env = [&](std::string_view name, bool create_child_d) {
+        auto workspace = kasumi::test::make_temp_workspace(name);
+        const auto root = kasumi::test::workspace_root(workspace);
+        const auto storage_path = root / "remote";
+        const auto profile_a = root / "profile-a";
+        const auto local_a = root / "local-a";
+        const auto profile_b = root / "profile-b";
+        const auto local_b = root / "local-b";
+        for (const auto& dir :
+             {storage_path, profile_a, local_a, profile_b, local_b}) {
+            std::filesystem::create_directories(dir);
+        }
+        auto storage = open_initialized_storage(storage_path);
+        std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+        key.fill(0x31U);
+        const auto layout =
+            kasumi::application::history_storage::derive_remote_layout(key);
+
+        auto runtime_a = make_runtime(profile_a, local_a, storage_path);
+        auto runtime_b = make_runtime(profile_b, local_b, storage_path);
+
+        kasumi::test::write_text(local_a / "from-a.txt", "content from A");
+        auto obs_a =
+            kasumi::application::observation::collect_reconciliation_input(
+                runtime_a, *storage, key, false);
+        auto rec_a = kasumi::reconciliation::reconcile(*obs_a);
+        EXPECT_TRUE(coord::execute(runtime_a, *storage, key, *obs_a, *rec_a));
+
+        auto state_a =
+            kasumi::state_storage::load_state(runtime_a.database_path);
+        const kasumi::application::history_storage::HeadReference commit_c_ref{
+            .commit_id = (*state_a)->commit_id,
+            .ciphertext_id = (*state_a)->ciphertext_id};
+
+        if (create_child_d) {
+            auto obs_b1 =
+                kasumi::application::observation::collect_reconciliation_input(
+                    runtime_b, *storage, key, false);
+            auto rec_b1 = kasumi::reconciliation::reconcile(*obs_b1);
+            EXPECT_TRUE(
+                coord::execute(runtime_b, *storage, key, *obs_b1, *rec_b1));
+            kasumi::test::write_text(local_b / "from-b.txt", "content from B");
+            auto obs_b2 =
+                kasumi::application::observation::collect_reconciliation_input(
+                    runtime_b, *storage, key, false);
+            auto rec_b2 = kasumi::reconciliation::reconcile(*obs_b2);
+            EXPECT_TRUE(
+                coord::execute(runtime_b, *storage, key, *obs_b2, *rec_b2));
+        } else {
+            const auto marker_id =
+                kasumi::application::history_storage::marker_identifier(
+                    layout, commit_c_ref);
+            EXPECT_TRUE(kasumi::transport::remove(*storage, marker_id));
+        }
+
+        const auto tx_id = save_recovery_record(
+            profile_a,
+            kasumi::transaction::Phase::DatabaseCommitted,
+            key,
+            (*state_a)->commit_id,
+            (*state_a)->ciphertext_id);
+        const auto paths_a = sync_journal::make_paths(profile_a);
+        auto record_a = sync_journal::load(*paths_a, key);
+        auto latest_epoch_a = kasumi::application::history_storage::epoch::load_latest(
+            *storage, key, profile_a);
+        EXPECT_TRUE(latest_epoch_a.has_value() && *latest_epoch_a);
+        (*record_a)->epoch_vault_id = (*latest_epoch_a)->value.vault_id;
+        (*record_a)->epoch_id = (*state_a)->epoch_id;
+        EXPECT_TRUE(sync_journal::save(*paths_a, **record_a, key));
+
+        return std::tuple{std::move(workspace),
+                          storage_path,
+                          profile_a,
+                          runtime_a,
+                          key,
+                          layout,
+                          commit_c_ref};
+    };
+
+    // Subcase 1: Corrupt marker bytes (HeadMarkerState::Invalid) ->
+    // RecoveryConflict even with child D.
+    {
+        auto [ws, storage_path, profile_a, runtime_a, key, layout, c_ref] =
+            make_two_commit_env("pruned-ancestor-tampered-marker", true);
+        auto storage = open_initialized_storage(storage_path);
+        ASSERT_TRUE(storage.has_value());
+        const auto bad_file =
+            kasumi::test::workspace_path(ws, "corrupt-marker.bin");
+        kasumi::test::write_text(bad_file, "tampered-marker-bytes");
+        const auto marker_id =
+            kasumi::application::history_storage::marker_identifier(layout,
+                                                                    c_ref);
+        ASSERT_TRUE(kasumi::transport::put(*storage, bad_file, marker_id));
+        auto inspected =
+            kasumi::application::sync::publication::inspect_head_marker(
+                *storage, layout, c_ref, profile_a);
+        ASSERT_TRUE(inspected.has_value());
+        ASSERT_EQ(*inspected,
+                  kasumi::application::sync::publication::HeadMarkerState::
+                      Invalid);
+
+        ASSERT_TRUE(recover_error_expect(
+            runtime_a, *storage, key, CoordErrorCode::RecoveryConflict));
+        const auto paths_a = sync_journal::make_paths(profile_a);
+        ASSERT_TRUE(paths_a.has_value());
+        EXPECT_TRUE(std::filesystem::exists(paths_a->final_path));
+    }
+
+    // Subcase 2: Marker absent and child D exists, but state.db diverges ->
+    // RecoveryConflict and state.db untouched.
+    {
+        auto [ws, storage_path, profile_a, runtime_a, key, layout, c_ref] =
+            make_two_commit_env("pruned-ancestor-divergent-db", true);
+        auto storage = open_initialized_storage(storage_path);
+        ASSERT_TRUE(storage.has_value());
+        auto state_a =
+            kasumi::state_storage::load_state(runtime_a.database_path);
+        ASSERT_TRUE(state_a.has_value() && *state_a);
+        auto diverged = **state_a;
+        diverged.tree.rows.push_back(file_row(
+            "rogue.txt", kasumi::hasher::hash_string("rogue"), 5));
+        kasumi::finalize_snapshot(diverged.tree);
+        ASSERT_TRUE(kasumi::state_storage::save_state(runtime_a.database_path,
+                                                      diverged));
+        const auto db_before =
+            kasumi::test::read_binary(runtime_a.database_path);
+
+        ASSERT_TRUE(recover_error_expect(
+            runtime_a, *storage, key, CoordErrorCode::RecoveryConflict));
+        EXPECT_EQ(kasumi::test::read_binary(runtime_a.database_path),
+                  db_before);
+        const auto paths_a = sync_journal::make_paths(profile_a);
+        ASSERT_TRUE(paths_a.has_value());
+        EXPECT_TRUE(std::filesystem::exists(paths_a->final_path));
+    }
+
+    // Subcase 3: Marker absent, state.db matches C, commit object exists, but NO
+    // descendant D exists -> RecoveryConflict.
+    {
+        auto [ws, storage_path, profile_a, runtime_a, key, layout, c_ref] =
+            make_two_commit_env("pruned-ancestor-no-descendant", false);
+        auto storage = open_initialized_storage(storage_path);
+        ASSERT_TRUE(storage.has_value());
+
+        ASSERT_TRUE(recover_error_expect(
+            runtime_a, *storage, key, CoordErrorCode::RecoveryConflict));
+        const auto paths_a = sync_journal::make_paths(profile_a);
+        ASSERT_TRUE(paths_a.has_value());
+        EXPECT_TRUE(std::filesystem::exists(paths_a->final_path));
+    }
+}
+
+TEST(SyncCoordinatorTest,
+     OfflineDeviceReturningAfterEpochAdvancementFastForwardsUnchangedAndPreservesLocalEdits) {
+    auto workspace = kasumi::test::make_temp_workspace("sync-offline-epoch-return");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const auto storage_path = root / "remote";
+    const auto profile_a = root / "profile-a";
+    const auto local_a = root / "local-a";
+    const auto profile_b = root / "profile-b";
+    const auto local_b = root / "local-b";
+    for (const auto& dir :
+         {storage_path, profile_a, local_a, profile_b, local_b}) {
+        ASSERT_TRUE(std::filesystem::create_directories(dir));
+    }
+
+    auto storage = open_initialized_storage(storage_path);
+    ASSERT_TRUE(storage.has_value());
+    std::array<std::uint8_t, kasumi::crypto::KEY_SIZE> key{};
+    key.fill(0x44U);
+    auto runtime_a = make_runtime(profile_a, local_a, storage_path);
+    auto runtime_b = make_runtime(profile_b, local_b, storage_path);
+    runtime_a.min_history_depth = 2;
+    runtime_a.min_history_age_hours = 1;
+    runtime_b.min_history_depth = 2;
+    runtime_b.min_history_age_hours = 1;
+
+    const auto real_now = kasumi::platform::clock::unix_seconds().value();
+    const auto sync_device = [&](const kasumi::runtime::RuntimeData& rt,
+                                 std::int64_t ts) {
+        kasumi::platform::clock::testing::ScopedUnixSecondsOverride clock(ts);
+        auto obs = app_obs::collect_reconciliation_input(
+            rt, *storage, key, false);
+        if (!obs) {
+            return ::testing::AssertionFailure() << obs.error().detail;
+        }
+        auto rec = kasumi::reconciliation::reconcile(*obs);
+        if (!rec) {
+            return ::testing::AssertionFailure() << rec.error().detail;
+        }
+        auto ex = coord::execute(rt, *storage, key, *obs, *rec);
+        if (!ex) {
+            return ::testing::AssertionFailure() << ex.error().detail;
+        }
+        return ::testing::AssertionSuccess();
+    };
+
+    // Initial convergence at c0 (height 0): same.txt, edited.txt, deleted_remote.txt.
+    kasumi::test::write_text(local_a / "same.txt", "same-v0");
+    kasumi::test::write_text(local_a / "edited.txt", "edited-v0");
+    kasumi::test::write_text(local_a / "deleted_remote.txt", "del-remote-v0");
+    ASSERT_TRUE(sync_device(runtime_a, real_now - 10 * 3600));
+    ASSERT_TRUE(sync_device(runtime_b, real_now - 10 * 3600 + 60));
+
+    // Device B goes offline: leaves same.txt and deleted_remote.txt untouched,
+    // edits edited.txt, and creates b_new.txt.
+    kasumi::test::write_text(local_b / "edited.txt", "b-local-edit");
+    kasumi::test::write_text(local_b / "b_new.txt", "b-offline-created");
+
+    // Device A advances past c0 (c1, c2 old; c3 recent) and deletes
+    // deleted_remote.txt, then GC publishes Epoch 1 anchoring above c0.
+    kasumi::test::write_text(local_a / "same.txt", "same-v2");
+    kasumi::test::write_text(local_a / "edited.txt", "a-remote-edit");
+    ASSERT_TRUE(std::filesystem::remove(local_a / "deleted_remote.txt"));
+    ASSERT_TRUE(sync_device(runtime_a, real_now - 9 * 3600));
+    kasumi::test::write_text(local_a / "step2.txt", "s2");
+    ASSERT_TRUE(sync_device(runtime_a, real_now - 8 * 3600));
+    kasumi::test::write_text(local_a / "step3.txt", "s3");
+    ASSERT_TRUE(sync_device(runtime_a, real_now - 60));
+
+    {
+        kasumi::platform::clock::testing::ScopedUnixSecondsOverride clock(
+            real_now);
+        const auto gc = kasumi::application::integrity::garbage_collect(
+            runtime_a,
+            *storage,
+            key,
+            kasumi::application::integrity::GarbageCollectOptions{
+                .min_orphan_age = std::chrono::seconds{0}});
+        ASSERT_TRUE(gc.has_value()) << gc.error().detail;
+        EXPECT_TRUE(gc->epoch_advanced);
+        EXPECT_EQ(gc->target_epoch_sequence, std::optional<std::uint64_t>{1U});
+    }
+
+    // Device B returns with base c0 (behind Epoch 1 anchors).
+    ASSERT_TRUE(sync_device(runtime_b, real_now + 60));
+
+    // Untouched same.txt fast-forwarded cleanly without false conflict.
+    EXPECT_EQ(kasumi::test::read_text(local_b / "same.txt"), "same-v2");
+    // Ambiguous delete vs offline base preserves deleted_remote.txt instead of
+    // silently deleting local data from an expired base.
+    EXPECT_TRUE(std::filesystem::exists(local_b / "deleted_remote.txt"));
+    // Offline new file uploaded & kept.
+    EXPECT_EQ(kasumi::test::read_text(local_b / "b_new.txt"),
+              "b-offline-created");
+    // Local edit + remote edit both preserved (edited.txt + conflict copy).
+    bool saw_b_edit =
+        kasumi::test::read_text(local_b / "edited.txt") == "b-local-edit";
+    bool saw_a_edit =
+        kasumi::test::read_text(local_b / "edited.txt") == "a-remote-edit";
+    for (const auto& entry : std::filesystem::directory_iterator(local_b)) {
+        const auto name = entry.path().filename().string();
+        if (name.starts_with("edited.txt.kasumiconflict_")) {
+            const auto text = kasumi::test::read_text(entry.path());
+            saw_b_edit = saw_b_edit || (text == "b-local-edit");
+            saw_a_edit = saw_a_edit || (text == "a-remote-edit");
+        }
+    }
+    EXPECT_TRUE(saw_b_edit);
+    EXPECT_TRUE(saw_a_edit);
+
+    const auto state_b = kasumi::state_storage::load_state(runtime_b.database_path);
+    ASSERT_TRUE(state_b.has_value() && *state_b);
+    EXPECT_GE((*state_b)->epoch_sequence, 1U);
+
+    // If local_generation >= anchor.height and base is missing, fail closed
+    // with StorageHistoryRegression (never fall back when not behind Epoch).
+    auto bare_obs = kasumi::application::observation::history::observe(
+        *storage, key, profile_b, false);
+    ASSERT_TRUE(bare_obs.has_value())
+        << "bare observe before forged check failed: " << bare_obs.error().detail;
+    auto forged = **state_b;
+    forged.commit_id = std::string(64, 'f');
+    forged.height = 99;
+    forged.epoch_sequence = 0;
+    forged.epoch_id.clear();
+    ASSERT_TRUE(
+        kasumi::state_storage::save_state(runtime_b.database_path, forged));
+    kasumi::platform::clock::testing::ScopedUnixSecondsOverride clock(
+        real_now + 120);
+    const auto regressed = app_obs::collect_reconciliation_input(
+        runtime_b, *storage, key, false);
+    ASSERT_FALSE(regressed.has_value());
+    EXPECT_EQ(regressed.error().code,
+              kasumi::reconciliation::ErrorCode::StorageHistoryRegression)
+        << regressed.error().detail;
 }
 
 } // namespace

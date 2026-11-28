@@ -9,6 +9,7 @@
 #include "application/daemon/web_thumbnails.hpp"
 #include "application/history_storage/commit_cache.hpp"
 #include "application/observation/state.hpp"
+#include "application/use_cases/context.hpp"
 #include "core/ignore.hpp"
 #include "platform/directory_watcher.hpp"
 #include "platform/private_storage.hpp"
@@ -26,6 +27,7 @@
 #include <deque>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -39,6 +41,8 @@
 
 namespace kasumi::application {
 namespace daemon_detail {
+
+inline constexpr std::size_t kMaxTrackedDirtyPaths = 4096U;
 
 struct WatcherContext {
     std::mutex mutex;
@@ -68,6 +72,9 @@ struct ProfileHotSchedule {
     std::uint64_t config_generation = 0;
     std::uint64_t watch_epoch = 0;
     std::uint64_t completed_generation = 0;
+    std::uint64_t immediate_sync_request_id = 0;
+    std::uint64_t immediate_sync_aborted_id = 0;
+    std::string immediate_sync_abort_reason;
 
     std::optional<std::chrono::steady_clock::time_point> first_dirty_at;
     std::optional<std::chrono::steady_clock::time_point> last_dirty_at;
@@ -127,6 +134,7 @@ struct ProfileWarmSlot {
     std::shared_ptr<WatcherContext> watcher_ctx;
     platform::DirectoryWatcher watcher;
     std::optional<transport::Transport> warm_transport;
+    std::optional<detail::TransportBinding> warm_transport_binding;
     std::chrono::steady_clock::time_point warm_transport_last_used{};
     observation::LocalObservationSession warm_observation;
     std::shared_ptr<history_storage::CommitCache> commit_cache;
@@ -154,6 +162,10 @@ struct DaemonSessionState {
     mutable std::mutex mutex;
     mutable std::mutex event_log_mutex;
     std::mutex cleanup_mutex;
+    std::mutex scheduler_join_mutex;
+    std::condition_variable scheduler_join_cv;
+    bool scheduler_join_claimed = false;
+    bool scheduler_joined = false;
     std::condition_variable cv;
     bool cleaned_up = false;
 
@@ -248,6 +260,92 @@ std::expected<void, DaemonError>
 cancel_session_state(DaemonSessionState& state, std::string_view profile_name);
 
 std::expected<void, DaemonError> start_ipc_server(DaemonSessionState& state);
+
+inline void abort_pending_immediate_sync_locked(ProfileHotSchedule& hot,
+                                                std::string_view reason) {
+    if (hot.immediate_sync_requested) {
+        hot.immediate_sync_requested = false;
+        hot.immediate_sync_aborted_id = hot.immediate_sync_request_id;
+        hot.immediate_sync_abort_reason = std::string{reason};
+    }
+}
+
+namespace testing {
+
+enum class PostSyncPruneStage {
+    BeforeFinishSyncSuccess,
+    AfterFinishSyncSuccess,
+};
+
+struct PostSyncPruneSnapshot {
+    bool dirty = false;
+    bool overflow = false;
+    bool watcher_baseline_established = false;
+    bool has_dirty_timestamps = false;
+    std::uint64_t sync_runs = 0;
+    std::unordered_set<std::string> dirty_paths;
+};
+
+using PostSyncPruneHook = std::function<void(DaemonSessionState&,
+                                             std::string_view,
+                                             PostSyncPruneStage,
+                                             const PostSyncPruneSnapshot*)>;
+
+struct ScopedPostSyncPruneHook {
+    PostSyncPruneHook previous{};
+
+    explicit ScopedPostSyncPruneHook(PostSyncPruneHook hook);
+    ~ScopedPostSyncPruneHook() noexcept;
+
+    ScopedPostSyncPruneHook(const ScopedPostSyncPruneHook&) = delete;
+    ScopedPostSyncPruneHook& operator=(const ScopedPostSyncPruneHook&) = delete;
+};
+
+[[nodiscard]] bool post_sync_prune_hook_active() noexcept;
+
+void invoke_post_sync_prune_hook(
+    DaemonSessionState& state,
+    std::string_view profile_name,
+    PostSyncPruneStage stage,
+    const PostSyncPruneSnapshot* snapshot = nullptr);
+
+using PauseResumeAfterPersistHook =
+    std::function<void(std::string_view, bool)>;
+
+struct ScopedPauseResumeAfterPersistHook {
+    PauseResumeAfterPersistHook previous{};
+
+    explicit ScopedPauseResumeAfterPersistHook(
+        PauseResumeAfterPersistHook hook);
+    ~ScopedPauseResumeAfterPersistHook() noexcept;
+
+    ScopedPauseResumeAfterPersistHook(
+        const ScopedPauseResumeAfterPersistHook&) = delete;
+    ScopedPauseResumeAfterPersistHook&
+    operator=(const ScopedPauseResumeAfterPersistHook&) = delete;
+};
+
+void invoke_pause_resume_after_persist_hook(std::string_view profile_name,
+                                            bool persisted_paused);
+
+using AfterSyncAdmitHook =
+    std::function<void(DaemonSessionState&, std::string_view)>;
+
+struct ScopedAfterSyncAdmitHook {
+    AfterSyncAdmitHook previous{};
+
+    explicit ScopedAfterSyncAdmitHook(AfterSyncAdmitHook hook);
+    ~ScopedAfterSyncAdmitHook() noexcept;
+
+    ScopedAfterSyncAdmitHook(const ScopedAfterSyncAdmitHook&) = delete;
+    ScopedAfterSyncAdmitHook&
+    operator=(const ScopedAfterSyncAdmitHook&) = delete;
+};
+
+void invoke_after_sync_admit_hook(DaemonSessionState& state,
+                                  std::string_view profile_name);
+
+} // namespace testing
 
 } // namespace daemon_detail
 } // namespace kasumi::application

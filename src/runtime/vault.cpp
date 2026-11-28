@@ -201,8 +201,10 @@ write_vault(const std::filesystem::path& key_path, const KeyBytes& clear_key) {
 }
 
 std::expected<void, runtime::Error>
-delete_vault(const std::filesystem::path& key_path) {
+delete_vault(const std::filesystem::path& key_path, bool require_backend) {
     static_cast<void>(key_path);
+    if (require_backend)
+        return fail(ErrorCode::IoFailure, "OS credential vault unavailable");
     return {};
 }
 #endif

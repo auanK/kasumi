@@ -497,7 +497,8 @@ TEST(RcloneSystemTest, SpawnedRcUsesRcloneServerTimeoutDefaults) {
     ASSERT_TRUE(response.has_value())
         << (response ? "" : response.error().message);
     const auto options = nlohmann::json::parse(*response);
-    const auto& http = options.at("rc").at("HTTP");
+    const auto& rc = options.at("rc");
+    const auto& http = rc.at(rc.contains("HTTP") ? "HTTP" : "HTTPOptions");
     const auto expected = std::chrono::duration_cast<std::chrono::nanoseconds>(
                               std::chrono::hours{1})
                               .count();
@@ -1590,6 +1591,23 @@ TEST(RcloneSystemTest, WriterPhysicalHashAvoidsReadback) {
                     release_registration(*registration));
 }
 
+// Query the real RC command table independently of the transport's result.
+// Older supported releases verify publications with readback instead.
+bool advertises_command(kasumi::transport::Transport& storage,
+                        std::string_view command) {
+    auto& state = *static_cast<kasumi::transport::rclone_detail::State*>(
+        storage.state.get());
+    const auto reply = kasumi::transport::rclone_detail::post_rc(
+        state, "rc/list", "{}", 1024 * 1024, std::chrono::seconds{5});
+    if (!reply) {
+        throw std::runtime_error(reply.error().message);
+    }
+    const auto commands = nlohmann::json::parse(*reply).at("commands");
+    return std::ranges::any_of(commands, [&](const auto& entry) {
+        return entry.at("Path") == command;
+    });
+}
+
 TEST(RcloneSystemTest, SinglePhysicalHashUsesHashsumfile) {
     auto harness = make_rclone_harness();
     auto storage = open_transport(harness);
@@ -1615,7 +1633,13 @@ TEST(RcloneSystemTest, SinglePhysicalHashUsesHashsumfile) {
 
     const auto verified =
         kasumi::transport::physical_hash(*storage, identifier, "sha256");
-    ASSERT_TRUE(verified.has_value());
+    if (!advertises_command(*storage, "operations/hashsumfile")) {
+        ASSERT_FALSE(verified);
+        EXPECT_EQ(verified.error().code,
+                  kasumi::transport::ErrorCode::Unsupported);
+        return;
+    }
+    ASSERT_TRUE(verified.has_value()) << verified.error().message;
     EXPECT_EQ(*verified, prepared->ciphertext_sha256);
 }
 
@@ -1652,6 +1676,12 @@ TEST(RcloneSystemTest, BulkPhysicalHashUsesOneCheckManifest) {
     ASSERT_TRUE(kasumi::transport::put_batch(*storage, batch));
     const auto verified =
         kasumi::transport::physical_hash_batch(*storage, request);
+    if (!advertises_command(*storage, "operations/check")) {
+        ASSERT_FALSE(verified);
+        EXPECT_EQ(verified.error().code,
+                  kasumi::transport::ErrorCode::Unsupported);
+        return;
+    }
     ASSERT_TRUE(verified.has_value()) << verified.error().message;
     EXPECT_TRUE(verified->mismatched.empty());
     EXPECT_TRUE(verified->missing.empty());

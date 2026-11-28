@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -20,10 +21,12 @@
 #include <format>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <print>
 #include <set>
 #include <string>
+#include <utility>
 #include <variant>
 
 #if !defined(_WIN32)
@@ -34,6 +37,10 @@
 
 namespace kasumi::cli {
 namespace {
+
+std::mutex before_profile_update_hook_mutex;
+testing::BeforeProfileUpdateHook active_before_profile_update_hook{};
+std::atomic<bool> has_before_profile_update_hook{false};
 
 #if !defined(_WIN32)
 const std::streambuf* const default_cin_buffer = std::cin.rdbuf();
@@ -685,15 +692,6 @@ std::optional<application::ProfileCredentials> read_profile_env_credentials() {
     return std::nullopt;
 }
 
-application::Credentials
-to_runtime_credentials(const application::ProfileCredentials& creds) {
-    return std::visit(
-        [](const auto& value) -> application::Credentials {
-            return application::Credentials{value};
-        },
-        creds);
-}
-
 struct ProfileCredsWipeGuard {
     application::ProfileCredentials& value;
     ~ProfileCredsWipeGuard() noexcept {
@@ -824,46 +822,14 @@ int run_profile_command(const application::ExecutionEnvironment& environment,
                 .sync_interval_seconds = invocation.sync_interval_seconds,
                 .paused = invocation.paused.value_or(false),
             };
-            application::Credentials verify_creds{application::NoCredentials{}};
-            CredsWipeGuard verify_guard{verify_creds};
-            if (invocation.verify &&
-                profile.key_storage == application::KeyStorage::Memory) {
-                verify_creds = to_runtime_credentials(creds);
-            }
             auto res = application::create_profile(
-                environment, profile, std::move(creds));
+                environment, profile, std::move(creds), invocation.verify,
+                platform::cancellation::current_stop_token());
             if (!res) {
-                return fail_error(res.error());
-            }
-            if (invocation.verify) {
-                auto conn = application::test_profile_connection(
-                    environment, profile.name, std::move(verify_creds));
-                if (platform::cancellation::requested()) {
-                    (void)application::delete_profile(environment,
-                                                      profile.name);
+                if (invocation.verify && platform::cancellation::requested()) {
                     return 130;
                 }
-                if (!conn || !conn->ready) {
-                    (void)application::delete_profile(environment,
-                                                      profile.name);
-                    if (!json) {
-                        print_warning_line(i18n::format(
-                            i18n::Key::WizardProfileCreatedVerifyFailed,
-                            profile.name));
-                    }
-                    if (!conn) {
-                        return fail_error(conn.error());
-                    }
-                    const auto code =
-                        conn->vault_state == application::RemoteVaultState::
-                                                 KeyMismatchOrInvalidHistory
-                            ? application::ProfileErrorCode::CredentialFailure
-                            : application::ProfileErrorCode::StorageFailure;
-                    return fail_error(application::ProfileError{
-                        .code = code,
-                        .detail = conn->detail,
-                    });
-                }
+                return fail_error(res.error());
             }
             return finish_success(
                 &profile,
@@ -884,7 +850,8 @@ int run_profile_command(const application::ExecutionEnvironment& environment,
                     .code = application::ProfileErrorCode::NotFound,
                     .detail = "profile not found"});
             }
-            application::Profile updated = *it;
+            const application::Profile original = *it;
+            application::Profile updated = original;
             if (invocation.local_dir) {
                 updated.local_dir =
                     platform::path::from_utf8(*invocation.local_dir);
@@ -929,8 +896,11 @@ int run_profile_command(const application::ExecutionEnvironment& environment,
             if (invocation.paused.has_value()) {
                 updated.paused = *invocation.paused;
             }
-            auto res = application::update_profile(
-                environment, updated, invocation.allow_empty_local);
+            testing::invoke_before_profile_update_hook(updated.name);
+            auto res = application::update_profile(environment,
+                                                   updated,
+                                                   invocation.allow_empty_local,
+                                                   &original);
             if (!res) {
                 return fail_error(res.error());
             }
@@ -989,9 +959,12 @@ int run_profile_command(const application::ExecutionEnvironment& environment,
             const bool needs_key =
                 target_storage != application::KeyStorage::Memory &&
                 target_storage != it->key_storage;
-            application::Profile updated = *it;
+            const application::Profile original = *it;
+            application::Profile updated = original;
             updated.key_storage = target_storage;
-            auto res = application::update_profile(environment, updated);
+            testing::invoke_before_profile_update_hook(updated.name);
+            auto res = application::update_profile(
+                environment, updated, false, &original);
             if (!res) {
                 return fail_error(res.error());
             }
@@ -1865,7 +1838,8 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 }
                 warn_if_unknown_rclone_remote(edit_remote, rclone_info);
 
-                application::Profile updated = *it;
+                const application::Profile original = *it;
+                application::Profile updated = original;
                 updated.local_dir = platform::path::from_utf8(edit_local);
                 updated.remote_dir = edit_remote;
 
@@ -1951,9 +1925,11 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
                 }
                 // WizardConfirmEdit already warns explicitly about empty local
                 // directories before asking for [y/N] confirmation.
-                report_result(
-                    application::update_profile(environment, updated, true),
-                    i18n::format(i18n::Key::WizardProfileEdited, target));
+                testing::invoke_before_profile_update_hook(updated.name);
+                report_result(application::update_profile(
+                                  environment, updated, true, &original),
+                              i18n::format(i18n::Key::WizardProfileEdited,
+                                           target));
             } else {
                 print_error_line(i18n::tr(i18n::Key::WizardProfileNotFound));
             }
@@ -2011,9 +1987,12 @@ int run_config_wizard(const application::ExecutionEnvironment& environment) {
             if (*chosen == selected->key_storage) {
                 continue;
             }
-            application::Profile updated = *selected;
+            const application::Profile original = *selected;
+            application::Profile updated = original;
             updated.key_storage = *chosen;
-            auto res = application::update_profile(environment, updated);
+            testing::invoke_before_profile_update_hook(updated.name);
+            auto res = application::update_profile(
+                environment, updated, false, &original);
             if (!res) {
                 print_error_line(res.error().detail);
             } else if (*chosen == application::KeyStorage::Memory) {
@@ -2197,5 +2176,41 @@ int run_profile_toggle_command(
     }
     return 0;
 }
+
+namespace testing {
+
+ScopedBeforeProfileUpdateHook::ScopedBeforeProfileUpdateHook(
+    BeforeProfileUpdateHook hook) {
+    std::lock_guard lock(before_profile_update_hook_mutex);
+    previous =
+        std::exchange(active_before_profile_update_hook, std::move(hook));
+    has_before_profile_update_hook.store(
+        static_cast<bool>(active_before_profile_update_hook),
+        std::memory_order_release);
+}
+
+ScopedBeforeProfileUpdateHook::~ScopedBeforeProfileUpdateHook() noexcept {
+    std::lock_guard lock(before_profile_update_hook_mutex);
+    active_before_profile_update_hook = std::move(previous);
+    has_before_profile_update_hook.store(
+        static_cast<bool>(active_before_profile_update_hook),
+        std::memory_order_release);
+}
+
+void invoke_before_profile_update_hook(std::string_view profile_name) {
+    if (!has_before_profile_update_hook.load(std::memory_order_acquire)) {
+        return;
+    }
+    BeforeProfileUpdateHook hook;
+    {
+        std::lock_guard lock(before_profile_update_hook_mutex);
+        hook = active_before_profile_update_hook;
+    }
+    if (hook) {
+        hook(profile_name);
+    }
+}
+
+} // namespace testing
 
 } // namespace kasumi::cli

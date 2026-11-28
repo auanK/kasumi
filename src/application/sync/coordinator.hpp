@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <filesystem>
 #include <optional>
 #include <span>
 #include <string>
@@ -55,6 +56,7 @@ struct Error {
     std::string detail;
     // Operation index in the plan, when applicable.
     std::optional<std::size_t> operation_index;
+    bool empty_local_blocked = false;
 };
 
 // Staging workspace and backup progress carried from stabilize into execute.
@@ -69,8 +71,21 @@ std::expected<void, Error>
 discard_staged_handoff(std::optional<StagedExecutionHandoff>& staged,
                        std::span<const std::uint8_t, crypto::KEY_SIZE> key);
 
+// Controls whether a sync may advance an existing remote pruning Epoch.
+enum class EpochAdvancementPolicy {
+    DeferMultiWriter,
+    ExclusivePublisher,
+};
+
 // Formats a coordinator failure.
 std::string describe(const Error& error);
+
+// Blocks unintended bulk remote deletions when an already-populated local
+// directory becomes empty and the plan would delete every remote entry.
+std::expected<void, Error>
+check_empty_local_deletion_guard(const std::filesystem::path& local_dir,
+                                 const reconciliation::Input& input,
+                                 const reconciliation::Result& result);
 
 // Transactionally executes the result of the provided observation.
 std::expected<void, Error>
@@ -83,7 +98,10 @@ execute(const runtime::RuntimeData& runtime_data,
         StagedExecutionHandoff* staged_handoff = nullptr,
         bool enable_micro_packs = false,
         history::CommitAuthorship authorship = {},
-        std::string* accepted_commit_id = nullptr);
+        std::string* accepted_commit_id = nullptr,
+        bool enforce_empty_local_guard = false,
+        EpochAdvancementPolicy epoch_advancement =
+            EpochAdvancementPolicy::DeferMultiWriter);
 
 // Recovers an interrupted transaction, if any.
 std::expected<RecoveryResult, Error>

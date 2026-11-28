@@ -1,7 +1,9 @@
 #include "application/execute.hpp"
+#include "application/history_storage/epoch.hpp"
 #include "application/history_storage/history_storage.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/remote_layout.hpp"
+#include "application/inspection/inspect.hpp"
 #include "application/profile.hpp"
 #include "application/use_cases/context.hpp"
 #include "application/use_cases/plan_support.hpp"
@@ -12,6 +14,7 @@
 #include "crypto/file_crypto.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
+#include "platform/clock.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
 #include "platform/profile_lock.hpp"
@@ -20,8 +23,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 #include <string>
 #include <string_view>
@@ -1906,6 +1911,300 @@ TEST(ApplicationExecuteTest, SyncCopyLocalCountsAndRecordsNonNoopStatus) {
     EXPECT_EQ(
         activity.last_complete_sync->status,
         kasumi::application::ProfileExecutionStatus::SucceededDownloadedOnly);
+}
+
+TEST(ApplicationExecuteTest,
+     WeeklyGcAdvancesEpochReclaimsExpiredLinearHistoryAndPreservesSharedAndLiveData) {
+    auto workspace = kasumi::test::make_temp_workspace("exec-weekly-gc-e2e");
+    write_profile(workspace);
+    const auto local = kasumi::test::workspace_path(workspace, "local");
+    const auto remote = kasumi::test::workspace_path(workspace, "remote");
+    const ExecutionEnvironment env{
+        kasumi::test::workspace_path(workspace, "app")};
+    ASSERT_TRUE(std::filesystem::create_directories(local));
+
+    const auto real_now_tp = std::chrono::system_clock::now();
+    const auto real_now =
+        std::chrono::duration_cast<std::chrono::seconds>(
+            real_now_tp.time_since_epoch())
+            .count();
+
+    // Build deterministic >8 MiB payload so FastCDC chunks prefix/middle
+    // independently from a trailing slice we mutate in v1.
+    std::string chunked_payload(9U * 1024U * 1024U, '\0');
+    for (std::size_t i = 0; i < chunked_payload.size(); ++i) {
+        chunked_payload[i] =
+            static_cast<char>((i * 131U + (i >> 8U) * 17U) & 0xFFU);
+    }
+    const auto write_chunked_tail = [&](std::string_view tag) {
+        std::string bytes = chunked_payload;
+        for (std::size_t i = 0; i < tag.size(); ++i) {
+            bytes[bytes.size() - 512U + i] = tag[i];
+        }
+        std::ofstream out(local / "shared_chunked.bin",
+                          std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(out.good());
+        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        ASSERT_TRUE(out.good());
+    };
+
+    const auto sync_at = [&](std::int64_t ts) -> SyncCompleted {
+        kasumi::platform::clock::testing::ScopedUnixSecondsOverride clock(ts);
+        const auto res = kasumi::application::execute(
+            {Request{Operation::Sync, "demo"}, Credentials{key()}, env});
+        EXPECT_TRUE(res.has_value()) << (res ? "" : res.error().detail);
+        if (!res) {
+            return {};
+        }
+        const auto* completed = std::get_if<SyncCompleted>(&res->data);
+        EXPECT_NE(completed, nullptr);
+        return completed ? *completed : SyncCompleted{};
+    };
+
+    // v0 (height 0) at real_now - 12h: steady 10y-mtime file, exclusive v0
+    // file, shared small file, and shared chunked file (tail-v0).
+    kasumi::test::write_text(local / "steady_10y.txt", "steady-live-ten-years");
+    {
+        std::error_code ec;
+        std::filesystem::last_write_time(
+            local / "steady_10y.txt",
+            std::filesystem::file_time_type::clock::now() -
+                std::chrono::hours{24LL * 365LL * 10LL},
+            ec);
+    }
+    kasumi::test::write_text(local / "exclusive.txt", "exclusive-content-v0");
+    kasumi::test::write_text(local / "shared_small.txt", "shared-live-small");
+    kasumi::test::write_text(local / "recent.txt", "recent-v0");
+    write_chunked_tail("TAIL-V0");
+    sync_at(real_now - 12LL * 3600LL);
+
+    const std::string steady_content_id = kasumi::crypto::content_identifier(
+        application_key(), kasumi::hasher::hash_string("steady-live-ten-years"));
+    const std::string excl_v0_id = kasumi::crypto::content_identifier(
+        application_key(), kasumi::hasher::hash_string("exclusive-content-v0"));
+    const std::string excl_v1_id = kasumi::crypto::content_identifier(
+        application_key(), kasumi::hasher::hash_string("exclusive-content-v1"));
+    const std::string excl_v2_id = kasumi::crypto::content_identifier(
+        application_key(), kasumi::hasher::hash_string("exclusive-content-v2"));
+
+    // v1 (height 1) at real_now - 11h: replace exclusive.txt and only the tail
+    // of shared_chunked.bin (prefix chunks remain shared with HEAD).
+    kasumi::test::write_text(local / "exclusive.txt", "exclusive-content-v1");
+    write_chunked_tail("TAIL-V1");
+    sync_at(real_now - 11LL * 3600LL);
+
+    // v2 (height 2) at real_now - 10h: replace exclusive.txt again.
+    kasumi::test::write_text(local / "exclusive.txt", "exclusive-content-v2");
+    sync_at(real_now - 10LL * 3600LL);
+
+    // v3..v7 within the last 2 hours (protected by depth + v2 protected by age
+    // since v3 superseded v2 only 2h ago < 6h).
+    for (int i = 3; i <= 7; ++i) {
+        const std::int64_t age_sec =
+            (8 - i) * 20LL * 60LL; // 100m, 80m, 60m, 40m, 20m
+        kasumi::test::write_text(local / "recent.txt",
+                                 "recent-v" + std::to_string(i));
+        sync_at(real_now - age_sec);
+    }
+
+    auto opened = kasumi::transport::open_transport(remote.string());
+    ASSERT_TRUE(opened.has_value()) << opened.error().message;
+    const auto key_bytes = application_key();
+
+    // Capture commit IDs before GC.
+    const auto commits_before_res = kasumi::application::inspect(
+        {kasumi::application::InspectionRequest{
+             .operation = kasumi::application::InspectionOperation::RemoteCommits,
+             .profile_name = "demo"},
+         Credentials{key()},
+         env});
+    ASSERT_TRUE(commits_before_res.has_value())
+        << commits_before_res.error().detail;
+    const auto* commits_before =
+        std::get_if<kasumi::application::RemoteCommitsReport>(
+            &commits_before_res->payload);
+    ASSERT_NE(commits_before, nullptr);
+    ASSERT_EQ(commits_before->commits.size(), 8U);
+
+    const auto find_commit_at_height = [&](std::uint64_t h) {
+        const auto it = std::ranges::find(
+            commits_before->commits,
+            h,
+            &kasumi::application::RemoteCommitInfo::height);
+        return it == commits_before->commits.end() ? std::string{}
+                                                   : it->commit_id;
+    };
+    const std::string c0_id = find_commit_at_height(0);
+    const std::string c1_id = find_commit_at_height(1);
+    const std::string c2_id = find_commit_at_height(2);
+    const std::string c7_id = find_commit_at_height(7);
+    ASSERT_FALSE(c0_id.empty());
+    ASSERT_FALSE(c1_id.empty());
+    ASSERT_FALSE(c2_id.empty());
+    ASSERT_FALSE(c7_id.empty());
+
+    kasumi::platform::clock::testing::ScopedUnixSecondsOverride now_clock(
+        real_now);
+
+    // 1. Dry-run simulates Epoch advancement (0 -> 1, pruning v0 and v1 while
+    // anchoring at v2) with zero remote Epoch writes or deletions.
+    {
+        const auto dry = kasumi::application::execute(
+            {Request{.operation = Operation::GarbageCollect,
+                     .profile_name = "demo",
+                     .dry_run = true,
+                     .gc_min_age_hours = 0},
+             Credentials{key()},
+             env});
+        ASSERT_TRUE(dry.has_value()) << dry.error().detail;
+        const auto* gc = std::get_if<GarbageCollectCompleted>(&dry->data);
+        ASSERT_NE(gc, nullptr);
+        EXPECT_TRUE(gc->dry_run);
+        EXPECT_TRUE(gc->epoch_advancement_planned);
+        EXPECT_FALSE(gc->epoch_advanced);
+        EXPECT_EQ(gc->target_epoch_sequence, std::optional<std::uint64_t>{1U});
+        EXPECT_EQ(gc->planned_pruned_commits, 2U);
+        EXPECT_EQ(gc->candidate_expired_commits, 2U);
+        EXPECT_EQ(gc->removed_objects, 0U);
+        EXPECT_GE(gc->candidate_content_objects, 2U);
+
+        const auto ep = kasumi::application::history_storage::epoch::load_latest(
+            *opened, key_bytes, kasumi::test::workspace_root(workspace));
+        ASSERT_TRUE(ep.has_value() && *ep);
+        EXPECT_EQ((*ep)->reference.sequence, 0U);
+        EXPECT_EQ(kasumi::transport::presence(*opened, excl_v0_id).value(),
+                  kasumi::transport::Presence::Present);
+    }
+
+    // 2. Live GC with default 6h physical grace advances Epoch 0 -> 1, but
+    // defers deleting freshly written remote objects (< 6h object mtime).
+    {
+        const auto deferred = kasumi::application::execute(
+            {Request{.operation = Operation::GarbageCollect,
+                     .profile_name = "demo"},
+             Credentials{key()},
+             env});
+        ASSERT_TRUE(deferred.has_value()) << deferred.error().detail;
+        const auto* gc = std::get_if<GarbageCollectCompleted>(&deferred->data);
+        ASSERT_NE(gc, nullptr);
+        EXPECT_FALSE(gc->dry_run);
+        EXPECT_TRUE(gc->epoch_advanced);
+        EXPECT_EQ(gc->target_epoch_sequence, std::optional<std::uint64_t>{1U});
+        EXPECT_EQ(gc->planned_pruned_commits, 2U);
+        EXPECT_GT(gc->deferred_recent_objects, 0U);
+        EXPECT_EQ(gc->removed_objects, 0U);
+        EXPECT_EQ(kasumi::transport::presence(*opened, excl_v0_id).value(),
+                  kasumi::transport::Presence::Present);
+
+        const auto ep = kasumi::application::history_storage::epoch::load_latest(
+            *opened, key_bytes, kasumi::test::workspace_root(workspace));
+        ASSERT_TRUE(ep.has_value() && *ep);
+        EXPECT_EQ((*ep)->reference.sequence, 1U);
+        ASSERT_EQ((*ep)->value.anchors.size(), 1U);
+        EXPECT_EQ((*ep)->value.anchors.front().commit_id, c2_id);
+        EXPECT_EQ((*ep)->value.anchors.front().height, 2U);
+    }
+
+    // 3. Live GC with --gc-min-age 0 physically deletes expired v0/v1 commits
+    // and exclusive objects, keeping v2..v7, shared chunks, and steady_10y.
+    {
+        const auto live = kasumi::application::execute(
+            {Request{.operation = Operation::GarbageCollect,
+                     .profile_name = "demo",
+                     .gc_min_age_hours = 0},
+             Credentials{key()},
+             env});
+        ASSERT_TRUE(live.has_value()) << live.error().detail;
+        const auto* gc = std::get_if<GarbageCollectCompleted>(&live->data);
+        ASSERT_NE(gc, nullptr);
+        EXPECT_FALSE(gc->epoch_advanced);
+        EXPECT_GT(gc->removed_objects, 0U);
+        EXPECT_EQ(gc->removed_objects, gc->candidate_objects);
+
+        EXPECT_EQ(kasumi::transport::presence(*opened, excl_v0_id).value(),
+                  kasumi::transport::Presence::Absent);
+        EXPECT_EQ(kasumi::transport::presence(*opened, excl_v1_id).value(),
+                  kasumi::transport::Presence::Absent);
+        EXPECT_EQ(kasumi::transport::presence(*opened, excl_v2_id).value(),
+                  kasumi::transport::Presence::Present);
+        EXPECT_EQ(kasumi::transport::presence(*opened, steady_content_id).value(),
+                  kasumi::transport::Presence::Present);
+    }
+
+    // Verify retained versions (v2..v7) and current snapshot integrity.
+    const auto commits_after_res = kasumi::application::inspect(
+        {kasumi::application::InspectionRequest{
+             .operation = kasumi::application::InspectionOperation::RemoteCommits,
+             .profile_name = "demo"},
+         Credentials{key()},
+         env});
+    ASSERT_TRUE(commits_after_res.has_value())
+        << commits_after_res.error().detail;
+    const auto* commits_after =
+        std::get_if<kasumi::application::RemoteCommitsReport>(
+            &commits_after_res->payload);
+    ASSERT_NE(commits_after, nullptr);
+    EXPECT_EQ(commits_after->commits.size(), 6U);
+
+    // Restoring v2 and v7 (which includes steady_10y.txt + shared_chunked.bin)
+    // succeeds with intact bytes; fsck passes.
+    const auto restore_v2_dst =
+        kasumi::test::workspace_path(workspace, "restored-v2");
+    ASSERT_TRUE(kasumi::application::inspect(
+                    {kasumi::application::InspectionRequest{
+                         .operation =
+                             kasumi::application::InspectionOperation::RemoteRestore,
+                         .profile_name = "demo",
+                         .commit_id = c2_id,
+                         .destination_path =
+                             kasumi::platform::path::to_utf8(restore_v2_dst)},
+                     Credentials{key()},
+                     env})
+                    .has_value());
+    EXPECT_EQ(kasumi::test::read_text(restore_v2_dst / "exclusive.txt"),
+              "exclusive-content-v2");
+
+    const auto restore_v7_dst =
+        kasumi::test::workspace_path(workspace, "restored-v7");
+    ASSERT_TRUE(kasumi::application::inspect(
+                    {kasumi::application::InspectionRequest{
+                         .operation =
+                             kasumi::application::InspectionOperation::RemoteRestore,
+                         .profile_name = "demo",
+                         .commit_id = c7_id,
+                         .destination_path =
+                             kasumi::platform::path::to_utf8(restore_v7_dst)},
+                     Credentials{key()},
+                     env})
+                    .has_value());
+    EXPECT_EQ(kasumi::test::read_text(restore_v7_dst / "steady_10y.txt"),
+              "steady-live-ten-years");
+    EXPECT_EQ(kasumi::test::read_text(restore_v7_dst / "recent.txt"),
+              "recent-v7");
+    EXPECT_EQ(std::filesystem::file_size(restore_v7_dst / "shared_chunked.bin"),
+              chunked_payload.size());
+
+    const auto fsck_res = kasumi::application::execute(
+        {Request{.operation = Operation::Fsck,
+                 .profile_name = "demo"},
+         Credentials{key()},
+         env});
+    ASSERT_TRUE(fsck_res.has_value()) << fsck_res.error().detail;
+
+    // 4. Repeat GC with no changes recognizes work already completed (no-op).
+    const auto second_gc = kasumi::application::execute(
+        {Request{.operation = Operation::GarbageCollect,
+                 .profile_name = "demo",
+                 .gc_min_age_hours = 0},
+         Credentials{key()},
+         env});
+    ASSERT_TRUE(second_gc.has_value()) << second_gc.error().detail;
+    const auto* gc2 = std::get_if<GarbageCollectCompleted>(&second_gc->data);
+    ASSERT_NE(gc2, nullptr);
+    EXPECT_FALSE(gc2->epoch_advanced);
+    EXPECT_FALSE(gc2->epoch_advancement_planned);
+    EXPECT_EQ(gc2->candidate_objects, 0U);
+    EXPECT_EQ(gc2->removed_objects, 0U);
 }
 
 } // namespace

@@ -1,12 +1,16 @@
 #include "application/execute.hpp"
+#include "application/observation/history.hpp"
 #include "application/profile.hpp"
 #include "application/profile_fault_test.hpp"
 #include "application/sync/journal.hpp"
+#include "application/sync/mutation_fault_test.hpp"
 #include "core/hasher.hpp"
 #include "core/history.hpp"
+#include "core/ignore.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/scoped_environment.hpp"
 #include "kasumi/test/temp_workspace.hpp"
+#include "platform/durability.hpp"
 #include "platform/path.hpp"
 #include "platform/private_storage.hpp"
 #include "platform/profile_lock.hpp"
@@ -16,6 +20,7 @@
 #include "runtime/vault.hpp"
 #include "state_storage/database.hpp"
 #include "state_storage/database_connection.hpp"
+#include "transport/transport.hpp"
 
 #include <algorithm>
 #include <array>
@@ -575,6 +580,38 @@ TEST(ApplicationProfileTest,
     EXPECT_FALSE(std::filesystem::exists(
         kasumi::test::workspace_path(workspace, "app/profiles/new")));
     EXPECT_TRUE(kasumi::application::list_profiles(environment)->empty());
+}
+
+TEST(ApplicationProfileTest,
+     PendingDeletionReservesNameAndResumesAfterRestart) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("pending-profile-delete");
+    const ExecutionEnvironment env{
+        kasumi::test::workspace_path(workspace, "app")};
+    Profile profile{"Demo",
+                    kasumi::test::workspace_path(workspace, "local"),
+                    kasumi::test::workspace_path(workspace, "remote").string()};
+    ASSERT_TRUE(kasumi::application::create_profile(env, profile, key()));
+    const auto intent = env.app_data_dir / "profile-demo.delete-pending";
+    const auto retired = env.app_data_dir / "profiles/.retired-demo";
+    // Persist the state left by a crash immediately after directory retirement.
+    ASSERT_TRUE(
+        kasumi::platform::private_storage::write_atomically(intent, "PDemo"));
+    ASSERT_TRUE(
+        kasumi::runtime::save_profiles(env.app_data_dir / "config.toml", {}));
+    std::filesystem::rename(env.app_data_dir / "profiles/Demo", retired);
+    auto other = profile;
+    other.name = "other";
+    ASSERT_TRUE(kasumi::application::create_profile(env, other, key()));
+    EXPECT_FALSE(kasumi::application::create_profile(env, profile, key()));
+    EXPECT_FALSE(clone_profile(env, "other", "demo"));
+    EXPECT_FALSE(kasumi::application::rename_profile(env, "other", "Demo"));
+    EXPECT_FALSE(kasumi::application::delete_profile(env, "demo"));
+    ASSERT_TRUE(std::filesystem::exists(retired / "db.sqlite"));
+    ASSERT_TRUE(kasumi::application::delete_profile(env, "Demo"));
+    EXPECT_FALSE(std::filesystem::exists(intent));
+    EXPECT_FALSE(std::filesystem::exists(retired));
+    EXPECT_TRUE(kasumi::application::create_profile(env, profile, key()));
 }
 
 TEST(ApplicationProfileTest, UpdateProfileValidatesAndPersistsRetentionPolicy) {
@@ -3923,7 +3960,7 @@ TEST(ApplicationProfileTest,
     EXPECT_TRUE(
         std::filesystem::exists(local_dir / "doc.txt.kasumiconflict_local"));
 
-    // KeepCanonical leaves canonical untouched, deletes doc.txt artifacts only.
+    // KeepCanonical leaves canonical untouched, retires doc.txt artifacts into recovery directory.
     const auto keep_can = kasumi::application::resolve_local_conflict(
         env,
         kasumi::application::ResolveConflictRequest{
@@ -3934,11 +3971,18 @@ TEST(ApplicationProfileTest,
         });
     ASSERT_TRUE(keep_can.has_value()) << keep_can.error().detail;
     EXPECT_EQ(keep_can->removed_artifacts.size(), 2U);
+    ASSERT_TRUE(keep_can->recovery_directory.has_value());
     EXPECT_EQ(kasumi::test::read_text(local_dir / "doc.txt"), "canonical-v1");
     EXPECT_FALSE(
         std::filesystem::exists(local_dir / "doc.txt.kasumiconflict_local"));
     EXPECT_FALSE(
         std::filesystem::exists(local_dir / "doc.txt.kasumiconflict_remote"));
+    EXPECT_EQ(kasumi::test::read_text(local_dir / *keep_can->recovery_directory /
+                                      "doc.txt.kasumiconflict_local"),
+              "local-v2");
+    EXPECT_EQ(kasumi::test::read_text(local_dir / *keep_can->recovery_directory /
+                                      "doc.txt.kasumiconflict_remote"),
+              "remote-v3");
     EXPECT_TRUE(std::filesystem::exists(local_dir / "sub" /
                                         "note.md.kasumiconflict_0123456789ab"));
 
@@ -3965,10 +4009,145 @@ TEST(ApplicationProfileTest,
             .artifact_selector = "0123456789ab",
         });
     ASSERT_TRUE(keep_art.has_value()) << keep_art.error().detail;
+    EXPECT_FALSE(keep_art->recovery_directory.has_value());
     EXPECT_EQ(kasumi::test::read_text(local_dir / "sub" / "note.md"),
               "branch-only");
     EXPECT_FALSE(std::filesystem::exists(
         local_dir / "sub" / "note.md.kasumiconflict_0123456789ab"));
+}
+
+TEST(ApplicationProfileTest, ResolutionPreservesRecreatedNamesAndOpenWriters) {
+    namespace ps = kasumi::platform::private_storage;
+    namespace fault = kasumi::application::sync::mutation_fault_test;
+    const auto workspace = kasumi::test::make_temp_workspace("conflict-writers");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const ExecutionEnvironment env{root / "app"};
+    const auto local = root / "local";
+    std::filesystem::create_directory(local);
+    ASSERT_TRUE(create_profile(env, Profile{"demo", local, (root / "remote").string()}, key()));
+
+    const auto winner = local / "note.kasumiconflict_local";
+    const auto other = local / "note.kasumiconflict_remote";
+    auto winner_writer = ps::create_private_file(winner);
+    auto other_writer = ps::create_private_file(other);
+    ASSERT_TRUE(winner_writer);
+    ASSERT_TRUE(other_writer);
+    ASSERT_TRUE(ps::write_private_file(*winner_writer, "chosen", 6));
+    ASSERT_TRUE(ps::write_private_file(*other_writer, "other", 5));
+    kasumi::test::write_text(local / "note", "canonical");
+
+    // Model an editor saving both names between reservation and promotion.
+    fault::set_hook([&](std::string_view point, const auto&) {
+        if (point == "conflict_artifacts_reserved") {
+            kasumi::test::write_text(winner, "new local");
+            kasumi::test::write_text(other, "new remote");
+        }
+    });
+    struct ResetHook { ~ResetHook() { fault::clear_hook(); } } reset;
+    const auto result = kasumi::application::resolve_local_conflict(
+        env, {.profile_name = "demo", .canonical_path = "note",
+              .choice = kasumi::application::ConflictResolutionChoice::KeepArtifact,
+              .artifact_selector = "local"});
+    ASSERT_TRUE(result) << result.error().detail;
+    ASSERT_TRUE(result->recovery_directory);
+    ASSERT_TRUE(ps::write_private_file(*winner_writer, "+edit", 5));
+    ASSERT_TRUE(ps::write_private_file(*other_writer, "+edit", 5));
+    ps::close_private_file(*winner_writer);
+    ps::close_private_file(*other_writer);
+
+    EXPECT_EQ(kasumi::test::read_text(local / "note"), "chosen+edit");
+    EXPECT_EQ(kasumi::test::read_text(local / *result->recovery_directory / other.filename()), "other+edit");
+    EXPECT_EQ(kasumi::test::read_text(winner), "new local");
+    EXPECT_EQ(kasumi::test::read_text(other), "new remote");
+    const auto listed = kasumi::application::list_local_conflicts(env, "demo");
+    ASSERT_TRUE(listed);
+    EXPECT_EQ(listed->total_artifacts, 2U);
+}
+
+TEST(ApplicationProfileTest,
+     ResolutionHandlesAtomicRenameReplacementKeepCanonicalAndRollback) {
+    namespace ps = kasumi::platform::private_storage;
+    namespace durability = kasumi::platform::durability;
+    namespace fault = kasumi::application::sync::mutation_fault_test;
+    const auto workspace =
+        kasumi::test::make_temp_workspace("conflict-rename-and-rollback");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const ExecutionEnvironment env{root / "app"};
+    const auto local = root / "local";
+    std::filesystem::create_directory(local);
+    ASSERT_TRUE(create_profile(
+        env, Profile{"demo", local, (root / "remote").string()}, key()));
+
+    struct ResetHook {
+        ~ResetHook() {
+            fault::clear_hook();
+        }
+    } reset;
+
+    // 1. KeepCanonical with open writer + atomic rename replacement by an editor.
+    const auto art = local / "note.kasumiconflict_local";
+    auto art_writer = ps::create_private_file(art);
+    ASSERT_TRUE(art_writer);
+    ASSERT_TRUE(ps::write_private_file(*art_writer, "open-art", 8));
+    kasumi::test::write_text(local / "note", "canonical");
+
+    fault::set_hook([&](std::string_view point, const auto&) {
+        if (point == "conflict_artifacts_reserved") {
+            const auto staged = local / "editor-temp.txt";
+            kasumi::test::write_text(staged, "editor-atomic");
+            ASSERT_TRUE(durability::replace_atomically(staged, art));
+        }
+    });
+    const auto keep_can = kasumi::application::resolve_local_conflict(
+        env,
+        {.profile_name = "demo",
+         .canonical_path = "note",
+         .choice = kasumi::application::ConflictResolutionChoice::KeepCanonical});
+    ASSERT_TRUE(keep_can) << keep_can.error().detail;
+    ASSERT_TRUE(keep_can->recovery_directory);
+    ASSERT_TRUE(ps::write_private_file(*art_writer, "+tail", 5));
+    ps::close_private_file(*art_writer);
+
+    EXPECT_EQ(kasumi::test::read_text(local / "note"), "canonical");
+    EXPECT_EQ(kasumi::test::read_text(local / *keep_can->recovery_directory /
+                                      art.filename()),
+              "open-art+tail");
+    EXPECT_EQ(kasumi::test::read_text(art), "editor-atomic");
+
+    // 2. Rollback preserves both a newly created canonical and newly saved artifact.
+    fault::clear_hook();
+    const auto rb_local = root / "rb_local";
+    std::filesystem::create_directory(rb_local);
+    ASSERT_TRUE(create_profile(
+        env, Profile{"rb", rb_local, (root / "rb_remote").string()}, key()));
+    const auto canon_rb = rb_local / "report.txt";
+    const auto art_rb = rb_local / "report.txt.kasumiconflict_local";
+    kasumi::test::write_text(art_rb, "original-artifact");
+
+    std::filesystem::path recovery_path;
+    fault::set_hook([&](std::string_view point, const std::filesystem::path& p) {
+        if (point == "conflict_artifacts_reserved") {
+            recovery_path = p;
+            kasumi::test::write_text(canon_rb, "late-canonical");
+            kasumi::test::write_text(art_rb, "late-editor");
+        }
+    });
+    const auto failed = kasumi::application::resolve_local_conflict(
+        env,
+        {.profile_name = "rb",
+         .canonical_path = "report.txt",
+         .choice = kasumi::application::ConflictResolutionChoice::KeepArtifact,
+         .artifact_selector = "local"});
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(failed.error().code, ProfileErrorCode::StorageFailure);
+    EXPECT_NE(
+        failed.error().detail.find(kasumi::ignore::conflict_recovery_prefix),
+        std::string::npos);
+    EXPECT_EQ(kasumi::test::read_text(canon_rb), "late-canonical");
+    EXPECT_EQ(kasumi::test::read_text(art_rb), "late-editor");
+    ASSERT_FALSE(recovery_path.empty());
+    EXPECT_EQ(kasumi::test::read_text(recovery_path / art_rb.filename()),
+              "original-artifact");
 }
 
 TEST(ApplicationProfileTest, EmptyLocalGuardsProtectSyncAndProfileRelocation) {
@@ -4061,6 +4240,110 @@ TEST(ApplicationProfileTest, EmptyLocalGuardsProtectSyncAndProfileRelocation) {
     });
     ASSERT_TRUE(allowed.has_value()) << allowed.error().detail;
     EXPECT_TRUE(std::filesystem::exists(local_dir));
+}
+
+TEST(ApplicationProfileTest, EmptyLocalGuardBlocksDeletionAfterReobservation) {
+    namespace fault = kasumi::application::sync::mutation_fault_test;
+    auto workspace =
+        kasumi::test::make_temp_workspace("app-empty-local-reobservation");
+    const auto root = kasumi::test::workspace_root(workspace);
+    const kasumi::application::ExecutionEnvironment env{root / "kasumi"};
+    const auto local_dir = root / "local";
+    const auto remote_dir = root / "remote";
+    std::filesystem::create_directories(local_dir);
+    for (int i = 0; i < 6; ++i) {
+        kasumi::test::write_text(local_dir /
+                                     ("file" + std::to_string(i) + ".txt"),
+                                 "payload-" + std::to_string(i));
+    }
+
+    const kasumi::application::Profile profile{
+        .name = "reobs",
+        .local_dir = local_dir,
+        .remote_dir = remote_dir.string(),
+        .key_storage = kasumi::application::KeyStorage::File,
+    };
+    const auto key = kasumi::application::MasterKeyHex{std::string(64, 'b')};
+    ASSERT_TRUE(
+        kasumi::application::create_profile(env, profile, key).has_value());
+
+    const auto synced = kasumi::application::execute({
+        .request = {.operation = kasumi::application::Operation::Sync,
+                    .profile_name = "reobs"},
+        .credentials = kasumi::application::NoCredentials{},
+        .environment = env,
+    });
+    ASSERT_TRUE(synced.has_value()) << synced.error().detail;
+
+    const auto runtime_rw = kasumi::runtime::resolve(
+        env.app_data_dir, "reobs", kasumi::runtime::AccessMode::ReadOnly);
+    ASSERT_TRUE(runtime_rw.has_value());
+    const auto initial_state =
+        kasumi::state_storage::load_state(runtime_rw->database_path);
+    ASSERT_TRUE(initial_state.has_value() && *initial_state);
+    const std::string initial_commit_id = (*initial_state)->commit_id;
+    ASSERT_EQ((*initial_state)->tree.rows.size(), 7U);
+
+    // Delete 1 file so initial pass passes the guard, then empty local_dir
+    // before stabilize's final local reobservation.
+    std::filesystem::remove(local_dir / "file0.txt");
+    fault::set_hook([&](std::string_view point, const std::filesystem::path&) {
+        if (point == "before_final_local_observation") {
+            for (int i = 1; i < 6; ++i) {
+                std::filesystem::remove(local_dir /
+                                        ("file" + std::to_string(i) + ".txt"));
+            }
+        }
+    });
+    struct ResetHook {
+        ~ResetHook() {
+            fault::clear_hook();
+        }
+    } reset_hook;
+
+    const auto blocked = kasumi::application::execute({
+        .request = {.operation = kasumi::application::Operation::Sync,
+                    .profile_name = "reobs"},
+        .credentials = kasumi::application::NoCredentials{},
+        .environment = env,
+    });
+    fault::clear_hook();
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_TRUE(blocked.error().empty_local_blocked)
+        << blocked.error().detail;
+
+    // Verify neither remote HEAD nor accepted local DB recorded deletions.
+    auto transport = kasumi::transport::open_transport(remote_dir.string());
+    ASSERT_TRUE(transport.has_value());
+    const auto key_bytes =
+        kasumi::runtime::vault::read_only(runtime_rw->key_path);
+    ASSERT_TRUE(key_bytes.has_value());
+    const auto remote_obs = kasumi::application::observation::history::observe(
+        *transport, *key_bytes, runtime_rw->database_path.parent_path(), false);
+    ASSERT_TRUE(remote_obs.has_value()) << remote_obs.error().detail;
+    EXPECT_EQ(remote_obs->logical_heads, std::vector{initial_commit_id});
+
+    const auto after_blocked_state =
+        kasumi::state_storage::load_state(runtime_rw->database_path);
+    ASSERT_TRUE(after_blocked_state.has_value() && *after_blocked_state);
+    EXPECT_EQ((*after_blocked_state)->commit_id, initial_commit_id);
+    EXPECT_EQ((*after_blocked_state)->tree.rows.size(), 7U);
+
+    // Passing --allow-empty-local still allows intentional full deletion.
+    const auto allowed = kasumi::application::execute({
+        .request = {.operation = kasumi::application::Operation::Sync,
+                    .profile_name = "reobs",
+                    .allow_empty_local = true},
+        .credentials = kasumi::application::NoCredentials{},
+        .environment = env,
+    });
+    ASSERT_TRUE(allowed.has_value()) << allowed.error().detail;
+
+    const auto after_allowed_state =
+        kasumi::state_storage::load_state(runtime_rw->database_path);
+    ASSERT_TRUE(after_allowed_state.has_value() && *after_allowed_state);
+    EXPECT_NE((*after_allowed_state)->commit_id, initial_commit_id);
+    EXPECT_EQ((*after_allowed_state)->tree.rows.size(), 1U);
 }
 
 TEST(ApplicationProfileTest,
@@ -4320,6 +4603,89 @@ TEST(ApplicationProfileTest,
     EXPECT_EQ(running_sum.activity.last_attempt->status,
               kasumi::application::ProfileExecutionStatus::InProgress);
     kasumi::platform::release_profile_lock(*held);
+}
+
+TEST(ApplicationProfileTest,
+     IgnoreInitWithoutForceIsAtomicAcrossConcurrentThreads) {
+    const auto ws = kasumi::test::make_temp_workspace("app-ignore-concurrent");
+    const ExecutionEnvironment env{kasumi::test::workspace_path(ws, "app")};
+    const auto local_dir = kasumi::test::workspace_path(ws, "local");
+    const auto remote_dir = kasumi::test::workspace_path(ws, "remote");
+    std::filesystem::create_directories(local_dir);
+    std::filesystem::create_directories(remote_dir);
+    ASSERT_TRUE(kasumi::application::create_profile(
+        env,
+        Profile{
+            .name = "demo",
+            .local_dir = local_dir,
+            .remote_dir = kasumi::platform::path::to_utf8(remote_dir),
+            .key_storage = KeyStorage::File,
+        },
+        key()));
+
+    const auto ignore_path = local_dir / ".kasumiignore";
+    for (int round = 0; round < 8; ++round) {
+        std::filesystem::remove(ignore_path);
+        std::barrier sync_start(2);
+        std::array<std::expected<kasumi::application::IgnoreInitReport,
+                                 kasumi::application::ProfileError>,
+                   2>
+            results{
+                std::unexpected(kasumi::application::ProfileError{}),
+                std::unexpected(kasumi::application::ProfileError{}),
+            };
+        const std::array<kasumi::application::IgnorePreset, 2> presets{
+            kasumi::application::IgnorePreset::Dev,
+            kasumi::application::IgnorePreset::Office,
+        };
+
+        std::array<std::thread, 2> workers;
+        for (std::size_t idx = 0; idx < 2; ++idx) {
+            workers[idx] = std::thread([&, idx]() {
+                sync_start.arrive_and_wait();
+                results[idx] = kasumi::application::init_profile_ignore(
+                    env, "demo", presets[idx], /*force=*/false, /*dry_run=*/false);
+            });
+        }
+        for (auto& worker : workers) {
+            worker.join();
+        }
+
+        const int successes =
+            (results[0].has_value() ? 1 : 0) + (results[1].has_value() ? 1 : 0);
+        ASSERT_EQ(successes, 1) << "round=" << round;
+        const std::size_t winner = results[0].has_value() ? 0U : 1U;
+        const std::size_t loser = 1U - winner;
+
+        EXPECT_TRUE(results[winner]->created);
+        EXPECT_FALSE(results[winner]->overwritten);
+        EXPECT_EQ(results[loser].error().code,
+                  kasumi::application::ProfileErrorCode::AlreadyExists);
+        EXPECT_EQ(kasumi::test::read_text(ignore_path),
+                  results[winner]->content);
+    }
+
+    const std::string preserved_before_dry_run =
+        kasumi::test::read_text(ignore_path);
+    const auto dry = kasumi::application::init_profile_ignore(
+        env, "demo", kasumi::application::IgnorePreset::Minimal, false, true);
+    ASSERT_TRUE(dry.has_value()) << dry.error().detail;
+    EXPECT_FALSE(dry->created);
+    EXPECT_FALSE(dry->overwritten);
+    EXPECT_TRUE(dry->dry_run);
+    EXPECT_EQ(kasumi::test::read_text(ignore_path),
+              preserved_before_dry_run);
+
+    const auto forced = kasumi::application::init_profile_ignore(
+        env,
+        "demo",
+        kasumi::application::IgnorePreset::Minimal,
+        /*force=*/true,
+        /*dry_run=*/false);
+    ASSERT_TRUE(forced.has_value()) << forced.error().detail;
+    EXPECT_FALSE(forced->created);
+    EXPECT_TRUE(forced->overwritten);
+    EXPECT_EQ(kasumi::test::read_text(ignore_path), forced->content);
 }
 
 } // namespace

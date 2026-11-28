@@ -79,6 +79,15 @@ using daemon_detail::current_unix_seconds;
 using daemon_detail::kDaemonApiVersion;
 using daemon_detail::WatcherContext;
 
+std::mutex pause_resume_hook_mutex;
+daemon_detail::testing::PauseResumeAfterPersistHook
+    active_pause_resume_hook{};
+std::atomic<bool> has_pause_resume_hook{false};
+
+std::mutex after_sync_admit_hook_mutex;
+daemon_detail::testing::AfterSyncAdmitHook active_after_sync_admit_hook{};
+std::atomic<bool> has_after_sync_admit_hook{false};
+
 std::int64_t
 steady_to_unix_estimate(std::chrono::steady_clock::time_point target,
                         std::chrono::steady_clock::time_point now_steady,
@@ -266,9 +275,34 @@ std::optional<std::string> detect_held_profile_operation(
 
 void cleanup_daemon_resources(DaemonSessionState& state,
                               bool join_scheduler) noexcept {
-    if (join_scheduler && state.scheduler_thread.joinable() &&
-        state.scheduler_thread.get_id() != std::this_thread::get_id()) {
-        state.scheduler_thread.join();
+    if (join_scheduler) {
+        std::thread thread_to_join;
+        {
+            std::unique_lock join_lock(state.scheduler_join_mutex);
+            if (!state.scheduler_join_claimed) {
+                state.scheduler_join_claimed = true;
+                if (state.scheduler_thread.joinable() &&
+                    state.scheduler_thread.get_id() !=
+                        std::this_thread::get_id()) {
+                    thread_to_join = std::move(state.scheduler_thread);
+                } else {
+                    state.scheduler_joined = true;
+                    state.scheduler_join_cv.notify_all();
+                }
+            } else {
+                state.scheduler_join_cv.wait(join_lock, [&] {
+                    return state.scheduler_joined;
+                });
+            }
+        }
+        if (thread_to_join.joinable()) {
+            thread_to_join.join();
+            {
+                std::lock_guard join_lock(state.scheduler_join_mutex);
+                state.scheduler_joined = true;
+            }
+            state.scheduler_join_cv.notify_all();
+        }
     }
     std::lock_guard cleanup_lock(state.cleanup_mutex);
     if (state.cleaned_up) {
@@ -433,6 +467,7 @@ trigger_sync_session_state(DaemonSessionState& state,
     struct Target {
         std::string name;
         std::uint64_t target_generation = 0;
+        std::uint64_t request_id = 0;
     };
     std::vector<Target> targets;
     {
@@ -471,11 +506,14 @@ trigger_sync_session_state(DaemonSessionState& state,
             hot.backoff_seconds = 0;
             hot.backoff_until = {};
             telemetry.last_error.clear();
+            hot.immediate_sync_abort_reason.clear();
             hot.immediate_sync_requested = true;
+            const auto req_id = ++hot.immediate_sync_request_id;
             targets.push_back(Target{
                 .name = state.profiles.names[*slot],
                 .target_generation =
                     hot.completed_generation + (hot.in_flight ? 2U : 1U),
+                .request_id = req_id,
             });
         } else {
             for (std::size_t idx = 0; idx < state.profiles.names.size();
@@ -489,14 +527,20 @@ trigger_sync_session_state(DaemonSessionState& state,
                 hot.backoff_seconds = 0;
                 hot.backoff_until = {};
                 telemetry.last_error.clear();
+                hot.immediate_sync_abort_reason.clear();
                 hot.immediate_sync_requested = true;
+                const auto req_id = ++hot.immediate_sync_request_id;
                 targets.push_back(Target{
                     .name = state.profiles.names[idx],
                     .target_generation =
                         hot.completed_generation + (hot.in_flight ? 2U : 1U),
+                    .request_id = req_id,
                 });
             }
         }
+    }
+    for (const auto& t : targets) {
+        testing::invoke_after_sync_admit_hook(state, t.name);
     }
     notify_daemon_status_change(state);
 
@@ -509,19 +553,68 @@ trigger_sync_session_state(DaemonSessionState& state,
         return report;
     }
 
+    const auto is_target_terminal =
+        [&](const Target& t) -> std::optional<std::string> {
+        const auto slot = find_profile_slot(state.profiles, t.name);
+        if (!slot) {
+            return std::string{"profile removed before sync completed"};
+        }
+        const auto& hot = state.profiles.hot[*slot];
+        const auto& telemetry = state.profiles.telemetry[*slot];
+        if (!hot.immediate_sync_requested && !hot.in_flight &&
+            hot.completed_generation >= t.target_generation) {
+            if (!telemetry.last_error.empty()) {
+                return telemetry.last_error;
+            }
+            return std::nullopt;
+        }
+        if (hot.immediate_sync_aborted_id >= t.request_id && !hot.in_flight) {
+            return !hot.immediate_sync_abort_reason.empty()
+                       ? hot.immediate_sync_abort_reason
+                       : std::string{"profile sync interrupted before dispatch"};
+        }
+        if ((hot.paused || hot.locked || hot.needs_attention) &&
+            !hot.in_flight && !hot.immediate_sync_requested) {
+            if (hot.paused) {
+                return std::string{"profile paused before sync completed"};
+            }
+            if (hot.locked) {
+                return std::string{"profile locked before sync completed"};
+            }
+            return !telemetry.last_error.empty()
+                       ? telemetry.last_error
+                       : std::string{"profile requires attention before sync"};
+        }
+        return std::nullopt;
+    };
+
+    const auto is_target_done = [&](const Target& t) {
+        const auto slot = find_profile_slot(state.profiles, t.name);
+        if (!slot) {
+            return true;
+        }
+        const auto& hot = state.profiles.hot[*slot];
+        if (!hot.immediate_sync_requested && !hot.in_flight &&
+            hot.completed_generation >= t.target_generation) {
+            return true;
+        }
+        if (hot.immediate_sync_aborted_id >= t.request_id && !hot.in_flight) {
+            return true;
+        }
+        if ((hot.paused || hot.locked || hot.needs_attention) &&
+            !hot.in_flight && !hot.immediate_sync_requested) {
+            return true;
+        }
+        return false;
+    };
+
     std::unique_lock lock(state.mutex);
     state.cv.wait(lock, [&] {
         if (!state.running || state.stop_requested) {
             return true;
         }
         for (const auto& t : targets) {
-            const auto slot = find_profile_slot(state.profiles, t.name);
-            if (!slot) {
-                continue;
-            }
-            const auto& hot = state.profiles.hot[*slot];
-            if (hot.immediate_sync_requested || hot.in_flight ||
-                hot.completed_generation < t.target_generation) {
+            if (!is_target_done(t)) {
                 return false;
             }
         }
@@ -533,26 +626,37 @@ trigger_sync_session_state(DaemonSessionState& state,
             .detail = "daemon stopped before triggered sync completed",
         });
     }
-    report.completed = true;
+    bool all_completed = true;
     for (const auto& t : targets) {
-        if (const auto slot = find_profile_slot(state.profiles, t.name)) {
-            if (!state.profiles.telemetry[*slot].last_error.empty()) {
-                report.failures.emplace_back(
-                    t.name, state.profiles.telemetry[*slot].last_error);
-            }
+        const auto slot = find_profile_slot(state.profiles, t.name);
+        const bool aborted_early =
+            !slot ||
+            (state.profiles.hot[*slot].immediate_sync_aborted_id >=
+                 t.request_id &&
+             state.profiles.hot[*slot].completed_generation <
+                 t.target_generation) ||
+            state.profiles.hot[*slot].completed_generation < t.target_generation;
+        if (aborted_early) {
+            all_completed = false;
+        }
+        if (auto failure = is_target_terminal(t)) {
+            report.failures.emplace_back(t.name, std::move(*failure));
         }
     }
+    report.completed = all_completed;
     return report;
 }
 
 std::expected<void, DaemonError>
-pause_session_state(DaemonSessionState& state, std::string_view profile_name) {
+apply_paused_state_after_persist(DaemonSessionState& state,
+                                 std::string_view profile_name,
+                                 bool requested_paused) {
     platform::DirectoryWatcher watcher_to_stop;
     std::shared_ptr<WatcherContext> ctx_to_detach;
     std::optional<transport::Transport> transport_to_close;
     ExecutionEnvironment env_copy;
     {
-        std::unique_lock lock(state.mutex);
+        std::lock_guard lock(state.mutex);
         if (!state.running) {
             return std::unexpected(DaemonError{
                 .code = DaemonErrorCode::NotRunning,
@@ -567,44 +671,93 @@ pause_session_state(DaemonSessionState& state, std::string_view profile_name) {
             });
         }
         env_copy = state.environment;
-        lock.unlock();
-
-        if (auto saved = set_profile_paused(env_copy, profile_name, true);
-            !saved) {
-            return std::unexpected(DaemonError{
-                .code = map_profile_pause_error_code(saved.error().code),
-                .detail = saved.error().detail,
-            });
-        }
-
-        lock.lock();
-        if (const auto re_slot =
-                find_profile_slot(state.profiles, profile_name)) {
-            auto& hot = state.profiles.hot[*re_slot];
-            auto& telemetry = state.profiles.telemetry[*re_slot];
-            auto& cold = state.profiles.cold[*re_slot];
-            auto& warm = state.profiles.warm[*re_slot];
-            hot.paused = true;
-            cold.config.paused = true;
-            if (warm.task_stop_source) {
-                warm.task_stop_source->request_stop();
-            }
-            if (!hot.in_flight) {
-                clear_active_telemetry(telemetry);
-            }
-            ctx_to_detach = std::move(warm.watcher_ctx);
-            watcher_to_stop = std::move(warm.watcher);
-            hot.watcher_healthy = false;
-            hot.watcher_baseline_established = false;
-            if (!hot.in_flight && warm.warm_transport) {
-                transport_to_close = std::move(warm.warm_transport);
-                warm.warm_transport.reset();
-            }
-        }
-        state.config_stamp =
-            read_file_stamp(env_copy.app_data_dir / "config.toml");
-        state.has_config_stamp = true;
     }
+
+    if (auto saved = set_profile_paused(env_copy, profile_name, requested_paused);
+        !saved) {
+        return std::unexpected(DaemonError{
+            .code = map_profile_pause_error_code(saved.error().code),
+            .detail = saved.error().detail,
+        });
+    }
+
+    testing::invoke_pause_resume_after_persist_hook(
+        profile_name, requested_paused);
+
+    std::optional<bool> applied_paused;
+    {
+        std::lock_guard lock(state.mutex);
+        if (!state.running) {
+            return {};
+        }
+        const auto cfg_path = env_copy.app_data_dir / "config.toml";
+        auto consistent = load_consistent_profiles(cfg_path);
+        std::optional<bool> persisted_paused;
+        if (consistent) {
+            state.config_stamp = consistent->stamp;
+            state.has_config_stamp = consistent->stamp_consistent;
+            if (const auto disk_it = std::ranges::find(
+                    consistent->profiles,
+                    profile_name,
+                    &runtime::ProfileData::name);
+                disk_it != consistent->profiles.end()) {
+                persisted_paused = disk_it->paused;
+            }
+        } else {
+            state.has_config_stamp = false;
+            persisted_paused = requested_paused;
+        }
+
+        if (persisted_paused.has_value()) {
+            const bool effective_paused = *persisted_paused;
+            applied_paused = effective_paused;
+            if (const auto re_slot =
+                    find_profile_slot(state.profiles, profile_name)) {
+                auto& hot = state.profiles.hot[*re_slot];
+                auto& telemetry = state.profiles.telemetry[*re_slot];
+                auto& cold = state.profiles.cold[*re_slot];
+                auto& warm = state.profiles.warm[*re_slot];
+                if (effective_paused) {
+                    hot.paused = true;
+                    cold.config.paused = true;
+                    abort_pending_immediate_sync_locked(
+                        hot, "profile paused before sync started");
+                    if (warm.task_stop_source) {
+                        warm.task_stop_source->request_stop();
+                    }
+                    if (!hot.in_flight) {
+                        clear_active_telemetry(telemetry);
+                    }
+                    ctx_to_detach = std::move(warm.watcher_ctx);
+                    watcher_to_stop = std::move(warm.watcher);
+                    hot.watcher_healthy = false;
+                    hot.watcher_baseline_established = false;
+                    if (!hot.in_flight && warm.warm_transport) {
+                        transport_to_close = std::move(warm.warm_transport);
+                        warm.warm_transport.reset();
+                        warm.warm_transport_binding.reset();
+                    }
+                } else {
+                    const bool transitioned_unpaused = hot.paused;
+                    hot.paused = false;
+                    cold.config.paused = false;
+                    if (transitioned_unpaused || !requested_paused) {
+                        hot.needs_attention = false;
+                        hot.backoff_seconds = 0;
+                        hot.backoff_until = {};
+                        telemetry.last_error.clear();
+                        const auto now_steady =
+                            std::chrono::steady_clock::now();
+                        hot.next_sync_at =
+                            hot.sync_interval_seconds > 0
+                                ? now_steady
+                                : (std::chrono::steady_clock::time_point::max)();
+                    }
+                }
+            }
+        }
+    }
+
     if (ctx_to_detach) {
         std::lock_guard ctx_lock(ctx_to_detach->mutex);
         ctx_to_detach->detached = true;
@@ -612,64 +765,28 @@ pause_session_state(DaemonSessionState& state, std::string_view profile_name) {
     platform::stop_directory_watcher(watcher_to_stop);
     transport_to_close.reset();
 
-    emit_daemon_event(
-        state, std::string{profile_name}, "paused", "profile paused");
+    if (applied_paused == false) {
+        ensure_watcher_started_unlocked(state, profile_name);
+    }
+    if (applied_paused == requested_paused) {
+        emit_daemon_event(
+            state,
+            std::string{profile_name},
+            requested_paused ? "paused" : "resumed",
+            requested_paused ? "profile paused" : "profile resumed");
+    }
     notify_daemon_status_change(state);
     return {};
 }
 
 std::expected<void, DaemonError>
+pause_session_state(DaemonSessionState& state, std::string_view profile_name) {
+    return apply_paused_state_after_persist(state, profile_name, true);
+}
+
+std::expected<void, DaemonError>
 resume_session_state(DaemonSessionState& state, std::string_view profile_name) {
-    ExecutionEnvironment env_copy;
-    {
-        std::unique_lock lock(state.mutex);
-        if (!state.running) {
-            return std::unexpected(DaemonError{
-                .code = DaemonErrorCode::NotRunning,
-                .detail = "daemon engine is not running",
-            });
-        }
-        const auto slot = find_profile_slot(state.profiles, profile_name);
-        if (!slot) {
-            return std::unexpected(DaemonError{
-                .code = DaemonErrorCode::ProfileNotFound,
-                .detail = "profile not found: " + std::string{profile_name},
-            });
-        }
-        env_copy = state.environment;
-        lock.unlock();
-
-        if (auto saved = set_profile_paused(env_copy, profile_name, false);
-            !saved) {
-            return std::unexpected(DaemonError{
-                .code = map_profile_pause_error_code(saved.error().code),
-                .detail = saved.error().detail,
-            });
-        }
-
-        lock.lock();
-        if (const auto re_slot =
-                find_profile_slot(state.profiles, profile_name)) {
-            auto& hot = state.profiles.hot[*re_slot];
-            auto& telemetry = state.profiles.telemetry[*re_slot];
-            auto& cold = state.profiles.cold[*re_slot];
-            hot.paused = false;
-            cold.config.paused = false;
-            hot.needs_attention = false;
-            hot.backoff_seconds = 0;
-            hot.backoff_until = {};
-            telemetry.last_error.clear();
-            hot.next_sync_at = std::chrono::steady_clock::now();
-        }
-        state.config_stamp =
-            read_file_stamp(env_copy.app_data_dir / "config.toml");
-        state.has_config_stamp = true;
-    }
-    ensure_watcher_started_unlocked(state, profile_name);
-    emit_daemon_event(
-        state, std::string{profile_name}, "resumed", "profile resumed");
-    notify_daemon_status_change(state);
-    return {};
+    return apply_paused_state_after_persist(state, profile_name, false);
 }
 
 std::expected<void, DaemonError>
@@ -846,6 +963,8 @@ lock_session_state(DaemonSessionState& state, std::string_view profile_name) {
         }
         platform::erase_secure_key(state.key_arena, profile_name);
         hot.locked = true;
+        abort_pending_immediate_sync_locked(
+            hot, "profile locked before sync started");
         hot.dirty = false;
         cold.dirty_paths.clear();
         hot.overflow = false;
@@ -858,6 +977,7 @@ lock_session_state(DaemonSessionState& state, std::string_view profile_name) {
         if (!hot.in_flight && warm.warm_transport) {
             transport_to_close = std::move(warm.warm_transport);
             warm.warm_transport.reset();
+            warm.warm_transport_binding.reset();
         }
         warm.warm_observation.history_reads = {};
         if (warm.commit_cache) {
@@ -909,7 +1029,9 @@ cancel_session_state(DaemonSessionState& state, std::string_view profile_name) {
                 .detail = "profile not found: " + std::string{profile_name},
             });
         }
+        auto& hot = state.profiles.hot[*slot];
         auto& warm = state.profiles.warm[*slot];
+        abort_pending_immediate_sync_locked(hot, "profile sync cancelled");
         if (warm.task_stop_source) {
             warm.task_stop_source->request_stop();
         }
@@ -921,6 +1043,71 @@ cancel_session_state(DaemonSessionState& state, std::string_view profile_name) {
     notify_daemon_status_change(state);
     return {};
 }
+
+namespace testing {
+
+ScopedPauseResumeAfterPersistHook::ScopedPauseResumeAfterPersistHook(
+    PauseResumeAfterPersistHook hook) {
+    std::lock_guard lock(pause_resume_hook_mutex);
+    previous = std::exchange(active_pause_resume_hook, std::move(hook));
+    has_pause_resume_hook.store(static_cast<bool>(active_pause_resume_hook),
+                                std::memory_order_release);
+}
+
+ScopedPauseResumeAfterPersistHook::~ScopedPauseResumeAfterPersistHook() noexcept {
+    std::lock_guard lock(pause_resume_hook_mutex);
+    active_pause_resume_hook = std::move(previous);
+    has_pause_resume_hook.store(static_cast<bool>(active_pause_resume_hook),
+                                std::memory_order_release);
+}
+
+void invoke_pause_resume_after_persist_hook(std::string_view profile_name,
+                                            bool persisted_paused) {
+    if (!has_pause_resume_hook.load(std::memory_order_acquire)) {
+        return;
+    }
+    PauseResumeAfterPersistHook hook;
+    {
+        std::lock_guard lock(pause_resume_hook_mutex);
+        hook = active_pause_resume_hook;
+    }
+    if (hook) {
+        hook(profile_name, persisted_paused);
+    }
+}
+
+ScopedAfterSyncAdmitHook::ScopedAfterSyncAdmitHook(AfterSyncAdmitHook hook) {
+    std::lock_guard lock(after_sync_admit_hook_mutex);
+    previous = std::exchange(active_after_sync_admit_hook, std::move(hook));
+    has_after_sync_admit_hook.store(
+        static_cast<bool>(active_after_sync_admit_hook),
+        std::memory_order_release);
+}
+
+ScopedAfterSyncAdmitHook::~ScopedAfterSyncAdmitHook() noexcept {
+    std::lock_guard lock(after_sync_admit_hook_mutex);
+    active_after_sync_admit_hook = std::move(previous);
+    has_after_sync_admit_hook.store(
+        static_cast<bool>(active_after_sync_admit_hook),
+        std::memory_order_release);
+}
+
+void invoke_after_sync_admit_hook(DaemonSessionState& state,
+                                  std::string_view profile_name) {
+    if (!has_after_sync_admit_hook.load(std::memory_order_acquire)) {
+        return;
+    }
+    AfterSyncAdmitHook hook;
+    {
+        std::lock_guard lock(after_sync_admit_hook_mutex);
+        hook = active_after_sync_admit_hook;
+    }
+    if (hook) {
+        hook(state, profile_name);
+    }
+}
+
+} // namespace testing
 
 } // namespace daemon_detail
 
@@ -1010,6 +1197,11 @@ std::expected<void, DaemonError> start_session_state(DaemonSessionState& state,
         state.status_revision.store(1, std::memory_order_release);
         state.stop_requested = false;
         state.cleaned_up = false;
+        {
+            std::lock_guard join_lock(state.scheduler_join_mutex);
+            state.scheduler_join_claimed = false;
+            state.scheduler_joined = false;
+        }
         state.master_stop = std::stop_source{};
         state.key_arena = platform::create_secure_key_arena();
         state.cached_autostart = std::move(initial_autostart);

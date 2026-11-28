@@ -1,15 +1,26 @@
 #include "application/daemon.hpp"
 #include "application/daemon/error_classification.hpp"
+#include "application/daemon/fast_poll.hpp"
+#include "application/daemon/profile_state.hpp"
+#include "application/daemon/session_state.hpp"
 #include "application/execute.hpp"
+#include "application/history_storage/commit_cache.hpp"
+#include "application/observation/history.hpp"
 #include "application/profile.hpp"
+#include "application/use_cases/context.hpp"
 #include "kasumi/test/filesystem.hpp"
 #include "kasumi/test/temp_workspace.hpp"
 #include "platform/path.hpp"
 #include "platform/profile_lock.hpp"
+#include "runtime/resolver.hpp"
+#include "runtime/vault.hpp"
+#include "transport/transport.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <barrier>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -1220,6 +1231,865 @@ TEST(DaemonEngineTest,
     EXPECT_GE(*st->profiles[1].next_sync_at - *st->profiles[0].next_sync_at, 4);
 
     app::stop_daemon_session(*session);
+}
+
+TEST(DaemonEngineTest,
+     ExecuteWarmAndFastPollBindTransportAndConfigUnderLockAcrossRemoteSwitch) {
+    namespace dd = app::daemon_detail;
+    auto workspace = kasumi::test::make_temp_workspace("kasumi-remote-bind-");
+    const auto env_dir = kasumi::test::workspace_path(workspace, "app");
+    const auto local_dir = kasumi::test::workspace_path(workspace, "local");
+    const auto remote_a = kasumi::test::workspace_path(workspace, "remote-a");
+    const auto remote_b = kasumi::test::workspace_path(workspace, "remote-b");
+    const auto remote_c = kasumi::test::workspace_path(workspace, "remote-c");
+    std::filesystem::create_directories(local_dir);
+    std::filesystem::create_directories(remote_a);
+    const std::string hex_key(64, '5');
+    const app::ExecutionEnvironment env{.app_data_dir = env_dir};
+
+    app::Profile profile{
+        .name = "bindtest",
+        .local_dir = local_dir,
+        .remote_dir = kasumi::platform::path::to_utf8(remote_a),
+        .key_storage = app::KeyStorage::File,
+        .sync_interval_seconds = 60U,
+    };
+    ASSERT_TRUE(
+        app::create_profile(env, profile, app::MasterKeyHex{hex_key}).has_value());
+
+    kasumi::test::write_text(local_dir / "seed.txt", "initial-payload");
+    const auto init_sync = app::execute(app::ExecutionInput{
+        .request = {.operation = app::Operation::Sync,
+                    .profile_name = "bindtest"},
+        .credentials = app::NoCredentials{},
+        .environment = env});
+    ASSERT_TRUE(init_sync.has_value()) << init_sync.error().detail;
+
+    const auto runtime_a = kasumi::runtime::resolve(
+        env_dir, "bindtest", kasumi::runtime::AccessMode::ReadOnly, false);
+    ASSERT_TRUE(runtime_a.has_value());
+    const auto key_bytes =
+        kasumi::runtime::vault::read_only(runtime_a->key_path);
+    ASSERT_TRUE(key_bytes.has_value());
+    const auto observe_remote = [&](const std::filesystem::path& remote_path) {
+        auto tr = kasumi::transport::open_transport(remote_path.string());
+        EXPECT_TRUE(tr.has_value());
+        return app::observation::history::observe(
+            *tr, *key_bytes, runtime_a->database_path.parent_path(), false);
+    };
+    const auto obs_a0 = observe_remote(remote_a);
+    ASSERT_TRUE(obs_a0.has_value()) << obs_a0.error().detail;
+    const auto heads_a0 = obs_a0->logical_heads;
+
+    // Seed remote_b as a mirror of remote_a before switching.
+    std::filesystem::copy(remote_a,
+                          remote_b,
+                          std::filesystem::copy_options::recursive |
+                              std::filesystem::copy_options::overwrite_existing);
+
+    // 1. Pre-warmed transport bound to A; fast_poll succeeds while config==A.
+    auto borrowed_a = kasumi::transport::open_transport(remote_a.string());
+    ASSERT_TRUE(borrowed_a.has_value());
+    const auto binding_a = app::detail::make_transport_binding(*runtime_a);
+    app::observation::LocalObservationSession warm_obs{
+        .database_path = runtime_a->database_path};
+    app::observation::refresh_warm_session_db_stamp(
+        warm_obs, runtime_a->database_path);
+    const auto fast_ok = dd::try_fast_remote_noop_poll(
+        env, "bindtest", *runtime_a, *borrowed_a, binding_a, *key_bytes,
+        warm_obs, false, {});
+    EXPECT_EQ(fast_ok.verdict, dd::FastPollVerdict::NoChanges)
+        << fast_ok.reason;
+    EXPECT_FALSE(fast_ok.config_changed);
+
+    // Edit profile from A to B while worker still holds borrowed_a / binding_a.
+    profile.remote_dir = kasumi::platform::path::to_utf8(remote_b);
+    ASSERT_TRUE(app::update_profile(env, profile, false).has_value());
+    kasumi::test::write_text(local_dir / "change-b.txt", "sync-to-b");
+
+    // Fast poll must notice the disk change under lock without accepting A.
+    const auto fast_switched = dd::try_fast_remote_noop_poll(
+        env, "bindtest", *runtime_a, *borrowed_a, binding_a, *key_bytes,
+        warm_obs, false, {});
+    EXPECT_EQ(fast_switched.verdict, dd::FastPollVerdict::FullSyncRequired);
+    EXPECT_TRUE(fast_switched.config_changed);
+    EXPECT_TRUE(warm_obs.history_reads.anchors.empty());
+    EXPECT_TRUE(warm_obs.history_reads.observed_markers.empty());
+    EXPECT_TRUE(warm_obs.cache.empty());
+
+    // Execute warm sync with stale borrowed_a/binding_a: must reject A and sync B.
+    app::history_storage::CommitCache commit_cache;
+    app::detail::WarmExecutionContext warm_ctx{
+        .borrowed_transport = &*borrowed_a,
+        .borrowed_transport_binding = binding_a,
+        .warm_observation = &warm_obs,
+        .commit_cache = &commit_cache,
+        .origin_daemon = true,
+    };
+    const auto sync_b = app::detail::execute_warm(
+        app::ExecutionInput{
+            .request = {.operation = app::Operation::Sync,
+                        .profile_name = "bindtest"},
+            .credentials = app::MasterKeyBytes{*key_bytes},
+            .environment = env},
+        warm_ctx);
+    ASSERT_TRUE(sync_b.has_value()) << sync_b.error().detail;
+    EXPECT_TRUE(warm_ctx.borrowed_transport_rejected);
+
+    const auto obs_a_after = observe_remote(remote_a);
+    ASSERT_TRUE(obs_a_after.has_value());
+    EXPECT_EQ(obs_a_after->logical_heads, heads_a0);
+
+    const auto obs_b_after = observe_remote(remote_b);
+    ASSERT_TRUE(obs_b_after.has_value());
+    EXPECT_NE(obs_b_after->logical_heads, heads_a0);
+    EXPECT_NE(kasumi::find_row(obs_b_after->effective_tree, "change-b.txt"),
+              nullptr);
+
+    // 2. Without a pre-warmed transport: switch B -> C after initial setup and
+    // confirm execute_warm resolves C under lock while leaving B untouched.
+    const auto heads_b_before = obs_b_after->logical_heads;
+    std::filesystem::copy(remote_b,
+                          remote_c,
+                          std::filesystem::copy_options::recursive |
+                              std::filesystem::copy_options::overwrite_existing);
+    profile.remote_dir = kasumi::platform::path::to_utf8(remote_c);
+    ASSERT_TRUE(app::update_profile(env, profile, false).has_value());
+    kasumi::test::write_text(local_dir / "change-c.txt", "sync-to-c");
+
+    app::detail::WarmExecutionContext fresh_warm_ctx{
+        .borrowed_transport = nullptr,
+        .warm_observation = &warm_obs,
+        .origin_daemon = true,
+    };
+    const auto sync_c = app::detail::execute_warm(
+        app::ExecutionInput{
+            .request = {.operation = app::Operation::Sync,
+                        .profile_name = "bindtest"},
+            .credentials = app::MasterKeyBytes{*key_bytes},
+            .environment = env},
+        fresh_warm_ctx);
+    ASSERT_TRUE(sync_c.has_value()) << sync_c.error().detail;
+    EXPECT_FALSE(fresh_warm_ctx.borrowed_transport_rejected);
+
+    const auto obs_b_untouched = observe_remote(remote_b);
+    ASSERT_TRUE(obs_b_untouched.has_value());
+    EXPECT_EQ(obs_b_untouched->logical_heads, heads_b_before);
+
+    const auto obs_c_after = observe_remote(remote_c);
+    ASSERT_TRUE(obs_c_after.has_value());
+    EXPECT_NE(obs_c_after->logical_heads, heads_b_before);
+    EXPECT_NE(kasumi::find_row(obs_c_after->effective_tree, "change-c.txt"),
+              nullptr);
+}
+
+TEST(DaemonEngineTest,
+     PreservesDifferentPathEventArrivingDuringPostSyncPruneWithZeroInterval) {
+    namespace dd = app::daemon_detail;
+    auto workspace =
+        kasumi::test::make_temp_workspace("kasumi-prune-diff-path-");
+    const app::ExecutionEnvironment env{
+        .app_data_dir = kasumi::test::workspace_path(workspace, "app")};
+    const auto local_dir = kasumi::test::workspace_path(workspace, "local");
+    const auto remote_dir = kasumi::test::workspace_path(workspace, "remote");
+    std::filesystem::create_directories(local_dir);
+    std::filesystem::create_directories(remote_dir);
+    const std::string hex_key(64, '6');
+
+    app::Profile profile{
+        .name = "peer_a",
+        .local_dir = local_dir,
+        .remote_dir = kasumi::platform::path::to_utf8(remote_dir),
+        .key_storage = app::KeyStorage::File,
+        .sync_interval_seconds = 0U,
+    };
+    ASSERT_TRUE(
+        app::create_profile(env, profile, app::MasterKeyHex{hex_key})
+            .has_value());
+    kasumi::test::write_text(local_dir / "seed.txt", "initial-seed");
+    const auto init_sync = app::execute(app::ExecutionInput{
+        .request = {.operation = app::Operation::Sync,
+                    .profile_name = "peer_a"},
+        .credentials = app::NoCredentials{},
+        .environment = env});
+    ASSERT_TRUE(init_sync.has_value()) << init_sync.error().detail;
+
+    app::DaemonOptions opts;
+    opts.watch_debounce = 50ms;
+    opts.watch_max_wait = 150ms;
+    opts.enable_ipc_server = false;
+    auto session = start_test_daemon(env, opts);
+    ASSERT_TRUE(session.has_value()) << session.error().detail;
+
+    ASSERT_TRUE(wait_until([&] {
+        const auto st = app::query_daemon_session_status(*session, "peer_a");
+        return st && !st->profiles.empty() && st->profiles[0].watcher_active;
+    }));
+
+    std::atomic<bool> injected{false};
+    std::atomic<std::uint64_t> target_sync_run{0};
+    std::atomic<bool> saw_after{false};
+    bool after_dirty = false;
+    bool after_overflow = false;
+    bool after_baseline = true;
+    bool after_has_path = false;
+    bool after_has_timestamps = false;
+    std::size_t after_dirty_count = 0;
+
+    {
+        dd::testing::ScopedPostSyncPruneHook hook(
+            [&](app::DaemonSessionState& state,
+                std::string_view name,
+                dd::testing::PostSyncPruneStage stage,
+                const dd::testing::PostSyncPruneSnapshot* snapshot) {
+                if (name != "peer_a") {
+                    return;
+                }
+                if (stage ==
+                        dd::testing::PostSyncPruneStage::BeforeFinishSyncSuccess &&
+                    !injected.exchange(true)) {
+                    {
+                        std::lock_guard lock(state.mutex);
+                        if (const auto slot =
+                                dd::find_profile_slot(state.profiles, "peer_a")) {
+                            target_sync_run.store(
+                                state.profiles.telemetry[*slot].sync_runs + 1U,
+                                std::memory_order_release);
+                        }
+                    }
+                    kasumi::test::write_text(local_dir / "concurrent_b.txt",
+                                             "from-prune-window");
+                    dd::testing::handle_watch_event_for_testing(
+                        state,
+                        "peer_a",
+                        kasumi::platform::WatchEvent{
+                            .relative_path = "concurrent_b.txt"});
+                } else if (stage == dd::testing::PostSyncPruneStage::
+                                        AfterFinishSyncSuccess &&
+                           snapshot != nullptr &&
+                           snapshot->sync_runs ==
+                               target_sync_run.load(
+                                   std::memory_order_acquire) &&
+                           !saw_after.exchange(true)) {
+                    after_dirty = snapshot->dirty;
+                    after_overflow = snapshot->overflow;
+                    after_baseline = snapshot->watcher_baseline_established;
+                    after_has_path =
+                        snapshot->dirty_paths.contains("concurrent_b.txt");
+                    after_dirty_count = snapshot->dirty_paths.size();
+                    after_has_timestamps = snapshot->has_dirty_timestamps;
+                }
+            });
+
+        ASSERT_TRUE(
+            app::trigger_daemon_session_sync(*session, "peer_a", true)
+                .has_value());
+        EXPECT_GT(target_sync_run.load(std::memory_order_acquire), 0U);
+        ASSERT_TRUE(wait_until(
+            [&] { return saw_after.load(std::memory_order_acquire); }, 5s));
+        EXPECT_TRUE(after_dirty);
+        EXPECT_FALSE(after_baseline);
+        EXPECT_TRUE(after_has_path)
+            << "dirty=" << after_dirty << " overflow=" << after_overflow
+            << " count=" << after_dirty_count;
+        EXPECT_TRUE(after_has_timestamps);
+
+        ASSERT_TRUE(wait_until(
+            [&] {
+                const auto st =
+                    app::query_daemon_session_status(*session, "peer_a");
+                return st && !st->profiles.empty() &&
+                       st->profiles[0].sync_runs >= 2U &&
+                       st->profiles[0].state ==
+                           app::DaemonProfileState::Idle &&
+                       st->profiles[0].dirty_paths_count == 0U;
+            },
+            15s));
+
+        app::stop_daemon_session(*session);
+    }
+
+    const auto runtime = kasumi::runtime::resolve(
+        env.app_data_dir, "peer_a", kasumi::runtime::AccessMode::ReadOnly, false);
+    ASSERT_TRUE(runtime.has_value());
+    const auto key_bytes = kasumi::runtime::vault::read_only(runtime->key_path);
+    ASSERT_TRUE(key_bytes.has_value());
+    auto tr = kasumi::transport::open_transport(remote_dir.string());
+    ASSERT_TRUE(tr.has_value());
+    const auto obs = app::observation::history::observe(
+        *tr, *key_bytes, runtime->database_path.parent_path(), false);
+    ASSERT_TRUE(obs.has_value()) << obs.error().detail;
+    EXPECT_NE(kasumi::find_row(obs->effective_tree, "concurrent_b.txt"),
+              nullptr);
+}
+
+TEST(DaemonEngineTest,
+     PreservesSamePathReeditedDuringPostSyncPruneWithZeroInterval) {
+    namespace dd = app::daemon_detail;
+    auto setup = TwoPeerSetup::create(
+        "kasumi-prune-same-path-", app::KeyStorage::File, 0U);
+
+    const std::string v1_payload = "v1";
+    const std::string v2_payload = "v2-same-path-modified-in-prune-window";
+    kasumi::test::write_text(setup.peer_b_dir / "shared.txt", v1_payload);
+    const auto push_b = app::execute(app::ExecutionInput{
+        .request = {.operation = app::Operation::Sync,
+                    .profile_name = "peer_b"},
+        .credentials = app::NoCredentials{},
+        .environment = setup.env});
+    ASSERT_TRUE(push_b.has_value()) << push_b.error().detail;
+
+    auto profiles = app::list_profiles(setup.env);
+    ASSERT_TRUE(profiles.has_value());
+    for (auto& p : *profiles) {
+        if (p.name == "peer_b") {
+            p.paused = true;
+            ASSERT_TRUE(app::update_profile(setup.env, p, false).has_value());
+        }
+    }
+
+    app::DaemonOptions opts;
+    opts.watch_debounce = 50ms;
+    opts.watch_max_wait = 150ms;
+    opts.enable_ipc_server = false;
+    auto session = start_test_daemon(setup.env, opts);
+    ASSERT_TRUE(session.has_value()) << session.error().detail;
+
+    ASSERT_TRUE(wait_until([&] {
+        const auto st = app::query_daemon_session_status(*session, "peer_a");
+        return st && !st->profiles.empty() && st->profiles[0].watcher_active;
+    }));
+
+    std::atomic<bool> injected{false};
+    std::atomic<std::uint64_t> target_sync_run{0};
+    std::atomic<bool> saw_after{false};
+    bool after_dirty = false;
+    bool after_baseline = true;
+    bool after_has_shared = false;
+    bool after_has_timestamps = false;
+
+    {
+        dd::testing::ScopedPostSyncPruneHook hook(
+            [&](app::DaemonSessionState& state,
+                std::string_view name,
+                dd::testing::PostSyncPruneStage stage,
+                const dd::testing::PostSyncPruneSnapshot* snapshot) {
+                if (name != "peer_a") {
+                    return;
+                }
+                if (stage ==
+                        dd::testing::PostSyncPruneStage::BeforeFinishSyncSuccess &&
+                    !injected.exchange(true)) {
+                    {
+                        std::lock_guard lock(state.mutex);
+                        if (const auto slot =
+                                dd::find_profile_slot(state.profiles, "peer_a")) {
+                            target_sync_run.store(
+                                state.profiles.telemetry[*slot].sync_runs + 1U,
+                                std::memory_order_release);
+                        }
+                    }
+                    kasumi::test::write_text(setup.peer_a_dir / "shared.txt",
+                                             v2_payload);
+                    dd::testing::handle_watch_event_for_testing(
+                        state,
+                        "peer_a",
+                        kasumi::platform::WatchEvent{
+                            .relative_path = "shared.txt"});
+                } else if (stage == dd::testing::PostSyncPruneStage::
+                                        AfterFinishSyncSuccess &&
+                           snapshot != nullptr &&
+                           snapshot->sync_runs ==
+                               target_sync_run.load(
+                                   std::memory_order_acquire) &&
+                           !saw_after.exchange(true)) {
+                    after_dirty = snapshot->dirty;
+                    after_baseline = snapshot->watcher_baseline_established;
+                    after_has_shared =
+                        snapshot->dirty_paths.contains("shared.txt");
+                    after_has_timestamps = snapshot->has_dirty_timestamps;
+                }
+            });
+
+        ASSERT_TRUE(
+            app::trigger_daemon_session_sync(*session, "peer_a", true)
+                .has_value());
+        EXPECT_GT(target_sync_run.load(std::memory_order_acquire), 0U);
+        ASSERT_TRUE(wait_until(
+            [&] { return saw_after.load(std::memory_order_acquire); }, 5s));
+        EXPECT_TRUE(after_dirty);
+        EXPECT_FALSE(after_baseline);
+        EXPECT_TRUE(after_has_shared);
+        EXPECT_TRUE(after_has_timestamps);
+
+        ASSERT_TRUE(wait_until(
+            [&] {
+                const auto st =
+                    app::query_daemon_session_status(*session, "peer_a");
+                return st && !st->profiles.empty() &&
+                       st->profiles[0].sync_runs >= 2U &&
+                       st->profiles[0].state ==
+                           app::DaemonProfileState::Idle &&
+                       st->profiles[0].dirty_paths_count == 0U;
+            },
+            15s));
+
+        app::stop_daemon_session(*session);
+    }
+
+    const auto runtime = kasumi::runtime::resolve(
+        setup.env.app_data_dir,
+        "peer_a",
+        kasumi::runtime::AccessMode::ReadOnly,
+        false);
+    ASSERT_TRUE(runtime.has_value());
+    const auto key_bytes = kasumi::runtime::vault::read_only(runtime->key_path);
+    ASSERT_TRUE(key_bytes.has_value());
+    auto tr = kasumi::transport::open_transport(setup.remote_dir.string());
+    ASSERT_TRUE(tr.has_value());
+    const auto obs = app::observation::history::observe(
+        *tr, *key_bytes, runtime->database_path.parent_path(), false);
+    ASSERT_TRUE(obs.has_value()) << obs.error().detail;
+    const auto* row = kasumi::find_row(obs->effective_tree, "shared.txt");
+    ASSERT_NE(row, nullptr);
+    EXPECT_EQ(row->size, v2_payload.size());
+}
+
+TEST(DaemonEngineTest,
+     PreservesWatcherOverflowArrivingDuringPostSyncPruneWithZeroInterval) {
+    namespace dd = app::daemon_detail;
+    auto workspace =
+        kasumi::test::make_temp_workspace("kasumi-prune-overflow-");
+    const app::ExecutionEnvironment env{
+        .app_data_dir = kasumi::test::workspace_path(workspace, "app")};
+    const auto local_dir = kasumi::test::workspace_path(workspace, "local");
+    const auto remote_dir = kasumi::test::workspace_path(workspace, "remote");
+    std::filesystem::create_directories(local_dir);
+    std::filesystem::create_directories(remote_dir);
+    const std::string hex_key(64, '6');
+
+    app::Profile profile{
+        .name = "peer_a",
+        .local_dir = local_dir,
+        .remote_dir = kasumi::platform::path::to_utf8(remote_dir),
+        .key_storage = app::KeyStorage::File,
+        .sync_interval_seconds = 0U,
+    };
+    ASSERT_TRUE(
+        app::create_profile(env, profile, app::MasterKeyHex{hex_key})
+            .has_value());
+    kasumi::test::write_text(local_dir / "seed.txt", "initial-seed");
+    const auto init_sync = app::execute(app::ExecutionInput{
+        .request = {.operation = app::Operation::Sync,
+                    .profile_name = "peer_a"},
+        .credentials = app::NoCredentials{},
+        .environment = env});
+    ASSERT_TRUE(init_sync.has_value()) << init_sync.error().detail;
+
+    app::DaemonOptions opts;
+    opts.watch_debounce = 50ms;
+    opts.watch_max_wait = 150ms;
+    opts.enable_ipc_server = false;
+    auto session = start_test_daemon(env, opts);
+    ASSERT_TRUE(session.has_value()) << session.error().detail;
+
+    ASSERT_TRUE(wait_until([&] {
+        const auto st = app::query_daemon_session_status(*session, "peer_a");
+        return st && !st->profiles.empty() && st->profiles[0].watcher_active;
+    }));
+
+    std::atomic<bool> injected{false};
+    std::atomic<std::uint64_t> target_sync_run{0};
+    std::atomic<bool> saw_after{false};
+    bool after_dirty = false;
+    bool after_overflow = false;
+    bool after_baseline = true;
+    bool after_has_timestamps = false;
+
+    {
+        dd::testing::ScopedPostSyncPruneHook hook(
+            [&](app::DaemonSessionState& state,
+                std::string_view name,
+                dd::testing::PostSyncPruneStage stage,
+                const dd::testing::PostSyncPruneSnapshot* snapshot) {
+                if (name != "peer_a") {
+                    return;
+                }
+                if (stage ==
+                        dd::testing::PostSyncPruneStage::BeforeFinishSyncSuccess &&
+                    !injected.exchange(true)) {
+                    {
+                        std::lock_guard lock(state.mutex);
+                        if (const auto slot =
+                                dd::find_profile_slot(state.profiles, "peer_a")) {
+                            target_sync_run.store(
+                                state.profiles.telemetry[*slot].sync_runs + 1U,
+                                std::memory_order_release);
+                        }
+                    }
+                    kasumi::test::write_text(local_dir / "overflow_file.txt",
+                                             "overflow-payload");
+                    dd::testing::handle_watch_event_for_testing(
+                        state,
+                        "peer_a",
+                        kasumi::platform::WatchEvent{.overflow = true});
+                } else if (stage == dd::testing::PostSyncPruneStage::
+                                        AfterFinishSyncSuccess &&
+                           snapshot != nullptr &&
+                           snapshot->sync_runs ==
+                               target_sync_run.load(
+                                   std::memory_order_acquire) &&
+                           !saw_after.exchange(true)) {
+                    after_dirty = snapshot->dirty;
+                    after_overflow = snapshot->overflow;
+                    after_baseline = snapshot->watcher_baseline_established;
+                    after_has_timestamps = snapshot->has_dirty_timestamps;
+                }
+            });
+
+        ASSERT_TRUE(
+            app::trigger_daemon_session_sync(*session, "peer_a", true)
+                .has_value());
+        EXPECT_GT(target_sync_run.load(std::memory_order_acquire), 0U);
+        ASSERT_TRUE(wait_until(
+            [&] { return saw_after.load(std::memory_order_acquire); }, 5s));
+        EXPECT_TRUE(after_dirty);
+        EXPECT_TRUE(after_overflow);
+        EXPECT_FALSE(after_baseline);
+        EXPECT_TRUE(after_has_timestamps);
+
+        ASSERT_TRUE(wait_until(
+            [&] {
+                const auto st =
+                    app::query_daemon_session_status(*session, "peer_a");
+                return st && !st->profiles.empty() &&
+                       st->profiles[0].sync_runs >= 2U &&
+                       st->profiles[0].state ==
+                           app::DaemonProfileState::Idle &&
+                       st->profiles[0].dirty_paths_count == 0U;
+            },
+            15s));
+
+        app::stop_daemon_session(*session);
+    }
+
+    const auto runtime = kasumi::runtime::resolve(
+        env.app_data_dir, "peer_a", kasumi::runtime::AccessMode::ReadOnly, false);
+    ASSERT_TRUE(runtime.has_value());
+    const auto key_bytes = kasumi::runtime::vault::read_only(runtime->key_path);
+    ASSERT_TRUE(key_bytes.has_value());
+    auto tr = kasumi::transport::open_transport(remote_dir.string());
+    ASSERT_TRUE(tr.has_value());
+    const auto obs = app::observation::history::observe(
+        *tr, *key_bytes, runtime->database_path.parent_path(), false);
+    ASSERT_TRUE(obs.has_value()) << obs.error().detail;
+    EXPECT_NE(kasumi::find_row(obs->effective_tree, "overflow_file.txt"),
+              nullptr);
+}
+
+TEST(DaemonEngineTest,
+     ConcurrentPauseAndResumeInvertedCompletionAgreeAcrossDiskStatusAndScheduler) {
+    namespace dd = app::daemon_detail;
+    auto workspace =
+        kasumi::test::make_temp_workspace("kasumi-pause-resume-race-");
+    const app::ExecutionEnvironment env{
+        .app_data_dir = kasumi::test::workspace_path(workspace, "app")};
+    const auto local_dir = kasumi::test::workspace_path(workspace, "local");
+    const auto remote_dir = kasumi::test::workspace_path(workspace, "remote");
+    std::filesystem::create_directories(local_dir);
+    std::filesystem::create_directories(remote_dir);
+    const std::string hex_key(64, '4');
+
+    app::Profile profile{
+        .name = "peer_a",
+        .local_dir = local_dir,
+        .remote_dir = kasumi::platform::path::to_utf8(remote_dir),
+        .key_storage = app::KeyStorage::File,
+        .sync_interval_seconds = 0U,
+    };
+    ASSERT_TRUE(
+        app::create_profile(env, profile, app::MasterKeyHex{hex_key})
+            .has_value());
+    kasumi::test::write_text(local_dir / "seed.txt", "initial-seed");
+    const auto init_sync = app::execute(app::ExecutionInput{
+        .request = {.operation = app::Operation::Sync,
+                    .profile_name = "peer_a"},
+        .credentials = app::NoCredentials{},
+        .environment = env});
+    ASSERT_TRUE(init_sync.has_value()) << init_sync.error().detail;
+
+    app::DaemonOptions opts;
+    opts.watch_debounce = 50ms;
+    opts.watch_max_wait = 150ms;
+    opts.config_poll_interval = 60s;
+    opts.enable_ipc_server = false;
+    auto session = start_test_daemon(env, opts);
+    ASSERT_TRUE(session.has_value()) << session.error().detail;
+
+    ASSERT_TRUE(wait_until([&] {
+        const auto st = app::query_daemon_session_status(*session, "peer_a");
+        return st && !st->profiles.empty() && st->profiles[0].watcher_active;
+    }));
+
+    // Direction 1: pause persists paused=true, suspends, resume completes with
+    // paused=false, then suspended pause finishes. Immediately, TOML, status,
+    // watcher, and scheduler must all agree that peer_a is NOT paused.
+    {
+        std::mutex mu;
+        std::condition_variable cv;
+        bool suspend_pause = true;
+        bool pause_persisted = false;
+        bool release_pause = false;
+
+        dd::testing::ScopedPauseResumeAfterPersistHook hook(
+            [&](std::string_view name, bool persisted_paused) {
+                if (name != "peer_a" || !persisted_paused) {
+                    return;
+                }
+                std::unique_lock lock(mu);
+                if (!suspend_pause) {
+                    return;
+                }
+                suspend_pause = false;
+                pause_persisted = true;
+                cv.notify_all();
+                cv.wait(lock, [&] { return release_pause; });
+            });
+
+        std::expected<void, app::DaemonError> pause_res;
+        std::thread pause_thread([&] {
+            pause_res = app::pause_daemon_session_profile(*session, "peer_a");
+        });
+
+        {
+            std::unique_lock lock(mu);
+            ASSERT_TRUE(cv.wait_for(
+                lock, 5s, [&] { return pause_persisted; }));
+        }
+
+        const auto resume_res =
+            app::resume_daemon_session_profile(*session, "peer_a");
+        ASSERT_TRUE(resume_res.has_value()) << resume_res.error().detail;
+
+        {
+            std::lock_guard lock(mu);
+            release_pause = true;
+        }
+        cv.notify_all();
+        pause_thread.join();
+        ASSERT_TRUE(pause_res.has_value()) << pause_res.error().detail;
+    }
+
+    {
+        const auto profs = app::list_profiles(env);
+        ASSERT_TRUE(profs && profs->size() == 1U);
+        EXPECT_FALSE((*profs)[0].paused);
+
+        const auto st = app::query_daemon_session_status(*session, "peer_a");
+        ASSERT_TRUE(st && st->profiles.size() == 1U);
+        EXPECT_FALSE(st->profiles[0].paused);
+        EXPECT_NE(st->profiles[0].state, app::DaemonProfileState::Paused);
+        EXPECT_TRUE(st->profiles[0].watcher_active);
+        const auto runs_before = st->profiles[0].sync_runs;
+
+        kasumi::test::write_text(local_dir / "active_after_race.txt",
+                                 "should-sync");
+        ASSERT_TRUE(wait_until(
+            [&] {
+                const auto cur =
+                    app::query_daemon_session_status(*session, "peer_a");
+                return cur && !cur->profiles.empty() &&
+                       cur->profiles[0].sync_runs > runs_before &&
+                       cur->profiles[0].state ==
+                           app::DaemonProfileState::Idle;
+            },
+            15s));
+    }
+
+    // Direction 2: resume persists paused=false, suspends, pause completes with
+    // paused=true, then suspended resume finishes. Immediately, TOML, status,
+    // watcher, and scheduler must all agree that peer_a IS paused.
+    {
+        std::mutex mu;
+        std::condition_variable cv;
+        bool suspend_resume = true;
+        bool resume_persisted = false;
+        bool release_resume = false;
+
+        dd::testing::ScopedPauseResumeAfterPersistHook hook(
+            [&](std::string_view name, bool persisted_paused) {
+                if (name != "peer_a" || persisted_paused) {
+                    return;
+                }
+                std::unique_lock lock(mu);
+                if (!suspend_resume) {
+                    return;
+                }
+                suspend_resume = false;
+                resume_persisted = true;
+                cv.notify_all();
+                cv.wait(lock, [&] { return release_resume; });
+            });
+
+        std::expected<void, app::DaemonError> resume_res;
+        std::thread resume_thread([&] {
+            resume_res =
+                app::resume_daemon_session_profile(*session, "peer_a");
+        });
+
+        {
+            std::unique_lock lock(mu);
+            ASSERT_TRUE(cv.wait_for(
+                lock, 5s, [&] { return resume_persisted; }));
+        }
+
+        const auto pause_res =
+            app::pause_daemon_session_profile(*session, "peer_a");
+        ASSERT_TRUE(pause_res.has_value()) << pause_res.error().detail;
+
+        {
+            std::lock_guard lock(mu);
+            release_resume = true;
+        }
+        cv.notify_all();
+        resume_thread.join();
+        ASSERT_TRUE(resume_res.has_value()) << resume_res.error().detail;
+    }
+
+    {
+        const auto profs = app::list_profiles(env);
+        ASSERT_TRUE(profs && profs->size() == 1U);
+        EXPECT_TRUE((*profs)[0].paused);
+
+        const auto st = app::query_daemon_session_status(*session, "peer_a");
+        ASSERT_TRUE(st && st->profiles.size() == 1U);
+        EXPECT_TRUE(st->profiles[0].paused);
+        EXPECT_EQ(st->profiles[0].state, app::DaemonProfileState::Paused);
+        EXPECT_FALSE(st->profiles[0].watcher_active);
+        const auto runs_before = st->profiles[0].sync_runs;
+
+        kasumi::test::write_text(local_dir / "ignored_while_paused.txt",
+                                 "must-not-sync");
+        std::this_thread::sleep_for(300ms);
+        const auto after =
+            app::query_daemon_session_status(*session, "peer_a");
+        ASSERT_TRUE(after && !after->profiles.empty());
+        EXPECT_EQ(after->profiles[0].sync_runs, runs_before);
+        EXPECT_TRUE(after->profiles[0].paused);
+        EXPECT_EQ(after->profiles[0].state, app::DaemonProfileState::Paused);
+    }
+
+    app::stop_daemon_session(*session);
+}
+
+TEST(DaemonEngineTest,
+     SyncWaitReturnsPromptlyWhenPausedBetweenAdmissionAndDispatchAndResumesCleanly) {
+    namespace dd = app::daemon_detail;
+    auto workspace =
+        kasumi::test::make_temp_workspace("kasumi-sync-wait-pause-");
+    const app::ExecutionEnvironment env{
+        .app_data_dir = kasumi::test::workspace_path(workspace, "app")};
+    const auto local_dir = kasumi::test::workspace_path(workspace, "local");
+    const auto remote_dir = kasumi::test::workspace_path(workspace, "remote");
+    std::filesystem::create_directories(local_dir);
+    std::filesystem::create_directories(remote_dir);
+    const std::string hex_key(64, '3');
+
+    app::Profile profile{
+        .name = "peer_a",
+        .local_dir = local_dir,
+        .remote_dir = kasumi::platform::path::to_utf8(remote_dir),
+        .key_storage = app::KeyStorage::File,
+        .sync_interval_seconds = 0U,
+    };
+    ASSERT_TRUE(
+        app::create_profile(env, profile, app::MasterKeyHex{hex_key})
+            .has_value());
+    kasumi::test::write_text(local_dir / "seed.txt", "initial-seed");
+    const auto init_sync = app::execute(app::ExecutionInput{
+        .request = {.operation = app::Operation::Sync,
+                    .profile_name = "peer_a"},
+        .credentials = app::NoCredentials{},
+        .environment = env});
+    ASSERT_TRUE(init_sync.has_value()) << init_sync.error().detail;
+
+    app::DaemonOptions opts;
+    opts.watch_debounce = 50ms;
+    opts.watch_max_wait = 150ms;
+    opts.enable_ipc_server = true;
+    auto session = start_test_daemon(env, opts);
+    ASSERT_TRUE(session.has_value()) << session.error().detail;
+
+    {
+        std::atomic<bool> paused_once{false};
+        dd::testing::ScopedAfterSyncAdmitHook admit_hook(
+            [&](app::DaemonSessionState& state, std::string_view name) {
+                if (name == "peer_a" && !paused_once.exchange(true)) {
+                    const auto paused = dd::pause_session_state(state, "peer_a");
+                    EXPECT_TRUE(paused.has_value()) << paused.error().detail;
+                }
+            });
+
+        const auto started = std::chrono::steady_clock::now();
+        const auto sync_res = app::trigger_daemon_sync(env, "peer_a", true);
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+
+        EXPECT_TRUE(paused_once.load(std::memory_order_acquire));
+        EXPECT_LT(elapsed, 5s);
+        ASSERT_TRUE(sync_res.has_value()) << sync_res.error().detail;
+        EXPECT_FALSE(sync_res->completed);
+        ASSERT_EQ(sync_res->failures.size(), 1U);
+        EXPECT_EQ(sync_res->failures[0].first, "peer_a");
+        EXPECT_NE(sync_res->failures[0].second.find("paused"),
+                  std::string::npos);
+
+        const auto st = app::query_daemon_session_status(*session, "peer_a");
+        ASSERT_TRUE(st && !st->profiles.empty());
+        EXPECT_TRUE(st->profiles[0].paused);
+        EXPECT_EQ(st->profiles[0].sync_runs, 0U);
+    }
+
+    ASSERT_TRUE(app::resume_daemon_profile(env, "peer_a").has_value());
+    kasumi::test::write_text(local_dir / "after_resume.txt", "sync-now");
+    const auto resumed_sync = app::trigger_daemon_sync(env, "peer_a", true);
+    ASSERT_TRUE(resumed_sync.has_value()) << resumed_sync.error().detail;
+    EXPECT_TRUE(resumed_sync->completed);
+    EXPECT_TRUE(resumed_sync->failures.empty());
+
+    const auto after = app::query_daemon_session_status(*session, "peer_a");
+    ASSERT_TRUE(after && !after->profiles.empty());
+    EXPECT_GE(after->profiles[0].sync_runs, 1U);
+
+    app::stop_daemon_session(*session);
+}
+
+TEST(DaemonEngineTest,
+     ConcurrentStopDaemonSessionCallsSerializeSchedulerJoinWithoutCrash) {
+    for (int iter = 0; iter < 5; ++iter) {
+        auto workspace = kasumi::test::make_temp_workspace(
+            "kasumi-stop-join-race-" + std::to_string(iter));
+        const app::ExecutionEnvironment env{
+            .app_data_dir = kasumi::test::workspace_path(workspace, "app")};
+        app::DaemonOptions opts;
+        opts.enable_ipc_server = false;
+        auto session = start_test_daemon(env, opts);
+        ASSERT_TRUE(session.has_value()) << session.error().detail;
+
+        constexpr std::ptrdiff_t kCallers = 4;
+        std::barrier sync_point(kCallers);
+        std::vector<std::thread> callers;
+        callers.reserve(kCallers);
+        for (std::ptrdiff_t i = 0; i < kCallers; ++i) {
+            callers.emplace_back([&] {
+                sync_point.arrive_and_wait();
+                app::stop_daemon_session(*session);
+            });
+        }
+        for (auto& caller : callers) {
+            caller.join();
+        }
+        EXPECT_FALSE(app::is_daemon_session_running(*session));
+    }
 }
 
 } // namespace

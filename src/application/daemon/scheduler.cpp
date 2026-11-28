@@ -18,7 +18,9 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <format>
+#include <mutex>
 #include <utility>
 
 namespace kasumi::application::daemon_detail {
@@ -26,6 +28,30 @@ namespace {
 
 constexpr std::uint32_t kMinBackoffSeconds = 5U;
 constexpr std::uint32_t kMaxBackoffSeconds = 600U;
+
+std::mutex post_sync_prune_hook_mutex;
+testing::PostSyncPruneHook active_post_sync_prune_hook{};
+std::atomic<bool> has_post_sync_prune_hook{false};
+
+void merge_dirty_paths_locked(ProfileHotSchedule& hot,
+                              ProfileColdMeta& cold,
+                              const std::unordered_set<std::string>& incoming,
+                              bool incoming_overflow) {
+    hot.overflow = hot.overflow || incoming_overflow;
+    if (hot.overflow) {
+        return;
+    }
+    for (const auto& path : incoming) {
+        if (cold.dirty_paths.contains(path)) {
+            continue;
+        }
+        if (cold.dirty_paths.size() >= kMaxTrackedDirtyPaths) {
+            hot.overflow = true;
+            return;
+        }
+        cold.dirty_paths.insert(path);
+    }
+}
 
 std::uint32_t
 compute_jittered_backoff_seconds(std::uint32_t consecutive_failures) noexcept {
@@ -110,11 +136,45 @@ std::string activity_stage_label(Activity activity) {
     return "running";
 }
 
-void finish_fast_noop(DaemonSessionState& state,
-                      const std::string& profile_name,
-                      std::uint64_t task_config_gen,
-                      std::optional<transport::Transport>& borrowed_owner,
-                      observation::LocalObservationSession& warm_obs) {
+void stash_or_discard_warm_state(
+    ProfileHotSchedule& hot,
+    const ProfileColdMeta& cold,
+    ProfileWarmSlot& warm,
+    std::uint64_t task_config_gen,
+    bool eligible,
+    std::optional<transport::Transport>& borrowed_owner,
+    const std::optional<detail::TransportBinding>& borrowed_binding,
+    observation::LocalObservationSession& warm_obs,
+    std::chrono::steady_clock::time_point now_steady,
+    std::optional<transport::Transport>& discard_transport) {
+    if (eligible && hot.config_generation == task_config_gen && !hot.paused &&
+        !hot.locked) {
+        if (warm_obs.database_path == cold.database_path) {
+            warm.warm_observation = std::move(warm_obs);
+        } else {
+            warm.warm_observation = {.database_path = cold.database_path};
+        }
+        if (borrowed_owner && borrowed_binding &&
+            *borrowed_binding == detail::make_transport_binding(cold.config)) {
+            warm.warm_transport = std::move(borrowed_owner);
+            warm.warm_transport_binding = *borrowed_binding;
+            warm.warm_transport_last_used = now_steady;
+        } else {
+            discard_transport = std::move(borrowed_owner);
+            warm.warm_transport_binding.reset();
+        }
+    } else {
+        discard_transport = std::move(borrowed_owner);
+    }
+}
+
+void finish_fast_noop(
+    DaemonSessionState& state,
+    const std::string& profile_name,
+    std::uint64_t task_config_gen,
+    std::optional<transport::Transport>& borrowed_owner,
+    const std::optional<detail::TransportBinding>& borrowed_binding,
+    observation::LocalObservationSession& warm_obs) {
     const auto now_steady = std::chrono::steady_clock::now();
     const auto now_unix = current_unix_seconds();
     std::optional<transport::Transport> discard_transport;
@@ -125,16 +185,16 @@ void finish_fast_noop(DaemonSessionState& state,
             auto& telemetry = state.profiles.telemetry[*slot];
             auto& cold = state.profiles.cold[*slot];
             auto& warm = state.profiles.warm[*slot];
-            if (hot.config_generation == task_config_gen && !hot.paused &&
-                !hot.locked) {
-                warm.warm_observation = std::move(warm_obs);
-                if (borrowed_owner) {
-                    warm.warm_transport = std::move(borrowed_owner);
-                    warm.warm_transport_last_used = now_steady;
-                }
-            } else {
-                discard_transport = std::move(borrowed_owner);
-            }
+            stash_or_discard_warm_state(hot,
+                                        cold,
+                                        warm,
+                                        task_config_gen,
+                                        true,
+                                        borrowed_owner,
+                                        borrowed_binding,
+                                        warm_obs,
+                                        now_steady,
+                                        discard_transport);
             const auto db_stamp = read_file_stamp(cold.database_path);
             cold.external_db_stamp = db_stamp;
             cold.has_external_db_stamp = db_stamp.present;
@@ -165,16 +225,21 @@ void finish_fast_noop(DaemonSessionState& state,
     notify_daemon_status_change(state);
 }
 
-void finish_sync_success(DaemonSessionState& state,
-                         const std::string& profile_name,
-                         std::uint64_t task_config_gen,
-                         std::optional<transport::Transport>& borrowed_owner,
-                         observation::LocalObservationSession& warm_obs,
-                         std::unordered_set<std::string> remaining_dirty,
-                         bool remaining_overflow,
-                         const WatcherContext* watcher_ctx_before,
-                         bool watcher_healthy_before,
-                         const std::string& outcome) {
+void finish_sync_success(
+    DaemonSessionState& state,
+    const std::string& profile_name,
+    std::uint64_t task_config_gen,
+    std::optional<transport::Transport>& borrowed_owner,
+    const std::optional<detail::TransportBinding>& borrowed_binding,
+    observation::LocalObservationSession& warm_obs,
+    const std::unordered_set<std::string>& remaining_dirty,
+    bool remaining_overflow,
+    std::uint64_t consumed_watch_epoch,
+    const WatcherContext* watcher_ctx_before,
+    bool watcher_healthy_before,
+    const std::string& outcome,
+    std::optional<testing::PostSyncPruneSnapshot>* post_snapshot_out =
+        nullptr) {
     const auto now_steady = std::chrono::steady_clock::now();
     const auto now_unix = current_unix_seconds();
     std::optional<transport::Transport> discard_transport;
@@ -185,16 +250,16 @@ void finish_sync_success(DaemonSessionState& state,
             auto& telemetry = state.profiles.telemetry[*slot];
             auto& cold = state.profiles.cold[*slot];
             auto& warm = state.profiles.warm[*slot];
-            if (hot.config_generation == task_config_gen && !hot.paused &&
-                !hot.locked) {
-                warm.warm_observation = std::move(warm_obs);
-                if (borrowed_owner) {
-                    warm.warm_transport = std::move(borrowed_owner);
-                    warm.warm_transport_last_used = now_steady;
-                }
-            } else {
-                discard_transport = std::move(borrowed_owner);
-            }
+            stash_or_discard_warm_state(hot,
+                                        cold,
+                                        warm,
+                                        task_config_gen,
+                                        true,
+                                        borrowed_owner,
+                                        borrowed_binding,
+                                        warm_obs,
+                                        now_steady,
+                                        discard_transport);
             refresh_ignore_state(cold, warm);
             cold.local_dir_identity =
                 platform::private_storage::query_directory_identity(
@@ -218,7 +283,14 @@ void finish_sync_success(DaemonSessionState& state,
             ++telemetry.sync_runs;
             ++hot.completed_generation;
 
-            if (remaining_dirty.empty() && !remaining_overflow) {
+            const bool watcher_changed_since_drain =
+                (hot.watch_epoch != consumed_watch_epoch);
+            merge_dirty_paths_locked(
+                hot, cold, remaining_dirty, remaining_overflow);
+            const bool has_pending_dirty = !cold.dirty_paths.empty() ||
+                                           hot.overflow ||
+                                           watcher_changed_since_drain;
+            if (!has_pending_dirty) {
                 hot.dirty = false;
                 hot.overflow = false;
                 cold.dirty_paths.clear();
@@ -230,11 +302,18 @@ void finish_sync_success(DaemonSessionState& state,
                     platform::directory_watcher_valid(warm.watcher) &&
                     hot.watcher_healthy;
             } else {
+                if (watcher_changed_since_drain && cold.dirty_paths.empty() &&
+                    !hot.overflow) {
+                    hot.overflow = true;
+                }
                 hot.dirty = true;
-                hot.overflow = remaining_overflow;
-                cold.dirty_paths = std::move(remaining_dirty);
-                hot.first_dirty_at = now_steady;
-                hot.last_dirty_at = now_steady;
+                hot.watcher_baseline_established = false;
+                if (!hot.first_dirty_at) {
+                    hot.first_dirty_at = now_steady;
+                }
+                if (!hot.last_dirty_at) {
+                    hot.last_dirty_at = now_steady;
+                }
             }
 
             hot.next_sync_at =
@@ -242,23 +321,39 @@ void finish_sync_success(DaemonSessionState& state,
                     ? (now_steady +
                        std::chrono::seconds{hot.sync_interval_seconds})
                     : (std::chrono::steady_clock::time_point::max)();
+
+            if (post_snapshot_out != nullptr &&
+                testing::post_sync_prune_hook_active()) {
+                *post_snapshot_out = testing::PostSyncPruneSnapshot{
+                    .dirty = hot.dirty,
+                    .overflow = hot.overflow,
+                    .watcher_baseline_established =
+                        hot.watcher_baseline_established,
+                    .has_dirty_timestamps = hot.first_dirty_at.has_value() &&
+                                            hot.last_dirty_at.has_value(),
+                    .sync_runs = telemetry.sync_runs,
+                    .dirty_paths = cold.dirty_paths,
+                };
+            }
         }
     }
     discard_transport.reset();
     notify_daemon_status_change(state);
 }
 
-void finish_task_state(DaemonSessionState& state,
-                       const std::string& profile_name,
-                       std::uint64_t task_config_gen,
-                       std::optional<transport::Transport>& borrowed_owner,
-                       observation::LocalObservationSession& warm_obs,
-                       bool count_failure,
-                       bool set_needs_attention,
-                       bool set_locked,
-                       bool set_backoff,
-                       const std::string& error_detail,
-                       const std::string& outcome) {
+void finish_task_state(
+    DaemonSessionState& state,
+    const std::string& profile_name,
+    std::uint64_t task_config_gen,
+    std::optional<transport::Transport>& borrowed_owner,
+    const std::optional<detail::TransportBinding>& borrowed_binding,
+    observation::LocalObservationSession& warm_obs,
+    bool count_failure,
+    bool set_needs_attention,
+    bool set_locked,
+    bool set_backoff,
+    const std::string& error_detail,
+    const std::string& outcome) {
     const auto now_steady = std::chrono::steady_clock::now();
     const auto now_unix = current_unix_seconds();
     std::string event_kind;
@@ -270,16 +365,16 @@ void finish_task_state(DaemonSessionState& state,
             auto& telemetry = state.profiles.telemetry[*slot];
             auto& cold = state.profiles.cold[*slot];
             auto& warm = state.profiles.warm[*slot];
-            if (hot.config_generation == task_config_gen && !set_locked &&
-                !hot.paused && !hot.locked) {
-                warm.warm_observation = std::move(warm_obs);
-                if (borrowed_owner) {
-                    warm.warm_transport = std::move(borrowed_owner);
-                    warm.warm_transport_last_used = now_steady;
-                }
-            } else {
-                discard_transport = std::move(borrowed_owner);
-            }
+            stash_or_discard_warm_state(hot,
+                                        cold,
+                                        warm,
+                                        task_config_gen,
+                                        !set_locked,
+                                        borrowed_owner,
+                                        borrowed_binding,
+                                        warm_obs,
+                                        now_steady,
+                                        discard_transport);
             hot.in_flight = false;
             clear_active_telemetry(telemetry);
             warm.task_stop_source.reset();
@@ -333,6 +428,7 @@ void run_profile_task(DaemonSessionState& state,
     std::filesystem::path db_path;
     std::filesystem::path key_path;
     std::optional<transport::Transport> borrowed_owner;
+    std::optional<detail::TransportBinding> borrowed_binding;
     observation::LocalObservationSession warm_obs;
     std::uint64_t task_config_gen = 0;
     bool can_try_fast_poll = false;
@@ -360,7 +456,9 @@ void run_profile_task(DaemonSessionState& state,
 
         if (warm.warm_transport) {
             borrowed_owner = std::move(warm.warm_transport);
+            borrowed_binding = std::move(warm.warm_transport_binding);
             warm.warm_transport.reset();
+            warm.warm_transport_binding.reset();
         }
         warm_obs = std::move(warm.warm_observation);
         warm.warm_observation = {};
@@ -415,6 +513,7 @@ void run_profile_task(DaemonSessionState& state,
                               profile_name,
                               task_config_gen,
                               borrowed_owner,
+                              borrowed_binding,
                               warm_obs,
                               false,
                               false,
@@ -432,6 +531,7 @@ void run_profile_task(DaemonSessionState& state,
                               profile_name,
                               task_config_gen,
                               borrowed_owner,
+                              borrowed_binding,
                               warm_obs,
                               false,
                               true,
@@ -446,12 +546,21 @@ void run_profile_task(DaemonSessionState& state,
             state.key_arena, profile_name, clear_key.data));
     }
 
+    const auto expected_binding = detail::make_transport_binding(cfg);
+    if (borrowed_owner &&
+        (!borrowed_binding || *borrowed_binding != expected_binding)) {
+        borrowed_owner.reset();
+        borrowed_binding.reset();
+        warm_obs = {.database_path = db_path};
+    }
+
     // Ensure warm transport exists & passes health check.
     bool opened_new_transport = false;
     if (borrowed_owner) {
         const auto health = transport::check_health(*borrowed_owner);
         if (!health) {
             borrowed_owner.reset();
+            borrowed_binding.reset();
         }
     }
     if (!borrowed_owner) {
@@ -464,6 +573,7 @@ void run_profile_task(DaemonSessionState& state,
             });
         if (opened) {
             borrowed_owner = std::move(*opened);
+            borrowed_binding = expected_binding;
             opened_new_transport = true;
         } else {
             const auto msg = transport::describe(opened.error());
@@ -471,6 +581,7 @@ void run_profile_task(DaemonSessionState& state,
                               profile_name,
                               task_config_gen,
                               borrowed_owner,
+                              borrowed_binding,
                               warm_obs,
                               false,
                               false,
@@ -495,20 +606,49 @@ void run_profile_task(DaemonSessionState& state,
                          runtime::AccessMode::ReadOnly,
                          false);
     if (can_try_fast_poll && resolved_runtime && !task_stop.stop_requested()) {
-        const auto fast =
-            daemon_detail::try_fast_remote_noop_poll(state.environment,
-                                                     profile_name,
-                                                     *resolved_runtime,
-                                                     *borrowed_owner,
-                                                     clear_key.data,
-                                                     warm_obs,
-                                                     ignore_present,
-                                                     ignore_stamp);
+        const auto fast = daemon_detail::try_fast_remote_noop_poll(
+            state.environment,
+            profile_name,
+            *resolved_runtime,
+            *borrowed_owner,
+            *borrowed_binding,
+            clear_key.data,
+            warm_obs,
+            ignore_present,
+            ignore_stamp);
+        if (fast.config_changed) {
+            borrowed_owner.reset();
+            borrowed_binding.reset();
+            warm_obs = {.database_path = db_path};
+            state.config_dirty.store(true, std::memory_order_release);
+            const auto updated = runtime::resolve(state.environment.app_data_dir,
+                                                  profile_name,
+                                                  runtime::AccessMode::ReadOnly,
+                                                  false);
+            if (!updated || updated->paused) {
+                finish_task_state(state,
+                                  profile_name,
+                                  task_config_gen,
+                                  borrowed_owner,
+                                  borrowed_binding,
+                                  warm_obs,
+                                  false,
+                                  false,
+                                  false,
+                                  false,
+                                  fast.reason,
+                                  "");
+                return;
+            }
+            db_path = updated->database_path;
+            key_path = updated->key_path;
+        }
         if (fast.profile_locked) {
             finish_task_state(state,
                               profile_name,
                               task_config_gen,
                               borrowed_owner,
+                              borrowed_binding,
                               warm_obs,
                               false,
                               false,
@@ -537,16 +677,19 @@ void run_profile_task(DaemonSessionState& state,
                                  profile_name,
                                  task_config_gen,
                                  borrowed_owner,
+                                 borrowed_binding,
                                  warm_obs);
                 return;
             }
         }
         if (fast.transport_error) {
             borrowed_owner.reset();
+            borrowed_binding.reset();
             finish_task_state(state,
                               profile_name,
                               task_config_gen,
                               borrowed_owner,
+                              borrowed_binding,
                               warm_obs,
                               false,
                               false,
@@ -565,6 +708,7 @@ void run_profile_task(DaemonSessionState& state,
                           profile_name,
                           task_config_gen,
                           borrowed_owner,
+                          borrowed_binding,
                           warm_obs,
                           false,
                           true,
@@ -585,6 +729,7 @@ void run_profile_task(DaemonSessionState& state,
 
     detail::WarmExecutionContext warm_ctx{
         .borrowed_transport = borrowed_owner ? &*borrowed_owner : nullptr,
+        .borrowed_transport_binding = borrowed_binding,
         .warm_observation = &warm_obs,
         .on_lock_acquired =
             [&]() {
@@ -614,8 +759,6 @@ void run_profile_task(DaemonSessionState& state,
             Request{
                 .operation = Operation::Sync,
                 .profile_name = profile_name,
-                .bandwidth_limit = cfg.bandwidth_limit,
-                .transfer_concurrency = cfg.transfer_concurrency,
             },
         .credentials = MasterKeyBytes{clear_key.data},
         .environment = state.environment,
@@ -713,6 +856,11 @@ void run_profile_task(DaemonSessionState& state,
 
     const auto exec_started = std::chrono::steady_clock::now();
     auto res = detail::execute_warm(exec_input, warm_ctx);
+    if (warm_ctx.borrowed_transport_rejected) {
+        borrowed_owner.reset();
+        borrowed_binding.reset();
+        state.config_dirty.store(true, std::memory_order_release);
+    }
 
     if (res) {
         const auto* sync_done = std::get_if<SyncCompleted>(&res->data);
@@ -725,6 +873,7 @@ void run_profile_task(DaemonSessionState& state,
         // published commit tree).
         std::unordered_set<std::string> remaining_dirty;
         bool remaining_overflow = false;
+        std::uint64_t consumed_watch_epoch = 0;
         {
             std::lock_guard lock(state.mutex);
             if (const auto slot =
@@ -733,6 +882,7 @@ void run_profile_task(DaemonSessionState& state,
                 auto& cold = state.profiles.cold[*slot];
                 remaining_dirty = std::move(cold.dirty_paths);
                 remaining_overflow = hot.overflow;
+                consumed_watch_epoch = hot.watch_epoch;
                 cold.dirty_paths.clear();
                 hot.overflow = false;
             }
@@ -829,16 +979,29 @@ void run_profile_task(DaemonSessionState& state,
             }
         }
 
+        testing::invoke_post_sync_prune_hook(
+            state,
+            profile_name,
+            testing::PostSyncPruneStage::BeforeFinishSyncSuccess);
+        std::optional<testing::PostSyncPruneSnapshot> post_snapshot;
         finish_sync_success(state,
                             profile_name,
                             task_config_gen,
                             borrowed_owner,
+                            borrowed_binding,
                             warm_obs,
-                            std::move(remaining_dirty),
+                            remaining_dirty,
                             remaining_overflow,
+                            consumed_watch_epoch,
                             watcher_ctx_before,
                             watcher_healthy_before,
-                            outcome);
+                            outcome,
+                            &post_snapshot);
+        testing::invoke_post_sync_prune_hook(
+            state,
+            profile_name,
+            testing::PostSyncPruneStage::AfterFinishSyncSuccess,
+            post_snapshot ? &*post_snapshot : nullptr);
         const double exec_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                           exec_started)
@@ -858,7 +1021,9 @@ void run_profile_task(DaemonSessionState& state,
     if (cancelled) {
         if (borrowed_owner && !transport::check_health(*borrowed_owner)) {
             borrowed_owner.reset();
+            borrowed_binding.reset();
         }
+        const auto now_cancelled = std::chrono::steady_clock::now();
         std::optional<transport::Transport> discard_transport;
         {
             std::lock_guard lock(state.mutex);
@@ -868,20 +1033,28 @@ void run_profile_task(DaemonSessionState& state,
                 auto& telemetry = state.profiles.telemetry[*slot];
                 auto& cold = state.profiles.cold[*slot];
                 auto& warm = state.profiles.warm[*slot];
-                if (hot.config_generation == task_config_gen && !hot.paused &&
-                    !hot.locked) {
-                    warm.warm_observation = std::move(warm_obs);
-                    if (borrowed_owner) {
-                        warm.warm_transport = std::move(borrowed_owner);
-                        warm.warm_transport_last_used =
-                            std::chrono::steady_clock::now();
+                stash_or_discard_warm_state(hot,
+                                            cold,
+                                            warm,
+                                            task_config_gen,
+                                            true,
+                                            borrowed_owner,
+                                            borrowed_binding,
+                                            warm_obs,
+                                            now_cancelled,
+                                            discard_transport);
+                merge_dirty_paths_locked(
+                    hot, cold, dirty_snapshot, had_overflow_snapshot);
+                if (!cold.dirty_paths.empty() || hot.overflow) {
+                    hot.dirty = true;
+                    hot.watcher_baseline_established = false;
+                    if (!hot.first_dirty_at) {
+                        hot.first_dirty_at = now_cancelled;
                     }
-                } else {
-                    discard_transport = std::move(borrowed_owner);
+                    if (!hot.last_dirty_at) {
+                        hot.last_dirty_at = now_cancelled;
+                    }
                 }
-                cold.dirty_paths.insert(dirty_snapshot.begin(),
-                                        dirty_snapshot.end());
-                hot.overflow = hot.overflow || had_overflow_snapshot;
                 hot.in_flight = false;
                 clear_active_telemetry(telemetry);
                 warm.task_stop_source.reset();
@@ -900,6 +1073,7 @@ void run_profile_task(DaemonSessionState& state,
                             daemon_detail::is_transient_sync_error(err)) ||
                            !transport::check_health(*borrowed_owner))) {
         borrowed_owner.reset();
+        borrowed_binding.reset();
     }
     const bool transient = daemon_detail::is_transient_sync_error(err);
     const bool lock_only = ((err.code == ErrorCode::CredentialFailure ||
@@ -908,15 +1082,22 @@ void run_profile_task(DaemonSessionState& state,
 
     // Restore any dirty snapshot before recording failure state.
     {
+        const auto now_restore = std::chrono::steady_clock::now();
         std::lock_guard lock(state.mutex);
         if (const auto slot = find_profile_slot(state.profiles, profile_name)) {
             auto& hot = state.profiles.hot[*slot];
             auto& cold = state.profiles.cold[*slot];
-            cold.dirty_paths.insert(dirty_snapshot.begin(),
-                                    dirty_snapshot.end());
-            hot.overflow = hot.overflow || had_overflow_snapshot;
+            merge_dirty_paths_locked(
+                hot, cold, dirty_snapshot, had_overflow_snapshot);
             if (!cold.dirty_paths.empty() || hot.overflow) {
                 hot.dirty = true;
+                hot.watcher_baseline_established = false;
+                if (!hot.first_dirty_at) {
+                    hot.first_dirty_at = now_restore;
+                }
+                if (!hot.last_dirty_at) {
+                    hot.last_dirty_at = now_restore;
+                }
             }
         }
     }
@@ -924,6 +1105,7 @@ void run_profile_task(DaemonSessionState& state,
                       profile_name,
                       task_config_gen,
                       borrowed_owner,
+                      borrowed_binding,
                       warm_obs,
                       true,
                       !transient && !lock_only,
@@ -990,6 +1172,7 @@ void scheduler_loop(DaemonSessionState& state) {
                                     .database_path = cold.database_path};
                                 if (warm.warm_transport) {
                                     warm.warm_transport.reset();
+                                    warm.warm_transport_binding.reset();
                                 }
                             }
                         }
@@ -1034,6 +1217,7 @@ void scheduler_loop(DaemonSessionState& state) {
                     state.options.warm_transport_idle_ttl) {
                 expired_transports.push_back(std::move(warm.warm_transport));
                 warm.warm_transport.reset();
+                warm.warm_transport_binding.reset();
                 expired_names.push_back(state.profiles.names[idx]);
             }
         }
@@ -1187,6 +1371,7 @@ void scheduler_loop(DaemonSessionState& state) {
         };
         auto next_wake = now + state.options.config_poll_interval;
 
+        bool aborted_any_immediate = false;
         for (std::size_t idx = 0; idx < state.profiles.hot.size(); ++idx) {
             auto& hot = state.profiles.hot[idx];
             const auto& cold = state.profiles.cold[idx];
@@ -1198,6 +1383,16 @@ void scheduler_loop(DaemonSessionState& state) {
             }
             if (hot.in_flight || hot.paused || hot.locked ||
                 hot.needs_attention) {
+                if (!hot.in_flight && hot.immediate_sync_requested) {
+                    const std::string_view reason =
+                        hot.paused
+                            ? "profile paused before sync started"
+                            : (hot.locked
+                                   ? "profile locked before sync started"
+                                   : "profile requires attention before sync");
+                    abort_pending_immediate_sync_locked(hot, reason);
+                    aborted_any_immediate = true;
+                }
                 continue;
             }
             const auto& name = state.profiles.names[idx];
@@ -1316,11 +1511,55 @@ void scheduler_loop(DaemonSessionState& state) {
         if (state.stop_requested) {
             break;
         }
+        if (aborted_any_immediate) {
+            state.cv.notify_all();
+        }
         state.cv.wait_until(lock, next_wake);
     }
     lock.unlock();
     cleanup_daemon_resources(state, false);
     notify_daemon_status_change(state);
 }
+
+namespace testing {
+
+ScopedPostSyncPruneHook::ScopedPostSyncPruneHook(PostSyncPruneHook hook) {
+    std::lock_guard lock(post_sync_prune_hook_mutex);
+    previous = std::exchange(active_post_sync_prune_hook, std::move(hook));
+    has_post_sync_prune_hook.store(
+        static_cast<bool>(active_post_sync_prune_hook),
+        std::memory_order_release);
+}
+
+ScopedPostSyncPruneHook::~ScopedPostSyncPruneHook() noexcept {
+    std::lock_guard lock(post_sync_prune_hook_mutex);
+    active_post_sync_prune_hook = std::move(previous);
+    has_post_sync_prune_hook.store(
+        static_cast<bool>(active_post_sync_prune_hook),
+        std::memory_order_release);
+}
+
+bool post_sync_prune_hook_active() noexcept {
+    return has_post_sync_prune_hook.load(std::memory_order_acquire);
+}
+
+void invoke_post_sync_prune_hook(DaemonSessionState& state,
+                                 std::string_view profile_name,
+                                 PostSyncPruneStage stage,
+                                 const PostSyncPruneSnapshot* snapshot) {
+    if (!has_post_sync_prune_hook.load(std::memory_order_acquire)) {
+        return;
+    }
+    PostSyncPruneHook hook;
+    {
+        std::lock_guard lock(post_sync_prune_hook_mutex);
+        hook = active_post_sync_prune_hook;
+    }
+    if (hook) {
+        hook(state, profile_name, stage, snapshot);
+    }
+}
+
+} // namespace testing
 
 } // namespace kasumi::application::daemon_detail

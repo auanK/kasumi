@@ -3,8 +3,10 @@
 
 #include "transport/transport.hpp"
 
+#include <cstddef>
 #include <expected>
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -15,6 +17,8 @@ namespace kasumi::transport::local_detail {
 // Local transport state.
 struct State {
     std::filesystem::path root;
+    std::mutex staging_dir_mutex;
+    std::size_t active_staging_puts = 0;
 };
 
 // Converts opaque context to local transport state.

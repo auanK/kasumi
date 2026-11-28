@@ -82,10 +82,18 @@ struct EpochPlan {
     bool operator==(const EpochPlan&) const = default;
 };
 
+struct PruneOptions {
+    std::optional<std::int64_t> reference_now_unix = std::nullopt;
+    std::span<const std::string> marked_commit_ids = {};
+    std::span<const Anchor> current_anchors = {};
+    std::span<const std::string> protected_commit_ids = {};
+};
+
 using PruneResult = std::expected<EpochPlan, NoPrune>;
 
 PruneResult plan_pruning(std::span<const kasumi::history::LoadedCommit> commits,
-                         const RetentionPolicy& policy);
+                         const RetentionPolicy& policy,
+                         const PruneOptions& options = {});
 
 enum class ErrorCode {
     InvalidInput,

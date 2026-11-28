@@ -97,6 +97,7 @@ FastPollReport try_fast_remote_noop_poll(
     std::string_view profile_name,
     const runtime::RuntimeData& runtime_data,
     transport::Transport& borrowed_transport,
+    const detail::TransportBinding& borrowed_binding,
     std::span<const std::uint8_t, 32> master_key,
     observation::LocalObservationSession& warm_observation,
     bool ignore_file_present,
@@ -104,12 +105,6 @@ FastPollReport try_fast_remote_noop_poll(
     if (!transport::valid(borrowed_transport)) {
         return {.verdict = FastPollVerdict::FullSyncRequired,
                 .reason = "warm transport unavailable"};
-    }
-    if (!ignore_stamp_matches(runtime_data.local_dir,
-                              ignore_file_present,
-                              expected_ignore_stamp)) {
-        return {.verdict = FastPollVerdict::FullSyncRequired,
-                .reason = ".kasumiignore changed"};
     }
 
     auto lock = platform::acquire_profile_lock(
@@ -127,21 +122,44 @@ FastPollReport try_fast_remote_noop_poll(
         }
     } lock_guard{*lock};
 
+    const auto fresh_runtime =
+        runtime::resolve(environment.app_data_dir,
+                         profile_name,
+                         runtime::AccessMode::ReadOnly,
+                         false);
+    if (!fresh_runtime || fresh_runtime->paused ||
+        detail::make_transport_binding(*fresh_runtime) != borrowed_binding) {
+        warm_observation = {.database_path =
+                                fresh_runtime ? fresh_runtime->database_path
+                                              : runtime_data.database_path};
+        return {.verdict = FastPollVerdict::FullSyncRequired,
+                .reason = "profile configuration changed",
+                .config_changed = true};
+    }
+    const auto& active_runtime = *fresh_runtime;
+
+    if (!ignore_stamp_matches(active_runtime.local_dir,
+                              ignore_file_present,
+                              expected_ignore_stamp)) {
+        return {.verdict = FastPollVerdict::FullSyncRequired,
+                .reason = ".kasumiignore changed"};
+    }
+
     if (!observation::warm_session_db_matches(warm_observation,
-                                              runtime_data.database_path)) {
+                                              active_runtime.database_path)) {
         return {.verdict = FastPollVerdict::FullSyncRequired,
                 .reason = "local database modified externally"};
     }
-    if (journal_evidence_present(runtime_data.database_path.parent_path())) {
+    if (journal_evidence_present(active_runtime.database_path.parent_path())) {
         return {.verdict = FastPollVerdict::FullSyncRequired,
                 .reason = "pending transaction journal"};
     }
-    if (!state_storage::validate(runtime_data.database_path)) {
+    if (!state_storage::validate(active_runtime.database_path)) {
         return {.verdict = FastPollVerdict::FullSyncRequired,
                 .reason = "database validation failed"};
     }
     const auto persisted =
-        state_storage::load_state(runtime_data.database_path);
+        state_storage::load_state(active_runtime.database_path);
     if (!persisted || !persisted->has_value()) {
         return {.verdict = FastPollVerdict::FullSyncRequired,
                 .reason = "no accepted local commit yet"};
@@ -150,7 +168,7 @@ FastPollReport try_fast_remote_noop_poll(
     // quiescent DB; refresh our warm DB stamp under the profile lock so the
     // next fast poll does not mistake our own read for external modification.
     observation::refresh_warm_session_db_stamp(warm_observation,
-                                               runtime_data.database_path);
+                                               active_runtime.database_path);
     const auto& state = **persisted;
     if (state.commit_id.empty() || state.ciphertext_id.empty() ||
         !state.pending_materializations.empty()) {

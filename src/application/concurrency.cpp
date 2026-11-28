@@ -1,8 +1,10 @@
 #include "application/concurrency.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <cstdlib>
+#include <mutex>
 #include <string_view>
 #include <utility>
 
@@ -10,6 +12,9 @@ namespace kasumi::application {
 namespace {
 
 thread_local std::optional<std::size_t> thread_concurrency_override{};
+std::mutex worker_spawn_hook_mutex;
+testing::WorkerSpawnHook active_worker_spawn_hook{};
+std::atomic<bool> has_worker_spawn_hook{false};
 
 std::optional<std::size_t> env_content_concurrency() noexcept {
     const char* setting = std::getenv("KASUMI_CONTENT_CONCURRENCY");
@@ -73,5 +78,37 @@ ScopedContentConcurrency::ScopedContentConcurrency(
 ScopedContentConcurrency::~ScopedContentConcurrency() noexcept {
     thread_concurrency_override = previous;
 }
+
+namespace testing {
+
+ScopedWorkerSpawnHook::ScopedWorkerSpawnHook(WorkerSpawnHook hook) {
+    std::lock_guard lock(worker_spawn_hook_mutex);
+    previous = std::exchange(active_worker_spawn_hook, std::move(hook));
+    has_worker_spawn_hook.store(static_cast<bool>(active_worker_spawn_hook),
+                                std::memory_order_release);
+}
+
+ScopedWorkerSpawnHook::~ScopedWorkerSpawnHook() noexcept {
+    std::lock_guard lock(worker_spawn_hook_mutex);
+    active_worker_spawn_hook = std::move(previous);
+    has_worker_spawn_hook.store(static_cast<bool>(active_worker_spawn_hook),
+                                std::memory_order_release);
+}
+
+void invoke_worker_spawn_hook(std::size_t worker_index) {
+    if (!has_worker_spawn_hook.load(std::memory_order_acquire)) {
+        return;
+    }
+    WorkerSpawnHook hook;
+    {
+        std::lock_guard lock(worker_spawn_hook_mutex);
+        hook = active_worker_spawn_hook;
+    }
+    if (hook) {
+        hook(worker_index);
+    }
+}
+
+} // namespace testing
 
 } // namespace kasumi::application

@@ -11,6 +11,7 @@
 #include "kasumi/test/history_storage.hpp"
 #include "platform/cancellation.hpp"
 #include "platform/clock.hpp"
+#include "state_storage/database.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2438,6 +2439,68 @@ INSTANTIATE_TEST_SUITE_P(
         return "N" + std::to_string(parameter.param);
     });
 
+TEST(GarbageCollectionTest,
+     RequiresLocallyAcceptedHistoryBeforePlanningDeletions) {
+    namespace epoch = kasumi::application::history_storage::epoch;
+    namespace db = kasumi::state_storage;
+    FakeFixture fixture("gc-local-checkpoint");
+    const auto root = commit_with_file("root");
+    fixture.publish(root, "root");
+    fixture.put_content("root", "root-content");
+    const auto child = kasumi::history::make_commit(
+                           1, {commit_id(root)}, make_tree("live.txt", "child"))
+                           .value();
+    const auto accepted = fixture.publish(child, "child", false);
+    const auto child_content = fixture.put_content("child", "child-content");
+    const auto orphan = fixture.put_content("orphan", "orphan-content");
+    Epoch genesis{.vault_id = std::string(64, 'a'),
+                  .sequence = 0,
+                  .issued_at = 1,
+                  .policy = {},
+                  .anchors = {{.commit_id = commit_id(root), .height = 0}}};
+    const auto checkpoint = epoch::seal(genesis, test_key()).value();
+    ASSERT_TRUE(db::initialize(fixture.runtime.database_path));
+    ASSERT_TRUE(db::save_state(fixture.runtime.database_path,
+                               {.tree = child.tree,
+                                .height = 1,
+                                .commit_id = accepted.commit_id,
+                                .ciphertext_id = accepted.ciphertext_id,
+                                .epoch_id = checkpoint.reference.epoch_id}));
+
+    const auto expect_blocked = [&](std::string_view missing) {
+        for (const bool dry_run : {true, false}) {
+            const auto result = fixture.collect_with_options(
+                {.dry_run = dry_run,
+                 .min_orphan_age = std::chrono::seconds{0}});
+            ASSERT_FALSE(result.has_value());
+            EXPECT_EQ(result.error().code, GcErrorCode::IntegrityFailure);
+            EXPECT_EQ(result.error().object_identifier, missing);
+            EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
+            EXPECT_TRUE(fixture.present(child_content));
+            EXPECT_TRUE(fixture.present(orphan));
+        }
+    };
+    expect_blocked(accepted.commit_id);
+    const auto marker =
+        kasumi::application::history_storage::marker_object(layout(), accepted);
+    fixture.state->objects[marker] = marker_bytes(accepted);
+    expect_blocked(
+        epoch::object_identifier(layout(), checkpoint.reference).value());
+
+    const auto workspace = kasumi::test::workspace_root(fixture.workspace);
+    ASSERT_TRUE(
+        epoch::publish(fixture.transport, test_key(), checkpoint, workspace));
+    auto successor = genesis;
+    successor.sequence = 1;
+    successor.previous_epoch_id = checkpoint.reference.epoch_id;
+    const auto next = epoch::seal(successor, test_key()).value();
+    ASSERT_TRUE(epoch::publish(fixture.transport, test_key(), next, workspace));
+    const auto result = fixture.collect();
+    ASSERT_TRUE(result.has_value()) << result.error().detail;
+    EXPECT_FALSE(fixture.present(orphan));
+    EXPECT_TRUE(fixture.present(child_content));
+}
+
 TEST(GarbageCollectionTest, GlobalPlanPreservesAnchoredCommitVariant) {
     LocalFixture fixture;
     const auto parent = commit_with_file("parent");
@@ -3684,6 +3747,861 @@ TEST(GarbageCollectionTest, GcReusesCommitCacheToSkipRemoteCommitDownloads) {
     ASSERT_TRUE(second.has_value()) << second.error().detail;
     EXPECT_EQ(second->candidate_objects, first->candidate_objects);
     EXPECT_EQ(fixture.state->commit_get_count, 0U);
+}
+
+TEST(GarbageCollectionTest,
+     BifurcatedLegacyEpochChainFailsClosedAndPreservesAllBranches) {
+    namespace epoch = kasumi::application::history_storage::epoch;
+    FakeFixture fixture("gc-bifurcated-epochs");
+    const auto c0 = commit_with_file("base");
+    const auto ca =
+        kasumi::history::make_commit(1, {commit_id(c0)}, make_tree("a.txt", "va"))
+            .value();
+    const auto cb =
+        kasumi::history::make_commit(1, {commit_id(c0)}, make_tree("b.txt", "vb"))
+            .value();
+    const auto c0_variant = fixture.publish(c0, "c0", false);
+    const auto ca_variant = fixture.publish(ca, "ca", true);
+    const auto cb_variant = fixture.publish(cb, "cb", true);
+    const auto base_content = fixture.put_content("base", "base");
+    const auto a_content = fixture.put_content("va", "va");
+    const auto b_content = fixture.put_content("vb", "vb");
+    const auto orphan = fixture.put_content("orphan", "orphan");
+
+    const auto root = kasumi::test::workspace_root(fixture.workspace);
+    const Epoch e0_val{
+        .vault_id = std::string(64, 'a'),
+        .sequence = 0,
+        .issued_at = 100,
+        .policy = {},
+        .anchors = {Anchor{.commit_id = commit_id(c0), .height = 0}},
+    };
+    const auto e0 = epoch::seal(e0_val, test_key());
+    ASSERT_TRUE(e0.has_value());
+    ASSERT_TRUE(epoch::publish(fixture.transport, test_key(), *e0, root));
+
+    const Epoch e1a_val{
+        .vault_id = std::string(64, 'a'),
+        .sequence = 1,
+        .issued_at = 200,
+        .policy = {},
+        .anchors = {Anchor{.commit_id = commit_id(ca), .height = 1}},
+        .previous_epoch_id = e0->reference.epoch_id,
+    };
+    const Epoch e1b_val{
+        .vault_id = std::string(64, 'a'),
+        .sequence = 1,
+        .issued_at = 205,
+        .policy = {},
+        .anchors = {Anchor{.commit_id = commit_id(cb), .height = 1}},
+        .previous_epoch_id = e0->reference.epoch_id,
+    };
+    const auto e1a = epoch::seal(e1a_val, test_key());
+    const auto e1b = epoch::seal(e1b_val, test_key());
+    ASSERT_TRUE(e1a.has_value() && e1b.has_value());
+    ASSERT_TRUE(epoch::publish(fixture.transport, test_key(), *e1a, root));
+    ASSERT_TRUE(epoch::publish(fixture.transport, test_key(), *e1b, root));
+
+    const auto e0_obj = epoch::object_identifier(layout(), e0->reference).value();
+    const auto e1a_obj =
+        epoch::object_identifier(layout(), e1a->reference).value();
+    const auto e1b_obj =
+        epoch::object_identifier(layout(), e1b->reference).value();
+
+    const auto gc = fixture.collect_with_options(
+        gc_int::GarbageCollectOptions{.min_orphan_age = std::chrono::seconds{0}});
+    ASSERT_FALSE(gc.has_value());
+    EXPECT_EQ(fixture.state->candidate_remove_count, 0U);
+    EXPECT_EQ(fixture.state->source_remove_count, 0U);
+    EXPECT_EQ(fixture.state->remove_batch_count, 0U);
+    EXPECT_EQ(barrier_remove_attempts(*fixture.state), 1U);
+    EXPECT_EQ(fixture.state->remove_count, 1U);
+    EXPECT_TRUE(fixture.present(e0_obj));
+    EXPECT_TRUE(fixture.present(e1a_obj));
+    EXPECT_TRUE(fixture.present(e1b_obj));
+    EXPECT_TRUE(fixture.present(object_path(c0_variant)));
+    EXPECT_TRUE(fixture.present(object_path(ca_variant)));
+    EXPECT_TRUE(fixture.present(object_path(cb_variant)));
+    EXPECT_TRUE(fixture.present(base_content));
+    EXPECT_TRUE(fixture.present(a_content));
+    EXPECT_TRUE(fixture.present(b_content));
+    EXPECT_TRUE(fixture.present(orphan));
+}
+
+TEST(GarbageCollectionTest,
+     GarbageCollectRecoversAfterPostPutBarrierVerificationOutageAndPreservesPeer) {
+    FakeFixture fixture("gc-post-put-barrier-recovery");
+    fixture.state->physical_hash_supported = true;
+    fixture.publish(commit_with_file("live"), "head");
+    fixture.put_content("live", "live");
+    const auto orphan = fixture.put_content("orphan", "orphan");
+
+    // 1. Barrier PUT succeeds, post-PUT verification fails -> GC fails and
+    // persists recoverable registration evidence locally.
+    fixture.state->physical_hash_failure_identifier =
+        layout().barrier_identifier;
+    fixture.state->physical_hash_failure = kasumi::transport::ErrorCode::Timeout;
+    const auto first = fixture.collect_with_options(
+        gc_int::GarbageCollectOptions{.min_orphan_age = std::chrono::seconds{0}});
+    ASSERT_FALSE(first.has_value());
+    EXPECT_EQ(first.error().code, GcErrorCode::TransportFailure);
+    const auto maintenance_root = fixture.runtime.database_path.parent_path();
+    EXPECT_TRUE(
+        std::filesystem::exists(maintenance_root / ".pending-control-markers"));
+    EXPECT_TRUE(fixture.present(orphan));
+
+    // 2. Backend recovers -> next GC automatically reconciles the abandoned
+    // pre-admission barrier and completes cleanly.
+    fixture.state->physical_hash_failure.reset();
+    fixture.state->physical_hash_failure_identifier.clear();
+    const auto second = fixture.collect_with_options(
+        gc_int::GarbageCollectOptions{.min_orphan_age = std::chrono::seconds{0}});
+    ASSERT_TRUE(second.has_value()) << second.error().detail;
+    EXPECT_EQ(second->removed_objects, 1U);
+    EXPECT_FALSE(fixture.present(orphan));
+    EXPECT_FALSE(
+        std::filesystem::exists(maintenance_root / ".pending-control-markers"));
+}
+
+TEST(GarbageCollectionTest,
+     LocalBackendIgnoresIsolatedStagingAndLegacy0312ResiduesButRejectsUnknownControlFiles) {
+    // 1. Crashed .kasumi-staging temp file on local storage backend -> GC
+    // succeeds normally.
+    {
+        LocalFixture fixture;
+        fixture.publish(commit_with_file("live"), "head");
+        fixture.put_content("live", "live");
+        const auto orphan = fixture.put_content("orphan", "orphan");
+        const auto storage_root =
+            kasumi::test::workspace_path(fixture.storage.workspace, "storage");
+        std::filesystem::create_directories(storage_root / ".kasumi-staging");
+        kasumi::test::write_text(
+            storage_root / ".kasumi-staging" / "put-0123456789abcdef.tmp",
+            "abandoned local put temp");
+
+        const auto res = fixture.collect();
+        ASSERT_TRUE(res.has_value()) << res.error().detail;
+        EXPECT_EQ(res->removed_objects, 1U);
+        EXPECT_FALSE(fixture.present(orphan));
+    }
+
+    // 2. Confirmed legacy 0.31.2 staging residue in barriers/ -> GC succeeds.
+    {
+        LocalFixture fixture;
+        fixture.publish(commit_with_file("live"), "head");
+        fixture.put_content("live", "live");
+        const auto orphan = fixture.put_content("orphan", "orphan");
+        const std::string token = "cccccccccccccccccccccccccccccccc";
+        const auto tmp_path = kasumi::test::workspace_path(
+            fixture.storage.workspace, "legacy-barrier.tmp");
+        const auto bytes = protocol::testing::format_payload("barrier", token);
+        kasumi::test::write_binary(
+            tmp_path,
+            std::as_bytes(std::span{bytes.data(), bytes.size()}));
+        const auto tmp_id =
+            layout().barriers_prefix + token + ".kasumi-tmp-abcdef0123456789";
+        ASSERT_TRUE(
+            kasumi::transport::put(fixture.storage.transport, tmp_path, tmp_id));
+
+        const auto res = fixture.collect();
+        ASSERT_TRUE(res.has_value()) << res.error().detail;
+        EXPECT_EQ(res->removed_objects, 1U);
+        EXPECT_FALSE(fixture.present(orphan));
+    }
+
+    // 3. Ambiguous/unknown file in barriers/ -> GC fails closed with
+    // diagnostics and preserves the unknown file untouched.
+    {
+        LocalFixture fixture;
+        fixture.publish(commit_with_file("live"), "head");
+        fixture.put_content("live", "live");
+        const auto orphan = fixture.put_content("orphan", "orphan");
+        const std::string token = "dddddddddddddddddddddddddddddddd";
+        const auto unknown_path = kasumi::test::workspace_path(
+            fixture.storage.workspace, "unknown-barrier.bin");
+        kasumi::test::write_text(unknown_path, "user-placed-content");
+        const auto unknown_id =
+            layout().barriers_prefix + token + ".kasumi-tmp-0011223344556677";
+        ASSERT_TRUE(kasumi::transport::put(
+            fixture.storage.transport, unknown_path, unknown_id));
+
+        const auto res = fixture.collect();
+        ASSERT_FALSE(res.has_value());
+        EXPECT_EQ(res.error().code, GcErrorCode::IntegrityFailure);
+        EXPECT_NE(res.error().detail.find(".kasumi-tmp-0011223344556677"),
+                  std::string::npos);
+        EXPECT_TRUE(fixture.present(unknown_id));
+        EXPECT_TRUE(fixture.present(orphan));
+    }
+}
+
+TEST(GarbageCollectionTest,
+     RetentionPolicyRespectsDepthAgeRecentReplacementAndFileMtime) {
+    namespace epoch = kasumi::application::history_storage::epoch;
+    namespace db = kasumi::state_storage;
+    const std::int64_t t0 = 1'700'000'000;
+
+    // Helper builds a FakeFixture with default 5-gen / 6h Epoch 0 policy,
+    // linear commits, and matching local checkpoint at HEAD.
+    const auto run_case = [&](const std::vector<std::int64_t>& commit_times,
+                              std::int64_t now_unix,
+                              std::uint32_t min_orphan_hours,
+                              std::int64_t obj_mtime,
+                              std::int64_t tree_file_mtime_ns) {
+        FakeFixture fixture("gc-policy-boundaries");
+        fixture.runtime.min_history_depth = 5;
+        fixture.runtime.min_history_age_hours = 6;
+        fixture.state->list_metadata_supported = true;
+
+        std::vector<kasumi::history::Commit> commits;
+        std::vector<HeadReference> refs;
+        std::vector<std::string> contents;
+        for (std::size_t i = 0; i < commit_times.size(); ++i) {
+            const std::string payload = "payload-v" + std::to_string(i);
+            auto tree = make_tree("doc.txt", payload);
+            tree.rows[1].mtime = tree_file_mtime_ns;
+            kasumi::finalize_snapshot(tree);
+            const std::vector<std::string> parents =
+                commits.empty()
+                    ? std::vector<std::string>{}
+                    : std::vector<std::string>{commit_id(commits.back())};
+            auto c = kasumi::history::make_commit(
+                         i, parents, std::move(tree), commit_times[i])
+                         .value();
+            const bool is_head = (i + 1 == commit_times.size());
+            refs.push_back(fixture.publish(c, "c" + std::to_string(i), is_head));
+            contents.push_back(
+                fixture.put_content(payload, "p" + std::to_string(i)));
+            commits.push_back(std::move(c));
+        }
+
+        const auto ws = kasumi::test::workspace_root(fixture.workspace);
+        Epoch e0{.vault_id = std::string(64, 'a'),
+                 .sequence = 0,
+                 .issued_at = t0,
+                 .policy = {.min_history_depth = 5, .min_history_age_hours = 6},
+                 .anchors = {{.commit_id = refs.front().commit_id, .height = 0}}};
+        const auto sealed0 = epoch::seal(e0, test_key()).value();
+        EXPECT_TRUE(epoch::publish(fixture.transport, test_key(), sealed0, ws));
+        for (const auto& [id, unused] : fixture.state->objects) {
+            static_cast<void>(unused);
+            fixture.state->object_mtimes[id] = obj_mtime;
+        }
+        fixture.state->default_object_mtime = now_unix;
+        EXPECT_TRUE(db::initialize(fixture.runtime.database_path));
+        EXPECT_TRUE(db::save_state(fixture.runtime.database_path,
+                                   {.tree = commits.back().tree,
+                                    .height = commits.back().height,
+                                    .commit_id = refs.back().commit_id,
+                                    .ciphertext_id = refs.back().ciphertext_id,
+                                    .epoch_id = sealed0.reference.epoch_id,
+                                    .epoch_sequence = 0}));
+
+        kasumi::platform::clock::testing::ScopedUnixSecondsOverride clock(
+            now_unix);
+        auto res = fixture.collect_with_options(
+            {.min_orphan_age =
+                 std::chrono::hours{min_orphan_hours}});
+        struct Outcome {
+            std::expected<gc_int::GarbageCollectResult, gc_int::Error> gc;
+            bool oldest_content_present = false;
+            FakeFixture fixture_keep; // unused
+        };
+        return std::tuple{std::move(res),
+                          fixture.present(contents.front()),
+                          std::move(commits),
+                          std::move(contents),
+                          fixture.state->objects.size()};
+    };
+
+    // 1. >5 versions (7 commits), all within 6h -> nothing expires even if file
+    // mtime in Commit.tree is 10 years old and min_orphan_age is 0.
+    {
+        std::vector<std::int64_t> times;
+        for (int i = 0; i < 7; ++i) {
+            times.push_back(t0 + i * 600);
+        }
+        auto [gc, oldest_ok, c, ids, n] =
+            run_case(times, t0 + 3600, 0, t0 - 10 * 3600, 100LL);
+        ASSERT_TRUE(gc.has_value()) << gc.error().detail;
+        EXPECT_FALSE(gc->epoch_advanced);
+        EXPECT_EQ(gc->removed_objects, 0U);
+        EXPECT_TRUE(oldest_ok);
+    }
+
+    // 2. <5 generations (4 commits), even 48h old -> nothing expires.
+    {
+        const std::vector<std::int64_t> times{
+            t0, t0 + 60, t0 + 120, t0 + 48 * 3600};
+        auto [gc, oldest_ok, c, ids, n] =
+            run_case(times, t0 + 72 * 3600, 0, t0, t0 * 1'000'000'000LL);
+        ASSERT_TRUE(gc.has_value()) << gc.error().detail;
+        EXPECT_FALSE(gc->epoch_advanced);
+        EXPECT_EQ(gc->removed_objects, 0U);
+        EXPECT_TRUE(oldest_ok);
+    }
+
+    // 3. Old file replaced only 5 minutes ago followed by 5 commits -> c0 stays
+    // protected because superseded_at(c0) = c1.created_at is within 6h.
+    {
+        const std::int64_t now = t0 + 72 * 3600;
+        const std::vector<std::int64_t> times{
+            t0,           now - 300, now - 240, now - 180,
+            now - 120,    now - 60,  now - 10};
+        auto [gc, oldest_ok, c, ids, n] =
+            run_case(times, now, 0, t0, 100LL);
+        ASSERT_TRUE(gc.has_value()) << gc.error().detail;
+        EXPECT_FALSE(gc->epoch_advanced);
+        EXPECT_EQ(gc->removed_objects, 0U);
+        EXPECT_TRUE(oldest_ok);
+    }
+
+    // 4. Separate physical deletion grace (--min-age 6h) vs version retention:
+    // After 7 commits with superseded_at > 6h, Epoch advances (0 -> 1) even if
+    // physical object mtime is recent, deferring physical deletion until grace
+    // elapses.
+    {
+        const std::int64_t now = t0 + 12 * 3600;
+        const std::vector<std::int64_t> times{
+            t0,       t0 + 60,      now - 7200, now - 3600,
+            now - 1800, now - 900,  now - 300};
+        auto [gc, oldest_ok, c, ids, n] =
+            run_case(times, now, 6, now - 60, now * 1'000'000'000LL);
+        ASSERT_TRUE(gc.has_value()) << gc.error().detail;
+        EXPECT_TRUE(gc->epoch_advanced);
+        EXPECT_EQ(gc->target_epoch_sequence, std::optional<std::uint64_t>{1U});
+        EXPECT_GT(gc->deferred_recent_objects, 0U);
+        EXPECT_EQ(gc->removed_objects, 0U);
+        EXPECT_TRUE(oldest_ok);
+    }
+}
+
+TEST(GarbageCollectionTest,
+     ConcurrentCollectorsAndWriterRaceCannotPublishIncompatibleEpochOrDropBranch) {
+    namespace epoch = kasumi::application::history_storage::epoch;
+    namespace db = kasumi::state_storage;
+    const std::int64_t t0 = 1'700'000'000;
+    const std::int64_t now = t0 + 12 * 3600;
+
+    const auto setup_prunable = [&](FakeFixture& fixture,
+                                    std::vector<HeadReference>& refs,
+                                    std::vector<kasumi::history::Commit>& commits) {
+        fixture.runtime.min_history_depth = 2;
+        fixture.runtime.min_history_age_hours = 1;
+        fixture.state->list_metadata_supported = true;
+        for (int i = 0; i < 4; ++i) {
+            const std::int64_t ts = (i < 2) ? (t0 + i * 60) : (now - (4 - i) * 60);
+            const std::vector<std::string> parents =
+                commits.empty()
+                    ? std::vector<std::string>{}
+                    : std::vector<std::string>{commit_id(commits.back())};
+            auto c = kasumi::history::make_commit(
+                         static_cast<std::uint64_t>(i),
+                         parents,
+                         make_tree("f.txt", "v" + std::to_string(i)),
+                         ts)
+                         .value();
+            refs.push_back(fixture.publish(c, "c" + std::to_string(i), i == 3));
+            fixture.put_content("v" + std::to_string(i), "cv" + std::to_string(i));
+            commits.push_back(std::move(c));
+        }
+        const auto ws = kasumi::test::workspace_root(fixture.workspace);
+        Epoch e0{.vault_id = std::string(64, 'c'),
+                 .sequence = 0,
+                 .issued_at = t0,
+                 .policy = {.min_history_depth = 2, .min_history_age_hours = 1},
+                 .anchors = {{.commit_id = refs.front().commit_id, .height = 0}}};
+        const auto s0 = epoch::seal(e0, test_key()).value();
+        ASSERT_TRUE(epoch::publish(fixture.transport, test_key(), s0, ws));
+        for (const auto& [id, unused] : fixture.state->objects) {
+            static_cast<void>(unused);
+            fixture.state->object_mtimes[id] = t0;
+        }
+        fixture.state->default_object_mtime = now;
+        ASSERT_TRUE(db::initialize(fixture.runtime.database_path));
+        ASSERT_TRUE(db::save_state(fixture.runtime.database_path,
+                                   {.tree = commits.back().tree,
+                                    .height = commits.back().height,
+                                    .commit_id = refs.back().commit_id,
+                                    .ciphertext_id = refs.back().ciphertext_id,
+                                    .epoch_id = s0.reference.epoch_id,
+                                    .epoch_sequence = 0}));
+    };
+
+    // 1. Two collectors starting from Epoch 0: competing collector publishes an
+    // incompatible Epoch 1 right before this collector publishes -> aborts fail
+    // closed with zero deletions.
+    {
+        FakeFixture fixture("gc-competing-collectors");
+        std::vector<HeadReference> refs;
+        std::vector<kasumi::history::Commit> commits;
+        ASSERT_NO_FATAL_FAILURE(setup_prunable(fixture, refs, commits));
+
+        const auto latest0 =
+            epoch::load_latest(fixture.transport,
+                               test_key(),
+                               kasumi::test::workspace_root(fixture.workspace))
+                .value();
+        Epoch competing_e1{
+            .vault_id = latest0->value.vault_id,
+            .sequence = 1,
+            .issued_at = now,
+            .policy = latest0->value.policy,
+            .anchors = {{.commit_id = refs[2].commit_id, .height = 2}},
+            .previous_epoch_id = latest0->reference.epoch_id};
+        const auto sealed_competing =
+            epoch::seal(competing_e1, test_key()).value();
+        const auto competing_id =
+            epoch::object_identifier(layout(), sealed_competing.reference)
+                .value();
+        bool injected = false;
+        fixture.state->on_operation = [&](FakeState& st,
+                                          std::string_view op,
+                                          std::string_view) {
+            if (!injected && op == "after_prefix_list" &&
+                st.full_list_count >= 1 && st.probe_list_count >= 1) {
+                injected = true;
+                st.objects[competing_id] = sealed_competing.bytes;
+                st.object_mtimes[competing_id] = now;
+            }
+        };
+
+        kasumi::platform::clock::testing::ScopedUnixSecondsOverride clock(now);
+        const auto res = fixture.collect();
+        ASSERT_FALSE(res.has_value());
+        EXPECT_EQ(res.error().code, GcErrorCode::ConcurrentChange);
+        EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
+        EXPECT_EQ(fixture.state->objects.count(competing_id), 1U);
+    }
+
+    // 2. Concurrent writer publishes a new head during maintenance -> GC detects
+    // the new head before Epoch publication, fails closed, and preserves branch.
+    {
+        FakeFixture fixture("gc-concurrent-writer-head");
+        std::vector<HeadReference> refs;
+        std::vector<kasumi::history::Commit> commits;
+        ASSERT_NO_FATAL_FAILURE(setup_prunable(fixture, refs, commits));
+
+        const auto writer_commit =
+            kasumi::history::make_commit(
+                2,
+                {refs[1].commit_id},
+                make_tree("branch.txt", "branch-new"),
+                now - 10)
+                .value();
+        const auto writer_content =
+            put_content(fixture.transport,
+                        fixture.workspace,
+                        "branch-new",
+                        "branch-new-obj");
+        const auto writer_canon =
+            kasumi::history::serialize(writer_commit).value();
+        const auto writer_cid =
+            kasumi::crypto::commit_identifier(test_key(), writer_canon);
+        bool writer_injected = false;
+        HeadReference writer_ref;
+        fixture.state->on_operation = [&](FakeState& st,
+                                          std::string_view op,
+                                          std::string_view) {
+            if (!writer_injected && op == "after_prefix_list" &&
+                st.full_list_count >= 1 && st.probe_list_count >= 1) {
+                writer_injected = true;
+                writer_ref = publish_object(fixture.transport,
+                                            fixture.workspace,
+                                            writer_commit,
+                                            "writer-branch",
+                                            true);
+            }
+        };
+
+        kasumi::platform::clock::testing::ScopedUnixSecondsOverride clock(now);
+        const auto res = fixture.collect();
+        ASSERT_FALSE(res.has_value());
+        EXPECT_EQ(res.error().code, GcErrorCode::ConcurrentChange);
+        EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
+        EXPECT_TRUE(fixture.present(writer_content));
+        EXPECT_TRUE(fixture.present(object_path(writer_ref)));
+        (void)writer_cid;
+    }
+
+    // 3. Two unreconciled heads protect both tips and their merge base even
+    // when old enough, while history strictly before the merge base expires.
+    {
+        FakeFixture fixture("gc-two-heads-merge-base");
+        fixture.runtime.min_history_depth = 1;
+        fixture.runtime.min_history_age_hours = 1;
+        fixture.state->list_metadata_supported = true;
+
+        auto c_pre = kasumi::history::make_commit(
+                         0, {}, make_tree("f.txt", "pre-base"), t0)
+                         .value();
+        const auto pre_ref = fixture.publish(c_pre, "pre", false);
+        const auto pre_content = fixture.put_content("pre-base", "pre-c");
+
+        auto c_base = kasumi::history::make_commit(
+                          1, {pre_ref.commit_id}, make_tree("f.txt", "base"),
+                          t0 + 60)
+                          .value();
+        const auto base_ref = fixture.publish(c_base, "base", false);
+        const auto base_content = fixture.put_content("base", "base-c");
+
+        auto c_h1 = kasumi::history::make_commit(
+                        2, {base_ref.commit_id}, make_tree("f.txt", "h1"),
+                        now - 10)
+                        .value();
+        const auto h1_ref = fixture.publish(c_h1, "h1", true);
+        const auto h1_content = fixture.put_content("h1", "h1-c");
+
+        auto c_h2 = kasumi::history::make_commit(
+                        2, {base_ref.commit_id}, make_tree("f.txt", "h2"),
+                        now - 5)
+                        .value();
+        const auto h2_ref = fixture.publish(c_h2, "h2", true);
+        const auto h2_content = fixture.put_content("h2", "h2-c");
+
+        const auto ws = kasumi::test::workspace_root(fixture.workspace);
+        Epoch e0{.vault_id = std::string(64, 'f'),
+                 .sequence = 0,
+                 .issued_at = t0,
+                 .policy = {.min_history_depth = 1, .min_history_age_hours = 1},
+                 .anchors = {{.commit_id = pre_ref.commit_id, .height = 0}}};
+        const auto s0 = epoch::seal(e0, test_key()).value();
+        ASSERT_TRUE(epoch::publish(fixture.transport, test_key(), s0, ws));
+        for (const auto& [id, unused] : fixture.state->objects) {
+            static_cast<void>(unused);
+            fixture.state->object_mtimes[id] = t0;
+        }
+        fixture.state->default_object_mtime = now;
+        ASSERT_TRUE(db::initialize(fixture.runtime.database_path));
+        ASSERT_TRUE(db::save_state(fixture.runtime.database_path,
+                                   {.tree = c_h1.tree,
+                                    .height = 2,
+                                    .commit_id = h1_ref.commit_id,
+                                    .ciphertext_id = h1_ref.ciphertext_id,
+                                    .epoch_id = s0.reference.epoch_id,
+                                    .epoch_sequence = 0}));
+
+        kasumi::platform::clock::testing::ScopedUnixSecondsOverride clock(now);
+        const auto res = fixture.collect();
+        ASSERT_TRUE(res.has_value()) << res.error().detail;
+        EXPECT_TRUE(res->epoch_advanced);
+        EXPECT_FALSE(fixture.present(pre_content));
+        EXPECT_TRUE(fixture.present(base_content));
+        EXPECT_TRUE(fixture.present(h1_content));
+        EXPECT_TRUE(fixture.present(h2_content));
+    }
+}
+
+TEST(GarbageCollectionTest,
+     ListFailureLostResponsePublishAndApplyInterruptionRecoverCleanly) {
+    namespace epoch = kasumi::application::history_storage::epoch;
+    namespace db = kasumi::state_storage;
+    const std::int64_t t0 = 1'700'000'000;
+    const std::int64_t now = t0 + 12 * 3600;
+
+    // 1. Listing failure fails closed with zero remote changes.
+    {
+        FakeFixture fixture("gc-list-failure");
+        fixture.state->fail_list = kasumi::transport::ErrorCode::Io;
+        const auto res = fixture.collect();
+        ASSERT_FALSE(res.has_value());
+        EXPECT_EQ(res.error().code, GcErrorCode::TransportFailure);
+        EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
+    }
+
+    // 2. Lost-response Epoch 1 publish + 3. Interruption mid-Apply.
+    FakeFixture fixture("gc-epoch-lost-response-and-apply-crash");
+    fixture.runtime.min_history_depth = 2;
+    fixture.runtime.min_history_age_hours = 1;
+    fixture.state->list_metadata_supported = true;
+
+    std::vector<HeadReference> refs;
+    std::vector<kasumi::history::Commit> commits;
+    std::vector<std::string> contents;
+    for (int i = 0; i < 5; ++i) {
+        const std::int64_t ts = (i < 3) ? (t0 + i * 60) : (now - (5 - i) * 60);
+        const std::vector<std::string> parents =
+            commits.empty()
+                ? std::vector<std::string>{}
+                : std::vector<std::string>{commit_id(commits.back())};
+        auto c = kasumi::history::make_commit(
+                     static_cast<std::uint64_t>(i),
+                     parents,
+                     make_tree("f.txt", "item-" + std::to_string(i)),
+                     ts)
+                     .value();
+        refs.push_back(fixture.publish(c, "c" + std::to_string(i), i == 4));
+        contents.push_back(
+            fixture.put_content("item-" + std::to_string(i),
+                                "p" + std::to_string(i)));
+        commits.push_back(std::move(c));
+    }
+    const auto ws = kasumi::test::workspace_root(fixture.workspace);
+    Epoch e0{.vault_id = std::string(64, 'd'),
+             .sequence = 0,
+             .issued_at = t0,
+             .policy = {.min_history_depth = 2, .min_history_age_hours = 1},
+             .anchors = {{.commit_id = refs.front().commit_id, .height = 0}}};
+    const auto s0 = epoch::seal(e0, test_key()).value();
+    ASSERT_TRUE(epoch::publish(fixture.transport, test_key(), s0, ws));
+    for (const auto& [id, unused] : fixture.state->objects) {
+        static_cast<void>(unused);
+        fixture.state->object_mtimes[id] = t0;
+    }
+    fixture.state->default_object_mtime = now;
+    ASSERT_TRUE(db::initialize(fixture.runtime.database_path));
+    ASSERT_TRUE(db::save_state(fixture.runtime.database_path,
+                               {.tree = commits.back().tree,
+                                .height = commits.back().height,
+                                .commit_id = refs.back().commit_id,
+                                .ciphertext_id = refs.back().ciphertext_id,
+                                .epoch_id = s0.reference.epoch_id,
+                                .epoch_sequence = 0}));
+
+    // Precompute the exact Epoch 1 object ID GC will publish and inject a
+    // lost-response PUT failure on it (bytes ARE stored remotely, PUT fails).
+    const std::vector<LoadedCommit> loaded_for_plan{
+        {.id = refs[0].commit_id, .commit = commits[0]},
+        {.id = refs[1].commit_id, .commit = commits[1]},
+        {.id = refs[2].commit_id, .commit = commits[2]},
+        {.id = refs[3].commit_id, .commit = commits[3]},
+        {.id = refs[4].commit_id, .commit = commits[4]}};
+    const std::vector<std::string> tip_ids{refs[4].commit_id};
+    const auto expected_plan =
+        epoch::plan_pruning(loaded_for_plan, e0.policy,
+                            {.reference_now_unix = now,
+                             .marked_commit_ids = tip_ids,
+                             .current_anchors = e0.anchors,
+                             .protected_commit_ids = tip_ids})
+            .value();
+    Epoch expected_e1{
+        .vault_id = e0.vault_id,
+        .sequence = 1,
+        .issued_at = now,
+        .policy = e0.policy,
+        .anchors = expected_plan.anchors,
+        .previous_epoch_id = s0.reference.epoch_id};
+    const auto expected_s1 = epoch::seal(expected_e1, test_key()).value();
+    const auto expected_e1_id =
+        epoch::object_identifier(layout(), expected_s1.reference).value();
+
+    fixture.state->put_then_fail_identifier = expected_e1_id;
+    kasumi::platform::clock::testing::ScopedUnixSecondsOverride clock(now);
+    const auto lost_res = fixture.collect();
+    ASSERT_FALSE(lost_res.has_value());
+    EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
+    EXPECT_TRUE(std::filesystem::exists(
+        fixture.runtime.database_path.parent_path() / ".pending-gc-epoch"));
+
+    // Next live GC reconciles .pending-gc-epoch with remote Epoch 1, does not
+    // publish a second conflicting Epoch, and if interrupted mid-Apply (fail on
+    // 2nd deletion), keeps Epoch 1 confirmed and finishes on the following GC.
+    fixture.state->fail_candidate_remove_at = 2;
+    const auto mid_apply = fixture.collect();
+    ASSERT_FALSE(mid_apply.has_value());
+    EXPECT_FALSE(std::filesystem::exists(
+        fixture.runtime.database_path.parent_path() / ".pending-gc-epoch"));
+
+    const auto local_after_crash =
+        db::load_state(fixture.runtime.database_path).value();
+    ASSERT_TRUE(local_after_crash.has_value());
+    EXPECT_EQ(local_after_crash->epoch_sequence, 1U);
+
+    fixture.state->fail_candidate_remove_at = 0;
+    const auto resumed = fixture.collect();
+    ASSERT_TRUE(resumed.has_value()) << resumed.error().detail;
+    EXPECT_FALSE(resumed->epoch_advanced);
+    EXPECT_FALSE(fixture.present(contents[0]));
+    EXPECT_FALSE(fixture.present(contents[1]));
+    EXPECT_TRUE(fixture.present(contents[2]));
+    EXPECT_TRUE(fixture.present(contents[3]));
+    EXPECT_TRUE(fixture.present(contents[4]));
+    EXPECT_TRUE(
+        kasumi::application::integrity::fsck(
+            fixture.runtime, fixture.transport, test_key())
+            .has_value());
+}
+
+TEST(GarbageCollectionTest,
+     LegacyPreEpochVaultAndMixed031WriterFailClosedSafely) {
+    // 1. Legacy vault with no epochs/ objects cleans only unreferenced orphans
+    // and never synthesizes Epoch 0.
+    {
+        FakeFixture fixture("gc-legacy-pre-epoch");
+        const auto c = commit_with_file("live");
+        fixture.publish(c, "legacy-head");
+        const auto live = fixture.put_content("live", "live-obj");
+        const auto orphan = fixture.put_content("orphan", "orphan-obj");
+
+        const auto res = fixture.collect();
+        ASSERT_TRUE(res.has_value()) << res.error().detail;
+        EXPECT_FALSE(res->epoch_advanced);
+        EXPECT_FALSE(res->epoch_advancement_planned);
+        EXPECT_TRUE(fixture.present(live));
+        EXPECT_FALSE(fixture.present(orphan));
+    }
+
+    // 2. Mixed 0.31 writer publishes conflicting Epoch 1 concurrently: fails
+    // closed cleanly without deleting objects.
+    namespace epoch = kasumi::application::history_storage::epoch;
+    namespace db = kasumi::state_storage;
+    const std::int64_t t0 = 1'700'000'000;
+    const std::int64_t now = t0 + 12 * 3600;
+    FakeFixture fixture("gc-mixed-031-writer");
+    fixture.runtime.min_history_depth = 1;
+    fixture.runtime.min_history_age_hours = 1;
+    fixture.state->list_metadata_supported = true;
+
+    auto c0 =
+        kasumi::history::make_commit(0, {}, make_tree("f.txt", "v0"), t0).value();
+    const auto r0 = fixture.publish(c0, "c0", false);
+    const auto k0 = fixture.put_content("v0", "k0");
+    auto c1 = kasumi::history::make_commit(
+                  1, {r0.commit_id}, make_tree("f.txt", "v1"), now - 60)
+                  .value();
+    const auto r1 = fixture.publish(c1, "c1", true);
+    const auto k1 = fixture.put_content("v1", "k1");
+
+    const auto ws = kasumi::test::workspace_root(fixture.workspace);
+    Epoch e0{.vault_id = std::string(64, 'e'),
+             .sequence = 0,
+             .issued_at = t0,
+             .policy = {.min_history_depth = 1, .min_history_age_hours = 1},
+             .anchors = {{.commit_id = r0.commit_id, .height = 0}}};
+    const auto s0 = epoch::seal(e0, test_key()).value();
+    ASSERT_TRUE(epoch::publish(fixture.transport, test_key(), s0, ws));
+    for (const auto& [id, unused] : fixture.state->objects) {
+        static_cast<void>(unused);
+        fixture.state->object_mtimes[id] = t0;
+    }
+    fixture.state->default_object_mtime = now;
+    ASSERT_TRUE(db::initialize(fixture.runtime.database_path));
+    ASSERT_TRUE(db::save_state(fixture.runtime.database_path,
+                               {.tree = c1.tree,
+                                .height = 1,
+                                .commit_id = r1.commit_id,
+                                .ciphertext_id = r1.ciphertext_id,
+                                .epoch_id = s0.reference.epoch_id,
+                                .epoch_sequence = 0}));
+
+    // Seed two conflicting sequence-1 epochs simulating legacy race.
+    Epoch e1a = e0;
+    e1a.sequence = 1;
+    e1a.issued_at = now;
+    e1a.anchors = {{.commit_id = r1.commit_id, .height = 1}};
+    e1a.previous_epoch_id = s0.reference.epoch_id;
+    Epoch e1b = e1a;
+    e1b.issued_at = now + 1;
+    ASSERT_TRUE(epoch::publish(
+        fixture.transport, test_key(), epoch::seal(e1a, test_key()).value(), ws));
+    ASSERT_TRUE(epoch::publish(
+        fixture.transport, test_key(), epoch::seal(e1b, test_key()).value(), ws));
+
+    kasumi::platform::clock::testing::ScopedUnixSecondsOverride clock(now);
+    const auto res = fixture.collect();
+    ASSERT_FALSE(res.has_value());
+    EXPECT_NE(res.error().detail.find("conflict"), std::string::npos);
+    EXPECT_EQ(candidate_remove_attempts(*fixture.state), 0U);
+    EXPECT_TRUE(fixture.present(k0));
+    EXPECT_TRUE(fixture.present(k1));
+}
+
+TEST(GarbageCollectionTest,
+     NearMaximumLoadedCommitBudgetMakesProgressThenFailsAboveLimit) {
+    namespace epoch = kasumi::application::history_storage::epoch;
+    namespace db = kasumi::state_storage;
+    const std::int64_t t0 = 1'700'000'000;
+    const std::size_t near_limit =
+        kasumi::history::maximum_loaded_commit_count - 6U; // 4,090 commits
+    const std::int64_t now = t0 + 10 * 3600;
+
+    FakeFixture fixture("gc-near-4096-budget");
+    fixture.runtime.min_history_depth = 5;
+    fixture.runtime.min_history_age_hours = 6;
+    fixture.state->list_metadata_supported = true;
+
+    const auto old_tree = make_tree("live.txt", "c0-exclusive");
+    const auto steady_tree = make_tree("live.txt", "steady");
+    const auto old_content = fixture.put_content("c0-exclusive", "c0-content");
+    const auto steady_content =
+        fixture.put_content("steady", "steady-content");
+
+    std::string prev_id;
+    HeadReference first_ref;
+    HeadReference head_ref;
+    kasumi::history::Commit head_commit;
+    for (std::size_t i = 0; i < near_limit; ++i) {
+        const std::vector<std::string> parents =
+            prev_id.empty() ? std::vector<std::string>{}
+                            : std::vector<std::string>{prev_id};
+        const std::int64_t ts = (i + 10 < near_limit)
+                                    ? (t0 + static_cast<std::int64_t>(i))
+                                    : (now - 10);
+        auto c = kasumi::history::make_commit(
+                     i, parents, i == 0 ? old_tree : steady_tree, ts)
+                     .value();
+        const bool is_head = (i + 1 == near_limit);
+        const auto ref = fixture.publish(c, "bulk", is_head);
+        if (i == 0) {
+            first_ref = ref;
+        }
+        if (is_head) {
+            head_ref = ref;
+            head_commit = c;
+        }
+        prev_id = ref.commit_id;
+    }
+
+    const auto ws = kasumi::test::workspace_root(fixture.workspace);
+    Epoch e0{.vault_id = std::string(64, 'b'),
+             .sequence = 0,
+             .issued_at = t0,
+             .policy = {.min_history_depth = 5, .min_history_age_hours = 6},
+             .anchors = {{.commit_id = first_ref.commit_id, .height = 0}}};
+    const auto s0 = epoch::seal(e0, test_key()).value();
+    ASSERT_TRUE(epoch::publish(fixture.transport, test_key(), s0, ws));
+    for (const auto& [id, unused] : fixture.state->objects) {
+        static_cast<void>(unused);
+        fixture.state->object_mtimes[id] = t0;
+    }
+    fixture.state->default_object_mtime = now;
+    ASSERT_TRUE(db::initialize(fixture.runtime.database_path));
+    ASSERT_TRUE(db::save_state(fixture.runtime.database_path,
+                               {.tree = head_commit.tree,
+                                .height = head_commit.height,
+                                .commit_id = head_ref.commit_id,
+                                .ciphertext_id = head_ref.ciphertext_id,
+                                .epoch_id = s0.reference.epoch_id,
+                                .epoch_sequence = 0}));
+
+    kasumi::platform::clock::testing::ScopedUnixSecondsOverride clock(now);
+    const auto res = fixture.collect();
+    ASSERT_TRUE(res.has_value()) << res.error().detail;
+    EXPECT_TRUE(res->epoch_advanced);
+    EXPECT_EQ(res->target_epoch_sequence, std::optional<std::uint64_t>{1U});
+    EXPECT_FALSE(fixture.present(old_content));
+    EXPECT_TRUE(fixture.present(steady_content));
+
+    const auto inv_after =
+        kasumi::application::history_storage::inventory_reachability(
+            fixture.transport, test_key(), ws);
+    ASSERT_TRUE(inv_after.has_value()) << inv_after.error().detail;
+    EXPECT_LT(inv_after->reachable_commits.size(), 20U);
+
+    // Exceeding maximum_loaded_commit_count fails closed without deletions.
+    std::vector<LoadedCommit> over_limit;
+    over_limit.reserve(kasumi::history::maximum_loaded_commit_count + 1);
+    for (std::size_t i = 0;
+         i < kasumi::history::maximum_loaded_commit_count + 1;
+         ++i) {
+        over_limit.push_back(LoadedCommit{
+            .id = std::string(64, 'a'),
+            .commit = kasumi::history::Commit{.height = i, .created_at = t0}});
+    }
+    EXPECT_FALSE(
+        epoch::plan_pruning(
+            over_limit, {.min_history_depth = 5, .min_history_age_hours = 6})
+            .has_value());
 }
 
 } // namespace

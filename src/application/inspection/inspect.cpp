@@ -663,10 +663,12 @@ resolve_destination(const InspectionRequest& request,
 }
 
 template <typename Writer>
-std::expected<void, InspectionError>
-write_and_publish_private_file(const std::filesystem::path& destination,
-                               InspectionOperation operation,
-                               Writer&& writer) {
+std::expected<void, InspectionError> write_and_publish_private_file(
+    const std::filesystem::path& destination,
+    InspectionOperation operation,
+    Writer&& writer,
+    platform::private_storage::PublishMode mode =
+        platform::private_storage::PublishMode::Replace) {
     auto token = platform::random::hex_id();
     if (!token) {
         return dest_fail(operation, "failed to prepare destination");
@@ -687,10 +689,12 @@ write_and_publish_private_file(const std::filesystem::path& destination,
         cleanup();
         return wrote;
     }
-    if (!platform::private_storage::publish_private_file(*private_tmp,
-                                                         destination)) {
+    if (auto installed = platform::private_storage::publish_private_file(
+            *private_tmp, destination, mode);
+        !installed) {
         cleanup();
-        return dest_fail(operation, "failed to install download");
+        return dest_fail(operation,
+                         "failed to install download: " + installed.error());
     }
     return {};
 }
@@ -699,7 +703,9 @@ std::expected<void, InspectionError> install_remote_file(
     const std::filesystem::path& plaintext,
     const std::filesystem::path& destination,
     InspectionOperation operation,
-    std::optional<platform::private_storage::FileSlice> slice = std::nullopt) {
+    std::optional<platform::private_storage::FileSlice> slice = std::nullopt,
+    platform::private_storage::PublishMode mode =
+        platform::private_storage::PublishMode::Replace) {
     return write_and_publish_private_file(
         destination,
         operation,
@@ -730,7 +736,8 @@ std::expected<void, InspectionError> install_remote_file(
                 return dest_fail(operation, "failed to read downloaded file");
             }
             return {};
-        });
+        },
+        mode);
 }
 
 std::expected<void, InspectionError> install_remote_bytes(
@@ -1752,6 +1759,7 @@ restore_remote_tree(const InspectionRequest& request,
     }
 
     begin_progress_phase(*context.progress, Activity::Installing, files.size());
+    std::size_t installed_count = 0;
     for (const auto& [item_ptr, src_plain] : materialized) {
         if (platform::cancellation::requested()) {
             return obs_fail(operation, "restore cancelled by user");
@@ -1768,11 +1776,22 @@ restore_remote_tree(const InspectionRequest& request,
             return dest_fail(
                 operation, "restore destination parent directory is not safe");
         }
-        if (auto installed =
-                install_remote_file(src_plain, dst_file, operation);
+        if (auto installed = install_remote_file(
+                src_plain,
+                dst_file,
+                operation,
+                std::nullopt,
+                platform::private_storage::PublishMode::CreateOnly);
             !installed) {
-            return std::unexpected(installed.error());
+            return dest_fail(
+                operation,
+                std::format(
+                    "restore stopped at '{}'; {} prior files installed: {}",
+                    item_ptr->rel_path,
+                    installed_count,
+                    installed.error().detail));
         }
+        ++installed_count;
         if (item_ptr->row->mtime != 0) {
             if (const auto ft =
                     platform::metadata::file_time_from_unix_nanoseconds(

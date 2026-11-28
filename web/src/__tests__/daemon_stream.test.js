@@ -227,3 +227,150 @@ it('starts HubView with all profiles collapsed by default and toggles on user cl
 
   hub.unmount()
 })
+
+it('ignores stale log responses and SSE callbacks after stopDaemonStream across restarts', async () => {
+  let resolveOldLogs
+  let resolveNewLogs
+  fetchDaemonLogs
+    .mockReturnValueOnce(new Promise((resolve) => { resolveOldLogs = resolve }))
+    .mockReturnValueOnce(new Promise((resolve) => { resolveNewLogs = resolve }))
+
+  const daemon = useDaemonStream()
+  daemon.startDaemonStream()
+  const oldStream = stream.events
+
+  daemon.stopDaemonStream(true)
+  expect(daemon.logs).toEqual([])
+
+  // Old stream callbacks and old log response finishing while stopped must be ignored
+  oldStream.onLog({ seq: 90, kind: 'sync_completed', detail: 'stale stopped event', profile_name: 'docs' })
+  oldStream.onStatus({ running: true, profiles: [{ name: 'docs', state: 'idle' }] })
+  resolveOldLogs({ latest_seq: 1, events: [{ seq: 1, kind: 'started', detail: 'stale stopped snapshot' }] })
+  await flushPromises()
+  expect(daemon.logs).toEqual([])
+  expect(daemon.daemonStatus).toBeNull()
+
+  // Restart a new session, then let an earlier session's delayed fetchDaemonLogs resolve
+  let resolveSecondOldLogs
+  fetchDaemonLogs.mockReturnValueOnce(new Promise((resolve) => { resolveSecondOldLogs = resolve }))
+  daemon.startDaemonStream()
+  await flushPromises()
+  resolveNewLogs({ latest_seq: 10, events: [{ seq: 10, kind: 'started', detail: 'session 2 start' }] })
+  await flushPromises()
+  expect(daemon.logs.map((e) => e.detail)).toEqual(['session 2 start'])
+
+  // Trigger a manual refreshLogs then restart before it settles -> stale response ignored
+  const staleManual = daemon.refreshLogs({ lines: 10, full: true })
+  daemon.stopDaemonStream(true)
+  fetchDaemonLogs.mockResolvedValueOnce({
+    latest_seq: 20,
+    events: [{ seq: 20, kind: 'started', detail: 'session 3 fresh' }],
+  })
+  daemon.startDaemonStream()
+  await flushPromises()
+  resolveSecondOldLogs({ latest_seq: 15, events: [{ seq: 15, kind: 'started', detail: 'old manual refresh' }] })
+  await staleManual
+  await flushPromises()
+
+  expect(daemon.logs.map((e) => e.detail)).toEqual(['session 3 fresh'])
+})
+
+it('ignores out-of-order getProfile responses and clears stale detail refreshes', async () => {
+  listProfiles.mockResolvedValueOnce({
+    profiles: [
+      {
+        name: 'Documents',
+        local_dir: '/docs',
+        remote_dir: 'remote:docs',
+        key_storage: 'file',
+        state: 'ready',
+        problem: 'none',
+        activity: { last_complete_sync: { status: 'succeeded', finished_at: 1000, duration_ms: 100 } },
+      },
+    ],
+  })
+
+  let resolveFirst
+  let resolveSecond
+  getProfile
+    .mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }))
+    .mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve }))
+
+  const daemon = useDaemonStream()
+  daemon.startDaemonStream()
+  const { refreshProfiles, profiles } = useProfiles()
+  await refreshProfiles()
+
+  // Seed initial previous snapshot
+  stream.events.onStatus({
+    profiles: [{ name: 'Documents', state: 'running_sync', busy: true, last_sync_finished_at: 1000 }],
+  })
+  await flushPromises()
+
+  // Completion #1 triggers getProfile #1
+  stream.events.onStatus({
+    profiles: [{ name: 'Documents', state: 'idle', busy: false, last_sync_finished_at: 2000 }],
+  })
+  await flushPromises()
+
+  // Completion #2 triggers getProfile #2
+  stream.events.onStatus({
+    profiles: [{ name: 'Documents', state: 'idle', busy: false, last_sync_finished_at: 3000 }],
+  })
+  await flushPromises()
+  expect(getProfile).toHaveBeenCalledTimes(2)
+
+  // Newer response (#2) resolves first, older response (#1) resolves late
+  resolveSecond({
+    name: 'Documents',
+    state: 'ready',
+    problem: 'none',
+    activity: { last_complete_sync: { status: 'succeeded', finished_at: 3000, duration_ms: 2500 } },
+  })
+  await flushPromises()
+  expect(profiles.value[0].activity.last_complete_sync.duration_ms).toBe(2500)
+
+  resolveFirst({
+    name: 'Documents',
+    state: 'warning',
+    problem: 'stale_error',
+    activity: { last_complete_sync: { status: 'failed', finished_at: 2000, duration_ms: 500 } },
+  })
+  await flushPromises()
+  expect(profiles.value[0].activity.last_complete_sync.duration_ms).toBe(2500)
+  expect(profiles.value[0].state).toBe('ready')
+  expect(profiles.value[0].problem).toBe('none')
+
+  // Stale request across clearProfiles/refreshProfiles is also ignored
+  let resolveThird
+  getProfile.mockReturnValueOnce(new Promise((resolve) => { resolveThird = resolve }))
+  stream.events.onStatus({
+    profiles: [{ name: 'Documents', state: 'idle', busy: false, last_sync_finished_at: 4000 }],
+  })
+  await flushPromises()
+
+  clearProfiles()
+  listProfiles.mockResolvedValueOnce({
+    profiles: [
+      {
+        name: 'Documents',
+        local_dir: '/docs',
+        remote_dir: 'remote:docs',
+        key_storage: 'file',
+        state: 'ready',
+        problem: 'none',
+        activity: { last_complete_sync: { status: 'succeeded', finished_at: 5000, duration_ms: 99 } },
+      },
+    ],
+  })
+  await refreshProfiles()
+  resolveThird({
+    name: 'Documents',
+    state: 'error',
+    problem: 'old_generation',
+    activity: { last_complete_sync: { status: 'failed', finished_at: 4000, duration_ms: 777 } },
+  })
+  await flushPromises()
+  expect(profiles.value[0].activity.last_complete_sync.duration_ms).toBe(99)
+  expect(profiles.value[0].state).toBe('ready')
+})

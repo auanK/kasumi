@@ -193,6 +193,11 @@ to_gc_completed(const integrity::GarbageCollectResult& collected) {
         .removed_bytes = collected.removed_bytes,
         .min_age_hours = collected.effective_min_age_hours,
         .removal_elapsed = collected.removal_elapsed,
+        .epoch_advanced = collected.epoch_advanced,
+        .epoch_advancement_planned = collected.epoch_advancement_planned,
+        .target_epoch_sequence = collected.target_epoch_sequence,
+        .target_epoch_id = collected.target_epoch_id,
+        .planned_pruned_commits = collected.planned_pruned_commits,
     };
 }
 

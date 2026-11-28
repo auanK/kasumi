@@ -3,6 +3,7 @@
 #include "application/concurrency.hpp"
 #include "application/daemon.hpp"
 #include "application/detail.hpp"
+#include "application/history_storage/commit_cache.hpp"
 #include "application/history_storage/remote_layout.hpp"
 #include "application/observation/history.hpp"
 #include "application/profile.hpp"
@@ -29,7 +30,7 @@ namespace kasumi::application::detail {
 
 std::expected<void, Error> prepare_operation(const ExecutionInput& input,
                                              OperationContext& output,
-                                             const WarmExecutionContext* warm) {
+                                             WarmExecutionContext* warm) {
     wipe_operation(output);
     const auto operation = input.request.operation;
     output.operation = operation;
@@ -249,20 +250,33 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         warm->on_lock_acquired();
     }
 
+    // Always resolve profile configuration authoritatively under profile_lock
+    // so concurrent edits cannot pair stale settings with this execution.
     if (guard_missing_local_root) {
+        auto locked_ro = runtime::resolve(input.environment.app_data_dir,
+                                          input.request.profile_name,
+                                          runtime::AccessMode::ReadOnly);
+        if (!locked_ro) {
+            return fail(locked_ro.error().detail,
+                        map_runtime_error_code(locked_ro.error().code,
+                                               ErrorCode::InvalidProfile,
+                                               ErrorCode::ProfileNotFound,
+                                               ErrorCode::CredentialFailure,
+                                               ErrorCode::RuntimeFailure,
+                                               ErrorCode::RuntimeFailure));
+        }
         std::error_code local_ec;
         const auto local_status =
-            std::filesystem::symlink_status(runtime_data->local_dir, local_ec);
+            std::filesystem::symlink_status(locked_ro->local_dir, local_ec);
         const bool local_missing =
             local_ec == std::errc::no_such_file_or_directory ||
             (!local_ec &&
              local_status.type() == std::filesystem::file_type::not_found);
-        if (local_missing &&
-            state_storage::validate(runtime_data->database_path)) {
+        if (local_missing && state_storage::validate(locked_ro->database_path)) {
             const auto persisted =
-                state_storage::load_state(runtime_data->database_path);
+                state_storage::load_state(locked_ro->database_path);
             const auto journal_paths = sync::journal::make_paths(
-                runtime_data->database_path.parent_path());
+                locked_ro->database_path.parent_path());
             bool journal_present = false;
             if (journal_paths) {
                 std::error_code j_ec;
@@ -283,7 +297,7 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
                         "accepted state tracks {} synchronized entries; "
                         "restore the directory or pass --allow-empty-local to "
                         "propagate deletions",
-                        platform::path::to_utf8(runtime_data->local_dir),
+                        platform::path::to_utf8(locked_ro->local_dir),
                         (*persisted)->tree.rows.size() - 1U),
                     SyncStage::Observing);
                 err.empty_local_blocked = true;
@@ -291,20 +305,33 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
                 return std::unexpected(std::move(err));
             }
         }
-        auto rw_runtime = runtime::resolve(input.environment.app_data_dir,
-                                           input.request.profile_name,
-                                           runtime::AccessMode::ReadWrite);
-        if (!rw_runtime) {
-            return fail(rw_runtime.error().detail,
-                        map_runtime_error_code(rw_runtime.error().code,
+    }
+    {
+        auto locked_runtime = runtime::resolve(input.environment.app_data_dir,
+                                               input.request.profile_name,
+                                               access_mode);
+        if (!locked_runtime) {
+            return fail(locked_runtime.error().detail,
+                        map_runtime_error_code(locked_runtime.error().code,
                                                ErrorCode::InvalidProfile,
                                                ErrorCode::ProfileNotFound,
                                                ErrorCode::CredentialFailure,
                                                ErrorCode::RuntimeFailure,
                                                ErrorCode::RuntimeFailure));
         }
-        output.runtime = *rw_runtime;
-        runtime_data = *rw_runtime;
+        output.runtime = *locked_runtime;
+        output.summary =
+            RuntimeSummary{.local_dir = locked_runtime->local_dir,
+                           .remote_dir = locked_runtime->storage_location};
+        output.transfer_concurrency = resolve_content_concurrency(
+            input.request.transfer_concurrency,
+            locked_runtime->transfer_concurrency);
+        if (locked_runtime->min_history_depth == 0 ||
+            locked_runtime->min_history_depth > history::maximum_graph_depth ||
+            locked_runtime->min_history_age_hours == 0) {
+            return fail("invalid retention policy");
+        }
+        runtime_data = *locked_runtime;
     }
 
     if (input.request.initial) {
@@ -435,9 +462,32 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
         return std::unexpected(key.error());
     }
 
+    const auto expected_binding =
+        make_transport_binding(*runtime_data, input.request.bandwidth_limit);
+    const bool can_reuse_borrowed =
+        warm != nullptr && warm->borrowed_transport != nullptr &&
+        !input.request.initial &&
+        transport::valid(*warm->borrowed_transport) &&
+        warm->borrowed_transport_binding.has_value() &&
+        *warm->borrowed_transport_binding == expected_binding;
+    if (warm != nullptr && warm->borrowed_transport != nullptr &&
+        !can_reuse_borrowed) {
+        warm->borrowed_transport_rejected = true;
+    }
+    if (warm != nullptr && warm->warm_observation != nullptr &&
+        ((warm->borrowed_transport != nullptr && !can_reuse_borrowed) ||
+         warm->warm_observation->database_path !=
+             runtime_data->database_path)) {
+        *warm->warm_observation = {.database_path =
+                                       runtime_data->database_path};
+    }
+    if (warm != nullptr && warm->commit_cache != nullptr &&
+        warm->borrowed_transport != nullptr && !can_reuse_borrowed) {
+        history_storage::clear_memory_cache(*warm->commit_cache);
+    }
+
     std::expected<transport::Transport, transport::Error> opened_storage =
-        (warm != nullptr && warm->borrowed_transport != nullptr &&
-         !input.request.initial && transport::valid(*warm->borrowed_transport))
+        can_reuse_borrowed
             ? std::expected<transport::Transport,
                             transport::Error>{transport::borrow_transport(
                   *warm->borrowed_transport)}
@@ -446,9 +496,7 @@ std::expected<void, Error> prepare_operation(const ExecutionInput& input,
                   transport::TransportOptions{
                       .forbidden_executable_root = runtime_data->local_dir,
                       .rclone_config = runtime_data->rclone_config,
-                      .bandwidth_limit = input.request.bandwidth_limit
-                                             ? input.request.bandwidth_limit
-                                             : runtime_data->bandwidth_limit,
+                      .bandwidth_limit = expected_binding.bandwidth_limit,
                   });
     if (!opened_storage) {
         return fail(transport::describe(opened_storage.error()));

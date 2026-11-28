@@ -4,6 +4,7 @@
 #include "application/environment.hpp"
 #include "cli/parser.hpp"
 
+#include <functional>
 #include <string>
 #include <string_view>
 
@@ -42,6 +43,26 @@ int run_ignore_command(const application::ExecutionEnvironment& environment,
                        bool json = false,
                        std::string* log_summary = nullptr);
 bool prompt_confirmation(std::string_view message);
+
+namespace testing {
+
+using BeforeProfileUpdateHook = std::function<void(std::string_view)>;
+
+struct ScopedBeforeProfileUpdateHook {
+    BeforeProfileUpdateHook previous{};
+
+    explicit ScopedBeforeProfileUpdateHook(BeforeProfileUpdateHook hook);
+    ~ScopedBeforeProfileUpdateHook() noexcept;
+
+    ScopedBeforeProfileUpdateHook(const ScopedBeforeProfileUpdateHook&) =
+        delete;
+    ScopedBeforeProfileUpdateHook&
+    operator=(const ScopedBeforeProfileUpdateHook&) = delete;
+};
+
+void invoke_before_profile_update_hook(std::string_view profile_name);
+
+} // namespace testing
 
 } // namespace kasumi::cli
 

@@ -1129,4 +1129,33 @@ TEST(ProfileLockTest, ConcurrentLockProbesDoNotProduceFalsePositives) {
     kasumi::platform::release_profile_lock(*held);
 }
 
+TEST(PrivateStorageTest,
+     AtomicWriteWithoutOverwriteFailsWithoutModifyingExistingFile) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("atomic-write-no-overwrite");
+    const auto dir = kasumi::test::workspace_path(workspace, "protected");
+    std::filesystem::create_directories(dir);
+    const auto target = dir / ".kasumiignore";
+
+    const auto first =
+        kasumi::platform::private_storage::write_atomically_without_overwrite(
+            target, "first-content\n");
+    ASSERT_TRUE(first.has_value()) << first.error().message;
+    EXPECT_EQ(kasumi::test::read_text(target), "first-content\n");
+
+    const auto second =
+        kasumi::platform::private_storage::write_atomically_without_overwrite(
+            target, "second-content\n");
+    ASSERT_FALSE(second.has_value());
+    EXPECT_TRUE(second.error().already_exists) << second.error().message;
+    EXPECT_EQ(kasumi::test::read_text(target), "first-content\n");
+
+    std::size_t entry_count = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        EXPECT_EQ(entry.path().filename(), ".kasumiignore");
+        ++entry_count;
+    }
+    EXPECT_EQ(entry_count, 1U);
+}
+
 } // namespace

@@ -182,6 +182,8 @@
     "plan_details": "  Breakdown: {} content, {} commit variant(s), {} expired commit(s), {} activity record(s); reclaimable {}",
     "deferred_recent_singular": "  Protected by {}h grace period: 1 recent or timestamp-missing object deferred.",
     "deferred_recent_plural": "  Protected by {}h grace period: {} recent or timestamp-missing objects deferred.",
+    "epoch_advancement_planned": "  Retention frontier planned: Epoch {} ({} older commit(s) eligible for expiration).",
+    "epoch_advanced": "  Retention frontier advanced to Epoch {} ({} older commit(s) expired).",
     "reclaimed_bytes": "{} reclaimed",
     "warning_header_singular": "Analysis completed with 1 candidate.",
     "warning_header_plural": "Analysis completed with {} candidates.",
@@ -594,7 +596,7 @@
     "conflicts": "Usage: kasumi conflicts <profile> [--json] [--quiet]\n       kasumi conflicts resolve <profile> <path> (--keep-canonical | --keep <artifact>) [--dry-run]\n\nScan the profile's synchronized folder read-only (respecting .kasumiignore) for '.kasumiconflict_*' artifacts, or resolve a preserved conflict group.\nExample: kasumi conflicts work --json",
     "completion": "Usage: kasumi completion <bash|zsh|fish|powershell>\n\nPrint shell completion script to stdout.\nExample: source <(kasumi completion bash)\n",
     "web": "Usage: kasumi web [--no-open]\n       kasumi web set-password [--username <name>]\n       kasumi web listen <addr[:port]> [--allow-host <host>] [--skip-host-check | --no-skip-host-check]\n\nOpen the embedded Kasumi Web UI (starting the background daemon if needed), set/rotate the Web UI login password, or configure the Web UI listen address (e.g. 0.0.0.0:3137 for Tailscale/LAN).\nUse --no-open to print the URL without launching a browser.\n",
-    "conflicts_resolve": "Usage: kasumi conflicts resolve <profile> <path> (--keep-canonical | --keep <artifact>) [--dry-run] [--json] [--quiet] [--log-file <path>]\n\nResolve one preserved conflict group by keeping either the canonical file or one '.kasumiconflict_*' artifact (matched by full path, filename, or origin suffix such as 'local' or 'remote').\nThe selected artifact is atomically promoted over the canonical path before any artifact is removed.\nExample: kasumi conflicts resolve work docs/report.txt --keep local",
+    "conflicts_resolve": "Usage: kasumi conflicts resolve <profile> <path> (--keep-canonical | --keep <artifact>) [--dry-run] [--json] [--quiet] [--log-file <path>]\n\nResolve one preserved conflict group by keeping either the canonical file or one '.kasumiconflict_*' artifact (matched by full path, filename, or origin suffix such as 'local' or 'remote').\nThe selected artifact is promoted atomically. Other artifacts remain in a local recovery directory.\nExample: kasumi conflicts resolve work docs/report.txt --keep local",
     "remote_log": "Usage: kasumi remote log <profile> <path> [--full] [--json] [--quiet] [--log-file <path>]\n\nList reachable commits that added, modified, deleted, or observed <path> without stopping at the cached frontier.\nExample: kasumi remote log Programming docs/report.txt",
     "remote_restore": "Usage: kasumi remote restore <profile> [<prefix>] <dst> [--commit <id>] [--dry-run] [--json] [--quiet] [--log-file <path>]\n\nDownload and cryptographically verify all files under <prefix> (or root '/' when omitted) into an empty directory <dst> that does not overlap the profile local folder.\nExample: kasumi remote restore Programming docs /tmp/restored-docs --commit <64-hex>"
   },
@@ -609,6 +611,7 @@
     "origin_branch": "branch {}",
     "total_summary": "{} conflict artifact(s) across {} path(s).",
     "resolve_dry_run_header": "Dry run: resolve '{}' (keep: {}):",
+    "recovery_directory": "Other versions were kept in {}.",
     "resolve_completed_keep_canonical": "Resolved '{}' keeping canonical file (removed {} artifact(s)).",
     "resolve_completed_keep_artifact": "Resolved '{}' by promoting '{}' (removed {} artifact(s)).",
     "resolve_removed_list": "  Artifact to remove: {}"

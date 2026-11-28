@@ -182,6 +182,8 @@
     "plan_details": "  Detalhamento: {} de conteúdo, {} variante(s) de commit, {} commit(s) expirado(s), {} registro(s) de atividade; recuperável {}",
     "deferred_recent_singular": "  Protegido pelo período de carência de {}h: 1 objeto recente ou sem carimbo de data adiado.",
     "deferred_recent_plural": "  Protegido pelo período de carência de {}h: {} objetos recentes ou sem carimbo de data adiados.",
+    "epoch_advancement_planned": "  Nova fronteira de retenção planejada: Epoch {} ({} commit(s) antigo(s) elegível(is) para expiração).",
+    "epoch_advanced": "  Fronteira de retenção avançada para o Epoch {} ({} commit(s) antigo(s) expirado(s)).",
     "reclaimed_bytes": "{} recuperados",
     "warning_header_singular": "Análise concluída com 1 candidato.",
     "warning_header_plural": "Análise concluída com {} candidatos.",
@@ -594,7 +596,7 @@
     "conflicts": "Uso: kasumi conflicts <perfil> [--json] [--quiet]\n       kasumi conflicts resolve <perfil> <caminho> (--keep-canonical | --keep <artefato>) [--dry-run]\n\nVarre a pasta sincronizada em modo somente leitura (respeitando .kasumiignore) para listar '.kasumiconflict_*', ou resolve um grupo de conflitos preservado.\nExemplo: kasumi conflicts work --json",
     "completion": "Uso: kasumi completion <bash|zsh|fish|powershell>\n\nImprime o script de autocompletar do shell na saída padrão.\nExemplo: source <(kasumi completion bash)\n",
     "web": "Uso: kasumi web [--no-open]\n       kasumi web set-password [--username <name>]\n       kasumi web listen <endereço[:porta]> [--allow-host <host>] [--skip-host-check | --no-skip-host-check]\n\nAbre a interface Web embarcada do Kasumi (iniciando o daemon em segundo plano se necessário), define/rotaciona a senha de acesso Web ou configura o endereço de escuta (ex.: 0.0.0.0:3137 para Tailscale/LAN).\nUse --no-open para exibir a URL sem abrir o navegador.\n",
-    "conflicts_resolve": "Uso: kasumi conflicts resolve <perfil> <caminho> (--keep-canonical | --keep <artefato>) [--dry-run] [--json] [--quiet] [--log-file <caminho>]\n\nResolve um grupo de conflitos mantendo o arquivo canônico ou promovendo um artefato '.kasumiconflict_*' (selecionado por caminho completo, nome do arquivo ou sufixo como 'local' ou 'remote').\nO artefato escolhido é promovido atomicamente sobre o caminho canônico antes da remoção dos artefatos.\nExemplo: kasumi conflicts resolve work docs/report.txt --keep local",
+    "conflicts_resolve": "Uso: kasumi conflicts resolve <perfil> <caminho> (--keep-canonical | --keep <artefato>) [--dry-run] [--json] [--quiet] [--log-file <caminho>]\n\nResolve um grupo de conflitos mantendo o arquivo canônico ou promovendo um artefato '.kasumiconflict_*' (selecionado por caminho completo, nome do arquivo ou sufixo como 'local' ou 'remote').\nO artefato escolhido é promovido atomicamente. Os demais ficam em uma pasta de recuperação local.\nExemplo: kasumi conflicts resolve work docs/report.txt --keep local",
     "remote_log": "Uso: kasumi remote log <perfil> <caminho> [--full] [--json] [--quiet] [--log-file <caminho>]\n\nLista commits alcançáveis que adicionaram, modificaram, excluíram ou observaram <caminho> sem truncar na fronteira em cache.\nExemplo: kasumi remote log Programming docs/report.txt",
     "remote_restore": "Uso: kasumi remote restore <perfil> [<prefixo>] <dst> [--commit <id>] [--dry-run] [--json] [--quiet] [--log-file <caminho>]\n\nBaixa e verifica criptograficamente todos os arquivos sob <prefixo> (ou raiz '/' se omitido) para uma pasta vazia <dst> sem sobreposição com a pasta local do perfil.\nExemplo: kasumi remote restore Programming docs /tmp/restored-docs --commit <64-hex>"
   },
@@ -609,6 +611,7 @@
     "origin_branch": "branch {}",
     "total_summary": "{} artefato(s) de conflito em {} caminho(s).",
     "resolve_dry_run_header": "Simulação: resolver '{}' (manter: {}):",
+    "recovery_directory": "As outras versões foram preservadas em {}.",
     "resolve_completed_keep_canonical": "Resolvido '{}' mantendo o arquivo canônico ({} artefato(s) removido(s)).",
     "resolve_completed_keep_artifact": "Resolvido '{}' promovendo '{}' ({} artefato(s) removido(s)).",
     "resolve_removed_list": "  Artefato a remover: {}"

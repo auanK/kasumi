@@ -289,6 +289,14 @@ bool is_reserved_internal(std::string_view path) {
         path == ".kasumi_sync_buffer") {
         return true;
     }
+    for (auto pos = path.find(conflict_recovery_prefix);
+         pos != std::string_view::npos;
+         pos = path.find(conflict_recovery_prefix, pos + conflict_recovery_prefix.size())) {
+        if (pos != 0 && path[pos - 1] != '/' && path[pos - 1] != '\\') continue;
+        const auto tail = path.substr(pos + conflict_recovery_prefix.size());
+        const auto id = tail.substr(0, tail.find_first_of("/\\"));
+        if (id.size() == 32 && is_lowercase_hex(id)) return true;
+    }
     const auto slash = path.find_last_of("/\\");
     const auto name =
         slash == std::string_view::npos ? path : path.substr(slash + 1);

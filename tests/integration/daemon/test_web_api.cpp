@@ -1,3 +1,4 @@
+#include "application/concurrency.hpp"
 #include "application/daemon.hpp"
 #include "application/daemon/web_auth.hpp"
 #include "application/execute.hpp"
@@ -24,6 +25,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <random>
+#include <system_error>
 #include <thread>
 
 namespace {
@@ -252,7 +254,14 @@ TEST(WebApiTest,
 TEST(WebApiTest, DefaultBrowserApiUses3137AndKeepsIpcSeparate) {
     auto workspace = kasumi::test::make_temp_workspace("kasumi-http-default-");
     app::ExecutionEnvironment env{.app_data_dir = workspace->root / "app"};
+    const auto config = app::read_web_listener_config(env);
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->port, 3137);
     auto session = app::start_daemon_session(env);
+    if (!session &&
+        session.error().detail == "cannot bind web API on 127.0.0.1:3137") {
+        GTEST_SKIP() << "the default Web listener is unavailable on this host";
+    }
     ASSERT_TRUE(session) << session.error().detail;
     const auto status = app::query_daemon_status(env);
     ASSERT_TRUE(status) << status.error().detail;
@@ -264,6 +273,22 @@ TEST(WebApiTest, DefaultBrowserApiUses3137AndKeepsIpcSeparate) {
                      .get<bool>());
     httplib::Client ipc("127.0.0.1", status->ipc_port);
     response(ipc.Get("/v1/auth/status"), 403);
+}
+
+TEST(WebApiTest, IndependentDaemonCannotShareAnActiveListener) {
+    auto first = start_api();
+    const auto status = app::query_daemon_session_status(first.daemon);
+    ASSERT_TRUE(status);
+    auto other = kasumi::test::make_temp_workspace("kasumi-http-occupied-");
+    app::ExecutionEnvironment env{.app_data_dir = other->root / "app"};
+    kasumi::test::write_text(env.app_data_dir / "web.json",
+                             Json{{"port", status->ipc_port}}.dump());
+    const auto second = app::start_daemon_session(env);
+    ASSERT_FALSE(second);
+    EXPECT_EQ(second.error().code, app::DaemonErrorCode::IpcFailure);
+    EXPECT_FALSE(
+        std::filesystem::exists(env.app_data_dir / "daemon.control.json"));
+    EXPECT_TRUE(app::query_daemon_status(first.env));
 }
 
 TEST(WebApiTest, ProfilesDiagnosticsConflictsAndIgnore) {
@@ -351,8 +376,23 @@ TEST(WebApiTest, ProfilesDiagnosticsConflictsAndIgnore) {
     EXPECT_EQ(post(api, "/v1/conflicts/demo/resolve", resolve).at("dry_run"),
               true);
     resolve["dry_run"] = false;
-    post(api, "/v1/conflicts/demo/resolve", resolve);
+    const auto resolved_single = post(api, "/v1/conflicts/demo/resolve", resolve);
+    EXPECT_TRUE(resolved_single.at("recovery_directory").is_null());
     EXPECT_EQ(kasumi::test::read_text(local / "note.txt"), "artifact");
+
+    kasumi::test::write_text(local / "keep.txt", "canonical-keep");
+    kasumi::test::write_text(local / "keep.txt.kasumiconflict_remote",
+                             "remote-retired");
+    const auto resolved_keep = post(
+        api,
+        "/v1/conflicts/demo/resolve",
+        {{"path", "keep.txt"}, {"choice", "keep_canonical"}, {"dry_run", false}});
+    ASSERT_TRUE(resolved_keep.at("recovery_directory").is_string());
+    const auto recovery_dir =
+        resolved_keep.at("recovery_directory").get<std::string>();
+    EXPECT_EQ(kasumi::test::read_text(local / recovery_dir /
+                                      "keep.txt.kasumiconflict_remote"),
+              "remote-retired");
     post(api, "/v1/profiles/demo/clone", {{"name", "copy"}});
     EXPECT_EQ(get(api, "/v1/profiles/copy").at("paused"), true);
     post(api, "/v1/profiles/copy/rename", {{"name", "renamed"}});
@@ -586,14 +626,16 @@ TEST(WebApiTest,
                   ->status,
               403);
     {
-        // A persistent connection lets httplib drain a body rejected during
-        // routing before the next request. Closing early can reset the socket.
+        // Keep-alive ensures each pre-routing-rejected POST receives its full
+        // HTTP response, while stopping between calls avoids reusing a socket
+        // whose unread request body was left unconsumed by pre_routing_handler.
         api.client->set_keep_alive(true);
         auto invalid = auth;
         invalid.emplace("X-CSRF-Token", std::string(64, '0'));
         response(
             api.client->Post("/v1/reload", invalid, "{}", "application/json"),
             403);
+        api.client->stop();
         auth.emplace(
             "X-CSRF-Token",
             Json::parse(first->body).at("csrf_token").get<std::string>());
@@ -603,7 +645,9 @@ TEST(WebApiTest,
         without_type.headers = auth;
         without_type.body = "{}";
         response(api.client->send(without_type), 415);
+        api.client->stop();
         response(api.client->Post("/v1/reload", auth, "{}", "text/plain"), 415);
+        api.client->stop();
         response(
             api.client->Post(
                 "/v1/reload", auth, "{}", "Application/JSON; charset=utf-8"),
@@ -1811,6 +1855,41 @@ TEST(WebApiTest, RemoveWriterBatchRemovesMultipleAndReportsAlreadyAbsent) {
               kasumi::transport::Presence::Absent);
     EXPECT_EQ(kasumi::transport::presence(*storage, w2->identifier).value(),
               kasumi::transport::Presence::Absent);
+}
+
+TEST(WebApiTest,
+     FsckWorkerSpawnFailureFailsJobCleanlyAndDaemonServesNextRequest) {
+    auto api = start_api();
+    auto local = create(api);
+    kasumi::test::write_text(local / "alpha.txt", "distinct-alpha-payload");
+    kasumi::test::write_text(local / "beta.txt", "distinct-beta-payload");
+    ASSERT_TRUE(job_result(api, "/v1/maintenance/demo/sync", Json::object())
+                    .at("published")
+                    .get<bool>());
+
+    {
+        std::atomic<bool> fail_once{true};
+        app::testing::ScopedWorkerSpawnHook spawn_hook(
+            [&](std::size_t worker_index) {
+                if (worker_index == 1 && fail_once.exchange(false)) {
+                    throw std::system_error(
+                        std::make_error_code(
+                            std::errc::resource_unavailable_try_again),
+                        "injected worker spawn failure");
+                }
+            });
+
+        const auto failed = job_result(
+            api, "/v1/maintenance/demo/fsck", Json::object(), "failed");
+        ASSERT_TRUE(failed.contains("error"));
+        EXPECT_NE(failed.at("error").get<std::string>().find(
+                      "injected worker spawn failure"),
+                  std::string::npos);
+    }
+
+    const auto next_ok =
+        job_result(api, "/v1/maintenance/demo/fsck", Json::object());
+    EXPECT_GE(next_ok.at("checked_objects").get<std::size_t>(), 2U);
 }
 
 } // namespace

@@ -87,7 +87,8 @@ void compare_nodes_3way(
     const HashSet& missing_blocks,
     std::vector<SyncOperation>& ops,
     const ignore::IgnoreList* ignore_list,
-    const std::unordered_set<std::string>* authorized_deletions) {
+    const std::unordered_set<std::string>* authorized_deletions,
+    const Snapshot* expired_base_snapshot) {
     if (!local && !base && !cloud)
         return;
     if (same_hash(local, cloud) && missing_blocks.empty())
@@ -141,7 +142,8 @@ void compare_nodes_3way(
                                    missing_blocks,
                                    ops,
                                    ignore_list,
-                                   authorized_deletions);
+                                   authorized_deletions,
+                                   expired_base_snapshot);
             };
 
         const auto add_op = [&](Action action,
@@ -311,7 +313,16 @@ void compare_nodes_3way(
                 recurse(nullptr, nullptr, c);
             }
         } else if (l && c && !l->is_directory) {
-            if (l->mtime > c->mtime) {
+            const NodeRow* expired_row =
+                (b == nullptr && expired_base_snapshot != nullptr)
+                    ? find_row(*expired_base_snapshot, path)
+                    : nullptr;
+            if (expired_row != nullptr && !expired_row->is_directory &&
+                expired_row->hash == l->hash &&
+                expired_row->size == l->size) {
+                add_op(
+                    Action::Download, target, hash_hex(c->hash), {}, c->size);
+            } else if (l->mtime > c->mtime) {
                 add_op(Action::Upload, target, hash_hex(l->hash), {}, l->size);
                 add_op(Action::Download,
                        platform::path::from_utf8(
@@ -343,7 +354,8 @@ compare_trees(const Snapshot& local,
               const Snapshot& cloud,
               const HashSet& missing_blocks,
               const ignore::IgnoreList* ignore_list,
-              const std::unordered_set<std::string>* authorized_deletions) {
+              const std::unordered_set<std::string>* authorized_deletions,
+              const Snapshot* expired_base) {
     std::vector<SyncOperation> operations;
     compare_nodes_3way(&local,
                        &base,
@@ -355,7 +367,8 @@ compare_trees(const Snapshot& local,
                        missing_blocks,
                        operations,
                        ignore_list,
-                       authorized_deletions);
+                       authorized_deletions,
+                       expired_base);
     return operations;
 }
 

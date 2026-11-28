@@ -457,4 +457,62 @@ TEST(LocalTransportTest, HealthCheckAndNonOwningBorrowWork) {
               Presence::Present);
 }
 
+TEST(LocalTransportTest, StagingRemainsIsolatedFromListingAndRejectsDirectAccess) {
+    auto workspace =
+        kasumi::test::make_temp_workspace("transport-local-staging-iso");
+    const auto storage_root =
+        kasumi::test::workspace_path(workspace, "storage");
+    auto opened = kasumi::transport::open_transport(storage_root.string());
+    ASSERT_TRUE(opened.has_value());
+    ASSERT_TRUE(kasumi::transport::initialize(*opened));
+
+    // Normal put removes empty .kasumi-staging when idle.
+    const auto src = kasumi::test::workspace_path(workspace, "src.bin");
+    kasumi::test::write_text(src, "payload-data");
+    ASSERT_TRUE(kasumi::transport::put(*opened, src, "barriers/published"));
+    EXPECT_FALSE(std::filesystem::exists(storage_root / ".kasumi-staging"));
+
+    // A crashed put leaves a temporary inside .kasumi-staging; listings and
+    // prefix queries must never return it.
+    std::filesystem::create_directories(storage_root / ".kasumi-staging");
+    kasumi::test::write_text(
+        storage_root / ".kasumi-staging" / "put-0123456789abcdef.tmp",
+        "partial-temp-bytes");
+
+    const auto listed = kasumi::transport::list(*opened);
+    ASSERT_TRUE(listed.has_value()) << listed.error().message;
+    EXPECT_EQ(*listed, (std::vector<std::string>{"barriers/published"}));
+
+    const auto listed_meta = kasumi::transport::list_metadata(*opened);
+    ASSERT_TRUE(listed_meta.has_value()) << listed_meta.error().message;
+    ASSERT_EQ(listed_meta->size(), 1U);
+    EXPECT_EQ((*listed_meta)[0].identifier, "barriers/published");
+
+    const auto listed_prefix = kasumi::transport::list(*opened, "barriers");
+    ASSERT_TRUE(listed_prefix.has_value()) << listed_prefix.error().message;
+    EXPECT_EQ(*listed_prefix, (std::vector<std::string>{"published"}));
+
+    // Subsequent puts/gets continue working cleanly despite leftover staging.
+    ASSERT_TRUE(kasumi::transport::put(*opened, src, "barriers/second"));
+    const auto out = kasumi::test::workspace_path(workspace, "out.bin");
+    ASSERT_TRUE(kasumi::transport::get(*opened, "barriers/second", out));
+    EXPECT_EQ(kasumi::test::read_text(out), "payload-data");
+
+    // Direct access to reserved .kasumi-staging paths fails with
+    // InvalidIdentifier.
+    for (const auto* reserved :
+         {".kasumi-staging", ".kasumi-staging/put-0123456789abcdef.tmp"}) {
+        const auto p = kasumi::transport::presence(*opened, reserved);
+        ASSERT_FALSE(p.has_value());
+        EXPECT_EQ(p.error().code, ErrorCode::InvalidIdentifier);
+        const auto put_res = kasumi::transport::put(*opened, src, reserved);
+        ASSERT_FALSE(put_res.has_value());
+        EXPECT_EQ(put_res.error().code, ErrorCode::InvalidIdentifier);
+    }
+    const auto list_reserved =
+        kasumi::transport::list(*opened, ".kasumi-staging");
+    ASSERT_FALSE(list_reserved.has_value());
+    EXPECT_EQ(list_reserved.error().code, ErrorCode::InvalidIdentifier);
+}
+
 } // namespace

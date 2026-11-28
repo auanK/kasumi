@@ -2,7 +2,7 @@ openapi: 3.1.0
 info: {title: Kasumi daemon HTTP API, version: 1.0.0, description: The daemon validates Host against the local address,
     configured allowed_hosts (including *.domain wildcards), direct IP literals on wildcard binds, or explicit
     skip_host_check. Browser mutations require a matching Origin or Referer and JSON for requests with a body. Browser
-    session cookies and IPC tokens are accepted on their respective listeners. Registered GET routes also accept HEAD
+    session cookies and IPC tokens have distinct authentication rules. With Web bind 127.0.0.1 and port zero the daemon serves both on its own loopback socket. Registered GET routes also accept HEAD
     through the HTTP server.}
 servers:
 - {url: 'http://127.0.0.1:3137', description: Default Web API listener.}
@@ -1991,7 +1991,7 @@ components:
       in: cookie
       name: kasumi_session
       description: HttpOnly, SameSite=Strict and Secure via a trusted loopback HTTPS proxy. Sessions expire after
-        a 30 minute idle timeout or 12 hours total.
+        7 days of inactivity or 30 days total.
     csrfToken:
       type: apiKey
       in: header
@@ -2497,10 +2497,15 @@ components:
         removed_objects: {type: integer, format: int64, minimum: 0}
         removed_bytes: {type: integer, format: int64, minimum: 0}
         min_age_hours: {type: integer, format: int64, minimum: 0}
+        epoch_advanced: {type: boolean}
+        epoch_advancement_planned: {type: boolean}
+        target_epoch_sequence: {type: [integer, "null"], format: int64, minimum: 0}
+        target_epoch_id: {type: [string, "null"]}
+        planned_pruned_commits: {type: integer, format: int64, minimum: 0}
         warning: {type: string}
       required: [candidate_objects, analysis_only, dry_run, candidate_content_objects, candidate_commit_variants,
         candidate_expired_commits, candidate_activities, deferred_recent_objects, candidate_bytes, removed_objects,
-        removed_bytes, min_age_hours]
+        removed_bytes, min_age_hours, epoch_advanced, epoch_advancement_planned, planned_pruned_commits]
     GarbageCollectProgress:
       type: object
       properties:

@@ -1097,6 +1097,28 @@ LoadResult load_impl(transport::Transport& storage,
             (cached_anchor && commit_id == cached_anchor->commit_id)) {
             continue;
         }
+        if (cached_anchor != nullptr && discovered_epoch.has_value() &&
+            epoch_anchors.empty() &&
+            std::ranges::any_of(discovered_epoch->value.anchors,
+                                [&](const auto& anchor) {
+                                    return anchor.commit_id == commit_id;
+                                })) {
+            KnownHistoryFrontier fallback;
+            if (frontier != nullptr) {
+                fallback.accepted_epoch = frontier->accepted_epoch;
+                fallback.observed_variants = frontier->observed_variants;
+                fallback.observed_markers = frontier->observed_markers;
+                fallback.observed_epoch = frontier->observed_epoch;
+            }
+            return load_impl(storage,
+                             key,
+                             workspace_root,
+                             scoped ? std::nullopt : identifiers,
+                             &fallback,
+                             scoped,
+                             trusted_marker_identifiers,
+                             commit_cache);
+        }
         if (loaded.size() >= history::maximum_loaded_commit_count) {
             return std::unexpected(error(ErrorCode::LimitExceeded,
                                          "history contains too many commits"));

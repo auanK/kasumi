@@ -202,7 +202,7 @@ write_vault(const std::filesystem::path& key_path, const KeyBytes& clear_key) {
 }
 
 std::expected<void, runtime::Error>
-delete_vault(const std::filesystem::path& key_path) {
+delete_vault(const std::filesystem::path& key_path, bool) {
     const auto target = vault_target_name(key_path);
     return with_credential_lock([&]() -> std::expected<void, runtime::Error> {
         DWORD read_error = ERROR_SUCCESS;

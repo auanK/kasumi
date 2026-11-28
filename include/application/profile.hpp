@@ -423,6 +423,7 @@ struct ResolveConflictReport {
     std::optional<std::string> selected_artifact;
     bool dry_run = false;
     std::vector<std::string> removed_artifacts;
+    std::optional<std::string> recovery_directory;
 };
 
 // Resolves one preserved conflict group by keeping either the canonical file or

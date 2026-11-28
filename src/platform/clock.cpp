@@ -10,6 +10,8 @@
 namespace kasumi::platform::clock {
 namespace {
 
+thread_local std::optional<std::int64_t> g_override_unix_seconds;
+
 bool to_utc_tm(std::time_t value, std::tm& output) noexcept {
 #if defined(_WIN32)
     return ::gmtime_s(&output, &value) == 0;
@@ -92,6 +94,12 @@ std::string format_tm_with_offset(const std::tm& value,
 } // namespace
 
 std::expected<std::int64_t, std::string> unix_seconds() {
+    if (g_override_unix_seconds.has_value()) {
+        if (*g_override_unix_seconds < 0) {
+            return std::unexpected("invalid Unix clock");
+        }
+        return *g_override_unix_seconds;
+    }
     using seconds = std::chrono::seconds;
     const auto elapsed = std::chrono::system_clock::now().time_since_epoch();
     const auto value = std::chrono::duration_cast<seconds>(elapsed).count();
@@ -139,5 +147,19 @@ std::string format_local_timestamp(std::int64_t timestamp,
     return format_tm_with_offset(
         local_tm, static_cast<int>(diff_minutes), include_seconds);
 }
+
+namespace testing {
+
+ScopedUnixSecondsOverride::ScopedUnixSecondsOverride(
+    std::optional<std::int64_t> value) noexcept
+    : previous(g_override_unix_seconds) {
+    g_override_unix_seconds = value;
+}
+
+ScopedUnixSecondsOverride::~ScopedUnixSecondsOverride() noexcept {
+    g_override_unix_seconds = previous;
+}
+
+} // namespace testing
 
 } // namespace kasumi::platform::clock

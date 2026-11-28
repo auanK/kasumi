@@ -1,3 +1,4 @@
+#include "application/concurrency.hpp"
 #include "application/history_storage/epoch.hpp"
 #include "application/history_storage/maintenance_protocol.hpp"
 #include "application/history_storage/reachability.hpp"
@@ -26,6 +27,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -1701,6 +1703,87 @@ TEST(IntegrityMaintenanceTest,
     EXPECT_EQ(checked_first->checked_objects, checked_second->checked_objects);
     EXPECT_EQ(checked_first->repaired_objects,
               checked_second->repaired_objects);
+}
+
+TEST(
+    IntegrityMaintenanceTest,
+    BoundedConcurrentFsckWorkerSpawnFailureWithProgressReturnsErrorAndJoinsStartedWorkers) {
+    auto storage = make_local_storage();
+    auto runtime = runtime_data(storage.workspace);
+    const std::vector<std::pair<std::string, std::string>> files{
+        {"f0.txt", "payload_0"},
+        {"f1.txt", "payload_1"},
+    };
+    setup_multi_file_dataset(storage, files);
+
+    std::mutex gate_mutex;
+    std::condition_variable gate_changed;
+    bool worker0_entered = false;
+    bool window_stop_requested = false;
+    bool worker0_exited = false;
+    std::vector<kasumi::application::FsckProgress> events;
+
+    kasumi::application::integrity::testing::FsckWorkerEventCallback
+        worker_event = [&](auto event, std::size_t) {
+            using Event =
+                kasumi::application::integrity::testing::FsckWorkerEvent;
+            if (event == Event::BeforeAudit) {
+                std::unique_lock lock(gate_mutex);
+                worker0_entered = true;
+                gate_changed.notify_all();
+                gate_changed.wait(lock, [&] {
+                    return window_stop_requested;
+                });
+                worker0_exited = true;
+            } else if (event == Event::WindowStopRequested) {
+                {
+                    std::lock_guard lock(gate_mutex);
+                    window_stop_requested = true;
+                }
+                gate_changed.notify_all();
+            }
+        };
+
+    {
+        kasumi::application::testing::ScopedWorkerSpawnHook spawn_hook(
+            [&](std::size_t worker_index) {
+                if (worker_index == 1) {
+                    std::unique_lock lock(gate_mutex);
+                    gate_changed.wait(lock, [&] {
+                        return worker0_entered;
+                    });
+                    throw std::system_error(
+                        std::make_error_code(
+                            std::errc::resource_unavailable_try_again),
+                        "injected worker spawn failure");
+                }
+            });
+
+        const auto checked =
+            kasumi::application::integrity::testing::fsck_with_worker_events(
+                runtime,
+                storage.transport,
+                test_key(),
+                2,
+                [&](const auto& progress) {
+                    events.push_back(progress);
+                },
+                std::move(worker_event));
+        ASSERT_FALSE(checked.has_value());
+        EXPECT_EQ(checked.error().code, IntegrityErrorCode::StateFailure);
+        EXPECT_NE(checked.error().detail.find("injected worker spawn failure"),
+                  std::string::npos);
+        EXPECT_TRUE(worker0_exited);
+        EXPECT_TRUE(window_stop_requested);
+        ASSERT_FALSE(events.empty());
+        EXPECT_EQ(events.back().stage,
+                  kasumi::application::FsckStage::Finalizing);
+    }
+
+    const auto recovered = kasumi::application::integrity::fsck(
+        runtime, storage.transport, test_key(), 2);
+    ASSERT_TRUE(recovered.has_value()) << recovered.error().detail;
+    EXPECT_EQ(recovered->checked_objects, 2U);
 }
 
 } // namespace

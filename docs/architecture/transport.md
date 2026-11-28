@@ -22,6 +22,8 @@ lookup. Provider PUT semantics still apply, and Kasumi's physical verification
 after upload is unchanged. Each FastCDC download window supplies the content
 concurrency as rclone's transfer limit. The copy deadline applies per window.
 
+The local backend stages PUTs under `.kasumi-staging`, outside writer and barrier namespaces. Concurrent PUTs sharing the backend state hold staging leases so one worker cannot remove the staging directory while another uses it. The scope of that coordination is the local backend instance. Across devices, bootstrap and maintenance depend on acknowledged writes becoming visible to GET and prefix LIST and on complete listings. [Vault protocol](protocol-0.32.md)
+
 ## Control Read Batches
 
 `control_read_batch` aggregates read-only remote checks during observation and writer admission into single backend requests (such as rclone `job/batch`). Batches containing directory prefix listings (`list_prefixes`) preserve strict sequential execution (`concurrency = 1`) to uphold control ordering (`LIST writers/barriers -> STAT legacy barrier`). Independent content presence checks (`presence_identifiers` only) are partitioned into bounded chunks of up to 128 items executed with bounded concurrency (8 workers) to prevent request deadlines from expiring on large vaults. Results are correlated positionally, and any transport, parse, or timeout error fails closed without converting failures into false content absences.

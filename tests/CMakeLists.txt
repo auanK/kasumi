@@ -72,6 +72,7 @@ endfunction()
 add_subdirectory(support)
 
 add_library(kasumi_application_fault_test_objects OBJECT
+    ${PROJECT_SOURCE_DIR}/src/application/conflicts.cpp
     ${PROJECT_SOURCE_DIR}/src/application/profile_fault_test.cpp
     ${PROJECT_SOURCE_DIR}/src/application/profile.cpp
     ${PROJECT_SOURCE_DIR}/src/application/sync/mutation_detail.cpp

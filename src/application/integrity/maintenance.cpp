@@ -624,7 +624,8 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                                 make_error(ErrorCode::StateFailure,
                                            "audit worker failed"));
                         }
-                    });
+                    },
+                    request_window_stop);
             };
 
             if (on_progress) {
@@ -633,9 +634,29 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
                 std::jthread driver([&, stop_token] {
                     const platform::cancellation::ScopedStopToken stop_scope{
                         stop_token};
-                    run_workers();
-                    workers_done.store(true, std::memory_order_release);
-                    progress_signal.release();
+                    struct DriverExitGuard {
+                        std::atomic<bool>& workers_done;
+                        std::counting_semaphore<>& progress_signal;
+                        ~DriverExitGuard() noexcept {
+                            workers_done.store(true, std::memory_order_release);
+                            progress_signal.release();
+                        }
+                    };
+                    const DriverExitGuard exit_guard{workers_done,
+                                                     progress_signal};
+                    try {
+                        run_workers();
+                    } catch (const std::exception& exception) {
+                        record_hard_failure(
+                            total_objects,
+                            make_error(ErrorCode::StateFailure,
+                                       exception.what()));
+                    } catch (...) {
+                        record_hard_failure(
+                            total_objects,
+                            make_error(ErrorCode::StateFailure,
+                                       "audit worker pool failed"));
+                    }
                 });
                 try {
                     std::size_t cursor = 0;
@@ -706,6 +727,9 @@ fsck_impl(const runtime::RuntimeData& runtime_data,
         } catch (const std::exception& exception) {
             return std::unexpected(
                 make_error(ErrorCode::StateFailure, exception.what()));
+        } catch (...) {
+            return std::unexpected(
+                make_error(ErrorCode::StateFailure, "fsck failed"));
         }
     }();
     platform::cleanup_workspace(*workspace);

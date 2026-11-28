@@ -15,7 +15,7 @@
    * **`KPAK\x01` Micro-Packs**. Each referenced Pack ID is downloaded and authenticated once (`FilePurpose::Pack`). The audit verifies the Pack ID binding and the size and BLAKE3 of every member against the pack descriptors.
    * **FastCDC chunked files**. Fsck authenticates each required chunk once. It streams the verified chunks in manifest order and verifies the assembled BLAKE3 and size against the committed file. Plaintext chunks live in the private workspace until all audit workers that reference them have finished using them.
    Missing/corrupt objects are collected with their referenced paths; transport/workspace errors are hard failures.
-6. A hard failure or cancellation stops new worker admissions, drains in-flight work, removes the workspace, and returns an error. Missing/corrupt referenced objects produce an unrecoverable-path result after classification. Healthy completion returns the number of checked objects (and byte progress when available). Transport, key, and lock are cleaned up on exit.
+6. If a worker cannot start, Fsck joins workers already started and reports the audit failure to the caller. A hard failure or cancellation stops new worker admissions, drains in-flight work, removes the workspace, and returns an error. Missing/corrupt referenced objects produce an unrecoverable-path result after classification. Healthy completion returns the number of checked objects (and byte progress when available). Transport, key, and lock are cleaned up on exit.
 
 ## Boundaries
 

@@ -864,6 +864,7 @@ int present_json_conflict_resolved(
                                   : json(nullptr)},
         {"removed_count", report.removed_artifacts.size()},
         {"removed_artifacts", std::move(removed)},
+        {"recovery_directory", report.recovery_directory ? json(*report.recovery_directory) : json(nullptr)},
     };
     emit_json(doc);
     return 0;
@@ -1198,6 +1199,18 @@ int present_json(std::string_view profile_name,
                     {"removed_objects", payload.removed_objects},
                     {"removed_bytes", payload.removed_bytes},
                     {"min_age_hours", payload.min_age_hours},
+                    {"epoch_advanced", payload.epoch_advanced},
+                    {"epoch_advancement_planned",
+                     payload.epoch_advancement_planned},
+                    {"target_epoch_sequence",
+                     payload.target_epoch_sequence.has_value()
+                         ? json(*payload.target_epoch_sequence)
+                         : json(nullptr)},
+                    {"target_epoch_id",
+                     payload.target_epoch_id.has_value()
+                         ? json(*payload.target_epoch_id)
+                         : json(nullptr)},
+                    {"planned_pruned_commits", payload.planned_pruned_commits},
                 };
             } else if constexpr (std::is_same_v<T,
                                                 application::RepackCompleted>) {

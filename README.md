@@ -46,7 +46,7 @@ Machine C ───┘
 - **Flexible key storage (`vault`, `file`, `memory`)**: Persist derived keys in Windows Credential Manager / Linux Secret Service & KWallet, local `key.bin`, or stateless RAM-only derivation (kept pinned in non-swappable OS memory pages while unlocked in `kasumi daemon`).
 - **Continuous multi-profile daemon (`kasumi daemon`)**: Native file watchers (`ReadDirectoryChangesW` / `inotify`) with debounce and self-mutation suppression, warm `rclone` transport sessions, staggered startup and per-remote concurrency limits, zero-walk remote fast polling, user-session autostart, and authenticated loopback IPC.
 - **Embedded Local Web UI & HTTP API (`kasumi web`)**: Single-binary Vue 3 interface served at `http://127.0.0.1:3137/` with Argon2id single-user authentication, live Server-Sent Events (`/v1/events/stream`), local and remote file explorers with previews, commit history and text diffs, visual conflict resolution, and on-demand maintenance jobs (`/v1/*`).
-- **Crash-resilient & auditable**: Encrypted local transaction journals safely recover interrupted runs; built-in `diagnostics`, `sync --repair`, `fsck`, `repack`, `resolve-missing`, and hardened `gc` (6h remote-clock-clamped grace period, `remote_busy` backoff, multi-barrier checks, periodic mid-`Apply` revalidation) keep vaults healthy.
+- **Crash-resilient & auditable**: Encrypted local transaction journals safely recover interrupted runs; built-in `diagnostics`, `sync --repair`, `fsck`, `repack`, `resolve-missing`, and hardened `gc` (maintenance-side Epoch advancement when both depth and superseded age qualify, 6h remote-clock-clamped physical grace period, `remote_busy` backoff, multi-barrier checks, `.pending-gc-epoch` crash recovery, and periodic mid-`Apply` revalidation) keep vaults healthy.
 - **Automation-ready CLI**: Non-interactive `kasumi profile ...` lifecycle commands, `kasumi daemon ...` service controls, `kasumi completion <shell>`, live terminal progress, `--json` (`schema_version: 1` with stable `error.code`), `--quiet`, `--log-file <path>` (text or NDJSON), and `--full`.
 
 ---
@@ -75,6 +75,8 @@ kasumi config
 ```bash
 kasumi sync work
 ```
+
+On a new destination, let one device finish this first Sync before enrolling the others. After initialization, devices can publish concurrent branches and reconcile them on subsequent syncs. The store must make acknowledged writes visible across devices. Keep an independent backup for recovery from provider loss. [Vault protocol and operating assumptions](docs/architecture/protocol-0.32.md)
 
 4. *(Optional)* **Enable continuous real-time sync** in the background, open the embedded Web UI (`http://127.0.0.1:3137/`), and inspect status or live logs at any time:
 
@@ -156,6 +158,7 @@ Run `kasumi help`, `kasumi help --all`, `kasumi help <command>` (or `--help`), a
 - [Troubleshooting](docs/troubleshooting.md) — diagnosis and safe recovery procedures.
 - [Security](docs/security.md) — threat model, cryptography, and local key storage trade-offs.
 - [Architecture](docs/architecture.md) — system map, protocols, and component invariants.
+- [0.32 vault protocol](docs/architecture/protocol-0.32.md) — publication, trust assumptions, recovery, compatibility, and accepted costs.
 - [Build and Test](docs/build-and-test.md) — source builds, formatting, sanitizers, and test suites.
 - [Changelog](CHANGELOG.md) & [Release Notes](RELEASE_NOTES.md) — version history and upgrade notes.
 

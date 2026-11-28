@@ -35,7 +35,8 @@ std::vector<SyncOperation> compare_trees(
     const Snapshot& cloud,
     const HashSet& missing_blocks,
     const ignore::IgnoreList* ignore_list = nullptr,
-    const std::unordered_set<std::string>* authorized_deletions = nullptr);
+    const std::unordered_set<std::string>* authorized_deletions = nullptr,
+    const Snapshot* expired_base = nullptr);
 
 // Compares local, base, and remote assuming referenced objects are available.
 std::vector<SyncOperation>

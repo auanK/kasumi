@@ -13,8 +13,10 @@
 #include <cstring>
 #include <exception>
 #include <limits>
+#include <map>
 #include <monocypher.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace kasumi::application::history_storage::epoch {
@@ -179,9 +181,10 @@ std::expected<EpochInventory, Error> discover_epoch_inventory(
         const auto sequence = ids_by_sequence.find(reference->sequence);
         if (sequence != ids_by_sequence.end()) {
             if (sequence->second != reference->epoch_id) {
-                return std::unexpected(
-                    error(ErrorCode::Conflict,
-                          "epoch sequence has multiple identifiers"));
+                return std::unexpected(error(
+                    ErrorCode::Conflict,
+                    "epoch sequence " + std::to_string(reference->sequence) +
+                        " has multiple identifiers"));
             }
             continue;
         }
@@ -282,6 +285,11 @@ load_latest_impl(transport::Transport& storage,
             return std::unexpected(inventory.error());
         }
         if (inventory->references.empty()) {
+            if (trusted_ancestor) {
+                return std::unexpected(error(
+                    ErrorCode::Conflict,
+                    "remote Epoch chain is missing the local checkpoint"));
+            }
             return std::optional<VerifiedEpoch>{};
         }
         const auto& latest_reference = inventory->references.back();
@@ -813,16 +821,30 @@ load_by_id(transport::Transport& storage,
         }
 
         const auto layout = derive_remote_layout(master_key);
-        auto inventory =
-            discover_epoch_inventory(storage, layout, std::nullopt, false);
-        if (!inventory) {
-            return std::unexpected(inventory.error());
+        auto listed = detail::list_identifiers(storage, layout.epochs_prefix);
+        if (!listed) {
+            return std::unexpected(
+                error(ErrorCode::TransportFailure, listed.error().detail));
         }
-        const auto matching = std::ranges::find_if(
-            inventory->references, [epoch_id](const auto& reference) {
-                return reference.epoch_id == epoch_id;
-            });
-        if (matching == inventory->references.end()) {
+        std::optional<Reference> matching;
+        for (const auto& name : *listed) {
+            const auto identifier = name.starts_with(layout.epochs_prefix)
+                                        ? name
+                                        : layout.epochs_prefix + name;
+            auto reference = parse_object_identifier(layout, identifier);
+            if (!reference) {
+                return std::unexpected(reference.error());
+            }
+            if (reference->epoch_id == epoch_id) {
+                if (matching && matching->sequence != reference->sequence) {
+                    return std::unexpected(error(
+                        ErrorCode::Conflict,
+                        "epoch identifier appears in multiple sequences"));
+                }
+                matching = *reference;
+            }
+        }
+        if (!matching) {
             return std::optional<VerifiedEpoch>{};
         }
         auto temporary = detail::make_workspace(workspace_root);
@@ -840,28 +862,36 @@ load_by_id(transport::Transport& storage,
 }
 
 PruneResult plan_pruning(std::span<const kasumi::history::LoadedCommit> commits,
-                         const RetentionPolicy& policy) {
+                         const RetentionPolicy& policy,
+                         const PruneOptions& options) {
     if (commits.size() > kasumi::history::maximum_loaded_commit_count) {
         return std::unexpected(NoPrune{"defensive limit exceeded"});
+    }
+    if (policy.min_history_depth == 0 ||
+        policy.min_history_depth > kasumi::history::maximum_graph_depth ||
+        policy.min_history_age_hours == 0) {
+        return std::unexpected(NoPrune{"invalid retention policy"});
+    }
+    if (commits.empty()) {
+        return std::unexpected(NoPrune{"no commits reached retention limits"});
     }
 
     std::unordered_map<std::string_view, const kasumi::history::LoadedCommit*>
         by_id;
-    std::unordered_set<std::string_view> has_children;
+    std::unordered_map<std::string_view,
+                       std::vector<const kasumi::history::LoadedCommit*>>
+        children_by_id;
     by_id.reserve(commits.size());
-    has_children.reserve(commits.size());
+    children_by_id.reserve(commits.size());
     for (const auto& c : commits) {
         by_id[c.id] = &c;
         for (const auto& p : c.commit.parents) {
-            has_children.insert(p);
+            children_by_id[p].push_back(&c);
         }
     }
 
-    std::unordered_map<std::string_view, std::uint64_t> shortest_depth;
-    shortest_depth.reserve(commits.size());
-    std::vector<const kasumi::history::LoadedCommit*> queue;
+    std::vector<std::string_view> logical_heads;
     std::int64_t newest_authenticated_head = 0;
-
     for (const auto& c : commits) {
         for (const auto& parent : c.commit.parents) {
             if (const auto it = by_id.find(parent);
@@ -871,17 +901,65 @@ PruneResult plan_pruning(std::span<const kasumi::history::LoadedCommit> commits,
                     NoPrune{"timestamp regression detected"});
             }
         }
-        if (!has_children.contains(c.id)) {
+        if (const auto child_it = children_by_id.find(c.id);
+            child_it == children_by_id.end() || child_it->second.empty()) {
             newest_authenticated_head =
                 std::max(newest_authenticated_head, c.commit.created_at);
-            shortest_depth[c.id] = 0;
-            queue.push_back(&c);
+            logical_heads.push_back(c.id);
         }
     }
     if (newest_authenticated_head <= 0) {
         return std::unexpected(NoPrune{"no authenticated commit timestamp"});
     }
+    std::int64_t effective_now = newest_authenticated_head;
+    if (options.reference_now_unix.has_value()) {
+        if (*options.reference_now_unix <= 0) {
+            return std::unexpected(NoPrune{"no trusted reference clock"});
+        }
+        effective_now = *options.reference_now_unix;
+    }
 
+    std::unordered_set<std::string_view> marked_set;
+    marked_set.reserve(options.marked_commit_ids.size());
+    for (const auto& id : options.marked_commit_ids) {
+        if (by_id.contains(id)) {
+            marked_set.insert(id);
+        }
+    }
+    std::unordered_set<std::string_view> protected_set;
+    protected_set.reserve(options.protected_commit_ids.size());
+    for (const auto& id : options.protected_commit_ids) {
+        if (by_id.contains(id)) {
+            protected_set.insert(id);
+        }
+    }
+    std::unordered_set<std::string_view> current_anchor_set;
+    current_anchor_set.reserve(options.current_anchors.size());
+    for (const auto& anchor : options.current_anchors) {
+        if (by_id.contains(anchor.commit_id)) {
+            current_anchor_set.insert(anchor.commit_id);
+        }
+    }
+
+    // Shortest distance (in edges) from any logical head or marked commit.
+    std::unordered_map<std::string_view, std::uint64_t> shortest_depth;
+    shortest_depth.reserve(commits.size());
+    std::vector<const kasumi::history::LoadedCommit*> queue;
+    queue.reserve(commits.size());
+    const auto seed_root = [&](std::string_view root_id) {
+        if (auto [it, inserted] = shortest_depth.try_emplace(root_id, 0);
+            inserted) {
+            if (const auto found = by_id.find(root_id); found != by_id.end()) {
+                queue.push_back(found->second);
+            }
+        }
+    };
+    for (const auto head_id : logical_heads) {
+        seed_root(head_id);
+    }
+    for (const auto marked_id : marked_set) {
+        seed_root(marked_id);
+    }
     for (std::size_t head_ptr = 0; head_ptr < queue.size(); ++head_ptr) {
         const auto* current = queue[head_ptr];
         const auto next_depth = shortest_depth[current->id] + 1;
@@ -897,42 +975,244 @@ PruneResult plan_pruning(std::span<const kasumi::history::LoadedCommit> commits,
         }
     }
 
-    std::unordered_set<std::string_view> prunable;
-    const auto age_limit_seconds =
-        static_cast<std::int64_t>(policy.min_history_age_hours) * 3600LL;
-    for (const auto& c : commits) {
-        if (const auto it = shortest_depth.find(c.id);
-            it != shortest_depth.end() &&
-            it->second >= policy.min_history_depth && c.commit.created_at > 0 &&
-            c.commit.created_at <= newest_authenticated_head &&
-            newest_authenticated_head - c.commit.created_at >=
-                age_limit_seconds) {
-            prunable.insert(c.id);
-        }
-    }
-    if (prunable.empty()) {
-        return std::unexpected(NoPrune{"no commits reached retention limits"});
-    }
+    // Protect the full merge-base closure when multiple unreconciled logical
+    // heads exist so branches can always reconcile without losing common roots.
+    std::unordered_set<std::string_view> merge_closure;
+    if (logical_heads.size() > 1) {
+        const auto collect_ancestors = [&](std::string_view start) {
+            std::unordered_set<std::string_view> visited;
+            std::vector<std::string_view> stack{start};
+            visited.insert(start);
+            while (!stack.empty()) {
+                const auto cur = stack.back();
+                stack.pop_back();
+                const auto found = by_id.find(cur);
+                if (found == by_id.end()) {
+                    continue;
+                }
+                for (const auto& parent : found->second->commit.parents) {
+                    if (by_id.contains(parent) &&
+                        visited.insert(parent).second) {
+                        stack.push_back(parent);
+                    }
+                }
+            }
+            return visited;
+        };
 
-    std::map<std::string_view, std::uint64_t> anchor_heights;
-    for (const auto& c : commits) {
-        if (prunable.contains(c.id)) {
-            continue;
+        std::vector<std::string_view> bases = logical_heads;
+        std::ranges::sort(bases);
+        bases.erase(std::ranges::unique(bases).begin(), bases.end());
+        std::size_t ancestor_visits = 0;
+        std::size_t layer_count = 0;
+        while (bases.size() > 1) {
+            if (bases.size() > kasumi::history::maximum_parent_count ||
+                layer_count >= kasumi::history::maximum_graph_depth) {
+                return std::unexpected(
+                    NoPrune{"virtual merge base limit exceeded"});
+            }
+            ++layer_count;
+            std::unordered_set<std::string_view> common;
+            for (std::size_t i = 0; i < bases.size(); ++i) {
+                auto ancestors = collect_ancestors(bases[i]);
+                ancestor_visits += ancestors.size();
+                if (ancestor_visits >
+                    kasumi::history::maximum_virtual_base_ancestor_visits) {
+                    return std::unexpected(
+                        NoPrune{"virtual merge base limit exceeded"});
+                }
+                if (i == 0) {
+                    common = std::move(ancestors);
+                } else {
+                    std::erase_if(common, [&](std::string_view id) {
+                        return !ancestors.contains(id);
+                    });
+                }
+            }
+            if (common.empty()) {
+                return std::unexpected(
+                    NoPrune{"cannot prune across disconnected branch roots"});
+            }
+            std::unordered_set<std::string_view> dominated;
+            for (const auto candidate : common) {
+                const auto found = by_id.find(candidate);
+                if (found == by_id.end()) {
+                    continue;
+                }
+                std::vector<std::string_view> walk;
+                for (const auto& p : found->second->commit.parents) {
+                    if (common.contains(p) && dominated.insert(p).second) {
+                        walk.push_back(p);
+                    }
+                }
+                while (!walk.empty()) {
+                    const auto cur = walk.back();
+                    walk.pop_back();
+                    const auto cur_it = by_id.find(cur);
+                    if (cur_it == by_id.end()) {
+                        continue;
+                    }
+                    for (const auto& p : cur_it->second->commit.parents) {
+                        if (common.contains(p) && dominated.insert(p).second) {
+                            walk.push_back(p);
+                        }
+                    }
+                }
+            }
+            std::vector<std::string_view> next_bases;
+            for (const auto candidate : common) {
+                if (!dominated.contains(candidate)) {
+                    next_bases.push_back(candidate);
+                }
+            }
+            if (next_bases.empty()) {
+                return std::unexpected(
+                    NoPrune{"cannot prune across disconnected branch roots"});
+            }
+            std::ranges::sort(next_bases);
+            bases = std::move(next_bases);
         }
-        for (const auto& p : c.commit.parents) {
-            if (prunable.contains(p)) {
-                if (const auto parent_it = by_id.find(p);
-                    parent_it != by_id.end()) {
-                    anchor_heights.emplace(p, parent_it->second->commit.height);
+
+        const auto common_root = bases.front();
+        std::unordered_set<std::string_view> from_heads;
+        std::vector<std::string_view> up_stack = logical_heads;
+        for (const auto h : up_stack) {
+            from_heads.insert(h);
+        }
+        while (!up_stack.empty()) {
+            const auto cur = up_stack.back();
+            up_stack.pop_back();
+            if (cur == common_root) {
+                continue;
+            }
+            const auto found = by_id.find(cur);
+            if (found == by_id.end()) {
+                continue;
+            }
+            for (const auto& p : found->second->commit.parents) {
+                if (by_id.contains(p) && from_heads.insert(p).second) {
+                    up_stack.push_back(p);
+                }
+            }
+        }
+        std::vector<std::string_view> down_stack{common_root};
+        merge_closure.insert(common_root);
+        while (!down_stack.empty()) {
+            const auto cur = down_stack.back();
+            down_stack.pop_back();
+            const auto child_it = children_by_id.find(cur);
+            if (child_it == children_by_id.end()) {
+                continue;
+            }
+            for (const auto* child : child_it->second) {
+                if (from_heads.contains(child->id) &&
+                    merge_closure.insert(child->id).second) {
+                    down_stack.push_back(child->id);
                 }
             }
         }
     }
 
+    std::unordered_set<std::string_view> prunable;
+    const auto age_limit_seconds =
+        static_cast<std::int64_t>(policy.min_history_age_hours) * 3600LL;
+    for (const auto& c : commits) {
+        if (merge_closure.contains(c.id) || protected_set.contains(c.id) ||
+            marked_set.contains(c.id)) {
+            continue;
+        }
+        const auto depth_it = shortest_depth.find(c.id);
+        if (depth_it == shortest_depth.end() ||
+            depth_it->second < policy.min_history_depth) {
+            continue;
+        }
+        const auto child_it = children_by_id.find(c.id);
+        if (child_it == children_by_id.end() || child_it->second.empty()) {
+            continue;
+        }
+        if (c.commit.created_at <= 0) {
+            continue;
+        }
+        std::int64_t superseded_at = 0;
+        bool valid_children_time = true;
+        for (const auto* child : child_it->second) {
+            if (child->commit.created_at <= 0) {
+                valid_children_time = false;
+                break;
+            }
+            superseded_at = std::max(superseded_at, child->commit.created_at);
+        }
+        if (!valid_children_time || superseded_at > effective_now ||
+            (effective_now - superseded_at) < age_limit_seconds) {
+            continue;
+        }
+        prunable.insert(c.id);
+    }
+    if (prunable.empty()) {
+        return std::unexpected(NoPrune{"no commits reached retention limits"});
+    }
+
+    // Walk from logical heads and marked commits to build a reachable boundary
+    // anchor set; every non-retained commit lies strictly behind these anchors.
+    std::unordered_set<std::string_view> retained;
+    std::map<std::string_view, std::uint64_t> anchor_heights;
+    std::vector<std::string_view> frontier_walk;
+    for (const auto head_id : logical_heads) {
+        if (retained.insert(head_id).second) {
+            frontier_walk.push_back(head_id);
+        }
+    }
+    for (const auto marked_id : marked_set) {
+        if (retained.insert(marked_id).second) {
+            frontier_walk.push_back(marked_id);
+        }
+    }
+    while (!frontier_walk.empty()) {
+        const auto cur_id = frontier_walk.back();
+        frontier_walk.pop_back();
+        const auto cur_it = by_id.find(cur_id);
+        if (cur_it == by_id.end()) {
+            continue;
+        }
+        const auto& cur = *cur_it->second;
+        if (current_anchor_set.contains(cur.id)) {
+            anchor_heights.emplace(cur.id, cur.commit.height);
+            continue;
+        }
+        const bool all_parents_prunable =
+            !cur.commit.parents.empty() &&
+            std::ranges::all_of(cur.commit.parents, [&](std::string_view p) {
+                return prunable.contains(p);
+            });
+        if (all_parents_prunable) {
+            anchor_heights.emplace(cur.id, cur.commit.height);
+            continue;
+        }
+        for (const auto& p : cur.commit.parents) {
+            if (prunable.contains(p)) {
+                if (const auto parent_it = by_id.find(p);
+                    parent_it != by_id.end()) {
+                    retained.insert(p);
+                    anchor_heights.emplace(p, parent_it->second->commit.height);
+                }
+            } else if (by_id.contains(p) && retained.insert(p).second) {
+                frontier_walk.push_back(p);
+            }
+        }
+    }
+
     EpochPlan plan;
-    plan.prunable_commits.reserve(prunable.size());
-    for (const auto id : prunable) {
-        plan.prunable_commits.emplace_back(id);
+    for (const auto& c : commits) {
+        if (!retained.contains(c.id)) {
+            plan.prunable_commits.push_back(c.id);
+        }
+    }
+    if (plan.prunable_commits.empty() || anchor_heights.empty()) {
+        return std::unexpected(NoPrune{"no commits reached retention limits"});
+    }
+    if (anchor_heights.size() > maximum_anchor_count) {
+        return std::unexpected(
+            NoPrune{"planned anchor count exceeds epoch limit"});
     }
     std::ranges::sort(plan.prunable_commits);
     plan.anchors.reserve(anchor_heights.size());

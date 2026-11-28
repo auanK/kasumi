@@ -177,6 +177,11 @@ struct Input {
     // Last shared tree persisted locally.
     Snapshot base_tree;
 
+    // Local base snapshot retained for conflict disambiguation when the
+    // accepted base commit has aged past the confirmed remote Epoch horizon.
+    // Never authorizes remote or local deletions on its own.
+    std::optional<Snapshot> expired_base_tree;
+
     // ID of the persisted local base.
     std::string base_commit_id;
     // Ciphertext identifier corresponding to the base.
