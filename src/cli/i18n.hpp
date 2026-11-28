@@ -272,6 +272,8 @@ enum class Key {
     GcPlanDetails,
     GcDeferredRecentSingular,
     GcDeferredRecentPlural,
+    GcEpochAdvancementPlanned,
+    GcEpochAdvanced,
     GcReclaimedBytes,
     ManualWriterRemovalWarning,
     ManualWriterRemovalCompleted,
@@ -705,6 +707,7 @@ enum class Key {
     ConflictsResolveCompletedKeepCanonical,
     ConflictsResolveCompletedKeepArtifact,
     ConflictsResolveRemovedList,
+    ConflictsRecoveryDirectory,
 
     // Daemon
     DaemonStarting,

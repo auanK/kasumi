@@ -10,19 +10,27 @@
 #include "platform/cancellation.hpp"
 #include "platform/clock.hpp"
 #include "platform/machine.hpp"
+#include "platform/path.hpp"
+#include "platform/private_storage.hpp"
+#include "state_storage/database.hpp"
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <limits>
+#include <map>
 #include <new>
 #include <optional>
 #include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -357,7 +365,427 @@ struct ObservePlan {
     std::size_t deferred_recent_objects = 0;
     std::uint64_t candidate_bytes = 0;
     std::size_t pruned_activities = 0;
+    std::optional<history_storage::epoch::VerifiedEpoch> latest_epoch;
+    std::optional<history_storage::epoch::Epoch> planned_next_epoch;
+    std::optional<history_storage::epoch::SealedEpoch> planned_sealed_epoch;
+    std::size_t planned_pruned_commits = 0;
+    std::vector<std::string> observed_head_markers;
+    std::vector<std::string> observed_epoch_objects;
 };
+
+Error epoch_error(const history_storage::epoch::Error& err) {
+    using EC = history_storage::epoch::ErrorCode;
+    ErrorCode code = ErrorCode::IntegrityFailure;
+    switch (err.code) {
+        case EC::InvalidInput:
+            code = ErrorCode::InvalidInput;
+            break;
+        case EC::WorkspaceFailure:
+            code = ErrorCode::WorkspaceFailure;
+            break;
+        case EC::TransportFailure:
+            code = ErrorCode::TransportFailure;
+            break;
+        case EC::VerificationFailure:
+        case EC::Conflict:
+        case EC::NotFound:
+        case EC::AuthenticationFailure:
+        case EC::InvalidEncoding:
+        case EC::UnsupportedVersion:
+        case EC::LimitExceeded:
+            code = ErrorCode::IntegrityFailure;
+            break;
+    }
+    return make_error(code, err.detail);
+}
+
+std::string hex_encode_bytes(std::span<const std::uint8_t> bytes) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2U);
+    for (const auto byte : bytes) {
+        out.push_back(kHex[(byte >> 4U) & 0x0FU]);
+        out.push_back(kHex[byte & 0x0FU]);
+    }
+    return out;
+}
+
+std::optional<std::vector<std::uint8_t>>
+hex_decode_bytes(std::string_view hex) {
+    if ((hex.size() % 2U) != 0U) {
+        return std::nullopt;
+    }
+    const auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') {
+            return c - '0';
+        }
+        if (c >= 'a' && c <= 'f') {
+            return 10 + (c - 'a');
+        }
+        return -1;
+    };
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(hex.size() / 2U);
+    for (std::size_t i = 0; i < hex.size(); i += 2U) {
+        const int hi = nibble(hex[i]);
+        const int lo = nibble(hex[i + 1U]);
+        if (hi < 0 || lo < 0) {
+            return std::nullopt;
+        }
+        bytes.push_back(static_cast<std::uint8_t>((hi << 4U) | lo));
+    }
+    return bytes;
+}
+
+std::filesystem::path
+pending_gc_epoch_path(const std::filesystem::path& workspace_root) {
+    return workspace_root / ".pending-gc-epoch";
+}
+
+struct PendingGcEpochRecord {
+    std::string identifier;
+    history_storage::epoch::Reference reference;
+    std::string previous_epoch_id;
+    std::vector<std::uint8_t> sealed_bytes;
+};
+
+std::string serialize_pending_gc_epoch(const PendingGcEpochRecord& record) {
+    std::string out;
+    out.reserve(256 + record.identifier.size() + record.sealed_bytes.size() * 2U);
+    out.append("kasumi-pending-gc-epoch-v1\nidentifier=");
+    out.append(record.identifier);
+    out.append("\nsequence=");
+    out.append(std::to_string(record.reference.sequence));
+    out.append("\nepoch_id=");
+    out.append(record.reference.epoch_id);
+    out.append("\nprevious_epoch_id=");
+    out.append(record.previous_epoch_id);
+    out.append("\nsealed_hex=");
+    out.append(hex_encode_bytes(record.sealed_bytes));
+    out.push_back('\n');
+    return out;
+}
+
+std::optional<PendingGcEpochRecord>
+parse_pending_gc_epoch(std::span<const std::uint8_t> bytes) {
+    const std::string_view text{reinterpret_cast<const char*>(bytes.data()),
+                                bytes.size()};
+    if (text.find('\r') != std::string_view::npos) {
+        return std::nullopt;
+    }
+    constexpr std::string_view kHeader = "kasumi-pending-gc-epoch-v1\n";
+    if (!text.starts_with(kHeader)) {
+        return std::nullopt;
+    }
+    PendingGcEpochRecord record;
+    bool seen_id = false;
+    bool seen_seq = false;
+    bool seen_epoch_id = false;
+    bool seen_prev = false;
+    bool seen_sealed = false;
+    std::string_view rest = text.substr(kHeader.size());
+    while (!rest.empty()) {
+        const auto nl = rest.find('\n');
+        const auto line =
+            nl == std::string_view::npos ? rest : rest.substr(0, nl);
+        if (line.empty()) {
+            return std::nullopt;
+        }
+        if (line.starts_with("identifier=")) {
+            if (seen_id) {
+                return std::nullopt;
+            }
+            record.identifier = std::string{line.substr(11)};
+            seen_id = true;
+        } else if (line.starts_with("sequence=")) {
+            if (seen_seq) {
+                return std::nullopt;
+            }
+            const auto val = line.substr(9);
+            std::uint64_t parsed = 0;
+            const auto [ptr, ec] =
+                std::from_chars(val.data(), val.data() + val.size(), parsed);
+            if (ec != std::errc{} || ptr != val.data() + val.size()) {
+                return std::nullopt;
+            }
+            record.reference.sequence = parsed;
+            seen_seq = true;
+        } else if (line.starts_with("epoch_id=")) {
+            if (seen_epoch_id) {
+                return std::nullopt;
+            }
+            record.reference.epoch_id = std::string{line.substr(9)};
+            seen_epoch_id = true;
+        } else if (line.starts_with("previous_epoch_id=")) {
+            if (seen_prev) {
+                return std::nullopt;
+            }
+            record.previous_epoch_id = std::string{line.substr(18)};
+            seen_prev = true;
+        } else if (line.starts_with("sealed_hex=")) {
+            if (seen_sealed) {
+                return std::nullopt;
+            }
+            auto decoded = hex_decode_bytes(line.substr(11));
+            if (!decoded || decoded->empty()) {
+                return std::nullopt;
+            }
+            record.sealed_bytes = std::move(*decoded);
+            seen_sealed = true;
+        } else {
+            return std::nullopt;
+        }
+        if (nl == std::string_view::npos) {
+            break;
+        }
+        rest = rest.substr(nl + 1);
+    }
+    if (!seen_id || !seen_seq || !seen_epoch_id || !seen_prev ||
+        !seen_sealed || record.identifier.empty() ||
+        record.reference.sequence == 0 ||
+        !history::valid_commit_id(record.reference.epoch_id) ||
+        !history::valid_commit_id(record.previous_epoch_id)) {
+        return std::nullopt;
+    }
+    return record;
+}
+
+std::expected<void, Error> persist_pending_gc_epoch(
+    const std::filesystem::path& workspace_root,
+    const PendingGcEpochRecord& record) {
+    const auto path = pending_gc_epoch_path(workspace_root);
+    if (auto ensured =
+            platform::private_storage::ensure_directory(path.parent_path());
+        !ensured) {
+        return std::unexpected(
+            make_error(ErrorCode::WorkspaceFailure, ensured.error()));
+    }
+    const auto serialized = serialize_pending_gc_epoch(record);
+    if (auto written =
+            platform::private_storage::write_atomically(path, serialized);
+        !written) {
+        return std::unexpected(
+            make_error(ErrorCode::WorkspaceFailure, written.error()));
+    }
+    return {};
+}
+
+void remove_pending_gc_epoch(
+    const std::filesystem::path& workspace_root) noexcept {
+    std::error_code ec;
+    std::filesystem::remove(pending_gc_epoch_path(workspace_root), ec);
+}
+
+std::expected<void, Error>
+sync_local_epoch_checkpoint(const std::filesystem::path& database_path,
+                            const history_storage::epoch::Reference& ref) {
+    auto local = state_storage::load_state(database_path);
+    if (!local) {
+        return std::unexpected(make_error(ErrorCode::StateFailure, local.error()));
+    }
+    if (!*local) {
+        return {};
+    }
+    auto updated = **local;
+    if (!updated.epoch_id.empty() && updated.epoch_sequence >= ref.sequence) {
+        return {};
+    }
+    updated.epoch_id = ref.epoch_id;
+    updated.epoch_sequence = ref.sequence;
+    if (!state_storage::save_state(database_path, updated)) {
+        return std::unexpected(
+            make_error(ErrorCode::StateFailure,
+                       "failed to persist confirmed Epoch checkpoint"));
+    }
+    return {};
+}
+
+std::expected<void, Error> reconcile_pending_gc_epoch(
+    transport::Transport& storage,
+    const history_storage::RemoteLayout& layout,
+    KeySpan key,
+    const std::filesystem::path& workspace_root,
+    const std::filesystem::path& database_path,
+    bool dry_run) {
+    const auto path = pending_gc_epoch_path(workspace_root);
+    std::error_code ec;
+    const auto st = std::filesystem::symlink_status(path, ec);
+    if (ec == std::errc::no_such_file_or_directory ||
+        !std::filesystem::exists(st)) {
+        return {};
+    }
+    if (ec) {
+        return std::unexpected(
+            make_error(ErrorCode::WorkspaceFailure,
+                       "failed to inspect pending GC Epoch record: " +
+                           ec.message()));
+    }
+    if (std::filesystem::is_symlink(st) ||
+        !std::filesystem::is_regular_file(st)) {
+        return std::unexpected(
+            make_error(ErrorCode::WorkspaceFailure,
+                       "pending GC Epoch record is not a regular file"));
+    }
+    auto raw = history_storage::detail::read_file(path, 65536U);
+    if (!raw) {
+        return std::unexpected(history_error(raw.error()));
+    }
+    auto parsed = parse_pending_gc_epoch(*raw);
+    if (!parsed) {
+        return std::unexpected(
+            make_error(ErrorCode::IntegrityFailure,
+                       "corrupt pending GC Epoch recovery record"));
+    }
+    if (!parsed->identifier.starts_with(layout.epochs_prefix)) {
+        return {};
+    }
+    auto expected_id =
+        history_storage::epoch::object_identifier(layout, parsed->reference);
+    if (!expected_id || *expected_id != parsed->identifier) {
+        return std::unexpected(
+            make_error(ErrorCode::IntegrityFailure,
+                       "pending GC Epoch identifier does not match vault"));
+    }
+    auto opened = history_storage::epoch::open(
+        parsed->sealed_bytes, parsed->reference, key);
+    if (!opened ||
+        opened->value.previous_epoch_id != parsed->previous_epoch_id) {
+        return std::unexpected(make_error(
+            ErrorCode::IntegrityFailure,
+            "pending GC Epoch failed cryptographic authentication"));
+    }
+
+    auto latest =
+        history_storage::epoch::load_latest(storage, key, workspace_root);
+    if (!latest) {
+        return std::unexpected(epoch_error(latest.error()));
+    }
+    bool confirmed = false;
+    if (*latest) {
+        if ((*latest)->reference == parsed->reference) {
+            confirmed = true;
+        } else if (parsed->reference.sequence < (*latest)->reference.sequence) {
+            auto exact = history_storage::epoch::load_by_id(
+                storage, key, workspace_root, parsed->reference.epoch_id);
+            if (!exact) {
+                return std::unexpected(epoch_error(exact.error()));
+            }
+            if (!*exact || (*exact)->value != opened->value) {
+                return std::unexpected(
+                    make_error(ErrorCode::IntegrityFailure,
+                               "remote Epoch chain diverged from pending "
+                               "GC Epoch publication"));
+            }
+            confirmed = true;
+        }
+    }
+
+    if (dry_run) {
+        if (!confirmed) {
+            return std::unexpected(make_error(
+                ErrorCode::StateFailure,
+                "pending interrupted GC Epoch publication exists; run live "
+                "garbage collection to reconcile"));
+        }
+        return {};
+    }
+
+    if (confirmed) {
+        if (auto synced = sync_local_epoch_checkpoint(
+                database_path, (*latest)->reference);
+            !synced) {
+            return synced;
+        }
+        remove_pending_gc_epoch(workspace_root);
+        return {};
+    }
+
+    auto present = transport::presence(storage, parsed->identifier);
+    if (!present) {
+        return std::unexpected(transport_error(
+            present.error(), "could not verify pending GC Epoch presence"));
+    }
+    if (*present == transport::Presence::Present) {
+        return std::unexpected(
+            make_error(ErrorCode::IntegrityFailure,
+                       "pending GC Epoch is present remotely but omitted "
+                       "from Epoch listing"));
+    }
+    remove_pending_gc_epoch(workspace_root);
+    return {};
+}
+
+std::expected<std::vector<std::string>, Error>
+list_prefixed_objects(transport::Transport& storage, std::string_view prefix) {
+    auto listed = history_storage::detail::list_identifiers(storage, prefix);
+    if (!listed) {
+        return std::unexpected(history_error(listed.error()));
+    }
+    std::vector<std::string> out;
+    out.reserve(listed->size());
+    for (const auto& entry : *listed) {
+        out.push_back(entry.starts_with(prefix) ? entry
+                                                : std::string{prefix} + entry);
+    }
+    history_storage::detail::sort_unique(out);
+    return out;
+}
+
+void simulate_reachability_at_epoch(
+    history_storage::ReachabilityInventory& history,
+    const history_storage::epoch::Epoch& next_epoch) {
+    std::unordered_map<std::string_view, history_storage::ReachabilityCommit*>
+        by_id;
+    by_id.reserve(history.commits.size());
+    for (auto& commit : history.commits) {
+        commit.reachable = false;
+        by_id.emplace(commit.commit_id, &commit);
+    }
+    std::unordered_set<std::string_view> next_anchors;
+    next_anchors.reserve(next_epoch.anchors.size());
+    for (const auto& anchor : next_epoch.anchors) {
+        next_anchors.insert(anchor.commit_id);
+    }
+    std::vector<std::string_view> pending;
+    pending.reserve(history.logical_heads.size() + history.markers.size());
+    for (const auto& head : history.logical_heads) {
+        pending.push_back(head);
+    }
+    for (const auto& marker : history.markers) {
+        if (marker.state == history_storage::ReachabilityMarkerState::Valid &&
+            marker.reference.has_value()) {
+            pending.push_back(marker.reference->commit_id);
+        }
+    }
+    while (!pending.empty()) {
+        const auto id = pending.back();
+        pending.pop_back();
+        const auto it = by_id.find(id);
+        if (it == by_id.end()) {
+            continue;
+        }
+        auto* commit = it->second;
+        if (!commit->valid || commit->reachable) {
+            continue;
+        }
+        commit->reachable = true;
+        if (next_anchors.contains(commit->commit_id)) {
+            continue;
+        }
+        for (const auto& parent : commit->parents) {
+            pending.push_back(parent);
+        }
+    }
+    history.reachable_commits.clear();
+    history.orphan_commits.clear();
+    for (const auto& commit : history.commits) {
+        if (commit.reachable) {
+            history.reachable_commits.push_back(commit.commit_id);
+        } else if (commit.valid) {
+            history.orphan_commits.push_back(commit.commit_id);
+        }
+    }
+}
 
 std::expected<ObservePlan, Error>
 observe(transport::Transport& storage,
@@ -367,8 +795,10 @@ observe(transport::Transport& storage,
         std::uint32_t effective_min_age_hours,
         std::optional<std::string_view> barrier_identifier,
         const std::filesystem::path& workspace_root,
+        const std::filesystem::path& database_path,
         history_storage::CommitCache* commit_cache,
-        ProgressState& progress) {
+        ProgressState& progress,
+        bool simulate_epoch_advancement) {
     emit_gc_progress(progress,
                      GarbageCollectStage::Analyzing,
                      GarbageCollectSubStage::ListingRemote);
@@ -440,6 +870,162 @@ observe(transport::Transport& storage,
     if (auto valid = validate_history(*history); !valid) {
         return std::unexpected(valid.error());
     }
+    std::optional<state_storage::StoredState> local_accepted;
+    {
+        auto local = state_storage::load_state(database_path);
+        if (!local) {
+            return std::unexpected(
+                make_error(ErrorCode::StateFailure, local.error()));
+        }
+        if (*local) {
+            local_accepted = **local;
+            const auto& accepted = *local_accepted;
+            if (!accepted.commit_id.empty() &&
+                !std::ranges::contains(history->reachable_commits,
+                                       accepted.commit_id)) {
+                return std::unexpected(
+                    make_error(ErrorCode::IntegrityFailure,
+                               "locally accepted commit is outside the "
+                               "observed retained history",
+                               accepted.commit_id));
+            }
+            if (!accepted.epoch_id.empty()) {
+                const auto checkpoint = history_storage::epoch_object(
+                    layout, accepted.epoch_sequence, accepted.epoch_id);
+                // select_latest verified the entire chain. The inventory
+                // classifies its predecessors separately from its tip.
+                if (!std::ranges::contains(history->valid_epochs, checkpoint) &&
+                    !std::ranges::contains(history->orphan_epochs,
+                                           checkpoint)) {
+                    return std::unexpected(
+                        make_error(ErrorCode::IntegrityFailure,
+                                   "observed Epoch chain omits the locally "
+                                   "accepted checkpoint",
+                                   checkpoint));
+                }
+            }
+        }
+    }
+
+    std::vector<std::string> observed_head_markers;
+    observed_head_markers.reserve(history->markers.size());
+    for (const auto& marker : history->markers) {
+        observed_head_markers.push_back(marker.identifier);
+    }
+    history_storage::detail::sort_unique(observed_head_markers);
+
+    std::vector<std::string> observed_epoch_objects = history->valid_epochs;
+    observed_epoch_objects.insert(observed_epoch_objects.end(),
+                                  history->orphan_epochs.begin(),
+                                  history->orphan_epochs.end());
+    history_storage::detail::sort_unique(observed_epoch_objects);
+
+    const auto now_unix = platform::clock::unix_seconds();
+    if (!now_unix) {
+        return std::unexpected(
+            make_error(ErrorCode::StateFailure,
+                       "failed to read system clock for retention check: " +
+                           now_unix.error()));
+    }
+
+    std::optional<std::int64_t> remote_now_unix;
+    if (barrier_identifier.has_value()) {
+        const auto* barrier_meta = find_metadata(*barrier_identifier);
+        if (barrier_meta != nullptr &&
+            barrier_meta->modified_at_unix.has_value() &&
+            *barrier_meta->modified_at_unix > 0) {
+            remote_now_unix = *barrier_meta->modified_at_unix;
+        }
+    }
+
+    std::int64_t newest_reachable_head_created_at = 0;
+    for (const auto& commit : history->commits) {
+        if (commit.reachable && commit.valid && commit.tree &&
+            std::ranges::binary_search(history->logical_heads,
+                                       commit.commit_id)) {
+            newest_reachable_head_created_at = std::max(
+                newest_reachable_head_created_at, commit.tree->created_at);
+        }
+    }
+
+    // Version-retention clock:
+    // - Live GC uses min(local_now, remote_now) from the freshly published
+    //   barrier; if remote_now is absent under positive grace, fail closed;
+    //   under explicit --min-age 0 without list_metadata, fall back to
+    //   min(local_now, newest authenticated head timestamp).
+    // - Dry-run uses local_now because no remote barrier is published.
+    std::optional<std::int64_t> epoch_now_unix;
+    if (barrier_identifier.has_value()) {
+        if (remote_now_unix.has_value()) {
+            epoch_now_unix = std::min(*now_unix, *remote_now_unix);
+        } else if (effective_grace == std::chrono::seconds{0} &&
+                   newest_reachable_head_created_at > 0) {
+            epoch_now_unix =
+                std::min(*now_unix, newest_reachable_head_created_at);
+        }
+    } else {
+        epoch_now_unix = *now_unix;
+    }
+
+    std::optional<history_storage::epoch::Epoch> planned_next_epoch;
+    std::optional<history_storage::epoch::SealedEpoch> planned_sealed_epoch;
+    std::size_t planned_pruned_commits = 0;
+    if (history->latest_epoch.has_value() && epoch_now_unix.has_value() &&
+        *epoch_now_unix > 0 &&
+        history->latest_epoch->reference.sequence <
+            std::numeric_limits<std::uint64_t>::max()) {
+        std::vector<history::LoadedCommit> reachable_loaded;
+        reachable_loaded.reserve(history->reachable_commits.size());
+        for (const auto& commit : history->commits) {
+            if (commit.reachable && commit.valid && commit.tree.has_value()) {
+                reachable_loaded.push_back(history::LoadedCommit{
+                    .id = commit.commit_id, .commit = *commit.tree});
+            }
+        }
+        std::vector<std::string> marked_commit_ids;
+        marked_commit_ids.reserve(history->markers.size());
+        for (const auto& marker : history->markers) {
+            if (marker.state ==
+                    history_storage::ReachabilityMarkerState::Valid &&
+                marker.reference.has_value()) {
+                marked_commit_ids.push_back(marker.reference->commit_id);
+            }
+        }
+        history_storage::detail::sort_unique(marked_commit_ids);
+        std::vector<std::string> protected_commit_ids;
+        if (local_accepted && !local_accepted->commit_id.empty()) {
+            protected_commit_ids.push_back(local_accepted->commit_id);
+        }
+        const auto plan = history_storage::epoch::plan_pruning(
+            reachable_loaded,
+            history->latest_epoch->value.policy,
+            {.reference_now_unix = *epoch_now_unix,
+             .marked_commit_ids = marked_commit_ids,
+             .current_anchors = history->latest_epoch->value.anchors,
+             .protected_commit_ids = protected_commit_ids});
+        if (plan.has_value() && !plan->prunable_commits.empty() &&
+            plan->anchors != history->latest_epoch->value.anchors) {
+            history_storage::epoch::Epoch candidate{
+                .vault_id = history->latest_epoch->value.vault_id,
+                .sequence = history->latest_epoch->reference.sequence + 1,
+                .issued_at = std::max(history->latest_epoch->value.issued_at + 1,
+                                      *epoch_now_unix),
+                .policy = history->latest_epoch->value.policy,
+                .anchors = plan->anchors,
+                .previous_epoch_id = history->latest_epoch->reference.epoch_id,
+            };
+            auto sealed = history_storage::epoch::seal(candidate, key);
+            if (!sealed) {
+                return std::unexpected(epoch_error(sealed.error()));
+            }
+            planned_next_epoch = std::move(candidate);
+            planned_sealed_epoch = std::move(*sealed);
+            planned_pruned_commits = plan->prunable_commits.size();
+            if (simulate_epoch_advancement) {
+                simulate_reachability_at_epoch(*history, *planned_next_epoch);
+            }
+        }
+    }
 
     emit_gc_progress(progress,
                      GarbageCollectStage::Analyzing,
@@ -473,13 +1059,6 @@ observe(transport::Transport& storage,
                        "remote contains invalid operational activity objects",
                        activities->invalid_objects.front()));
     }
-    const auto now_unix = platform::clock::unix_seconds();
-    if (!now_unix) {
-        return std::unexpected(
-            make_error(ErrorCode::StateFailure,
-                       "failed to read system clock for retention check: " +
-                           now_unix.error()));
-    }
 
     // Fail-closed remote clock clamping: when running a mutating GC with
     // positive grace period, clamp effective_now to min(local_now, remote_now)
@@ -487,14 +1066,10 @@ observe(transport::Transport& storage,
     std::optional<std::int64_t> effective_now_unix = *now_unix;
     if (effective_grace > std::chrono::seconds{0} &&
         barrier_identifier.has_value()) {
-        const auto* barrier_meta = find_metadata(*barrier_identifier);
-        if (barrier_meta == nullptr ||
-            !barrier_meta->modified_at_unix.has_value() ||
-            *barrier_meta->modified_at_unix <= 0) {
+        if (!remote_now_unix.has_value()) {
             effective_now_unix.reset();
         } else {
-            effective_now_unix =
-                std::min(*now_unix, *barrier_meta->modified_at_unix);
+            effective_now_unix = std::min(*now_unix, *remote_now_unix);
         }
     }
 
@@ -680,103 +1255,25 @@ observe(transport::Transport& storage,
         .deferred_recent_objects = deferred_recent_objects,
         .candidate_bytes = candidate_bytes,
         .pruned_activities = candidate_activities,
+        .latest_epoch = std::move(history->latest_epoch),
+        .planned_next_epoch = std::move(planned_next_epoch),
+        .planned_sealed_epoch = std::move(planned_sealed_epoch),
+        .planned_pruned_commits = planned_pruned_commits,
+        .observed_head_markers = std::move(observed_head_markers),
+        .observed_epoch_objects = std::move(observed_epoch_objects),
     };
 }
 
 std::expected<void, Error>
-reject_if_writers_present(const std::vector<std::string>& writers) {
-    if (!writers.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::ConcurrentChange,
-                       "active writers block garbage collection: " +
-                           join_values(writers)));
+check_pre_barrier_controls(transport::Transport& storage,
+                           const history_storage::RemoteLayout& layout,
+                           const std::filesystem::path& workspace_root) {
+    auto checked =
+        protocol::check_pre_barrier_controls(storage, layout, workspace_root);
+    if (!checked) {
+        return std::unexpected(protocol_error(checked.error()));
     }
     return {};
-}
-
-std::expected<void, Error>
-require_no_writers(transport::Transport& storage,
-                   const history_storage::RemoteLayout& layout) {
-    auto writers = protocol::active_writers(storage, layout);
-    if (!writers) {
-        return std::unexpected(protocol_error(writers.error()));
-    }
-    return reject_if_writers_present(*writers);
-}
-
-std::expected<void, Error>
-check_pre_barrier_controls(transport::Transport& storage,
-                           const history_storage::RemoteLayout& layout) {
-    bool use_fallback = (storage.storage.control_read_batch == nullptr);
-    std::vector<std::string> listed_writers;
-    std::vector<std::string> listed_barriers;
-    transport::Presence legacy_barrier = transport::Presence::Absent;
-
-    if (!use_fallback) {
-        const auto writers_dir =
-            history_storage::detail::trim_trailing_slash(layout.writers_prefix);
-        const auto barriers_dir = history_storage::detail::trim_trailing_slash(
-            layout.barriers_prefix);
-        auto batch = transport::control_read_batch(
-            storage,
-            transport::ControlReadBatchRequest{
-                .list_prefixes = {std::string{writers_dir},
-                                  std::string{barriers_dir}},
-                .presence_identifiers = {layout.barrier_identifier},
-            });
-        if (!batch) {
-            if (batch.error().code == transport::ErrorCode::Unsupported) {
-                use_fallback = true;
-            } else {
-                return std::unexpected(transport_error(
-                    batch.error(), "could not inspect maintenance controls"));
-            }
-        } else {
-            if (batch->listings.size() != 2 || batch->presences.size() != 1) {
-                return std::unexpected(make_error(
-                    ErrorCode::TransportFailure,
-                    "invalid control read batch response cardinality"));
-            }
-            listed_writers = std::move(batch->listings[0]);
-            listed_barriers = std::move(batch->listings[1]);
-            legacy_barrier = batch->presences.front();
-        }
-    }
-
-    if (use_fallback) {
-        auto barriers = protocol::active_barriers(storage, layout);
-        if (!barriers) {
-            return std::unexpected(protocol_error(barriers.error()));
-        }
-        if (!barriers->empty()) {
-            return std::unexpected(
-                make_error(ErrorCode::ConcurrentChange,
-                           "another maintenance barrier is already present"));
-        }
-        return require_no_writers(storage, layout);
-    }
-
-    if (legacy_barrier == transport::Presence::Present ||
-        !listed_barriers.empty()) {
-        return std::unexpected(
-            make_error(ErrorCode::ConcurrentChange,
-                       "another maintenance barrier is already present"));
-    }
-
-    std::vector<std::string> writers;
-    writers.reserve(listed_writers.size());
-    for (const auto& name : listed_writers) {
-        const bool valid_hex32 =
-            name.size() == 32 && std::ranges::all_of(name, [](char c) {
-                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
-            });
-        if (!valid_hex32) {
-            return std::unexpected(make_error(
-                ErrorCode::IntegrityFailure, "invalid writer marker: " + name));
-        }
-        writers.push_back(layout.writers_prefix + name);
-    }
-    return reject_if_writers_present(writers);
 }
 
 std::expected<void, Error>
@@ -840,7 +1337,33 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
     emit_gc_progress(progress,
                      GarbageCollectStage::Preparing,
                      GarbageCollectSubStage::CheckingControls);
-    if (auto controls = check_pre_barrier_controls(storage, layout);
+    if (auto reconciled = protocol::reconcile_pending_registrations(
+            storage, layout, workspace_root, protocol::PendingRegistrationKind::All);
+        !reconciled) {
+        auto err = protocol_error(reconciled.error());
+        if (!failure_diagnostic.transport_error.has_value()) {
+            failure_diagnostic.transport_error = err.transport_failure;
+        }
+        err.garbage_collection = failure_diagnostic;
+        return std::unexpected(std::move(err));
+    }
+    if (auto pending_epoch = reconcile_pending_gc_epoch(
+            storage,
+            layout,
+            key,
+            workspace_root,
+            runtime_data.database_path,
+            options.dry_run);
+        !pending_epoch) {
+        auto err = pending_epoch.error();
+        if (!failure_diagnostic.transport_error.has_value()) {
+            failure_diagnostic.transport_error = err.transport_failure;
+        }
+        err.garbage_collection = failure_diagnostic;
+        return std::unexpected(std::move(err));
+    }
+    if (auto controls =
+            check_pre_barrier_controls(storage, layout, workspace_root);
         !controls) {
         auto err = controls.error();
         if (!failure_diagnostic.transport_error.has_value()) {
@@ -864,8 +1387,10 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                                      effective_min_age_hours,
                                      std::nullopt,
                                      workspace_root,
+                                     runtime_data.database_path,
                                      options.commit_cache,
-                                     progress);
+                                     progress,
+                                     /*simulate_epoch_advancement=*/true);
         if (!observed_plan) {
             auto err = observed_plan.error();
             if (!failure_diagnostic.transport_error.has_value()) {
@@ -912,6 +1437,20 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             .candidate_bytes = observed_plan->candidate_bytes,
             .removed_bytes = 0,
             .effective_min_age_hours = effective_min_age_hours,
+            .epoch_advanced = false,
+            .epoch_advancement_planned =
+                observed_plan->planned_next_epoch.has_value(),
+            .target_epoch_sequence =
+                observed_plan->planned_sealed_epoch
+                    ? std::optional{observed_plan->planned_sealed_epoch
+                                        ->reference.sequence}
+                    : std::nullopt,
+            .target_epoch_id =
+                observed_plan->planned_sealed_epoch
+                    ? std::optional{observed_plan->planned_sealed_epoch
+                                        ->reference.epoch_id}
+                    : std::nullopt,
+            .planned_pruned_commits = observed_plan->planned_pruned_commits,
             .pruned_activities = observed_plan->pruned_activities,
             .kept_activities = std::move(observed_plan->kept_activities),
         };
@@ -937,7 +1476,12 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
     auto barrier = protocol::establish_barrier(
         storage, layout, workspace_root, barrier_options);
     if (!barrier) {
-        return std::unexpected(protocol_error(barrier.error()));
+        auto err = protocol_error(barrier.error());
+        if (!failure_diagnostic.transport_error.has_value()) {
+            failure_diagnostic.transport_error = err.transport_failure;
+        }
+        err.garbage_collection = failure_diagnostic;
+        return std::unexpected(std::move(err));
     }
     BarrierCleanup cleanup{std::move(*barrier)};
 
@@ -1020,10 +1564,198 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                                      effective_min_age_hours,
                                      cleanup.registration.identifier,
                                      workspace_root,
+                                     runtime_data.database_path,
                                      options.commit_cache,
-                                     progress);
+                                     progress,
+                                     /*simulate_epoch_advancement=*/false);
         if (!observed_plan) {
             return finish(std::unexpected(observed_plan.error()));
+        }
+
+        bool epoch_advanced = false;
+        bool consistency_probed = false;
+        std::optional<std::uint64_t> target_epoch_sequence;
+        std::optional<std::string> target_epoch_id;
+        std::size_t planned_pruned_commits =
+            observed_plan->planned_pruned_commits;
+
+        if (observed_plan->planned_next_epoch.has_value() &&
+            observed_plan->planned_sealed_epoch.has_value() &&
+            observed_plan->latest_epoch.has_value()) {
+            const auto planned_epoch = *observed_plan->planned_next_epoch;
+            const auto sealed_epoch = *observed_plan->planned_sealed_epoch;
+            const auto previous_epoch_ref =
+                observed_plan->latest_epoch->reference;
+            target_epoch_sequence = sealed_epoch.reference.sequence;
+            target_epoch_id = sealed_epoch.reference.epoch_id;
+
+            emit_gc_progress(progress,
+                             GarbageCollectStage::Analyzing,
+                             GarbageCollectSubStage::ProbingConsistency);
+            auto online = protocol::supports_online_collection(
+                storage, layout, workspace_root);
+            if (!online) {
+                return finish(std::unexpected(protocol_error(online.error())));
+            }
+            consistency_probed = true;
+            if (!*online) {
+                failure_diagnostic.stage = GarbageCollectStage::Finalizing;
+                emit_gc_progress(progress,
+                                 GarbageCollectStage::Finalizing,
+                                 GarbageCollectSubStage::ReleasingBarrier);
+                return finish(GarbageCollectResult{
+                    .candidate_objects = observed_plan->candidates.size(),
+                    .removed_objects = 0,
+                    .analysis_only = true,
+                    .dry_run = false,
+                    .candidate_content_objects =
+                        observed_plan->candidate_content_objects,
+                    .candidate_commit_variants =
+                        observed_plan->candidate_commit_variants,
+                    .candidate_expired_commits =
+                        observed_plan->candidate_expired_commits,
+                    .candidate_activities = observed_plan->candidate_activities,
+                    .deferred_recent_objects =
+                        observed_plan->deferred_recent_objects,
+                    .candidate_bytes = observed_plan->candidate_bytes,
+                    .removed_bytes = 0,
+                    .effective_min_age_hours = effective_min_age_hours,
+                    .epoch_advanced = false,
+                    .epoch_advancement_planned = true,
+                    .target_epoch_sequence = target_epoch_sequence,
+                    .target_epoch_id = target_epoch_id,
+                    .planned_pruned_commits = planned_pruned_commits,
+                    .pruned_activities = observed_plan->pruned_activities,
+                    .kept_activities =
+                        std::move(observed_plan->kept_activities),
+                });
+            }
+
+            if (auto verified =
+                    require_barrier_exclusivity(cleanup.registration, layout);
+                !verified) {
+                return finish(std::unexpected(verified.error()));
+            }
+            auto current_epochs =
+                list_prefixed_objects(storage, layout.epochs_prefix);
+            if (!current_epochs) {
+                return finish(std::unexpected(current_epochs.error()));
+            }
+            if (*current_epochs != observed_plan->observed_epoch_objects) {
+                return finish(std::unexpected(make_error(
+                    ErrorCode::ConcurrentChange,
+                    "remote Epoch inventory changed before publishing "
+                    "retention Epoch")));
+            }
+            auto current_heads =
+                list_prefixed_objects(storage, layout.heads_prefix);
+            if (!current_heads) {
+                return finish(std::unexpected(current_heads.error()));
+            }
+            if (*current_heads != observed_plan->observed_head_markers) {
+                return finish(std::unexpected(make_error(
+                    ErrorCode::ConcurrentChange,
+                    "remote HEAD markers changed before publishing "
+                    "retention Epoch")));
+            }
+
+            auto epoch_identifier = history_storage::epoch::object_identifier(
+                layout, sealed_epoch.reference);
+            if (!epoch_identifier) {
+                return finish(
+                    std::unexpected(epoch_error(epoch_identifier.error())));
+            }
+            if (auto persisted = persist_pending_gc_epoch(
+                    workspace_root,
+                    PendingGcEpochRecord{
+                        .identifier = *epoch_identifier,
+                        .reference = sealed_epoch.reference,
+                        .previous_epoch_id = previous_epoch_ref.epoch_id,
+                        .sealed_bytes = sealed_epoch.bytes});
+                !persisted) {
+                return finish(std::unexpected(persisted.error()));
+            }
+
+            failure_diagnostic.failed_identifier = *epoch_identifier;
+            mutation_in_flight = true;
+            auto published = history_storage::epoch::publish(
+                storage, layout, sealed_epoch, workspace_root);
+            mutation_in_flight = false;
+            if (!published) {
+                failure_diagnostic.mutation_state =
+                    GarbageCollectMutationState::Uncertain;
+                return finish(std::unexpected(epoch_error(published.error())));
+            }
+
+            auto verified_epoch = history_storage::epoch::verify(
+                storage, planned_epoch, sealed_epoch.reference, key,
+                workspace_root);
+            if (!verified_epoch) {
+                failure_diagnostic.mutation_state =
+                    GarbageCollectMutationState::Uncertain;
+                return finish(
+                    std::unexpected(epoch_error(verified_epoch.error())));
+            }
+            auto confirmed_latest = history_storage::epoch::load_latest(
+                storage, key, workspace_root, previous_epoch_ref);
+            if (!confirmed_latest) {
+                if (confirmed_latest.error().code !=
+                    history_storage::epoch::ErrorCode::Conflict) {
+                    failure_diagnostic.mutation_state =
+                        GarbageCollectMutationState::Uncertain;
+                }
+                return finish(
+                    std::unexpected(epoch_error(confirmed_latest.error())));
+            }
+            if (!*confirmed_latest ||
+                (*confirmed_latest)->reference != sealed_epoch.reference) {
+                failure_diagnostic.mutation_state =
+                    GarbageCollectMutationState::Uncertain;
+                return finish(std::unexpected(make_error(
+                    ErrorCode::IntegrityFailure,
+                    "published Epoch is not the authenticated chain tip")));
+            }
+
+            remove_pending_gc_epoch(workspace_root);
+            failure_diagnostic.failed_identifier.reset();
+            if (auto synced = sync_local_epoch_checkpoint(
+                    runtime_data.database_path, sealed_epoch.reference);
+                !synced) {
+                return finish(std::unexpected(synced.error()));
+            }
+
+            if (auto verified =
+                    require_barrier_exclusivity(cleanup.registration, layout);
+                !verified) {
+                return finish(std::unexpected(verified.error()));
+            }
+
+            // Mandatory Observation #2 after confirmed Epoch advancement:
+            // build the physical deletion plan strictly from authenticated
+            // remote storage under the newly confirmed Epoch.
+            observed_plan = observe(storage,
+                                    key,
+                                    retention,
+                                    effective_grace,
+                                    effective_min_age_hours,
+                                    cleanup.registration.identifier,
+                                    workspace_root,
+                                    runtime_data.database_path,
+                                    options.commit_cache,
+                                    progress,
+                                    /*simulate_epoch_advancement=*/false);
+            if (!observed_plan) {
+                return finish(std::unexpected(observed_plan.error()));
+            }
+            if (!observed_plan->latest_epoch ||
+                observed_plan->latest_epoch->reference !=
+                    sealed_epoch.reference) {
+                return finish(std::unexpected(make_error(
+                    ErrorCode::IntegrityFailure,
+                    "post-Epoch re-observation did not observe the confirmed "
+                    "Epoch")));
+            }
+            epoch_advanced = true;
         }
 
         const auto& candidates = observed_plan->candidates;
@@ -1069,45 +1801,58 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
                 .candidate_bytes = observed_plan->candidate_bytes,
                 .removed_bytes = 0,
                 .effective_min_age_hours = effective_min_age_hours,
+                .epoch_advanced = epoch_advanced,
+                .epoch_advancement_planned = epoch_advanced,
+                .target_epoch_sequence = target_epoch_sequence,
+                .target_epoch_id = target_epoch_id,
+                .planned_pruned_commits = planned_pruned_commits,
                 .pruned_activities = observed_plan->pruned_activities,
                 .kept_activities = std::move(observed_plan->kept_activities),
             });
         }
 
-        emit_gc_progress(progress,
-                         GarbageCollectStage::Analyzing,
-                         GarbageCollectSubStage::ProbingConsistency);
-        auto online = protocol::supports_online_collection(
-            storage, layout, workspace_root);
-        if (!online) {
-            return finish(std::unexpected(protocol_error(online.error())));
-        }
-
-        if (!*online) {
-            failure_diagnostic.stage = GarbageCollectStage::Finalizing;
+        if (!consistency_probed) {
             emit_gc_progress(progress,
-                             GarbageCollectStage::Finalizing,
-                             GarbageCollectSubStage::ReleasingBarrier);
-            return finish(GarbageCollectResult{
-                .candidate_objects = candidate_count,
-                .removed_objects = 0,
-                .analysis_only = true,
-                .dry_run = false,
-                .candidate_content_objects =
-                    observed_plan->candidate_content_objects,
-                .candidate_commit_variants =
-                    observed_plan->candidate_commit_variants,
-                .candidate_expired_commits =
-                    observed_plan->candidate_expired_commits,
-                .candidate_activities = observed_plan->candidate_activities,
-                .deferred_recent_objects =
-                    observed_plan->deferred_recent_objects,
-                .candidate_bytes = observed_plan->candidate_bytes,
-                .removed_bytes = 0,
-                .effective_min_age_hours = effective_min_age_hours,
-                .pruned_activities = observed_plan->pruned_activities,
-                .kept_activities = std::move(observed_plan->kept_activities),
-            });
+                             GarbageCollectStage::Analyzing,
+                             GarbageCollectSubStage::ProbingConsistency);
+            auto online = protocol::supports_online_collection(
+                storage, layout, workspace_root);
+            if (!online) {
+                return finish(std::unexpected(protocol_error(online.error())));
+            }
+
+            if (!*online) {
+                failure_diagnostic.stage = GarbageCollectStage::Finalizing;
+                emit_gc_progress(progress,
+                                 GarbageCollectStage::Finalizing,
+                                 GarbageCollectSubStage::ReleasingBarrier);
+                return finish(GarbageCollectResult{
+                    .candidate_objects = candidate_count,
+                    .removed_objects = 0,
+                    .analysis_only = true,
+                    .dry_run = false,
+                    .candidate_content_objects =
+                        observed_plan->candidate_content_objects,
+                    .candidate_commit_variants =
+                        observed_plan->candidate_commit_variants,
+                    .candidate_expired_commits =
+                        observed_plan->candidate_expired_commits,
+                    .candidate_activities = observed_plan->candidate_activities,
+                    .deferred_recent_objects =
+                        observed_plan->deferred_recent_objects,
+                    .candidate_bytes = observed_plan->candidate_bytes,
+                    .removed_bytes = 0,
+                    .effective_min_age_hours = effective_min_age_hours,
+                    .epoch_advanced = epoch_advanced,
+                    .epoch_advancement_planned = epoch_advanced,
+                    .target_epoch_sequence = target_epoch_sequence,
+                    .target_epoch_id = target_epoch_id,
+                    .planned_pruned_commits = planned_pruned_commits,
+                    .pruned_activities = observed_plan->pruned_activities,
+                    .kept_activities =
+                        std::move(observed_plan->kept_activities),
+                });
+            }
         }
 
         failure_diagnostic.stage = GarbageCollectStage::Applying;
@@ -1325,6 +2070,11 @@ garbage_collect_impl(const runtime::RuntimeData& runtime_data,
             .removed_bytes = progress.removed_bytes,
             .effective_min_age_hours = effective_min_age_hours,
             .removal_elapsed = removal_elapsed,
+            .epoch_advanced = epoch_advanced,
+            .epoch_advancement_planned = epoch_advanced,
+            .target_epoch_sequence = target_epoch_sequence,
+            .target_epoch_id = target_epoch_id,
+            .planned_pruned_commits = planned_pruned_commits,
             .pruned_activities = observed_plan->pruned_activities,
             .kept_activities = std::move(observed_plan->kept_activities),
         });

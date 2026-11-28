@@ -2917,6 +2917,26 @@ TEST(CliPresenterTest,
     EXPECT_NE(res_json.find("\"command\":\"conflicts resolve\""),
               std::string::npos);
     EXPECT_NE(res_json.find("\"removed_count\":1"), std::string::npos);
+    EXPECT_NE(res_json.find("\"recovery_directory\":null"), std::string::npos);
+
+    resolved.recovery_directory =
+        "docs/.kasumi-conflict-recovery-0123456789abcdef0123456789abcdef";
+    const auto rec_text = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present(resolved, false), 0);
+    });
+    EXPECT_NE(rec_text.find("Other versions were kept in "
+                            "docs/.kasumi-conflict-recovery-"
+                            "0123456789abcdef0123456789abcdef."),
+              std::string::npos);
+    const auto rec_json = kasumi::test::capture_stdout([&] {
+        EXPECT_EQ(kasumi::cli::present_json_conflict_resolved(
+                      resolved, std::chrono::milliseconds{2}),
+                  0);
+    });
+    EXPECT_NE(rec_json.find("\"recovery_directory\":"
+                            "\"docs/.kasumi-conflict-recovery-"
+                            "0123456789abcdef0123456789abcdef\""),
+              std::string::npos);
 }
 
 TEST(CliPresenterTest, PresentsV026JsonDiagnosticsIgnoreProfileTestAndKey) {

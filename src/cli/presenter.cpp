@@ -2765,6 +2765,12 @@ int present(const application::Response& response, bool full, bool quiet) {
                     }
                     print_deferred_recent(data.min_age_hours,
                                           data.deferred_recent_objects);
+                    if (data.epoch_advancement_planned &&
+                        data.target_epoch_sequence.has_value()) {
+                        i18n::println(i18n::Key::GcEpochAdvancementPlanned,
+                                      *data.target_epoch_sequence,
+                                      data.planned_pruned_commits);
+                    }
                     i18n::println(i18n::Key::GcDryRunCompleted);
                     return 0;
                 }
@@ -2820,6 +2826,12 @@ int present(const application::Response& response, bool full, bool quiet) {
                 }
                 print_deferred_recent(data.min_age_hours,
                                       data.deferred_recent_objects);
+                if (data.epoch_advanced &&
+                    data.target_epoch_sequence.has_value()) {
+                    i18n::println(i18n::Key::GcEpochAdvanced,
+                                  *data.target_epoch_sequence,
+                                  data.planned_pruned_commits);
+                }
                 return 0;
             } else if constexpr (std::is_same_v<
                                      T,
@@ -3302,6 +3314,10 @@ int present(const application::ResolveConflictReport& report, bool quiet) {
             sanitize_terminal_text(report.canonical_path),
             sanitize_terminal_text(report.selected_artifact.value_or("")),
             report.removed_artifacts.size()));
+    }
+    if (report.recovery_directory) {
+        i18n::println(i18n::Key::ConflictsRecoveryDirectory,
+                      sanitize_terminal_text(*report.recovery_directory));
     }
     return 0;
 }

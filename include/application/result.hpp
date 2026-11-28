@@ -168,6 +168,11 @@ struct GarbageCollectCompleted {
     std::uint64_t removed_bytes = 0;
     std::uint32_t min_age_hours = 0;
     std::chrono::nanoseconds removal_elapsed{};
+    bool epoch_advanced = false;
+    bool epoch_advancement_planned = false;
+    std::optional<std::uint64_t> target_epoch_sequence = std::nullopt;
+    std::optional<std::string> target_epoch_id = std::nullopt;
+    std::size_t planned_pruned_commits = 0;
 };
 
 // Result of resolving unavailable pending materializations as logical

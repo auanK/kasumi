@@ -94,6 +94,11 @@ struct GarbageCollectResult {
     std::uint64_t removed_bytes = 0;
     std::uint32_t effective_min_age_hours = 0;
     std::chrono::nanoseconds removal_elapsed{};
+    bool epoch_advanced = false;
+    bool epoch_advancement_planned = false;
+    std::optional<std::uint64_t> target_epoch_sequence = std::nullopt;
+    std::optional<std::string> target_epoch_id = std::nullopt;
+    std::size_t planned_pruned_commits = 0;
     std::size_t pruned_activities = 0;
     std::vector<history_storage::activity::LoadedActivity> kept_activities;
 };
