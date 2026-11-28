@@ -1,11 +1,14 @@
 # Architecture Map
 
+The [0.32 vault protocol](architecture/protocol-0.32.md) defines the interoperability and safety contract shared by Sync, recovery, and maintenance.
+
 Kasumi is a C++23 client that synchronizes local directories through a passive shared object store. Clients authenticate and reconcile history locally; the provider stores encrypted payloads and protocol objects. Each machine has its own profile and accepted SQLite state. The shared vault is identified by its key and authenticated genesis Epoch. Concurrent clients can publish immutable Commit branches without a global sync lock. A later client resolves the branches and may publish a merge Commit.
 
 ```text
 CLI/profile → local observation + authenticated remote history + StoredState
              → remote DAG resolution → reconciliation → SyncPlan
-             → reobservation → staged execution → Commit/HEAD/Epoch publication
+             → reobservation → staged execution → verified Commit and HEAD when publishing
+             → genesis Epoch on bootstrap, or checkpoint validation on established history
              → SQLite accepted state and cleanup
 ```
 
@@ -36,11 +39,11 @@ CLI/profile → local observation + authenticated remote history + StoredState
 
 | Request | Local effects | Remote effects |
 |---|---|---|
-| `config` list/create/edit/rename/delete, `profile <create\|edit\|clone\|storage\|rename\|delete>`, `key` | Reads or changes `config.toml`, private profile paths, and persisted keys in the OS vault or `key.bin`; delete preserves the synchronized directory | None (`profile create --verify` also runs a read-only `profile test` connection check and rolls back on failure) |
+| `config` list/create/edit/rename/delete, `profile <create\|edit\|clone\|storage\|rename\|delete>`, `key` | Reads or changes `config.toml`, private profile paths, and persisted keys in the OS vault or `key.bin`; delete preserves the synchronized directory | None (`profile create --verify` checks the candidate connection before publishing the name) |
 | `profile test <profile>` | Validates credentials and opens transport read-only without changing local SQLite state | Lists/observes vault readiness (`empty_ready_for_init` or authenticated HEAD/Epoch probe) read-only |
 | `ignore check`, `ignore init` | `ignore check` evaluates `.kasumiignore` rules read-only; `ignore init` writes (or previews with `--dry-run`) `.kasumiignore` in `local_dir` | None |
 | `list`, `show`, `diagnostics`, `conflicts [<profile>]`, `web`, `completion` | `list`/`show`/`diagnostics`/`conflicts <profile>` inspect `config.toml`, `.kasumiignore` syntax, local/SQLite traceability, or `.kasumiconflict_*` artifacts read-only without contacting remote storage or exposing secrets; `web` launches/opens the daemon's embedded Web UI (or configures `web-password.json` via `web set-password`); `completion` prints shell completion scripts | None |
-| `conflicts resolve` | Under `profile-<name>.lock` (skipped for `--dry-run`): optionally promotes the chosen `.kasumiconflict_*` file atomically over the canonical path, then deletes all conflict artifacts in that group | None |
+| `conflicts resolve` | Under `profile-<name>.lock` (skipped for `--dry-run`): optionally promotes the chosen `.kasumiconflict_*` file atomically over the canonical path, and retains the other artifacts in an excluded local recovery directory | None |
 | Preview (`sync --dry-run`), Status | Reads local/SQLite state; profile lock and permission normalization are possible | Observation only; no recovery or publication |
 | Sync | May change synchronized files, file-hash cache, transaction journal, and accepted `StoredState` | May upload content and publish/prune history; registers a writer for active work |
 | Resolve Missing | `--dry-run`: read-only preview of pending paths. `--confirm` (or confirmed prompt): preceding recovery, logical deletion updates in `StoredState` | `--dry-run`: observation only. Confirmed run: registers writer and publishes a `KCOM` Commit/HEAD marking unresolved paths deleted |

@@ -172,8 +172,7 @@ ctest --test-dir build-debug -L release-critical --output-on-failure --no-tests=
 ctest --test-dir build-debug -R ^kasumi_architecture_dag$ --output-on-failure
 ```
 
-The release-critical selection covers crypto, formats, paths, protected history,
-GC, authenticated Sync repair, journal/crash recovery, and Fsck. Run it alongside
+The [release-critical selection](../tests/release_critical_labels.cmake) covers crypto, formats, paths, protected history, GC, authenticated Sync repair, journal/crash recovery and Fsck. The 0.32 regression cases also exercise concurrent bootstrap admission, retained checkpoints, recovery after an ancestral HEAD is pruned, and local lifecycle races. Run it alongside
 the full suite; record skipped and disabled tests separately. `--no-tests=error`
 rejects an empty selection.
 
@@ -210,7 +209,7 @@ UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 
 ## Rclone System Tests
 
-System tests exercise integration with an active rclone installation:
+System tests exercise an installed rclone binary. The physical-hash tests inspect its advertised RC commands. They check the SHA-256 result when `operations/hashsumfile` or `operations/check` is present and the `Unsupported` result when the corresponding command is absent. These tests establish capability handling for that installation. Cross-device visibility on the deployment provider is a separate requirement. [Transport contract](architecture/transport.md)
 
 ```powershell
 cmake -S . -B build-system -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DKASUMI_BUILD_SYSTEM_TESTS=ON

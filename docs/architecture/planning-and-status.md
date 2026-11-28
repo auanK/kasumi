@@ -4,6 +4,8 @@
 intents but share the same read-only planner and return a plan report. `--full`
 changes display truncation only. Neither command is a shortened Sync execution.
 
+A preview reserves neither a remote writer slot nor a destination path. On an empty vault, writer admission happens during real Sync. On a populated profile, the empty-local deletion safeguard is checked again if reobservation changes the plan. A successful preview cannot authorize publication against later state. [Sync execution](synchronization.md)
+
 ## Lifecycle
 
 Plan rows and action totals use translated descriptions that distinguish local

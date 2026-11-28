@@ -181,7 +181,14 @@ Concurrent modifications were made to the same file across multiple machines or 
 ### Safe Next Steps
 1. List preserved conflict groups with `kasumi conflicts <profile>` (or `--json`).
 2. Compare the canonical file and the conflict file(s).
-3. Resolve cleanly with `kasumi conflicts resolve <profile> <path> --keep-canonical` (keep current canonical) or `kasumi conflicts resolve <profile> <path> --keep <artifact>` (atomically promote that artifact over canonical and remove the artifacts; add `--dry-run` to preview first), or manually merge into the canonical file and delete `.kasumiconflict_*`.
+3. Resolve cleanly with `kasumi conflicts resolve <profile> <path> --keep-canonical` (keep current canonical) or `kasumi conflicts resolve <profile> <path> --keep <artifact>` (atomically promote that artifact over canonical and retire the other artifacts; add `--dry-run` to preview first), or manually merge into the canonical file and delete `.kasumiconflict_*`.
+
+   Resolution moves the other versions into a private sibling directory named
+   `.kasumi-conflict-recovery-<32 hex digits>`. The CLI and Web API report its
+   location relative to the sync root. Each file retains its original name and
+   any edits made through an already-open handle. Kasumi excludes this directory
+   from sync and retains it until you remove it. After an interrupted resolution,
+   check this directory for the originals before retrying.
 4. Run `kasumi sync <profile>` to synchronize the resolved canonical file and record the deletion of the conflict file(s).
 
 ### Related Documentation
@@ -248,6 +255,36 @@ The observed remote history is inconsistent with the client's locally accepted s
 ### Related Documentation
 * [Epochs & Retention Horizons](architecture/history-and-concurrency.md#epochs--retention-horizons)
 * [Remote History Inspection](architecture/remote-history-inspection.md)
+
+---
+
+## First Sync stopped while initializing a shared destination
+
+If two devices start against an empty destination, both may back off. Let one initializer finish and accept its first HEAD and Epoch in SQLite before starting the other. After a crash, keep the initializing profile and its journal and rerun Sync there. A visible HEAD alone can be an intermediate bootstrap state. An abandoned writer can also block admission. Inspect `kasumi remote writers <profile>` and verify that its owner has stopped before using marker removal. [Bootstrap and recovery](architecture/protocol-0.32.md#protocol-transitions)
+
+## Repack completed or old files were deleted, but GC reports little or no space to reclaim
+
+With the default policy, a historical commit only expires once **both** conditions hold: it is at least **5 generations** (`min_history_depth`) behind every logical head or marked commit **and** at least **6 hours** (`min_history_age_hours`) have passed since its child commit superseded it (independent of filesystem `mtime`, and separate from GC's physical `--min-age` deletion grace). Additionally, unmerged remote branches protect their common merge-base closure, and shared chunks or Micro-Pack members referenced by any still-retained commit keep the whole physical pack/chunk protected. Ordinary 0.32 Sync keeps the existing Epoch, while running `kasumi gc <profile>` (not `--dry-run`) advances the Epoch whenever commits pass both thresholds; note that a run that just confirmed Epoch `N+1` with freshly created remote objects may defer physical removal into `deferred_recent_objects` until the physical grace window elapses (unless run with `--min-age 0` while all Sync clients are stopped). Inspect `kasumi remote epochs <profile>`, `kasumi remote heads <profile>`, and `kasumi gc <profile> --dry-run`. A collector that cannot observe its accepted commit or exact Epoch stops before classifying candidates; preserve that checkpoint while investigating provider visibility. [Repack](architecture/repack.md) · [GC planning](architecture/garbage-collection.md#global-deletion-plan)
+
+## Epoch Chain Bifurcation (Legacy `0.31.x` Vaults)
+
+### Symptom
+Synchronization, history inspection, or garbage collection fails closed with:
+```text
+epoch sequence <N> has multiple identifiers
+```
+or `epoch sequence has conflict`.
+
+### Likely Meaning
+Before `0.32.0`, two `0.31.x` clients observed the same retention Epoch `N-1` concurrently and published two different authenticated Epoch objects for sequence `N`. Because Kasumi fails closed on duplicate Epoch sequences, normal history loading and GC refuse to arbitrarily pick one branch (such as lowest ID or newest timestamp), which could invalidate another device's accepted checkpoint.
+
+### Safe Next Steps
+1. **Do not delete any remote Epoch objects blindly and do not run destructive maintenance.** Preserve a full backup of both the remote `epochs/` namespace and commits/content before any recovery action.
+2. **Inspect every participating device's local checkpoint** (`db.sqlite` and the profile's diagnostics) and inspect remote objects so you know which Epoch ID(s) (`E_a` vs. `E_b`) clients have already persisted and which branch anchors each Epoch protects. Individual candidate Epochs can be authenticated by exact ID (`epoch::load_by_id`), whereas picking the lower ID or latest timestamp silently can strand another device.
+3. Upgrade all syncing devices to **`0.32.0+`** so concurrent writers defer new pruning Epoch publications while migrating or reconciling the vault.
+
+### Related Documentation
+* [Multi-Writer Retention & 0.32.0 Safety Boundary](architecture/history-and-concurrency.md#multi-writer-retention--0320-safety-boundary)
 
 ---
 

@@ -1,10 +1,12 @@
 # Daemon HTTP API
 
-The browser uses the daemon's HTTP API at `http://127.0.0.1:3137` by default. Local IPC clients discover their separate port from the private `daemon.control.json` in the Kasumi application data directory. Authenticated `GET /v1/status` includes `ipc_port` and `web_port`.
+The browser uses the daemon's HTTP API at `http://127.0.0.1:3137` by default. Local IPC clients discover their IPC port from the private `daemon.control.json` in the Kasumi application data directory. Authenticated `GET /v1/status` includes `ipc_port` and `web_port`.
 
 The [OpenAPI contract](api/openapi.yaml) describes every registered operation, request, response and event format.
 
 ## Listener and login
+
+Each daemon requires an exclusive listening address for IPC and for the browser. When the configured browser address is in use, startup reports a bind failure before publishing discovery metadata. Configure distinct Web ports or use port zero for independent instances on one host.
 
 To change the browser address, port, or allowed proxy hosts, use the Web UI (**System -> Service -> Web UI & network access**), run `kasumi web listen <addr[:port]> [--allow-host <host>] [--skip-host-check | --no-skip-host-check]`, or create/edit `web.json` beside `config.toml` and restart the daemon. For example, the following configuration exposes the Web UI on all interfaces (`0.0.0.0:3137`, e.g. Tailscale/LAN servers) while also allowing a reverse proxy serving `kasumi.example` or `*.ts.net`.
 
@@ -17,7 +19,7 @@ To change the browser address, port, or allowed proxy hosts, use the Web UI (**S
 }
 ```
 
-The browser listener accepts session cookies. The CLI uses a separate, dynamically assigned loopback IPC port with token authentication. Setting `"port": 0` selects a dynamic port (`0` on default loopback shares cleanly with IPC/discovery). When bound to `0.0.0.0` or `::`, direct IPv4/IPv6 literals in `Host` (including Tailscale `100.x.y.z` and LAN addresses) are automatically accepted; `allowed_hosts` also supports `*.domain` wildcard patterns, and `"skip_host_check": true` bypasses `Host` checks behind trusted reverse proxies. Configure the Web UI password on loopback (or via `kasumi web set-password`) before selecting a non-loopback bind address; remote access refuses to start if no password is configured. For HTTPS termination, preserve the public Host and have a loopback proxy overwrite `X-Forwarded-Proto` with `https`. Include the public port in `allowed_hosts` when the browser sends it.
+The browser listener accepts session cookies. The CLI uses token authentication on a dynamically assigned loopback port. With Web `bind` set to `127.0.0.1` and `port` set to `0`, both interfaces use the same socket owned by that daemon. Other bind/port combinations use a distinct Web listener. Read the assigned ports from daemon status. When bound to `0.0.0.0` or `::`, direct IPv4/IPv6 literals in `Host` (including Tailscale `100.x.y.z` and LAN addresses) are automatically accepted; `allowed_hosts` also supports `*.domain` wildcard patterns, and `"skip_host_check": true` bypasses `Host` checks behind trusted reverse proxies. Configure the Web UI password on loopback (or via `kasumi web set-password`) before selecting a non-loopback bind address; remote access refuses to start if no password is configured. For HTTPS termination, preserve the public Host and have a loopback proxy overwrite `X-Forwarded-Proto` with `https`. Include the public port in `allowed_hosts` when the browser sends it.
 
 Browser mutations with a body use `Content-Type: application/json`. Every browser mutation requires a matching `Origin` or `Referer`. After login, include the session cookie and an `X-CSRF-Token` header.
 
@@ -54,7 +56,7 @@ The existing `/v1/status`, `/v1/events`, `/v1/sync`, `/v1/pause`, `/v1/resume`, 
 | `POST /v1/profiles/{name}/clone` or `/rename` | Send the destination `name`. A clone starts paused. |
 | `POST /v1/profiles/{name}/storage` | Set `key_storage` to `vault`, `file` or `memory`. Supply the key through the key endpoint when switching to a new persistent store. |
 | `POST /v1/profiles/{name}/key` | Supply credentials. Set `replace: true` to replace an existing different key. |
-| `DELETE /v1/profiles/{name}` | Requires `confirm: true` in the body. The synchronized directory is preserved. |
+| `DELETE /v1/profiles/{name}` | Requires `confirm: true` in the body. Deletion reserves the name until private state and credential cleanup finish. The synchronized directory is preserved. |
 | `POST /v1/profiles/{name}/test` | Tests the configured remote and returns its readiness and authentication state. |
 | `GET /v1/rclone/remotes` | Lists locally configured rclone remotes. |
 | `POST /v1/profiles/{name}/ignore/check` | Send a `paths` array. Each item includes its disposition and matching rule. |

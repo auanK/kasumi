@@ -65,15 +65,28 @@ Commits behind Epochs, and pruned `KACT` activity records while preserving
 required history and Epochs. Deletions are permanent; keep independent backups.
 
 * **Scheduled vs. Manual Maintenance**: Routine unattended `kasumi gc <profile>`
-  uses the default 6-hour remote-clock-clamped grace period (`min_history_age_hours`),
-  read-only `remote_busy` backoff, multi-barrier settle checks, and periodic
-  mid-`Apply` revalidation (see [Automation](#automation)). For immediate
+  safely advances the authenticated Epoch frontier when superseded commits exceed both
+  `min_history_depth` (default `5` commits) and `min_history_age_hours` (default `6` hours
+  from supersession), using the remote-clock-clamped physical grace period (`--min-age`,
+  default `6h`), read-only `remote_busy` backoff, multi-barrier settle checks, and
+  periodic mid-`Apply` revalidation (see [Automation](#automation)). For immediate
   `--min-age 0` cleanups, reserve a maintenance window with Sync stopped on every
   client and serialize destructive maintenance across the vault; running GC after
   every Sync is unnecessary.
-* **Preview and Inspect Results**: Use `kasumi gc <profile> --dry-run` to preview
-  reclaimable counts and bytes read-only, check acknowledged removals after a real
-  run, and investigate partial or uncertain results before retrying. A later run
+* **Example — Three versions of a photo under weekly GC**: Suppose you edit
+  `vacation.jpg` three times (`v1` -> `v2` -> `v3`) and run `kasumi gc` weekly. With
+  the default retention depth of **5** commits and age of **6** hours, weekly GC keeps
+  all 3 versions (`v1`, `v2`, and `v3`) intact because depth is below 5 even if weeks
+  have passed (`both` depth and age protect versions). Only after at least **5 newer
+  versions** follow `v1` (say `v1..v6` synced over time) **and** more than 6 hours have
+  elapsed since `v2` replaced `v1` can weekly GC advance the Epoch and delete `v1`. If
+  `v1` is a large photo (`> 8 MiB`) and only part of the image or metadata changed, any
+  FastCDC chunks (or intact files like an unchanged 10-year-old photo still in `v6`)
+  shared with any surviving commit remain protected in storage; only chunks exclusive
+  to expired `v1` are removed.
+* **Preview and Inspect Results**: Use `kasumi gc <profile> --dry-run` to simulate Epoch
+  advancement and preview reclaimable counts and bytes read-only, check acknowledged
+  removals after a real run, and investigate partial or uncertain results before retrying. A later run
   builds a new plan.
 * **Respect Protocol Objects**: Use Kasumi's maintenance commands rather than
   treating a provider listing as a deletion list.
@@ -98,9 +111,7 @@ from verified local files **without downloading payloads or deleting remote obje
 * **Reclaiming Large Dirty Packs**: Large fragmented packs (`>= 2 MiB` live
   bytes with dead blobs) are skipped by default to avoid upload amplification.
   Pass `--reclaim-dirty` when dead space justifies rewriting them.
-* **Two-Step Space Reclamation**: Old packs remain referenced by retained commits
-  until `min_history_depth` and `min_history_age_hours` allow Epoch retention
-  to advance; run `kasumi gc <profile>` afterward to delete superseded packs.
+* **Space after repack.** A retained commit protects its old pack even after the current snapshot uses a smaller pack. Ordinary 0.32 Sync keeps the existing Epoch, so waiting alone does not delete old packs; run `kasumi gc <profile> --dry-run` to see which replaced commits have satisfied both retention depth and age (`min_history_depth` and `min_history_age_hours`) so GC can advance the Epoch and reclaim those bytes.
 
 See [Micro-Pack Repack Architecture](architecture/repack.md) for planning
 thresholds, publication invariants, and cooperative writer controls.
