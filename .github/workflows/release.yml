@@ -10,7 +10,26 @@ permissions:
   contents: read
 
 jobs:
+  verify-ci:
+    name: Verify CI for release commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout release revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Require successful Ubuntu and Windows CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/wait_for_release_ci.py
+
   build-linux:
+    needs: verify-ci
     name: Linux (x86_64)
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -95,19 +114,7 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build --preset default -j$(nproc)
-          cmake -S . -B build-tests -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_TESTING=ON \
-            -DKASUMI_FETCHCONTENT_CACHE_DIR="${RUNNER_TEMP}/kasumi-fc-cache" \
-            -DKASUMI_ENABLE_IPO=OFF \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          cmake --build build-tests -j$(nproc)
           ccache -s
-
-      - name: Release Gate - Critical Tests
-        run: |
-          python3 scripts/run_with_linux_vault.py --backend gnome -- \
-            ctest --test-dir build-tests -L release-critical --output-on-failure --no-tests=error --parallel $(nproc)
 
       - name: Release Gate - Smoke Test (Binary)
         run: |
@@ -262,6 +269,7 @@ jobs:
             kasumi-v${{ env.KASUMI_VERSION }}-linux-x86_64.pkg.tar.zst.sha256
 
   build-windows:
+    needs: verify-ci
     name: Windows (x86_64)
     runs-on: windows-2022
     timeout-minutes: 60
@@ -350,24 +358,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build build-release --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake -S . -B build-release-tests -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_C_COMPILER=cl `
-            -DCMAKE_CXX_COMPILER=cl `
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache `
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
-            "-DKASUMI_FETCHCONTENT_CACHE_DIR=$fcCache" `
-            -DKASUMI_ENABLE_IPO=OFF `
-            -DBUILD_TESTING=ON
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build build-release-tests --parallel
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ccache -s
-
-      - name: Release Gate - Critical Tests
-        shell: powershell
-        run: |
-          ctest --test-dir build-release-tests -L release-critical --output-on-failure --no-tests=error --parallel $env:NUMBER_OF_PROCESSORS
 
       - name: Release Gate - Smoke Test (Binary)
         shell: powershell

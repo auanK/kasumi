@@ -176,6 +176,17 @@ The [release-critical selection](../tests/release_critical_labels.cmake) covers 
 the full suite; record skipped and disabled tests separately. `--no-tests=error`
 rejects an empty selection.
 
+On a version tag, both release builds wait for the latest Ubuntu and Windows CI
+runs on the tag's exact commit. Each workflow and every job in it must finish
+successfully, including Web UI and sanitizers. The same rule applies to the
+Ubuntu CI image workflow when it ran on that commit. Packaging reuses those
+results and runs smoke tests against the release binaries and packages.
+
+Push the release commit to a branch so both CI workflows run. If only the tag
+was pushed, dispatch the missing CI workflows on that tag. The release waits
+up to three hours for results. After a failure or timeout, rerun CI as needed
+and retry the release workflow on the same revision.
+
 Specific test labels include:
 * `unit.platform`
 * `unit.crypto`
