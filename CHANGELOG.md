@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.32.0]
+
+### Added
+
+- **Vault protocol reference**:
+  - Documented the cross-device storage requirements, publication order, checkpoint and recovery rules, GC prerequisites, format boundaries, and history limits. [0.32 vault protocol](docs/architecture/protocol-0.32.md)
+- **Release-critical regression coverage**:
+  - Added cases for competing initializers, missing checkpoint history, post-commit recovery, maintenance controls, file installation, profile lifecycle, and daemon listener ownership. Real-rclone tests check optional hash commands against the installed binary's advertised capabilities.
+
+### Changed
+
+- **Retention frontier and maintenance advancement**:
+  - Ordinary Sync preserves `EpochAdvancementPolicy::DeferMultiWriter` after genesis so concurrent writers never race to publish conflicting `N+1` Epochs.
+  - Maintenance [`kasumi gc`](docs/architecture/garbage-collection.md) now advances the authenticated retention Epoch (`N -> N+1`) once commits satisfy both `min_history_depth` (default `5` generations by shortest edge distance from logical heads and marked commits) and `min_history_age_hours` (default `6` hours counted from child superseding timestamp `superseded_at` against `min(local_now, barrier_remote_now)`), while preserving multi-head merge bases (`merge_closure`), shared FastCDC chunks/packs, and unchanged live files regardless of filesystem `mtime`.
+  - Pre-publish barrier + `epochs/` + `heads/` revalidation, durable `.pending-gc-epoch` lost-response recovery, post-publish verification, mandatory Observation #2 before any `DELETE`, in-memory Epoch simulation in `--dry-run`, additive Epoch reporting fields in CLI/`--json`/HTTP jobs, and safe returning-offline-device reconciliation (`expired_base_tree`) eliminate the 0.32 retention freeze while maintaining multi-writer safety.
+- **Admission and checkpoint checks**:
+  - A parentless publisher must see its own writer alone and recheck HEAD and Epoch. A returning client with an accepted Epoch rejects an empty Epoch inventory. Both preview and live GC require the collector's accepted commit and exact Epoch, when present, to agree with authenticated remote history; scoped history loading falls back cleanly when traversing an unchanged-Epoch fast path across branches reaching remote Epoch anchors.
+
+### Fixed
+
+- **Recovery and remote controls**:
+  - At `DatabaseCommitted`, recovery can finish after a peer prunes the ancestral HEAD if surviving authenticated history and durable local state prove the journal's intent. Ambiguous writer or barrier registration retains evidence for reconciliation. Cleanup protects live registrations and handles abandoned rclone work.
+- **Local changes and restore**:
+  - Sync reapplies the empty-local deletion safeguard when replanning. Conflict resolution guards external edits. Restore uses atomic create-only installation and reports how many files were installed before a target collision. Generating `.kasumiignore` preserves concurrent arrivals unless replacement is explicitly requested.
+- **Profile lifecycle**:
+  - Verified creation checks the candidate before publishing its name. Deletion reserves the name until private cleanup completes, including across interrupted attempts. CLI edits carry the expected profile revision to detect concurrent changes.
+- **Daemon and Web UI concurrency**:
+  - Fast polls and borrowed transports follow the current profile configuration. Post-sync pruning preserves newer watcher events and overflow. Pause and resume use persisted state, and pausing before dispatch wakes waiting Sync callers. Concurrent shutdown coordinates scheduler thread cleanup. IPC and Web listeners require exclusive ownership of their addresses.
+  - The Web UI discards stale profile-detail and log responses that could otherwise replace newer data or restore logs from a previous session.
+- **Local storage and Fsck**:
+  - Local PUT staging is isolated from protocol controls and coordinated across concurrent uploads. Existing staging residues are classified separately. An Fsck worker startup failure is reported without terminating the daemon.
+
 ## [0.31.2]
 
 ### Fixed
