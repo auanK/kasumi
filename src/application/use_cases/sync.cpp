@@ -185,6 +185,11 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                        !stable->result.requires_state_commit;
             };
 
+            const bool enforce_empty_local_guard =
+                *recovery == sync::coordinator::RecoveryResult::NoJournal &&
+                !context.initial_sync && !context.repair &&
+                !context.allow_empty_local;
+
             const auto prepare_pass =
                 [&](bool initial_pass,
                     std::span<const std::string> marked_heads,
@@ -242,40 +247,19 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                         SyncStage::Calculating);
                 }
 
-                if (initial_pass &&
-                    *recovery == sync::coordinator::RecoveryResult::NoJournal &&
-                    !context.initial_sync && !context.repair &&
-                    !context.allow_empty_local &&
-                    collected->base_state_present &&
-                    collected->base_tree.rows.size() > 5U &&
-                    collected->local_tree.rows.size() <= 1U) {
-                    std::error_code dir_ec;
-                    std::filesystem::directory_iterator dir_it(
-                        context.runtime.local_dir, dir_ec);
-                    const bool physically_empty =
-                        !dir_ec &&
-                        dir_it == std::filesystem::directory_iterator{};
-                    const auto ops = sync_plan_operations(reconciled->plan);
-                    const bool all_remote_deletes =
-                        !ops.empty() &&
-                        std::ranges::all_of(ops, [](const auto& op) {
-                            return op.action == Action::DeleteRemote ||
-                                   op.action == Action::DeleteRemoteDirectory;
-                        });
-                    if (physically_empty && all_remote_deletes) {
-                        auto err = make_error(
-                            context,
-                            ErrorCode::SynchronizationFailure,
-                            std::format(
-                                "refusing to delete all {} remote entries "
-                                "because local directory '{}' is completely "
-                                "empty (verify mounted storage or pass "
-                                "--allow-empty-local to propagate deletions)",
-                                collected->base_tree.rows.size() - 1U,
-                                platform::path::to_utf8(
-                                    context.runtime.local_dir)),
-                            SyncStage::Calculating);
-                        err.empty_local_blocked = true;
+                if (enforce_empty_local_guard) {
+                    if (auto guarded = sync::coordinator::
+                            check_empty_local_deletion_guard(
+                                context.runtime.local_dir,
+                                *collected,
+                                *reconciled);
+                        !guarded) {
+                        auto err = make_error(context,
+                                              ErrorCode::SynchronizationFailure,
+                                              guarded.error().detail,
+                                              SyncStage::Calculating);
+                        err.empty_local_blocked =
+                            guarded.error().empty_local_blocked;
                         return std::unexpected(std::move(err));
                     }
                 }
@@ -378,8 +362,17 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     initial_pass,
                     allow_unreferenced_content_reuse,
                     true,
-                    context.repair);
+                    context.repair,
+                    enforce_empty_local_guard);
                 if (!stabilized) {
+                    if (stabilized.error().empty_local_blocked) {
+                        auto err = make_error(context,
+                                              ErrorCode::SynchronizationFailure,
+                                              stabilized.error().detail,
+                                              SyncStage::Calculating);
+                        err.empty_local_blocked = true;
+                        return std::unexpected(std::move(err));
+                    }
                     return fail_app(
                         context,
                         ErrorCode::SynchronizationFailure,
@@ -417,7 +410,15 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
             for (std::size_t attempt = 0; attempt < 3; ++attempt) {
                 begin_progress_phase(meter, Activity::PreparingRemote);
                 auto admission = history_storage::maintenance_protocol::
-                    verify_writer_admission(writer, layout);
+                    verify_writer_admission(
+                        writer,
+                        layout,
+                        stable->result.requires_publication &&
+                                !stable->input.storage.history_present
+                            ? std::optional{history_storage::
+                                                maintenance_protocol::
+                                                    GenesisAdmission{}}
+                            : std::nullopt);
                 if (!admission) {
                     synchronized = std::unexpected(sync::coordinator::Error{
                         .code = admission.error().code ==
@@ -453,7 +454,8 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                     stable->staged ? &*stable->staged : nullptr,
                     true,
                     std::move(authorship),
-                    &context.accepted_commit_id);
+                    &context.accepted_commit_id,
+                    enforce_empty_local_guard);
                 if (synchronized ||
                     synchronized.error().code !=
                         sync::coordinator::ErrorCode::RemoteContentMissing) {
@@ -511,6 +513,14 @@ std::expected<Response, Error> run_sync(OperationContext& context) {
                 notify_stage(SyncStage::Applying, {}, summary.total);
             }
             if (!synchronized) {
+                if (synchronized.error().empty_local_blocked) {
+                    auto err = make_error(context,
+                                          ErrorCode::SynchronizationFailure,
+                                          synchronized.error().detail,
+                                          SyncStage::Calculating);
+                    err.empty_local_blocked = true;
+                    return std::unexpected(std::move(err));
+                }
                 const auto fail_stage =
                     synchronized.error().code ==
                             sync::coordinator::ErrorCode::PublicationFailure

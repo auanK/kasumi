@@ -1263,6 +1263,12 @@ ReconcileResult reconcile(const Input& input) {
             fail_error(ErrorCode::InvalidBaseTree, "invalid base tree"));
     }
 
+    if (input.expired_base_tree.has_value() &&
+        !kasumi::valid_snapshot(*input.expired_base_tree, true)) {
+        return std::unexpected(fail_error(
+            ErrorCode::InvalidBaseTree, "invalid expired base tree"));
+    }
+
     if (!kasumi::valid_snapshot(input.storage.tree,
                                 !input.storage.history_present)) {
         return std::unexpected(
@@ -1370,12 +1376,14 @@ ReconcileResult reconcile(const Input& input) {
         }
         authorized_deletions_ptr = &authorized_deletion_paths;
     }
-    auto operations = diff::compare_trees(*projected_local,
-                                          input.base_tree,
-                                          effective_storage_tree,
-                                          missing_objects,
-                                          &input.ignore_list,
-                                          authorized_deletions_ptr);
+    auto operations = diff::compare_trees(
+        *projected_local,
+        input.base_tree,
+        effective_storage_tree,
+        missing_objects,
+        &input.ignore_list,
+        authorized_deletions_ptr,
+        input.expired_base_tree ? &*input.expired_base_tree : nullptr);
 
     std::erase_if(operations, [&](const Operation& operation) {
         if (operation.action != Action::Upload ||

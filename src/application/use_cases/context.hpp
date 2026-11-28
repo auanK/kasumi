@@ -66,12 +66,46 @@ struct OperationContext {
     history_storage::CommitCache* commit_cache = nullptr;
 };
 
+struct TransportBinding {
+    std::string storage_location;
+    std::filesystem::path forbidden_executable_root;
+    std::optional<std::filesystem::path> rclone_config;
+    std::optional<std::string> bandwidth_limit;
+
+    bool operator==(const TransportBinding&) const = default;
+};
+
+[[nodiscard]] inline TransportBinding make_transport_binding(
+    const runtime::RuntimeData& runtime_data,
+    const std::optional<std::string>& request_bandwidth_limit = std::nullopt) {
+    return TransportBinding{
+        .storage_location = runtime_data.storage_location,
+        .forbidden_executable_root = runtime_data.local_dir,
+        .rclone_config = runtime_data.rclone_config,
+        .bandwidth_limit = request_bandwidth_limit
+                               ? request_bandwidth_limit
+                               : runtime_data.bandwidth_limit,
+    };
+}
+
+[[nodiscard]] inline TransportBinding
+make_transport_binding(const runtime::ProfileData& profile) {
+    return TransportBinding{
+        .storage_location = profile.remote_dir,
+        .forbidden_executable_root = profile.local_dir,
+        .rclone_config = profile.rclone_config,
+        .bandwidth_limit = profile.bandwidth_limit,
+    };
+}
+
 struct WarmExecutionContext {
     transport::Transport* borrowed_transport = nullptr;
+    std::optional<TransportBinding> borrowed_transport_binding = std::nullopt;
     observation::LocalObservationSession* warm_observation = nullptr;
     history_storage::CommitCache* commit_cache = nullptr;
     std::function<void()> on_lock_acquired{};
     bool origin_daemon = false;
+    bool borrowed_transport_rejected = false;
 };
 
 [[nodiscard]] inline history::CommitAuthorship
@@ -114,7 +148,7 @@ inline Response make_response(const OperationContext& context,
 std::expected<void, Error>
 prepare_operation(const ExecutionInput& input,
                   OperationContext& output,
-                  const WarmExecutionContext* warm = nullptr);
+                  WarmExecutionContext* warm = nullptr);
 
 std::expected<Response, Error> execute_warm(ExecutionInput input,
                                             WarmExecutionContext& warm);

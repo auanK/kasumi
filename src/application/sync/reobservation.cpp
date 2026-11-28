@@ -537,6 +537,11 @@ bool same_observation(const reconciliation::Input& left,
            left.verified_remote_content_objects ==
                right.verified_remote_content_objects &&
            same_snapshot(left.base_tree, right.base_tree) &&
+           left.expired_base_tree.has_value() ==
+               right.expired_base_tree.has_value() &&
+           (!left.expired_base_tree ||
+            same_snapshot(*left.expired_base_tree,
+                          *right.expired_base_tree)) &&
            left.base_commit_id == right.base_commit_id &&
            left.base_state_present == right.base_state_present &&
            left.local_generation == right.local_generation &&
@@ -716,7 +721,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
           bool content_availability_is_current,
           bool allow_unreferenced_content_reuse,
           bool retain_staged_workspace,
-          bool repair_missing) {
+          bool repair_missing,
+          bool enforce_empty_local_guard) {
     auto* meter = session ? session->progress : nullptr;
     const auto no_work = [](const reconciliation::Result& candidate) {
         return !candidate.requires_publication &&
@@ -765,6 +771,13 @@ stabilize(const runtime::RuntimeData& runtime_data,
         return StableExecution{.input = std::move(observed_input),
                                .result = std::move(reconciliation_result)};
     }
+    if (enforce_empty_local_guard) {
+        if (auto guarded = check_empty_local_deletion_guard(
+                runtime_data.local_dir, observed_input, reconciliation_result);
+            !guarded) {
+            return std::unexpected(guarded.error());
+        }
+    }
 
     auto profile = detail::profile_directory(runtime_data);
     if (!profile) {
@@ -800,6 +813,13 @@ stabilize(const runtime::RuntimeData& runtime_data,
                 return std::unexpected(refreshed.error());
             }
             result = std::move(*refreshed);
+            if (enforce_empty_local_guard) {
+                if (auto guarded = check_empty_local_deletion_guard(
+                        runtime_data.local_dir, input, result);
+                    !guarded) {
+                    return std::unexpected(guarded.error());
+                }
+            }
             if (no_work(result)) {
                 return StableExecution{.input = std::move(input),
                                        .result = std::move(result)};
@@ -889,6 +909,13 @@ stabilize(const runtime::RuntimeData& runtime_data,
                                       !observed->storage.history_present);
         if (!refreshed) {
             return fail_with_cleanup(refreshed.error());
+        }
+        if (enforce_empty_local_guard) {
+            if (auto guarded = check_empty_local_deletion_guard(
+                    runtime_data.local_dir, *observed, *refreshed);
+                !guarded) {
+                return fail_with_cleanup(guarded.error());
+            }
         }
         if (same_observation(input, *observed)) {
             if (retain_staged_workspace && workspace.has_value()) {

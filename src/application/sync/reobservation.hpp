@@ -53,7 +53,8 @@ stabilize(const runtime::RuntimeData& runtime_data,
           bool content_availability_is_current = false,
           bool allow_unreferenced_content_reuse = false,
           bool retain_staged_workspace = false,
-          bool repair_missing = false);
+          bool repair_missing = false,
+          bool enforce_empty_local_guard = false);
 
 } // namespace kasumi::application::sync::coordinator::reobservation
 

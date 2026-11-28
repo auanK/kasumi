@@ -18,6 +18,7 @@
 #include <exception>
 #include <filesystem>
 #include <optional>
+#include <ranges>
 
 namespace kasumi::application::sync::coordinator {
 namespace {
@@ -165,27 +166,70 @@ std::expected<history::LoadedCommit, Error>
 load_published_commit(const transaction::Record& record,
                       const runtime::RuntimeData& runtime_data,
                       transport::Transport& storage,
-                      std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+                      std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+                      bool require_ancestral = false) {
     const history_storage::HeadReference reference{
         .commit_id = record.commit_id, .ciphertext_id = record.ciphertext_id};
-    auto reachable = publication::find_reachable_commit(
-        storage,
-        key,
-        runtime_data.database_path.parent_path(),
-        record.commit_id);
-    if (!reachable) {
-        return std::unexpected(detail::indeterminate_publication(
-            reachable.error(), "published commit"));
+    std::optional<history::LoadedCommit> reachable;
+    if (require_ancestral) {
+        auto loaded = history_storage::load_history(
+            storage, key, runtime_data.database_path.parent_path());
+        if (!loaded) {
+            if (loaded.error().code ==
+                    history_storage::ErrorCode::TransportFailure ||
+                loaded.error().code ==
+                    history_storage::ErrorCode::WorkspaceFailure) {
+                return std::unexpected(detail::indeterminate_publication(
+                    loaded.error(), "pruned ancestral commit"));
+            }
+            return std::unexpected(detail::make_error(
+                ErrorCode::RecoveryConflict,
+                "cannot authenticate pruned head commit against invalid "
+                "remote history: " +
+                    loaded.error().detail));
+        }
+        const auto found = std::ranges::find(
+            loaded->commits, record.commit_id, &history::LoadedCommit::id);
+        if (found == loaded->commits.end()) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::RecoveryConflict,
+                "published commit is not reachable as an authenticated "
+                "ancestor"));
+        }
+        const bool has_authenticated_descendant = std::ranges::any_of(
+            loaded->commits, [&](const history::LoadedCommit& candidate) {
+                return std::ranges::contains(candidate.commit.parents,
+                                             record.commit_id);
+            });
+        if (!has_authenticated_descendant) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::RecoveryConflict,
+                "published commit marker is absent without an authenticated "
+                "descendant"));
+        }
+        reachable = *found;
+    } else {
+        auto found = publication::find_reachable_commit(
+            storage,
+            key,
+            runtime_data.database_path.parent_path(),
+            record.commit_id);
+        if (!found) {
+            return std::unexpected(detail::indeterminate_publication(
+                found.error(), "published commit"));
+        }
+        if (!*found) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::RecoveryConflict,
+                "published commit is not reachable"));
+        }
+        reachable = std::move(*found);
     }
-    if (!*reachable) {
-        return std::unexpected(detail::make_error(
-            ErrorCode::RecoveryConflict, "published commit is not reachable"));
-    }
-    if ((*reachable)->commit.parents != record.parent_ids) {
+    if (reachable->commit.parents != record.parent_ids) {
         return std::unexpected(detail::make_error(
             ErrorCode::RecoveryConflict, "published commit parents mismatch"));
     }
-    const publication::PreparedCommit prepared{.commit = (*reachable)->commit,
+    const publication::PreparedCommit prepared{.commit = reachable->commit,
                                                .commit_id = record.commit_id};
     const auto layout = history_storage::derive_remote_layout(key);
     auto verified = publication::verify_commit_object(
@@ -196,10 +240,18 @@ load_published_commit(const transaction::Record& record,
         reference,
         runtime_data.database_path.parent_path());
     if (!verified) {
+        if (require_ancestral &&
+            verified.error().code != publication::ErrorCode::TransportFailure &&
+            verified.error().code != publication::ErrorCode::WorkspaceFailure) {
+            return std::unexpected(detail::make_error(
+                ErrorCode::RecoveryConflict,
+                "pruned ancestral commit verification failed: " +
+                    verified.error().detail));
+        }
         return std::unexpected(detail::indeterminate_publication(
             verified.error(), "published commit verification"));
     }
-    return **reachable;
+    return *reachable;
 }
 
 std::expected<RecoveryResult, Error>
@@ -794,7 +846,8 @@ roll_forward(const journal::Paths& paths,
              const std::optional<platform::Workspace>& workspace,
              const runtime::RuntimeData& runtime_data,
              transport::Transport& storage,
-             std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+             std::span<const std::uint8_t, crypto::KEY_SIZE> key,
+             bool marker_pruned_ancestor = false) {
     std::optional<history_storage::epoch::VerifiedEpoch>
         recovered_pruning_epoch;
     if (!record.parent_ids.empty() && !record.epoch_id.empty() &&
@@ -852,7 +905,8 @@ roll_forward(const journal::Paths& paths,
 
     const history_storage::HeadReference reference{
         .commit_id = record.commit_id, .ciphertext_id = record.ciphertext_id};
-    auto commit = load_published_commit(record, runtime_data, storage, key);
+    auto commit = load_published_commit(
+        record, runtime_data, storage, key, marker_pruned_ancestor);
     if (!commit) {
         return std::unexpected(commit.error());
     }
@@ -981,12 +1035,20 @@ roll_forward(const journal::Paths& paths,
             return std::unexpected(saved.error());
         }
     }
+    auto expected_pending =
+        resolve_pending_paths(commit->commit.tree, record.pending_paths);
+    if (!expected_pending) {
+        return std::unexpected(expected_pending.error());
+    }
     auto current = state_storage::load_state(runtime_data.database_path);
     if (!current || !*current || (*current)->commit_id != commit->id ||
         (*current)->height != commit->commit.height ||
         (*current)->tree != commit->commit.tree ||
         !same_pending_paths((*current)->pending_materializations,
-                            record.pending_paths)) {
+                            record.pending_paths) ||
+        (*current)->pending_materializations != *expected_pending ||
+        (!record.epoch_id.empty() && !(*current)->epoch_id.empty() &&
+         (*current)->epoch_id != record.epoch_id)) {
         return std::unexpected(detail::make_error(
             ErrorCode::RecoveryConflict,
             "committed state does not match journal pending intent"));
@@ -1022,6 +1084,22 @@ std::expected<RecoveryResult, Error>
 recover_if_needed(const runtime::RuntimeData& runtime_data,
                   transport::Transport& storage,
                   std::span<const std::uint8_t, crypto::KEY_SIZE> key) {
+    const auto layout = history_storage::derive_remote_layout(key);
+    const auto workspace_root = runtime_data.database_path.parent_path();
+    if (transport::valid(storage) && !workspace_root.empty()) {
+        if (auto reconciled =
+                history_storage::maintenance_protocol::
+                    reconcile_pending_registrations(
+                        storage,
+                        layout,
+                        workspace_root,
+                        history_storage::maintenance_protocol::
+                            PendingRegistrationKind::All);
+            !reconciled) {
+            return std::unexpected(protocol_error(reconciled.error()));
+        }
+    }
+
     auto paths = detail::make_journal_paths(runtime_data);
     if (!paths)
         return std::unexpected(paths.error());
@@ -1051,7 +1129,6 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
     }
 
     history_storage::maintenance_protocol::RegistrationState writer;
-    const auto layout = history_storage::derive_remote_layout(key);
     const bool has_repairs =
         !(*record)->publication_required &&
         (*record)->phase < transaction::Phase::DatabaseCommitted &&
@@ -1159,9 +1236,37 @@ recover_if_needed(const runtime::RuntimeData& runtime_data,
                     return rollback_before_publication(
                         *paths, **record, *workspace, runtime_data, key);
                 }
+                if (*marker == publication::HeadMarkerState::Absent &&
+                    (*record)->phase == transaction::Phase::DatabaseCommitted) {
+                    return roll_forward(*paths,
+                                        **record,
+                                        *workspace,
+                                        runtime_data,
+                                        storage,
+                                        key,
+                                        true);
+                }
                 return std::unexpected(detail::make_error(
                     ErrorCode::RecoveryConflict,
                     "journal says head was published but marker is not valid"));
+            }
+            if ((*record)->parent_ids.empty() &&
+                (*record)->phase < transaction::Phase::EpochUploaded) {
+                const auto& epoch_id = (*record)->epoch_id;
+                auto admission = history_storage::maintenance_protocol::
+                    verify_writer_admission(
+                        writer,
+                        layout,
+                        history_storage::maintenance_protocol::GenesisAdmission{
+                            .expected_head = history_storage::marker_object(
+                                layout, reference),
+                            .expected_epoch =
+                                epoch_id.empty()
+                                    ? std::string{}
+                                    : history_storage::epoch_object(
+                                          layout, 0, epoch_id)});
+                if (!admission)
+                    return std::unexpected(protocol_error(admission.error()));
             }
             return roll_forward(
                 *paths, **record, *workspace, runtime_data, storage, key);

@@ -542,11 +542,19 @@ collect_reconciliation_input(
                 observed->epoch && ((*persisted)->epoch_id.empty() ||
                                     observed->epoch->value.sequence >
                                         (*persisted)->epoch_sequence);
-            if (!epoch_advanced) {
+            const bool height_could_be_pruned =
+                observed->epoch &&
+                std::ranges::any_of(observed->epoch->value.anchors,
+                                    [&](const auto& anchor) {
+                                        return input.local_generation <
+                                               anchor.height;
+                                    });
+            if (!epoch_advanced || !height_could_be_pruned) {
                 return std::unexpected(state_error(
                     reconciliation::ErrorCode::StorageHistoryRegression,
                     "local base commit is not reachable from storage"));
             }
+            input.expired_base_tree = std::move(input.base_tree);
             input.base_tree = {};
             input.base_commit_id.clear();
             input.base_ciphertext_id.clear();

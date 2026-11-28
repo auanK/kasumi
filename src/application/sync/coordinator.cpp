@@ -34,6 +34,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <functional>
 #include <future>
 #include <limits>
@@ -931,6 +932,39 @@ discard_staged_handoff(std::optional<StagedExecutionHandoff>& staged,
 }
 
 std::expected<void, Error>
+check_empty_local_deletion_guard(const std::filesystem::path& local_dir,
+                                 const reconciliation::Input& input,
+                                 const reconciliation::Result& result) {
+    if (!input.base_state_present || input.base_tree.rows.size() <= 5U ||
+        input.local_tree.rows.size() > 1U) {
+        return {};
+    }
+    std::error_code dir_ec;
+    std::filesystem::directory_iterator dir_it(local_dir, dir_ec);
+    const bool physically_empty =
+        !dir_ec && dir_it == std::filesystem::directory_iterator{};
+    const auto ops = sync_plan_operations(result.plan);
+    const bool all_remote_deletes =
+        !ops.empty() && std::ranges::all_of(ops, [](const auto& op) {
+            return op.action == Action::DeleteRemote ||
+                   op.action == Action::DeleteRemoteDirectory;
+        });
+    if (physically_empty && all_remote_deletes) {
+        return std::unexpected(Error{
+            .code = ErrorCode::ObservationFailure,
+            .detail = std::format(
+                "refusing to delete all {} remote entries because local "
+                "directory '{}' is completely empty (verify mounted storage "
+                "or pass --allow-empty-local to propagate deletions)",
+                input.base_tree.rows.size() - 1U,
+                platform::path::to_utf8(local_dir)),
+            .empty_local_blocked = true,
+        });
+    }
+    return {};
+}
+
+std::expected<void, Error>
 execute(const runtime::RuntimeData& runtime_data,
         transport::Transport& storage,
         std::span<const std::uint8_t, crypto::KEY_SIZE> key,
@@ -940,7 +974,9 @@ execute(const runtime::RuntimeData& runtime_data,
         StagedExecutionHandoff* staged_handoff,
         bool enable_micro_packs,
         history::CommitAuthorship authorship,
-        std::string* accepted_commit_id) {
+        std::string* accepted_commit_id,
+        bool enforce_empty_local_guard,
+        EpochAdvancementPolicy epoch_advancement) {
     auto* meter = session ? session->progress : nullptr;
     struct StagedHandoffGuard {
         StagedExecutionHandoff* handoff = nullptr;
@@ -959,6 +995,14 @@ execute(const runtime::RuntimeData& runtime_data,
         !reconciliation::has_safe_paths(reconciliation_result.plan)) {
         return std::unexpected(detail::make_error(ErrorCode::InvalidInput,
                                                   "invalid transaction input"));
+    }
+
+    if (enforce_empty_local_guard) {
+        if (auto guarded = check_empty_local_deletion_guard(
+                runtime_data.local_dir, observed_input, reconciliation_result);
+            !guarded) {
+            return std::unexpected(guarded.error());
+        }
     }
 
     auto composition =
@@ -2233,13 +2277,14 @@ execute(const runtime::RuntimeData& runtime_data,
             return std::unexpected(policy.error());
         }
 
-        std::vector<history::LoadedCommit> current_dag =
-            observed_input.storage.reachable_commits;
-        current_dag.push_back(
-            history::LoadedCommit{.id = prepared_commit->commit_id,
-                                  .commit = prepared_commit->commit});
+        if (epoch_advancement == EpochAdvancementPolicy::ExclusivePublisher &&
+            commit_time->pruning_time_safe) {
+            std::vector<history::LoadedCommit> current_dag =
+                observed_input.storage.reachable_commits;
+            current_dag.push_back(
+                history::LoadedCommit{.id = prepared_commit->commit_id,
+                                      .commit = prepared_commit->commit});
 
-        if (commit_time->pruning_time_safe) {
             auto plan =
                 history_storage::epoch::plan_pruning(current_dag, *policy);
             if (plan &&
