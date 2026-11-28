@@ -264,42 +264,74 @@ init_profile_ignore(const ExecutionEnvironment& environment,
     }
 
     const auto ignore_path = prof->local_dir / ".kasumiignore";
+    const auto validate_existing_ignore =
+        [&](const std::filesystem::file_status& status)
+        -> std::expected<void, ProfileError> {
+        if (std::filesystem::is_symlink(status) ||
+            platform::private_storage::is_reparse_or_symlink(ignore_path) ||
+            !std::filesystem::is_regular_file(status)) {
+            return fail_ignore(
+                ProfileErrorCode::StorageFailure,
+                ".kasumiignore must be a regular non-symlink file");
+        }
+        return {};
+    };
+
     std::error_code ec;
     const auto st = std::filesystem::symlink_status(ignore_path, ec);
     if (ec && ec != std::errc::no_such_file_or_directory) {
         return fail_ignore(ProfileErrorCode::StorageFailure, ec.message());
     }
-    const bool exists = st.type() != std::filesystem::file_type::not_found;
-    if (exists &&
-        (std::filesystem::is_symlink(st) ||
-         platform::private_storage::is_reparse_or_symlink(ignore_path) ||
-         !std::filesystem::is_regular_file(st))) {
-        return fail_ignore(ProfileErrorCode::StorageFailure,
-                           ".kasumiignore must be a regular non-symlink file");
-    }
-    if (exists && !force && !dry_run) {
-        return fail_ignore(
-            ProfileErrorCode::AlreadyExists,
-            ".kasumiignore already exists; pass --force to overwrite");
+    if (!ec && st.type() != std::filesystem::file_type::not_found) {
+        if (auto valid = validate_existing_ignore(st); !valid) {
+            return std::unexpected(valid.error());
+        }
     }
 
     auto content = preset_content(preset);
+    bool created = false;
+    bool overwritten = false;
     if (!dry_run) {
-        if (auto saved = platform::private_storage::write_atomically(
+        auto installed =
+            platform::private_storage::write_atomically_without_overwrite(
                 ignore_path, content);
-            !saved) {
-            return fail_ignore(ProfileErrorCode::StorageFailure, saved.error());
+        if (installed) {
+            created = true;
+        } else if (installed.error().already_exists) {
+            std::error_code existing_ec;
+            const auto existing_st =
+                std::filesystem::symlink_status(ignore_path, existing_ec);
+            if (existing_ec) {
+                return fail_ignore(ProfileErrorCode::StorageFailure,
+                                   existing_ec.message());
+            }
+            if (auto valid = validate_existing_ignore(existing_st); !valid) {
+                return std::unexpected(valid.error());
+            }
+            if (!force) {
+                return fail_ignore(
+                    ProfileErrorCode::AlreadyExists,
+                    ".kasumiignore already exists; pass --force to overwrite");
+            }
+            if (auto saved = platform::private_storage::write_atomically(
+                    ignore_path, content);
+                !saved) {
+                return fail_ignore(ProfileErrorCode::StorageFailure,
+                                   saved.error());
+            }
+            overwritten = true;
+        } else {
+            return fail_ignore(ProfileErrorCode::StorageFailure,
+                               installed.error().message);
         }
-        static_cast<void>(
-            platform::durability::sync_parent_directory(ignore_path));
     }
 
     return IgnoreInitReport{
         .profile_name = prof->name,
         .ignore_file = ignore_path,
         .preset = preset,
-        .created = !dry_run && !exists,
-        .overwritten = !dry_run && exists,
+        .created = created,
+        .overwritten = overwritten,
         .dry_run = dry_run,
         .content = std::move(content),
     };

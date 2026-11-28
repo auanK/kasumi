@@ -58,6 +58,9 @@ struct IgnoreList {
     bool operator==(const IgnoreList&) const = default;
 };
 
+inline constexpr std::string_view conflict_recovery_prefix =
+    ".kasumi-conflict-recovery-";
+
 // Checks if a path matches internal metadata files reserved by Kasumi.
 bool is_reserved_internal(std::string_view path);
 

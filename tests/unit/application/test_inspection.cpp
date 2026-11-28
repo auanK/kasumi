@@ -2616,6 +2616,35 @@ TEST(ApplicationInspectionTest,
     EXPECT_EQ(kasumi::test::read_text(full_dst / "top.txt"), "top-v1");
     EXPECT_TRUE(std::filesystem::is_directory(full_dst / "empty"));
 
+    // An external file appears after validation, before the first installation.
+    const auto raced_dst =
+        kasumi::test::workspace_path(workspace, "restore-raced");
+    bool created = false;
+    auto raced = inspect_request(
+        workspace,
+        InspectionRequest{.operation = InspectionOperation::RemoteRestore,
+                          .profile_name = "demo",
+                          .commit_id = h1.head.commit_id,
+                          .destination_path =
+                              kasumi::platform::path::to_utf8(raced_dst)},
+        Credentials{MasterKeyHex{test_key_hex()}},
+        [&](const kasumi::application::ExecutionProgress& event) {
+            const auto* activity =
+                std::get_if<kasumi::application::ActivityProgress>(&event);
+            if (!created && activity &&
+                activity->activity ==
+                    kasumi::application::Activity::Installing) {
+                kasumi::test::write_text(raced_dst / "top.txt",
+                                         "external edit");
+                created = true;
+            }
+        });
+    ASSERT_TRUE(created);
+    ASSERT_FALSE(raced.has_value());
+    EXPECT_EQ(raced.error().code, InspectionErrorCode::DestinationFailure);
+    EXPECT_EQ(kasumi::test::read_text(raced_dst / "top.txt"), "external edit");
+    EXPECT_NE(raced.error().detail.find("top.txt"), std::string::npos);
+
     // Subtree restore places subtree contents directly under destination.
     const auto sub_dst = kasumi::test::workspace_path(workspace, "restore-sub");
     const auto sub_res = inspect(

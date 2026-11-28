@@ -40,6 +40,16 @@ TEST(IgnoreTest, OnlyGeneratedKasumiArtifactsAreReserved) {
         is_reserved_internal("file.kasumi-unknown-" + std::string(id) + "-0"));
 }
 
+TEST(IgnoreTest, ConflictRecoveryDirectoryAndItsContentsAreProtected) {
+    const std::string dir = "docs/.kasumi-conflict-recovery-0123456789abcdef0123456789abcdef";
+    EXPECT_TRUE(is_reserved_internal(dir));
+    EXPECT_TRUE(is_reserved_internal(dir + "/report.kasumiconflict_local"));
+    EXPECT_EQ(classify_ignore(dir + "/notes", false, parse_ignore_rules("**\n")),
+              IgnoreDisposition::IgnoredProtected);
+    EXPECT_FALSE(is_reserved_internal(dir + "f/report"));
+    EXPECT_FALSE(is_reserved_internal("docs/.kasumi-conflict-recovery-notes"));
+}
+
 TEST(IgnoreTest, EmptyIgnoreListMatchesNothing) {
     const IgnoreList empty_list{};
     EXPECT_FALSE(is_ignored("file.txt", empty_list, false));

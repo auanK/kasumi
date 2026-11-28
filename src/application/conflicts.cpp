@@ -1,6 +1,10 @@
 #include "application/profile.hpp"
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+#include "application/sync/mutation_fault_test.hpp"
+#endif
 #include "core/ignore.hpp"
 #include "core/node.hpp"
+#include "platform/durability.hpp"
 #include "platform/metadata.hpp"
 #include "platform/path.hpp"
 #include "platform/private_storage.hpp"
@@ -480,22 +484,24 @@ resolve_local_conflict(const ExecutionEnvironment& environment,
         selected_fs = local_dir / platform::path::from_utf8(*selected_artifact);
     }
 
-    std::vector<std::filesystem::path> artifact_paths;
-    artifact_paths.reserve(group_it->artifacts.size());
+    namespace ps = platform::private_storage;
+    namespace durability = platform::durability;
+    struct Artifact {
+        std::filesystem::path path;
+        ps::FileIdentity identity;
+    };
+    std::vector<Artifact> artifacts;
     std::vector<std::string> removed_paths;
-    removed_paths.reserve(group_it->artifacts.size());
     for (const auto& art : group_it->artifacts) {
-        const auto p = local_dir / platform::path::from_utf8(art.path);
-        std::error_code art_ec;
-        const auto art_st = std::filesystem::symlink_status(p, art_ec);
-        if (art_ec || is_link_or_reparse(p, art_st) ||
-            !std::filesystem::is_regular_file(art_st)) {
+        auto path = local_dir / platform::path::from_utf8(art.path);
+        const auto identity = ps::query_file_identity(path);
+        if (!identity.valid) {
             return std::unexpected(ProfileError{
                 .code = ProfileErrorCode::StorageFailure,
                 .detail = "conflict artifact is missing or not a regular file",
             });
         }
-        artifact_paths.push_back(p);
+        artifacts.push_back({std::move(path), identity});
         removed_paths.push_back(art.path);
     }
 
@@ -511,75 +517,75 @@ resolve_local_conflict(const ExecutionEnvironment& environment,
         return report;
     }
 
-    if (request.choice == ConflictResolutionChoice::KeepArtifact) {
-        const auto src_mtime = platform::metadata::last_write_time(selected_fs);
-        const auto token = platform::random::hex_id();
-        if (!token) {
-            return std::unexpected(ProfileError{
-                .code = ProfileErrorCode::StorageFailure,
-                .detail = "failed to prepare temporary file for resolution",
-            });
+    auto token = platform::random::hex_id();
+    if (!token) {
+        return std::unexpected(ProfileError{ProfileErrorCode::StorageFailure, token.error()});
+    }
+    const auto recovery = canonical_fs.parent_path() /
+        (std::string(ignore::conflict_recovery_prefix) + *token);
+    if (auto made = ps::create_directory(recovery); !made) {
+        return std::unexpected(ProfileError{ProfileErrorCode::StorageFailure, made.error()});
+    }
+    const auto location = platform::path::to_logical_utf8(recovery.lexically_relative(local_dir));
+    // Never touch an artifact name a second time unless rollback can claim
+    // that name atomically. Editors may already have saved a replacement.
+    std::size_t claimed = 0;
+    auto rollback = [&](std::string detail) -> std::unexpected<ProfileError> {
+        while (claimed != 0) {
+            const auto& original = artifacts[--claimed].path;
+            (void)durability::move_regular_file(recovery / original.filename(), original,
+                                                durability::ExistingTarget::Reject);
         }
-        const auto temp_path =
-            canonical_fs.parent_path() / (".kasumi-resolve-" + *token + ".tmp");
-        auto temp_out =
-            platform::private_storage::create_private_file(temp_path);
-        if (!temp_out) {
-            return std::unexpected(ProfileError{
-                .code = ProfileErrorCode::StorageFailure,
-                .detail = "failed to create temporary resolution file",
-            });
+        std::error_code ec;
+        std::filesystem::remove(recovery, ec);  // only succeeds if empty
+        if (ec) detail += "; remaining originals in " + location;
+        return std::unexpected(ProfileError{ProfileErrorCode::StorageFailure, std::move(detail)});
+    };
+    for (const auto& art : artifacts) {
+        const auto saved = recovery / art.path.filename();
+        if (auto moved = durability::move_regular_file(art.path, saved, durability::ExistingTarget::Reject);
+            !moved) {
+            return rollback("failed to reserve conflict artifact: " + moved.error());
         }
-        std::vector<std::uint8_t> buffer(65536U);
-        bool write_failed = false;
-        const auto streamed = platform::private_storage::stream_regular_file(
-            selected_fs, buffer, [&](std::span<const std::uint8_t> chunk) {
-                if (!chunk.empty() &&
-                    !platform::private_storage::write_private_file(
-                        *temp_out, chunk.data(), chunk.size())) {
-                    write_failed = true;
-                    return false;
-                }
-                return true;
-            });
-        if (!streamed || write_failed) {
-            static_cast<void>(
-                platform::private_storage::remove_private_file_if_owned(
-                    *temp_out));
-            return std::unexpected(ProfileError{
-                .code = ProfileErrorCode::StorageFailure,
-                .detail = "failed to copy selected conflict artifact",
-            });
-        }
-        if (const auto published =
-                platform::private_storage::publish_private_file(*temp_out,
-                                                                canonical_fs);
-            !published) {
-            static_cast<void>(
-                platform::private_storage::remove_private_file_if_owned(
-                    *temp_out));
-            return std::unexpected(ProfileError{
-                .code = ProfileErrorCode::StorageFailure,
-                .detail = "failed to promote selected conflict artifact",
-            });
-        }
-        if (src_mtime) {
-            static_cast<void>(platform::metadata::set_last_write_time(
-                canonical_fs, *src_mtime));
+        ++claimed;
+        if (ps::query_file_identity(saved) != art.identity) {
+            return rollback("conflict artifact changed during resolution");
         }
     }
+    const auto sync_directories = [&]() -> std::expected<void, std::string> {
+        if (auto synced = durability::sync_parent_directory(recovery / artifacts.front().path.filename()); !synced) {
+            return synced;
+        }
+        return durability::sync_parent_directory(recovery);
+    };
+    if (auto synced = sync_directories(); !synced) return rollback(synced.error());
 
-    for (const auto& art_path : artifact_paths) {
-        std::error_code rm_ec;
-        const bool removed = std::filesystem::remove(art_path, rm_ec);
-        if (rm_ec || !removed) {
-            return std::unexpected(ProfileError{
-                .code = ProfileErrorCode::StorageFailure,
-                .detail = "failed to remove conflict artifact",
-            });
+#ifdef KASUMI_MUTATION_FAULT_TESTS
+    sync::mutation_fault_test::hit("conflict_artifacts_reserved", recovery);
+#endif
+    if (!selected_artifact && !ps::query_file_identity(canonical_fs).valid) {
+        return rollback("canonical file disappeared during resolution");
+    }
+    if (selected_artifact) {
+        // Promote the original file object so open writers follow it.
+        const auto saved = recovery / selected_fs.filename();
+        if (auto moved = durability::move_regular_file(saved, canonical_fs,
+                canonical_absent ? durability::ExistingTarget::Reject : durability::ExistingTarget::Replace);
+            !moved) {
+            return rollback("failed to promote conflict artifact: " + moved.error());
+        }
+        if (auto synced = sync_directories(); !synced) {
+            return std::unexpected(ProfileError{ProfileErrorCode::StorageFailure,
+                "promotion completed but directory flush failed: " + synced.error() + "; recovery: " + location});
         }
     }
-
+    if (selected_artifact && artifacts.size() == 1) {
+        std::error_code ec;
+        std::filesystem::remove(recovery, ec);
+        if (ec) report.recovery_directory = location;
+    } else {
+        report.recovery_directory = location;
+    }
     return report;
 }
 
